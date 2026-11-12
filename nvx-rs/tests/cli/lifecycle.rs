@@ -787,7 +787,7 @@ struct Execution {
     status: i32,
     /// What the workload wrote to standard output.
     stdout: String,
-    /// What the workload wrote to standard error.
+    /// What the workload wrote to standard error, or the guest agent before it refused it.
     stderr: &'static str,
     /// The code of the error with which `exec` refuses the workload, if it does, and what the
     /// error names.
@@ -900,6 +900,15 @@ fn executions() -> Vec<Execution> {
         "",
     );
     missing.stderr = "openvmm: /bin/missing: not found\n";
+    // The guest agent's diagnostic streams before its refusal.
+    let mut cwd_refused = refused(
+        "missing working directory",
+        &["--cwd", "/missing"],
+        "exec-refused",
+        vec!["cwd-failed"],
+    );
+    cwd_refused.stderr =
+        "nvx-managed-agent: cannot enter working directory /missing: No such file or directory\n";
     let mut existing = refused(
         "existing outcome report",
         &["--outcome-report", "{root/reports/existing.json}"],
@@ -988,12 +997,7 @@ fn executions() -> Vec<Execution> {
             "",
         ),
         missing,
-        refused(
-            "missing working directory",
-            &["--cwd", "/missing"],
-            "exec-refused",
-            vec!["cwd-failed"],
-        ),
+        cwd_refused,
         refused(
             "relative working directory",
             &["--cwd", "relative"],
@@ -1052,7 +1056,7 @@ fn managed_execs_exit_with_the_workload_status() {
         }
         let before = root.snapshot();
         let started = Instant::now();
-        let outcome = root.nvx_rs(&sandbox("exec", "{root/state}", &case.options));
+        let mut outcome = root.nvx_rs(&sandbox("exec", "{root/state}", &case.options));
         eprintln!("case: {}", case.name);
         match &case.refusal {
             Some((code, fragments)) => {
@@ -1061,6 +1065,14 @@ fn managed_execs_exit_with_the_workload_status() {
                     .map(|fragment| root.expand(fragment))
                     .collect();
                 let fragments: Vec<&str> = fragments.iter().map(String::as_str).collect();
+                // What the guest wrote before it refused the workload streams before the error.
+                let streamed = case.stderr.as_bytes();
+                assert!(
+                    outcome.stderr.starts_with(streamed),
+                    "{}",
+                    outcome.describe()
+                );
+                outcome.stderr.drain(..streamed.len());
                 outcome.assert_error(code, &fragments);
                 // A refusal changes nothing, but the fake OpenVMM's log of the connections to its
                 // control endpoint, and the workload did not run.
@@ -1092,6 +1104,51 @@ fn managed_execs_exit_with_the_workload_status() {
         );
         assert_eq!(entries(&state), with_exec(running()), "{}", case.name);
     }
+    root.nvx_rs(&sandbox::<&str>("stop", "{root/state}", &[]))
+        .assert_silent_success();
+    root.nvx_rs(&sandbox::<&str>("deprovision", "{root/state}", &[]))
+        .assert_silent_success();
+}
+
+#[test]
+fn managed_execs_stream_their_standard_input_and_output() {
+    let root = Root::new();
+    root.nvx_rs(&provision("{root/state}", &[]))
+        .assert_silent_success();
+    root.nvx_rs(&sandbox::<&str>("start", "{root/state}", &[]))
+        .assert_silent_success();
+    // The workload reads more input than the window of 64 KiB holds, until its end, and echoes
+    // it as it reads it.
+    let input: Vec<u8> = (0..200 * 1024).map(|index| (index % 251) as u8).collect();
+    let cat = [
+        "--entrypoint",
+        "/bin/sh",
+        "--arg=-c",
+        "--arg",
+        "cat; echoerr ended",
+    ];
+    let echoed = root.nvx_rs_with_input(&sandbox("exec", "{root/state}", &cat), &input);
+    assert_eq!(echoed.status, Some(0), "{}", echoed.describe());
+    assert!(echoed.stdout == input, "{}", echoed.describe());
+    assert_eq!(echoed.stderr(), "ended\n");
+    // Output passes the old cap of 1 MiB whole.
+    let flood = root.nvx_rs(&sandbox(
+        "exec",
+        "{root/state}",
+        &[
+            "--entrypoint",
+            "/bin/sh",
+            "--arg=-c",
+            "--arg",
+            "flood 2000000",
+        ],
+    ));
+    assert_eq!(flood.status, Some(0), "{}", flood.describe());
+    assert!(
+        flood.stdout == vec![b'x'; 2_000_000],
+        "{}",
+        flood.describe()
+    );
     root.nvx_rs(&sandbox::<&str>("stop", "{root/state}", &[]))
         .assert_silent_success();
     root.nvx_rs(&sandbox::<&str>("deprovision", "{root/state}", &[]))

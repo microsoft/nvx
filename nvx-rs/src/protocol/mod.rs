@@ -62,15 +62,9 @@ pub mod status;
 mod tests;
 pub mod view;
 
-#[cfg(any(
-    feature = "cli",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) use app::APP_ACTIVATE;
-#[cfg(any(
-    feature = "cli",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) use app::APP_CAPTURE;
 #[cfg(any(
     feature = "cli",
@@ -80,13 +74,20 @@ pub(crate) use app::APP_CAPTURE;
 pub(crate) use app::APP_HEADER_LEN;
 #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) use app::AppFrame;
-#[cfg(any(feature = "cli", feature = "testing"))]
+#[cfg(feature = "testing")]
 pub(crate) use app::ExitCategory;
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) use app::MAPPING_FAILED;
 #[cfg(feature = "cli")]
 pub(crate) use app::encode_activate_payload;
 #[cfg(feature = "cli")]
 pub(crate) use app::encode_capture_payload;
 #[cfg(any(
+    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -97,14 +98,12 @@ pub(crate) use app::v2;
 ))]
 pub(crate) use app::workload;
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) use app::{
     APP_CANCEL, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_MAPS, APP_PING, APP_READY,
-    APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, MAPPING_FAILED, UNSUPPORTED_OPERATION,
-    decode_app, encode_app,
+    APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, UNSUPPORTED_OPERATION, decode_app, encode_app,
 };
 #[cfg(any(
     feature = "testing",
@@ -115,7 +114,6 @@ pub(crate) use app::{BUSY, CWD_FAILED, INVALID_REQUEST, LAUNCH_FAILED, MAPPINGS_
 pub(crate) use app::{decode_activate_payload, decode_capture_payload};
 pub use boot::{MAPS_TOKEN, parse_host_mapping_count};
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -127,7 +125,6 @@ pub(crate) use exec::{GuestExecPayload, decode_guest_exec_payload};
 #[cfg(feature = "cli")]
 pub(crate) use exec::{Workload, WorkloadEnvironment, encode_exec_payload};
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]

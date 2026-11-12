@@ -12,18 +12,33 @@ use crate::host::transport::HostConnection;
 use crate::protocol::exec::{
     EXEC_CWD_PRESENT, EXEC_ENVIRONMENT_PRESENT, EXEC_EXTENDED, EXEC_INHERIT_DEFAULT_ENV,
 };
+use crate::protocol::v2::{Frame, STDIN_WINDOW, VERSION};
 use crate::protocol::{
-    OUTER_DATA, OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_READY, OUTER_RESET, decode_app,
-    decode_outer_header, encode_app, encode_outer,
+    OUTER_DATA, OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_READY, OUTER_RESET, decode_outer_header,
+    encode_outer,
 };
 
 const CAPABILITY: [u8; CAPABILITY_LEN] = [7; CAPABILITY_LEN];
 const INSTANCE: [u8; 16] = [0x11; 16];
 
+/// The codes of the kinds of requests that version 2 shares with version 1, as its header holds
+/// them, and those of an execution's standard input.
+const PING: u8 = 0x01;
+const EXEC: u8 = 0x02;
+const CANCEL: u8 = 0x04;
+const STDIN: u8 = 0x09;
+const STDIN_END: u8 = 0x0a;
+
+/// A `READY` of the protocol version, which acknowledges a request.
+const READY: Frame<'static> = Frame::Ready {
+    version: VERSION,
+    activation: &[],
+};
+
 impl Session {
     fn from_connection(connection: HostConnection) -> Self {
         Self {
-            inner: Some(ControlSession { connection }),
+            inner: Some(connection.into()),
             probe: Arc::new(Probe::default()),
         }
     }
@@ -35,6 +50,46 @@ impl Session {
         timeout: f64,
     ) -> Result<Self> {
         Self::connect_unless_exited(endpoint, pid, capability, timeout, || false, None)
+    }
+
+    /// Runs `request` as `exec` does, with a standard input that stays open, as a terminal's does,
+    /// without Ctrl-C, and discards its output.
+    fn run(&mut self, request: &ExecRequest, response_timeout: f64) -> Result<ExecResult> {
+        let (_input, receiver) = mpsc::channel();
+        self.exec_with(
+            request,
+            response_timeout,
+            || receiver,
+            || false,
+            |_, _| Ok(()),
+        )
+    }
+
+    /// Runs `request` as `exec` does, with the standard input that `chunks` hold, until its end,
+    /// and without Ctrl-C, and returns how it ended and its standard output and error.
+    fn run_with(
+        &mut self,
+        request: &ExecRequest,
+        response_timeout: f64,
+        chunks: &[&[u8]],
+    ) -> (Result<ExecResult>, Vec<u8>, Vec<u8>) {
+        let (input, receiver) = mpsc::channel();
+        for chunk in chunks {
+            input.send(Ok(chunk.to_vec())).unwrap();
+        }
+        drop(input);
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let result = self.exec_with(
+            request,
+            response_timeout,
+            || receiver,
+            || false,
+            |error, data| {
+                (if error { &mut stderr } else { &mut stdout }).extend_from_slice(data);
+                Ok(())
+            },
+        );
+        (result, stdout, stderr)
     }
 }
 
@@ -163,14 +218,19 @@ impl<T: Transport> Guest<T> {
     fn request(&mut self) -> (u8, u64, Vec<u8>) {
         let (record_type, frame) = self.record().unwrap();
         assert_eq!(record_type, OUTER_DATA);
-        let frame = decode_app(&frame).unwrap();
-        (frame.kind, frame.request_id, frame.payload.to_vec())
+        let (request_id, _) = Frame::decode(&frame).unwrap();
+        (frame[5], request_id, frame[24..].to_vec())
     }
 
-    fn send(&mut self, kind: u8, request_id: u64, status: i32, payload: &[u8]) {
+    /// Sends `frame` with `request_id`.
+    fn send(&mut self, request_id: u64, frame: Frame<'_>) {
+        self.send_raw(&frame.encode(request_id).unwrap());
+    }
+
+    /// Sends the bytes of a frame, which may break the protocol.
+    fn send_raw(&mut self, frame: &[u8]) {
         self.sequence += 1;
-        let frame = encode_app(kind, request_id, status, payload);
-        let record = encode_outer(OUTER_DATA, &INSTANCE, 1, self.sequence, &frame).unwrap();
+        let record = encode_outer(OUTER_DATA, &INSTANCE, 1, self.sequence, frame).unwrap();
         self.stream.write_all(&record, None).unwrap();
     }
 }
@@ -197,21 +257,21 @@ fn an_owned_connection_keeps_its_authenticated_framing_without_another_attach() 
         guest.accept();
         for expected in [17, 0] {
             let (kind, request_id, payload) = guest.request();
-            assert_eq!(kind, APP_PING);
+            assert_eq!(kind, PING);
             assert!(payload.is_empty());
             if expected != 0 {
                 assert_eq!(request_id, expected);
             }
-            guest.send(APP_READY, request_id, 0, &[]);
+            guest.send(request_id, READY);
         }
     });
     let until = Instant::now() + Duration::from_secs(5);
     let mut connection = HostConnection::attach(Box::new(host), &CAPABILITY, until).unwrap();
     connection
-        .send(&encode_app(APP_PING, 17, 0, &[]), Some(until))
+        .send(&Frame::Ping.encode(17).unwrap(), Some(until))
         .unwrap();
     let reply = connection.receive(Some(until)).unwrap();
-    assert_eq!(decode_app(&reply).unwrap().request_id, 17);
+    assert_eq!(Frame::decode(&reply).unwrap(), (17, READY));
     let mut session = Session::from_connection(connection);
     session.ping(5.0).unwrap();
     worker.join().unwrap();
@@ -256,13 +316,33 @@ fn exec_payload(workload: ExecRequest) -> Vec<u8> {
     let (sender, receiver) = mpsc::channel();
     let (mut session, worker) = session_with(move |guest| {
         let (kind, request_id, payload) = guest.request();
-        assert_eq!(kind, APP_EXEC);
+        assert_eq!(kind, EXEC);
         sender.send(payload).unwrap();
-        guest.send(APP_EXIT, request_id, 0, b"exit");
+        guest.send(request_id, exit(0, Outcome::Exit));
     });
-    session.exec(&workload, 5.0).unwrap();
+    session.run(&workload, 5.0).unwrap();
     worker.join().unwrap();
     receiver.recv().unwrap()
+}
+
+/// Returns the `EXIT` of an execution that ended with `outcome` and `status`.
+fn exit(status: i32, outcome: Outcome) -> Frame<'static> {
+    Frame::Exit { status, outcome }
+}
+
+/// Returns the bytes of an `EXIT` of `request_id` and `status` whose outcome is `text`, which
+/// version 2 may not know.
+fn exit_text(request_id: u64, status: i32, text: &[u8]) -> Vec<u8> {
+    let length = u32::try_from(text.len()).unwrap();
+    [
+        b"NVXC".as_slice(),
+        &[VERSION, 0x84, 0, 0],
+        &request_id.to_le_bytes(),
+        &status.to_le_bytes(),
+        &length.to_le_bytes(),
+        text,
+    ]
+    .concat()
 }
 
 fn u16_at(payload: &[u8], offset: usize) -> u16 {
@@ -288,7 +368,7 @@ fn values(payload: &[u8], mut offset: usize, count: usize) -> (Vec<Vec<u8>>, usi
 fn exec_streams_output_and_returns_bounded_status() {
     let (mut session, worker) = session_with(|guest| {
         let (kind, request_id, payload) = guest.request();
-        assert_eq!(kind, APP_EXEC);
+        assert_eq!(kind, EXEC);
         // The legacy request: the timeout, the argument count, and no extension.
         assert_eq!(
             (
@@ -298,39 +378,145 @@ fn exec_streams_output_and_returns_bounded_status() {
             ),
             (5000, 3, 0)
         );
-        guest.send(APP_STDOUT, request_id, 0, b"hello");
-        guest.send(APP_STDERR, request_id, 0, b"warning");
-        guest.send(APP_EXIT, request_id, 7, b"exit");
+        // The command's standard input is empty, so the workload's ends at once.
+        assert_eq!(guest.request(), (STDIN_END, request_id, Vec::new()));
+        guest.send(request_id, Frame::Stdout(b"hello"));
+        guest.send(request_id, Frame::Stderr(b"warning"));
+        guest.send(request_id, exit(7, Outcome::Exit));
     });
     let mut workload = request(&["/bin/sh", "-c", "echo hello"]);
     workload.timeout_ms = 5000;
-    let result = session.exec(&workload, 5.0).unwrap();
+    let (result, stdout, stderr) = session.run_with(&workload, 5.0, &[]);
     worker.join().unwrap();
     assert_eq!(
-        result,
+        result.unwrap(),
         ExecResult {
             returncode: 7,
             category: "exit",
-            stdout: b"hello".to_vec(),
-            stderr: b"warning".to_vec(),
+            stderr_end: Some(b'g'),
         }
     );
+    assert_eq!((stdout, stderr), (b"hello".to_vec(), b"warning".to_vec()));
+}
+
+#[test]
+fn exec_streams_output_past_the_old_cap() {
+    // Version 1 forwarded at most 1 MiB of output; version 2 streams it whole.
+    let (mut session, worker) = session_with(|guest| {
+        let (_, request_id, _) = guest.request();
+        assert_eq!(guest.request(), (STDIN_END, request_id, Vec::new()));
+        let chunk = vec![b'x'; 60_000];
+        for _ in 0..18 {
+            guest.send(request_id, Frame::Stdout(&chunk));
+        }
+        guest.send(request_id, exit(0, Outcome::Exit));
+    });
+    let (result, stdout, stderr) = session.run_with(&request(&["/bin/true"]), 5.0, &[]);
+    worker.join().unwrap();
+    assert_eq!(result.unwrap().returncode, 0);
+    assert_eq!(stdout, vec![b'x'; 18 * 60_000]);
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn exec_streams_its_standard_input_under_the_window_until_its_end() {
+    let input: Vec<u8> = (0..120 * 1024).map(|index| (index % 251) as u8).collect();
+    let (mut session, worker) = session_with(|guest| {
+        let (_, request_id, _) = guest.request();
+        // The guest acknowledges nothing until the window is full, or the input ended.
+        let (mut received, mut outstanding) = (Vec::new(), 0);
+        loop {
+            match guest.request() {
+                (STDIN, id, bytes) if id == request_id => {
+                    outstanding += bytes.len();
+                    assert!(outstanding <= STDIN_WINDOW as usize, "{outstanding}");
+                    received.extend(bytes);
+                }
+                (STDIN_END, id, bytes) if id == request_id && bytes.is_empty() => break,
+                request => panic!("unexpected request {request:?}"),
+            }
+            if outstanding == STDIN_WINDOW as usize {
+                let count = u32::try_from(outstanding).unwrap();
+                guest.send(request_id, Frame::StdinAck(count));
+                outstanding = 0;
+            }
+        }
+        if outstanding > 0 {
+            let count = u32::try_from(outstanding).unwrap();
+            guest.send(request_id, Frame::StdinAck(count));
+        }
+        for chunk in received.chunks(v2::MAX_PAYLOAD) {
+            guest.send(request_id, Frame::Stdout(chunk));
+        }
+        guest.send(request_id, exit(0, Outcome::Exit));
+    });
+    let chunks: Vec<&[u8]> = input.chunks(40 * 1024).collect();
+    let (result, stdout, _) = session.run_with(&request(&["/bin/cat"]), 5.0, &chunks);
+    worker.join().unwrap();
+    assert_eq!(result.unwrap().returncode, 0);
+    assert_eq!(stdout, input);
+}
+
+#[test]
+fn ctrl_c_cancels_the_running_workload() {
+    let (mut session, worker) = session_with(|guest| {
+        let (_, request_id, _) = guest.request();
+        guest.send(request_id, Frame::Stdout(b"started"));
+        // Ctrl-C after the output: the guest ends the workload, which would outlive the session.
+        assert_eq!(guest.request(), (CANCEL, request_id, Vec::new()));
+    });
+    let started = AtomicBool::new(false);
+    let (_input, receiver) = mpsc::channel();
+    let result = session.exec_with(
+        &request(&["/bin/sleep", "60"]),
+        5.0,
+        || receiver,
+        || started.load(Ordering::SeqCst),
+        |_, _| {
+            started.store(true, Ordering::SeqCst);
+            Ok(())
+        },
+    );
+    assert!(matches!(result, Err(Exit::Interrupted)), "{result:?}");
+    worker.join().unwrap();
+}
+
+#[test]
+fn a_failed_read_of_the_standard_input_cancels_the_workload() {
+    let (mut session, worker) = session_with(|guest| {
+        let (_, request_id, _) = guest.request();
+        assert_eq!(guest.request(), (STDIN, request_id, b"partial".to_vec()));
+        // No end of the input follows, which would let the workload take what it read as all.
+        assert_eq!(guest.request(), (CANCEL, request_id, Vec::new()));
+    });
+    let (input, receiver) = mpsc::channel();
+    input.send(Ok(b"partial".to_vec())).unwrap();
+    input.send(Err(io::Error::other("read failed"))).unwrap();
+    let result = session.exec_with(
+        &request(&["/bin/cat"]),
+        5.0,
+        || receiver,
+        || false,
+        |_, _| Ok(()),
+    );
+    assert_eq!(message(result), "cannot read standard input: read failed");
+    worker.join().unwrap();
 }
 
 #[test]
 fn exec_rejects_unbounded_or_relative_arguments() {
     let (mut session, worker) = session_with(|_| {});
     assert_eq!(
-        message(session.exec(&request(&["relative"]), 1.0)),
+        message(session.run(&request(&["relative"]), 1.0)),
         "managed exec entrypoint must be absolute"
     );
     assert_eq!(
-        message(session.exec(&request(&["/bin/true"; 65]), 1.0)),
+        message(session.run(&request(&["/bin/true"; 65]), 1.0)),
         "managed exec requires 1 through 64 arguments"
     );
     for argument in ["", "a\0b", &"a".repeat(4097)] {
         assert_eq!(
-            message(session.exec(&request(&["/bin/true", argument]), 1.0)),
+            message(session.run(&request(&["/bin/true", argument]), 1.0)),
             "managed exec argument is empty or exceeds 4096 bytes"
         );
     }
@@ -455,7 +641,7 @@ fn exec_rejects_invalid_execution_fields_before_sending() {
         let mut workload = request(&["/bin/true"]);
         workload.cwd = Some(cwd.to_owned());
         assert_eq!(
-            failure(session.exec(&workload, 1.0)),
+            failure(session.run(&workload, 1.0)),
             (
                 ErrorCode::Unsupported,
                 "managed exec working directory must be an absolute path of at most 4096 bytes"
@@ -480,7 +666,7 @@ fn exec_rejects_invalid_execution_fields_before_sending() {
                 .map(|entry| (*entry).to_owned())
                 .collect(),
         );
-        assert_eq!(message(session.exec(&workload, 1.0)), expected);
+        assert_eq!(message(session.run(&workload, 1.0)), expected);
     }
     // Nothing reached the guest, which reads the end of the stream.
     drop(session);
@@ -493,7 +679,7 @@ fn exec_rejects_invalid_response_timeout_before_sending() {
     let (mut session, worker, received) = silent_session();
     for timeout in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert_eq!(
-            message(session.exec(&request(&["/bin/true"]), timeout)),
+            message(session.run(&request(&["/bin/true"]), timeout)),
             "managed exec response timeout must be positive and finite"
         );
     }
@@ -504,59 +690,67 @@ fn exec_rejects_invalid_response_timeout_before_sending() {
 
 #[test]
 fn exec_rejects_unknown_exit_category() {
-    // A cancellation, which this session never requests, is not among the categories.
-    for category in [&b"guest-provided-detail"[..], b"cancelled"] {
+    // A cancellation, whose end this session never waits for, is not among the categories.
+    let (mut session, worker) = session_with(|guest| {
+        let (_, request_id, _) = guest.request();
+        guest.send(request_id, exit(137, Outcome::Cancelled));
+    });
+    assert_eq!(
+        message(session.run(&request(&["/bin/true"]), 5.0)),
+        "managed guest returned an unsupported exit category"
+    );
+    worker.join().unwrap();
+    // Version 2 knows no other outcome.
+    for category in [&b"guest-provided-detail"[..], b"\xffexit", b"output-limit"] {
         let (mut session, worker) = session_with(move |guest| {
             let (_, request_id, _) = guest.request();
-            guest.send(APP_EXIT, request_id, 125, category);
+            guest.send_raw(&exit_text(request_id, 125, category));
         });
         assert_eq!(
-            message(session.exec(&request(&["/bin/true"]), 5.0)),
-            "managed guest returned an unsupported exit category"
+            message(session.run(&request(&["/bin/true"]), 5.0)),
+            "the NVXC frame of version 2 is malformed"
         );
         worker.join().unwrap();
     }
-    let (mut session, worker) = session_with(|guest| {
-        let (_, request_id, _) = guest.request();
-        guest.send(APP_EXIT, request_id, 0, b"\xffexit");
-    });
-    assert_eq!(
-        message(session.exec(&request(&["/bin/true"]), 5.0)),
-        "managed guest returned an invalid exit category"
-    );
-    worker.join().unwrap();
 }
 
 #[test]
 fn exec_refusal_keeps_status_category_and_diagnostic() {
+    let diagnostic =
+        b"nvx-managed-agent: cannot enter working directory /missing: No such file or directory\n";
     let (mut session, worker) = session_with(|guest| {
         let (_, request_id, _) = guest.request();
-        guest.send(
-            APP_STDERR,
-            request_id,
-            0,
-            b"nvx-managed-agent: cannot enter working directory /missing: No such file or \
-              directory\n",
-        );
-        guest.send(APP_ERROR, request_id, 2, b"cwd-failed");
+        assert_eq!(guest.request(), (STDIN_END, request_id, Vec::new()));
+        guest.send(request_id, Frame::Stderr(diagnostic));
+        let refusal = Frame::Error {
+            status: 2,
+            category: b"cwd-failed",
+        };
+        guest.send(request_id, refusal);
     });
     let mut workload = request(&["/bin/true"]);
     workload.cwd = Some("/missing".to_owned());
+    let (result, stdout, stderr) = session.run_with(&workload, 5.0, &[]);
     assert_eq!(
-        failure(session.exec(&workload, 5.0)),
+        failure(result),
         (
             ErrorCode::ExecRefused,
             "managed guest rejected exec (status=2, category=cwd-failed)".to_owned()
         )
     );
+    assert_eq!((stdout, stderr), (Vec::new(), diagnostic.to_vec()));
     worker.join().unwrap();
-    // A category that is not ASCII is decoded with replacement characters.
+    // A category that is not UTF-8 is decoded with replacement characters.
     let (mut session, worker) = session_with(|guest| {
         let (_, request_id, _) = guest.request();
-        guest.send(APP_ERROR, request_id, 5, b"bad\xff");
+        let refusal = Frame::Error {
+            status: 5,
+            category: b"bad\xff",
+        };
+        guest.send(request_id, refusal);
     });
     assert_eq!(
-        message(session.exec(&request(&["/bin/true"]), 5.0)),
+        message(session.run(&request(&["/bin/true"]), 5.0)),
         "managed guest rejected exec (status=5, category=bad\u{fffd})"
     );
     worker.join().unwrap();
@@ -639,14 +833,15 @@ impl Transport for Recording {
         let response = if header.record_type == OUTER_HOST_ATTACH {
             encode_outer(OUTER_READY, &INSTANCE, 1, 0, &[]).unwrap()
         } else {
-            let request = decode_app(&data[OUTER_HEADER_LEN..]).unwrap();
-            let (kind, payload) = match request.kind {
-                APP_PING => (APP_READY, &b""[..]),
-                APP_EXEC => (APP_EXIT, &b"exit"[..]),
-                _ => (APP_STOPPED, &b""[..]),
+            let request = &data[OUTER_HEADER_LEN..];
+            let (request_id, _) = Frame::decode(request).unwrap();
+            let response = match request[5] {
+                PING => READY,
+                EXEC => exit(0, Outcome::Exit),
+                _ => Frame::Stopped,
             };
             self.sequence += 1;
-            let frame = encode_app(kind, request.request_id, 0, payload);
+            let frame = response.encode(request_id).unwrap();
             encode_outer(OUTER_DATA, &INSTANCE, 1, self.sequence, &frame).unwrap()
         };
         self.responses.extend(response);
@@ -664,7 +859,7 @@ fn operations_bound_their_requests_by_their_deadlines() {
     let mut operations = vec![(7.0, transfers.lock().unwrap().split_off(0))];
     session.ping(5.0).unwrap();
     operations.push((5.0, transfers.lock().unwrap().split_off(0)));
-    session.exec(&request(&["/bin/true"]), 3.0).unwrap();
+    session.run(&request(&["/bin/true"]), 3.0).unwrap();
     operations.push((3.0, transfers.lock().unwrap().split_off(0)));
     session.stop(2.0).unwrap();
     operations.push((2.0, transfers.lock().unwrap().split_off(0)));
@@ -702,7 +897,7 @@ fn failed_transfer_closes_the_session() {
         );
         let count = transfers.lock().unwrap().len();
         assert_eq!(
-            self::failure(session.exec(&request(&["/bin/true"]), 5.0)),
+            self::failure(session.run(&request(&["/bin/true"]), 5.0)),
             (
                 ErrorCode::Protocol,
                 "managed control session is closed".to_owned()
@@ -731,7 +926,7 @@ fn request_to_a_stalled_endpoint_times_out_and_closes_the_session() {
     let mut session = Session::attach(Box::new(host), &CAPABILITY, 5.0, None).unwrap();
     let started = Instant::now();
     assert_eq!(
-        message(session.exec(&request(&["/bin/true"]), 0.25)),
+        message(session.run(&request(&["/bin/true"]), 0.25)),
         "managed control request timed out"
     );
     let elapsed = started.elapsed();
@@ -1042,63 +1237,10 @@ fn a_closed_endpoint_ends_the_operation_with_its_own_error() {
 }
 
 #[test]
-fn output_beyond_the_guest_limit_breaks_the_protocol() {
-    // The guest agent forwards at most 1 MiB of output, so a guest that sends more misbehaves.
-    let (mut session, worker) = session_with(|guest| {
-        let (_, request_id, _) = guest.request();
-        let chunk = vec![b'x'; 60_000];
-        for _ in 0..18 {
-            guest.send(APP_STDOUT, request_id, 0, &chunk);
-        }
-        guest.send(APP_EXIT, request_id, 0, b"exit");
-    });
-    assert_eq!(
-        failure(session.exec(&request(&["/bin/true"]), 5.0)),
-        (
-            ErrorCode::Protocol,
-            format!("managed guest exceeded the {MAX_OUTPUT_BYTES}-byte output limit")
-        )
-    );
-    // The guest may still be sending its exit record, which the host never reads, and a send
-    // fails once the session is gone, so the session ends after the guest.
-    worker.join().unwrap();
-}
-
-#[cfg(feature = "testing")]
-#[test]
-fn features_of_a_guest_that_predates_them_are_none() {
-    let (mut session, worker) = session_with(|guest| {
-        let (kind, request_id, _) = guest.request();
-        assert_eq!(kind, APP_FEATURES);
-        guest.send(APP_ERROR, request_id, 95, UNSUPPORTED_OPERATION);
-        let (_, request_id, _) = guest.request();
-        guest.send(
-            APP_READY,
-            request_id,
-            0,
-            &GuestFeatures::SANDBOX_AGENT.encode(),
-        );
-        let (_, request_id, _) = guest.request();
-        guest.send(APP_ERROR, request_id, 22, b"invalid-request");
-    });
-    assert_eq!(session.features(5.0).unwrap(), GuestFeatures::NONE);
-    assert_eq!(session.features(5.0).unwrap(), GuestFeatures::SANDBOX_AGENT);
-    assert_eq!(
-        message(session.features(5.0)),
-        "managed guest returned an invalid features response"
-    );
-    worker.join().unwrap();
-}
-
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
-#[test]
 fn protocol_violations_keep_the_messages_of_python() {
     let (mut session, worker) = session_with(|guest| {
         let (_, request_id, _) = guest.request();
-        guest.send(APP_READY, request_id ^ 1, 0, &[]);
+        guest.send(request_id ^ 1, READY);
     });
     assert_eq!(
         message(session.ping(5.0)),
@@ -1107,43 +1249,36 @@ fn protocol_violations_keep_the_messages_of_python() {
     worker.join().unwrap();
     let (mut session, worker) = session_with(|guest| {
         let (_, request_id, _) = guest.request();
-        guest.send(APP_STDOUT, request_id ^ 1, 0, b"x");
+        guest.send(request_id ^ 1, Frame::Stdout(b"x"));
     });
     assert_eq!(
-        message(session.exec(&request(&["/bin/true"]), 5.0)),
+        message(session.run(&request(&["/bin/true"]), 5.0)),
         "managed guest returned a mismatched request ID"
     );
     worker.join().unwrap();
     let (mut session, worker) = session_with(|guest| {
         let (_, request_id, _) = guest.request();
-        guest.send(APP_READY, request_id ^ 1, 0, &GuestFeatures::NONE.encode());
-    });
-    assert_eq!(
-        message(session.features(5.0)),
-        "managed guest returned a mismatched request ID"
-    );
-    worker.join().unwrap();
-    let (mut session, worker) = session_with(|guest| {
-        let (_, request_id, _) = guest.request();
-        guest.send(APP_READY, request_id, 0, b"");
+        guest.send(request_id, READY);
     });
     assert_eq!(
         message(session.stop(5.0)),
         "managed guest did not acknowledge stop"
     );
     worker.join().unwrap();
-    // An acknowledgement has status 0 and no payload.
-    for (status, payload) in [(1, &b""[..]), (0, b"x")] {
-        let (mut session, worker) = session_with(move |guest| {
-            let (_, request_id, _) = guest.request();
-            guest.send(APP_READY, request_id, status, payload);
-        });
-        assert_eq!(
-            message(session.ping(5.0)),
-            "managed guest did not acknowledge readiness"
-        );
-        worker.join().unwrap();
-    }
+    // An acknowledgement has no payload but the protocol version.
+    let (mut session, worker) = session_with(|guest| {
+        let (_, request_id, _) = guest.request();
+        let ready = Frame::Ready {
+            version: VERSION,
+            activation: b"x",
+        };
+        guest.send(request_id, ready);
+    });
+    assert_eq!(
+        message(session.ping(5.0)),
+        "managed guest did not acknowledge readiness"
+    );
+    worker.join().unwrap();
 }
 
 /// The endpoints of POSIX hosts: Unix-domain sockets that this process serves.
@@ -1207,7 +1342,7 @@ mod endpoints {
         workload
             .arguments
             .extend(std::iter::repeat_n("a".repeat(4000), 10));
-        let failure = session.exec(&workload, 5.0).unwrap_err();
+        let failure = session.run(&workload, 5.0).unwrap_err();
         worker.join().unwrap();
         assert!(matches!(failure, Exit::EndpointClosed), "{failure:?}");
         let (mut session, worker, _directory) = connected(|_| {});
@@ -1490,7 +1625,7 @@ mod endpoints {
     fn read_reports_a_closed_endpoint_after_its_data() {
         let (mut session, worker) = connected(|guest| {
             let (_, request_id, _) = guest.request();
-            guest.send(APP_READY, request_id, 0, &[]);
+            guest.send(request_id, READY);
             let _ = guest.request();
         });
         session.ping(5.0).unwrap();

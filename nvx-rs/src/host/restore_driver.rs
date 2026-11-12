@@ -2,9 +2,10 @@
 //!
 //! [`restore`] drives a [`RestoreMachine`] through a launched VM's restore-ready event and
 //! control sessions until the guest's Ready, then sends the VM's mapping table and starts its
-//! workload, and returns the live [`ControlSession`]. The restore-ready client and the control
-//! server must be the VM's held process. Each session carries the same activate message: the
-//! activation record and the workload's identity. A lost session is replaced, in at most
+//! workload, whose standard input it ends at once, and returns the live [`ControlSession`], of
+//! NVXC version 2, in which the workload's events arrive. The restore-ready client and the
+//! control server must be the VM's held process. Each session carries the same activate message:
+//! the activation record and the workload's identity. A lost session is replaced, in at most
 //! [`MAX_SESSIONS`] sessions in all.
 //!
 //! Every pending accept, read and write races the step's deadline, the caller's [`Cancel`] and
@@ -38,7 +39,7 @@ use super::transport::Transport;
 use super::vm::{Capability, Launched, VmOutputs};
 use crate::ErrorKind;
 use crate::activation::ActivationRecord;
-use crate::protocol::{self, APP_EXEC, HostMap, workload::WorkloadIdentity};
+use crate::protocol::{self, HostMap, workload::WorkloadIdentity};
 
 /// How long a restore may take, from the driver's start to the guest's Ready.
 const READY_BUDGET: Duration = Duration::from_secs(60);
@@ -240,9 +241,11 @@ fn start(
     }
     let payload = protocol::encode_exec_payload(&workload.exec)
         .map_err(|error| ControlRestoreError::Start(error.into()))?;
+    // The workload reads no standard input, as the null device gives none.
     watch
         .check()
-        .and_then(|()| session.send_request(APP_EXEC, workload.request_id, &payload, deadline))
+        .and_then(|()| session.start_exec(workload.request_id, &payload, deadline))
+        .and_then(|()| session.close_stdin(workload.request_id, deadline))
         .map_err(|error| ControlRestoreError::Start(watch.cause(error, deadline)))?;
     Ok(session)
 }

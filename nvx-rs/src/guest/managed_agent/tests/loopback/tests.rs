@@ -2,8 +2,10 @@ use std::thread;
 use std::time::Instant;
 
 use crate::host::session::{ControlSession, ExecEvent, SessionError};
+use crate::protocol::v2::Outcome;
 use crate::protocol::{
-    CAPABILITY_LEN, ExitCategory, GuestFeatures, HostMap, Workload, WorkloadEnvironment,
+    APP_EXEC, APP_EXIT, APP_STDERR, APP_STDOUT, CAPABILITY_LEN, HostMap, Workload,
+    WorkloadEnvironment, decode_app, encode_app, encode_exec_payload,
 };
 
 use super::super::AgentConfig;
@@ -16,20 +18,63 @@ fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(10)
 }
 
+/// Runs `workload` as the execution of `id`, with `input` as its standard input, and returns its
+/// output and how it ended.
+fn run_exec_with(
+    session: &mut ControlSession,
+    id: u64,
+    workload: &Workload<'_>,
+    input: &[u8],
+) -> (Vec<u8>, Vec<u8>, ExecEvent) {
+    session
+        .start_exec(id, &encode_exec_payload(workload).unwrap(), deadline())
+        .unwrap();
+    let (mut stdout, mut stderr, mut rest, mut open) = (Vec::new(), Vec::new(), input, true);
+    loop {
+        // The window takes more of the input as the agent acknowledges what it wrote.
+        let sent = session.send_stdin(id, rest, deadline()).unwrap();
+        rest = &rest[sent..];
+        if rest.is_empty() && open {
+            session.close_stdin(id, deadline()).unwrap();
+            open = false;
+        }
+        match session.next_exec_event(id, Some(deadline())).unwrap() {
+            ExecEvent::Stdout(bytes) => stdout.extend(bytes),
+            ExecEvent::Stderr(bytes) => stderr.extend(bytes),
+            ExecEvent::Acknowledged(_) => {}
+            event @ (ExecEvent::Exit { .. } | ExecEvent::Rejected { .. }) => {
+                return (stdout, stderr, event);
+            }
+        }
+    }
+}
+
 fn run_exec(
     session: &mut ControlSession,
     workload: &Workload<'_>,
 ) -> (Vec<u8>, Vec<u8>, ExecEvent) {
-    let id = session.start_exec(workload, deadline()).unwrap();
+    run_exec_with(session, 1, workload, &[])
+}
+
+/// Runs `workload` over version 1's frames, which the agent still serves, and returns its output,
+/// its exit category and its status.
+fn run_exec_v1(
+    session: &mut ControlSession,
+    workload: &Workload<'_>,
+) -> (Vec<u8>, Vec<u8>, (Vec<u8>, i32)) {
+    let payload = encode_exec_payload(workload).unwrap();
+    let request = encode_app(APP_EXEC, 1, 0, &payload);
+    session.connection.send(&request, Some(deadline())).unwrap();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     loop {
-        match session.next_exec_event(id, Some(deadline())).unwrap() {
-            ExecEvent::Stdout(bytes) => stdout.extend(bytes),
-            ExecEvent::Stderr(bytes) => stderr.extend(bytes),
-            event @ ExecEvent::Exit { .. } | event @ ExecEvent::Rejected { .. } => {
-                return (stdout, stderr, event);
-            }
+        let reply = session.connection.receive(Some(deadline())).unwrap();
+        let frame = decode_app(&reply).unwrap();
+        match frame.kind {
+            APP_STDOUT => stdout.extend(frame.payload),
+            APP_STDERR => stderr.extend(frame.payload),
+            APP_EXIT => return (stdout, stderr, (frame.payload.to_vec(), frame.status)),
+            kind => panic!("unexpected frame of kind {kind}"),
         }
     }
 }
@@ -71,10 +116,6 @@ fn control_session_broker_and_real_agent_loop_back() {
     let mut session = ControlSession::attach(broker.transport(), &capability, deadline()).unwrap();
 
     session.ping(deadline()).unwrap();
-    assert_eq!(
-        session.features(deadline()).unwrap(),
-        GuestFeatures::DIRECT_AGENT
-    );
     session
         .map_host_paths(
             &[HostMap {
@@ -100,7 +141,7 @@ fn control_session_broker_and_real_agent_loop_back() {
     assert_eq!(
         exit,
         ExecEvent::Exit {
-            category: ExitCategory::Exit,
+            category: Outcome::Exit,
             status: 7
         }
     );
@@ -109,7 +150,7 @@ fn control_session_broker_and_real_agent_loop_back() {
     assert_eq!(
         signal,
         ExecEvent::Exit {
-            category: ExitCategory::Signal,
+            category: Outcome::Signal,
             status: 128 + sys::Signal::SIGTERM as i32
         }
     );
@@ -117,7 +158,7 @@ fn control_session_broker_and_real_agent_loop_back() {
     assert_eq!(
         realtime_signal,
         ExecEvent::Exit {
-            category: ExitCategory::Signal,
+            category: Outcome::Signal,
             status: 128 + 40
         }
     );
@@ -125,21 +166,40 @@ fn control_session_broker_and_real_agent_loop_back() {
     assert_eq!(
         timeout,
         ExecEvent::Exit {
-            category: ExitCategory::Timeout,
+            category: Outcome::Timeout,
             status: 124
         }
     );
-    let (_, _, limited) = run_exec(&mut session, &workload("head -c 1048577 /dev/zero", 0));
+    // Version 2 caps no output: the old cap of 1 MiB passes whole.
+    let (stdout, _, uncapped) = run_exec(&mut session, &workload("head -c 1048577 /dev/zero", 0));
+    assert_eq!(stdout, vec![0; 1024 * 1024 + 1]);
     assert_eq!(
-        limited,
+        uncapped,
         ExecEvent::Exit {
-            category: ExitCategory::OutputLimit,
-            status: 125
+            category: Outcome::Exit,
+            status: 0
+        }
+    );
+    // The workload reads the standard input that the host streams, more than the window holds,
+    // until its end.
+    let input: Vec<u8> = (0..200 * 1024).map(|index| (index % 251) as u8).collect();
+    let (stdout, _, echoed) = run_exec_with(&mut session, 2, &workload("cat", 0), &input);
+    assert_eq!(stdout, input);
+    assert_eq!(
+        echoed,
+        ExecEvent::Exit {
+            category: Outcome::Exit,
+            status: 0
         }
     );
 
-    let cancel_id = session
-        .start_exec(&workload("sleep 10", 0), deadline())
+    let cancel_id = 3;
+    session
+        .start_exec(
+            cancel_id,
+            &encode_exec_payload(&workload("sleep 10", 0)).unwrap(),
+            deadline(),
+        )
         .unwrap();
     session.cancel_exec(cancel_id, deadline()).unwrap();
     assert_eq!(
@@ -147,13 +207,18 @@ fn control_session_broker_and_real_agent_loop_back() {
             .next_exec_event(cancel_id, Some(deadline()))
             .unwrap(),
         ExecEvent::Exit {
-            category: ExitCategory::Cancelled,
+            category: Outcome::Cancelled,
             status: 128 + sys::Signal::SIGKILL as i32
         }
     );
 
-    let reset_id = session
-        .start_exec(&workload("sleep 10", 0), deadline())
+    let reset_id = 4;
+    session
+        .start_exec(
+            reset_id,
+            &encode_exec_payload(&workload("sleep 10", 0)).unwrap(),
+            deadline(),
+        )
         .unwrap();
     broker.reset();
     assert!(matches!(
@@ -163,6 +228,14 @@ fn control_session_broker_and_real_agent_loop_back() {
     drop(session);
     let mut session = ControlSession::attach(broker.transport(), &capability, deadline()).unwrap();
     session.ping(deadline()).unwrap();
+    // A stop during an execution ends it first.
+    session
+        .start_exec(
+            5,
+            &encode_exec_payload(&workload("sleep 10", 0)).unwrap(),
+            deadline(),
+        )
+        .unwrap();
     session.stop(deadline()).unwrap();
     drop(session);
 
@@ -171,8 +244,8 @@ fn control_session_broker_and_real_agent_loop_back() {
     assert!(system.diagnostics.is_empty());
 }
 
-/// Once the output cap is hit, the agent forwards nothing more: each stream the client
-/// receives stays a prefix of what the workload wrote, with no silent gap where a later
+/// Once the output cap of NVXC version 1 is hit, the agent forwards nothing more: each stream the
+/// client receives stays a prefix of what the workload wrote, with no silent gap where a later
 /// chunk fit the leftover room.
 #[test]
 fn output_limit_forwards_nothing_after_the_cap() {
@@ -239,15 +312,10 @@ fn output_limit_forwards_nothing_after_the_cap() {
         cwd: None,
         environment: WorkloadEnvironment::Default,
     };
-    let (stdout, stderr, exit) = run_exec(&mut session, &workload);
+    // Version 1, which caps the output, until SL4.4d deletes it.
+    let (stdout, stderr, exit) = run_exec_v1(&mut session, &workload);
     let count = |byte: u8| stdout.iter().filter(|&&each| each == byte).count();
-    assert_eq!(
-        exit,
-        ExecEvent::Exit {
-            category: ExitCategory::OutputLimit,
-            status: 125
-        }
-    );
+    assert_eq!(exit, (b"output-limit".to_vec(), 125));
     assert!(stderr.is_empty());
     assert_eq!(count(b'a'), crate::protocol::MAX_OUTPUT_BYTES - room);
     assert!(count(b'b') <= room);

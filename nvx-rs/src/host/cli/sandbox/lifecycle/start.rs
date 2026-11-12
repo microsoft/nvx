@@ -1,6 +1,7 @@
 //! Starting a managed sandbox and executing workloads in its running VM, and running one workload
 //! in a VM of its own, without a state directory.
 
+use std::cell::Cell;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -14,8 +15,8 @@ use serde_json::Value;
 use super::directory::prepare_state_directory;
 use super::outcome::{copy_openvmm_outcome, validate_outcome_destination};
 use super::{
-    CONFIG_NAME, Found, ProvisionConfig, REQUIRED_FEATURES, connect, find_vm, mismatched,
-    require_config, running_vm, runtime_for,
+    CONFIG_NAME, Found, ProvisionConfig, connect, find_vm, mismatched, require_config, running_vm,
+    runtime_for,
 };
 use crate::activation::{ActivationRecord, TransactionId};
 use crate::host::cli::artifacts::locate;
@@ -29,7 +30,7 @@ use crate::host::cli::sandbox::state::{
 use crate::host::cli::sandbox::{
     Artifacts, Options, error_with_cause, export_tokens, path_string, refuse_own_files,
 };
-use crate::host::cli::session::{ExecRequest, ExecResult, Session};
+use crate::host::cli::session::{ExecRequest, ExecResult, Session, closes};
 use crate::host::cli::shell::format_command;
 use crate::host::cli::snapshots::Store;
 use crate::host::cli::store::StateFile;
@@ -48,8 +49,9 @@ use crate::host::snapshot::OPENVMM_DIR;
 use crate::host::vm::{self, Launched, Prepared, SavedVm, VmDir};
 use crate::protocol::cmdline::{self, Parameter};
 use crate::protocol::root::RootLayout;
+use crate::protocol::v2::Outcome;
 use crate::protocol::workload::WorkloadIdentity;
-use crate::protocol::{self, ExitCategory, HostMap, WorkloadEnvironment};
+use crate::protocol::{self, HostMap, WorkloadEnvironment};
 use crate::{ErrorCode, ErrorKind};
 
 /// Starts a provisioned sandbox, as `start` does. A workload of a restored sandbox that does not
@@ -414,24 +416,12 @@ fn binding_error(error: crate::Error) -> Exit {
 }
 
 /// Waits until the guest of a VM that starts answers on `endpoint`, which `launched`, the OpenVMM
-/// process of the start, serves, or until OpenVMM exits, checks that the guest provides the
-/// features of [`REQUIRED_FEATURES`], and returns the session, on which the caller sends the
-/// guest what it needs before the launch commits.
+/// process of the start, serves, or until OpenVMM exits, and returns the session, on which the
+/// caller sends the guest what it needs before the launch commits. The guest's Ready names the
+/// version of NVXC that it speaks, which the session requires.
 fn check_ready(saved: &SavedVm, runtime: &Runtime, timeout: f64) -> Result<Session> {
     let mut session = Session::reattach(saved, runtime, timeout)?;
     session.ping(timeout)?;
-    let features = session.features(timeout)?;
-    let missing = features.missing(REQUIRED_FEATURES);
-    if !missing.is_empty() {
-        return Err(Exit::error(
-            ErrorCode::GuestFeaturesMissing,
-            format!(
-                "the guest image lacks control features that layered sandboxes need ({}); use \
-                 an NVX release or build that includes them",
-                missing.join(", ")
-            ),
-        ));
-    }
     Ok(session)
 }
 
@@ -495,8 +485,9 @@ fn restore_guest(
                 Ok(ExecEvent::Stderr(data)) => {
                     output::write_stderr(&data).map_err(Exit::from_os_error)?;
                 }
+                Ok(ExecEvent::Acknowledged(_)) => {}
                 Ok(ExecEvent::Exit {
-                    category: ExitCategory::Exit,
+                    category: Outcome::Exit,
                     status: 0,
                 }) => return Ok(()),
                 Ok(ExecEvent::Exit { status, .. }) if restore.forward_status => {
@@ -533,8 +524,10 @@ fn restore_guest(
         ControlRestoreError::Maps(error) | ControlRestoreError::Start(error) => match error {
             SessionError::TimedOut => ErrorCode::TimedOut,
             // As for a cold start, a closed endpoint proves no exit, and gives OpenVMM its grace
-            // to exit by itself before the start ends it.
+            // to exit by itself before the start ends it. An endpoint that closes before it read
+            // the end of the workload's input, which follows its Start, resets the stream.
             SessionError::ProcessExited | SessionError::Closed => return Err(Exit::EndpointClosed),
+            SessionError::Io(error) if closes(error) => return Err(Exit::EndpointClosed),
             SessionError::Io(_) => ErrorCode::Io,
             _ => ErrorCode::Protocol,
         },
@@ -683,6 +676,10 @@ pub(crate) fn run(
     let dir = VmDir::open(&path).map_err(error_with_cause)?;
     let timeout = options.timeout;
     let mut cleanup = true;
+    // A diagnostic or an error of the run's own starts a line of its own after standard error
+    // that the workload's output left open.
+    let open_line = Cell::new(None);
+    let end_line = || output::end_stderr_line(open_line.take().as_slice());
     let result = (|| {
         let mut prepared = vm::create(&runtime, &vm_config, None, &dir)
             .map_err(error_with_cause)?
@@ -735,6 +732,7 @@ pub(crate) fn run(
                 .expect("a ready VM has a session")
                 .exec(request, timeout)
         });
+        open_line.set(executed.as_ref().ok().and_then(|result| result.stderr_end));
         // A VM whose control endpoint closed is shutting down already.
         let requested = match session.take() {
             Some(mut session)
@@ -769,12 +767,14 @@ pub(crate) fn run(
         if let Some(report) = &options.outcome_report
             && let Err(error) = copy_openvmm_outcome(&launched.outputs.outcome, report)
         {
+            end_line();
             error.report();
         }
         // Ctrl-C during the request ends the run as interrupted, which is no failed shutdown.
         if let Some(Err(error)) = &requested
             && !matches!(error, Exit::Interrupted)
         {
+            end_line();
             output::print_stderr(&format!(
                 "warning: managed guest shutdown failed: {error:?}"
             ));
@@ -785,15 +785,20 @@ pub(crate) fn run(
                 return Err(exited_during_startup(report));
             }
         } else if executed.is_ok() && stopped.forced {
+            end_line();
             output::print_stderr("warning: OpenVMM was forcibly terminated after the run");
         }
         executed.map(Some)
     })();
     if cleanup && let Err(error) = remove_vm_directory(&dir) {
+        end_line();
         output::print_stderr(&format!(
             "warning: cannot remove the temporary VM directory {}: {error:?}",
             dir.path().display()
         ));
+    }
+    if result.is_err() {
+        end_line();
     }
     result
 }

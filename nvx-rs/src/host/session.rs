@@ -1,5 +1,10 @@
-//! Host side of an authenticated control session with a sandbox's guest agent: NVX's control
-//! protocol, `NVXC`, over the host's role of the shared NVXS session, [`HostConnection`].
+//! Host side of an authenticated control session with a sandbox's guest agent: version 2 of NVX's
+//! control protocol, `NVXC`, over the host's role of the shared NVXS session, [`HostConnection`].
+//!
+//! Every exchange checks that the guest agent's `READY` carries the protocol version, and the
+//! session sends no `FEATURES`, which version 2 does not have. An execution streams: the host
+//! sends its standard input under the window of [`STDIN_WINDOW`] bytes that the guest agent has
+//! not acknowledged, ends it explicitly, and receives its output without a total cap.
 
 use std::fmt;
 use std::io;
@@ -8,12 +13,8 @@ use std::time::Instant;
 use super::process::{BootId, ProcessRef};
 use super::transport::{self, HostConnection, HostConnectionError, Transport};
 use crate::protocol::nvxs::{self, RecordError, RecordType};
-use crate::protocol::{
-    self, APP_CANCEL, APP_CAPTURE, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_HEADER_LEN,
-    APP_MAPS, APP_PING, APP_READY, APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, CAPABILITY_LEN,
-    ExitCategory, GuestFeatures, HostMap, OUTER_MAX_PAYLOAD, ProtocolError, UNSUPPORTED_OPERATION,
-    Workload,
-};
+use crate::protocol::v2::{self, Frame, Outcome, STDIN_WINDOW};
+use crate::protocol::{self, CAPABILITY_LEN, HostMap, OUTER_MAX_PAYLOAD, ProtocolError};
 use crate::{Error, ErrorKind};
 
 /// Failure of a control session.
@@ -119,25 +120,27 @@ pub(crate) enum ExecEvent {
     Stdout(Vec<u8>),
     /// A chunk of the workload's standard error.
     Stderr(Vec<u8>),
+    /// The guest agent wrote this many more bytes of the standard input into the workload's,
+    /// which leave the window.
+    Acknowledged(u32),
     /// The workload ended.
     Exit {
         /// How it ended.
-        category: ExitCategory,
-        /// Its exit status, 128 plus the signal number for [`ExitCategory::Signal`].
+        category: Outcome,
+        /// Its exit status, 128 plus the signal number for [`Outcome::Signal`].
         status: i32,
     },
     /// The guest agent refused the workload, and nothing of it runs any longer.
     Rejected {
         /// The guest's error number.
         status: i32,
-        /// The error category, such as [`LAUNCH_FAILED`](crate::protocol::LAUNCH_FAILED),
-        /// truncated to 64 characters.
+        /// The error category, such as `launch-failed`, truncated to 64 characters.
         category: String,
     },
 }
 
-/// Authenticated control session: `NVXC` frames, each in one DATA record of the host's NVXS
-/// connection to OpenVMM's broker.
+/// Authenticated control session: `NVXC` frames of version 2, each in one DATA record of the
+/// host's NVXS connection to OpenVMM's broker.
 ///
 /// Received bytes are buffered until a whole record is available, so a read that times out
 /// loses nothing and callers can poll with short deadlines. A failure that leaves the stream
@@ -146,6 +149,18 @@ pub(crate) enum ExecEvent {
 pub(crate) struct ControlSession {
     /// The host's NVXS connection to OpenVMM's control endpoint.
     pub(crate) connection: HostConnection,
+    /// The bytes of the running execution's standard input that the host sent and the guest agent
+    /// has not acknowledged, at most [`STDIN_WINDOW`].
+    unacknowledged: u32,
+}
+
+impl From<HostConnection> for ControlSession {
+    fn from(connection: HostConnection) -> Self {
+        Self {
+            connection,
+            unacknowledged: 0,
+        }
+    }
 }
 
 impl ControlSession {
@@ -158,19 +173,12 @@ impl ControlSession {
     ) -> Result<Self, SessionError> {
         let connection = HostConnection::attach(transport, capability, deadline)
             .map_err(|error| failure(error, Stage::Attach))?;
-        Ok(Self { connection })
+        Ok(connection.into())
     }
 
     /// Waits until the guest agent acknowledges readiness.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "SL4.4c's host paths ping the guest through the session"
-        )
-    )]
     pub(crate) fn ping(&mut self, deadline: Instant) -> Result<(), SessionError> {
-        self.acknowledged(APP_PING, &[], APP_READY, "readiness", deadline)
+        self.acknowledged(Frame::Ping, "readiness", deadline)
     }
 
     /// Asks nvx-init to capture the VM, killing its executions first when requested.
@@ -179,13 +187,8 @@ impl ControlSession {
         kill_executions: bool,
         deadline: Instant,
     ) -> Result<(), SessionError> {
-        self.acknowledged(
-            APP_CAPTURE,
-            &protocol::encode_capture_payload(kill_executions),
-            APP_READY,
-            "capture",
-            deadline,
-        )
+        let payload = protocol::encode_capture_payload(kill_executions);
+        self.acknowledged(Frame::Capture(&payload), "capture", deadline)
     }
 
     /// Sends nvx-init's activate message, whose `payload` carries a restore's activation record
@@ -196,41 +199,14 @@ impl ControlSession {
         deadline: Instant,
     ) -> Result<crate::activation::ReadyActivation, SessionError> {
         let request_id = request_id()?;
-        self.send_app(protocol::APP_ACTIVATE, request_id, payload, Some(deadline))?;
-        match self.read_reply(request_id, Some(deadline))? {
-            (APP_READY, 0, ready) => {
-                crate::activation::ReadyActivation::decode(&ready).map_err(|error| {
-                    SessionError::Protocol(format!("the guest's Ready is invalid: {error}"))
-                })
-            }
-            _ => Err(SessionError::Protocol(
-                "the guest agent did not activate the restore".to_owned(),
-            )),
-        }
-    }
-
-    /// Asks the guest agent which control features its image provides.
-    ///
-    /// An agent that predates the request refuses it as an unsupported operation, which means
-    /// that the image provides none of them.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no host path sends FEATURES here, and SL4.4d deletes it"
-        )
-    )]
-    pub(crate) fn features(&mut self, deadline: Instant) -> Result<GuestFeatures, SessionError> {
-        let request_id = request_id()?;
-        self.send_app(APP_FEATURES, request_id, &[], Some(deadline))?;
-        let (kind, status, payload) = self.read_reply(request_id, Some(deadline))?;
-        match kind {
-            APP_READY if status == 0 => Ok(GuestFeatures::decode(&payload)?),
-            APP_ERROR if payload == UNSUPPORTED_OPERATION => Ok(GuestFeatures::NONE),
-            _ => Err(SessionError::Protocol(
-                "the guest agent returned an invalid features response".to_owned(),
-            )),
-        }
+        self.send(request_id, Frame::Activate(payload), Some(deadline))?;
+        let reply = self.reply(request_id, Some(deadline))?;
+        let ready = ready(Frame::decode(&reply)?.1)?.ok_or_else(|| {
+            SessionError::Protocol("the guest agent did not activate the restore".to_owned())
+        })?;
+        crate::activation::ReadyActivation::decode(ready).map_err(|error| {
+            SessionError::Protocol(format!("the guest's Ready is invalid: {error}"))
+        })
     }
 
     /// Hands the guest agent the host mapping table, in as many requests as it takes, and waits
@@ -240,25 +216,26 @@ impl ControlSession {
         maps: &[HostMap],
         deadline: Instant,
     ) -> Result<(), SessionError> {
-        let payloads = protocol::encode_maps_payloads(maps, OUTER_MAX_PAYLOAD - APP_HEADER_LEN)?;
-        for payload in payloads {
+        for payload in protocol::encode_maps_payloads(maps, v2::MAX_PAYLOAD)? {
             let request_id = request_id()?;
-            self.send_app(APP_MAPS, request_id, &payload, Some(deadline))?;
-            let (kind, status, payload) = self.read_reply(request_id, Some(deadline))?;
-            match kind {
-                APP_READY if status == 0 && payload.is_empty() => {}
-                APP_ERROR if payload == protocol::MAPPING_FAILED.as_bytes() => {
+            self.send(request_id, Frame::Maps(&payload), Some(deadline))?;
+            let reply = self.reply(request_id, Some(deadline))?;
+            match Frame::decode(&reply)?.1 {
+                Frame::Error { status, category }
+                    if category == protocol::MAPPING_FAILED.as_bytes() =>
+                {
                     return Err(SessionError::Protocol(format!(
                         "the guest agent could not mount a mapped host path (error {status})"
                     )));
                 }
-                APP_ERROR => {
-                    let category = error_category(&payload);
+                Frame::Error { status, category } => {
+                    let category = error_category(category);
                     return Err(SessionError::Protocol(format!(
                         "the guest agent did not mount the host paths: {category} (status \
                          {status})"
                     )));
                 }
+                frame if ready(frame)?.is_some_and(<[u8]>::is_empty) => {}
                 _ => {
                     return Err(SessionError::Protocol(
                         "the guest agent returned an invalid host mapping response".to_owned(),
@@ -269,23 +246,43 @@ impl ControlSession {
         Ok(())
     }
 
-    /// Starts a workload and returns the request ID that identifies its events.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "SL4.4c's sandbox exec and run start workloads through it"
-        )
-    )]
+    /// Starts the workload that the `EXEC` payload `payload` describes as the execution of
+    /// `request_id`, which its events repeat, with none of its standard input in the window.
     pub(crate) fn start_exec(
         &mut self,
-        workload: &Workload<'_>,
+        request_id: u64,
+        payload: &[u8],
         deadline: Instant,
-    ) -> Result<u64, SessionError> {
-        let payload = protocol::encode_exec_payload(workload)?;
-        let request_id = request_id()?;
-        self.send_app(APP_EXEC, request_id, &payload, Some(deadline))?;
-        Ok(request_id)
+    ) -> Result<(), SessionError> {
+        self.unacknowledged = 0;
+        self.send(request_id, Frame::Exec(payload), Some(deadline))
+    }
+
+    /// Sends the next bytes of `data` that the window takes, at most what one frame holds, as
+    /// standard input of the execution of `request_id`, and returns how many it sent: none
+    /// while the guest agent has not acknowledged [`STDIN_WINDOW`] bytes.
+    pub(crate) fn send_stdin(
+        &mut self,
+        request_id: u64,
+        data: &[u8],
+        deadline: Instant,
+    ) -> Result<usize, SessionError> {
+        let room = (STDIN_WINDOW - self.unacknowledged) as usize;
+        let chunk = &data[..data.len().min(room).min(v2::MAX_PAYLOAD)];
+        if !chunk.is_empty() {
+            self.send(request_id, Frame::Stdin(chunk), Some(deadline))?;
+            self.unacknowledged += chunk.len() as u32;
+        }
+        Ok(chunk.len())
+    }
+
+    /// Ends the standard input of the execution of `request_id` after the bytes that it sent.
+    pub(crate) fn close_stdin(
+        &mut self,
+        request_id: u64,
+        deadline: Instant,
+    ) -> Result<(), SessionError> {
+        self.send(request_id, Frame::StdinEnd, Some(deadline))
     }
 
     /// Reads the next event of the workload started with `request_id`.
@@ -294,22 +291,33 @@ impl ControlSession {
         request_id: u64,
         deadline: Option<Instant>,
     ) -> Result<ExecEvent, SessionError> {
-        let (kind, status, payload) = self.read_reply(request_id, deadline)?;
-        match kind {
-            APP_STDOUT => Ok(ExecEvent::Stdout(payload)),
-            APP_STDERR => Ok(ExecEvent::Stderr(payload)),
-            APP_EXIT => Ok(ExecEvent::Exit {
-                category: ExitCategory::parse(&payload)?,
+        let reply = self.reply(request_id, deadline)?;
+        Ok(match Frame::decode(&reply)?.1 {
+            Frame::Stdout(data) => ExecEvent::Stdout(data.to_vec()),
+            Frame::Stderr(data) => ExecEvent::Stderr(data.to_vec()),
+            Frame::StdinAck(count) => {
+                self.unacknowledged = self.unacknowledged.checked_sub(count).ok_or_else(|| {
+                    SessionError::Protocol(
+                        "the guest agent acknowledged standard input that it did not receive"
+                            .to_owned(),
+                    )
+                })?;
+                ExecEvent::Acknowledged(count)
+            }
+            Frame::Exit { status, outcome } => ExecEvent::Exit {
+                category: outcome,
                 status,
-            }),
-            APP_ERROR => Ok(ExecEvent::Rejected {
+            },
+            Frame::Error { status, category } => ExecEvent::Rejected {
                 status,
-                category: error_category(&payload),
-            }),
-            _ => Err(SessionError::Protocol(
-                "the guest agent returned an invalid exec response".to_owned(),
-            )),
-        }
+                category: error_category(category),
+            },
+            _ => {
+                return Err(SessionError::Protocol(
+                    "the guest agent returned an invalid exec response".to_owned(),
+                ));
+            }
+        })
     }
 
     /// Asks the guest agent to terminate the workload started with `request_id`.
@@ -317,128 +325,111 @@ impl ControlSession {
     /// The guest reports the workload's outcome as a regular exec event, with the cancelled
     /// category if the request arrived before the workload exited. A request for a workload that
     /// already finished is ignored.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "SL4.4c's sandbox exec and run cancel through it on Ctrl-C"
-        )
-    )]
     pub(crate) fn cancel_exec(
         &mut self,
         request_id: u64,
         deadline: Instant,
     ) -> Result<(), SessionError> {
-        self.send_app(APP_CANCEL, request_id, &[], Some(deadline))
+        self.send(request_id, Frame::Cancel, Some(deadline))
     }
 
-    /// Asks the guest agent to shut the VM down.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "SL4.4c's sandbox exec and run stop the guest through it"
-        )
-    )]
+    /// Asks the guest agent to shut the VM down, which first ends an execution that runs: the
+    /// frames of that execution, which come before the acknowledgement, are skipped.
     pub(crate) fn stop(&mut self, deadline: Instant) -> Result<(), SessionError> {
-        self.acknowledged(APP_STOP, &[], APP_STOPPED, "stop", deadline)
-    }
-
-    /// Sends an application request of `kind` with `request_id` and `payload` in the next
-    /// sequenced outer record, for a caller that checks the responses itself, as the `nvx-rs`
-    /// CLI does with the messages of `nvx.py`.
-    pub(crate) fn send_request(
-        &mut self,
-        kind: u8,
-        request_id: u64,
-        payload: &[u8],
-        deadline: Instant,
-    ) -> Result<(), SessionError> {
-        self.send_app(kind, request_id, payload, Some(deadline))
-    }
-
-    /// Reads the next application frame, checked against the session's identity and sequence,
-    /// and returns its kind, request ID, status, and payload.
-    pub(crate) fn read_response(
-        &mut self,
-        deadline: Option<Instant>,
-    ) -> Result<(u8, u64, i32, Vec<u8>), SessionError> {
-        self.read_app(deadline)
-    }
-
-    /// Encodes and sends one application frame in the next DATA record.
-    fn send_app(
-        &mut self,
-        kind: u8,
-        request_id: u64,
-        payload: &[u8],
-        deadline: Option<Instant>,
-    ) -> Result<(), SessionError> {
-        let frame = protocol::encode_app(kind, request_id, 0, payload);
-        // The guest agent takes each DATA record as one frame, so a frame must fit one.
-        if frame.len() > OUTER_MAX_PAYLOAD {
-            return Err(SessionError::Protocol(
-                "control payload exceeds the outer protocol limit".to_owned(),
-            ));
+        let request_id = request_id()?;
+        self.send(request_id, Frame::Stop, Some(deadline))?;
+        loop {
+            let record = self.receive(Some(deadline))?;
+            match Frame::decode(&record)? {
+                (id, Frame::Stopped) if id == request_id => return Ok(()),
+                (
+                    id,
+                    Frame::Stdout(_)
+                    | Frame::Stderr(_)
+                    | Frame::StdinAck(_)
+                    | Frame::Exit { .. }
+                    | Frame::Error { .. },
+                ) if id != request_id => {}
+                _ => {
+                    return Err(SessionError::Protocol(
+                        "the guest agent did not acknowledge stop".to_owned(),
+                    ));
+                }
+            }
         }
+    }
+
+    /// Encodes `frame` with `request_id`, and sends it in the next DATA record, which the guest
+    /// agent takes as one frame.
+    fn send(
+        &mut self,
+        request_id: u64,
+        frame: Frame<'_>,
+        deadline: Option<Instant>,
+    ) -> Result<(), SessionError> {
+        let frame = frame.encode(request_id)?;
         self.connection
             .send(&frame, deadline)
             .map_err(|error| failure(error, Stage::Data))
     }
 
-    /// Reads and decodes the next application frame, the payload of the next DATA record.
-    fn read_app(
-        &mut self,
-        deadline: Option<Instant>,
-    ) -> Result<(u8, u64, i32, Vec<u8>), SessionError> {
-        let payload = self
-            .connection
+    /// Returns the payload of the next DATA record: the bytes of the guest agent's next frame.
+    fn receive(&mut self, deadline: Option<Instant>) -> Result<Vec<u8>, SessionError> {
+        self.connection
             .receive(deadline)
-            .map_err(|error| failure(error, Stage::Data))?;
-        let frame = protocol::decode_app(&payload)?;
-        Ok((
-            frame.kind,
-            frame.request_id,
-            frame.status,
-            frame.payload.to_vec(),
-        ))
+            .map_err(|error| failure(error, Stage::Data))
     }
 
-    /// Reads the next application frame, which must answer `request_id`, and returns its kind,
-    /// status, and payload.
-    fn read_reply(
+    /// Returns the bytes of the next frame, which must answer `request_id`.
+    fn reply(
         &mut self,
         request_id: u64,
         deadline: Option<Instant>,
-    ) -> Result<(u8, i32, Vec<u8>), SessionError> {
-        let (kind, response_id, status, payload) = self.read_app(deadline)?;
-        if response_id != request_id {
+    ) -> Result<Vec<u8>, SessionError> {
+        let record = self.receive(deadline)?;
+        if Frame::decode(&record)?.0 != request_id {
             return Err(SessionError::Protocol(
                 "the guest agent returned a mismatched request ID".to_owned(),
             ));
         }
-        Ok((kind, status, payload))
+        Ok(record)
     }
 
-    /// Sends a request of `kind` and waits until the guest agent acknowledges
-    /// `what` with an empty `reply` of status 0.
+    /// Sends `request` and waits until the guest agent acknowledges `what` with a `READY` of its
+    /// request ID that carries nothing but the protocol version.
     fn acknowledged(
         &mut self,
-        kind: u8,
-        payload: &[u8],
-        reply: u8,
+        request: Frame<'_>,
         what: &str,
         deadline: Instant,
     ) -> Result<(), SessionError> {
         let request_id = request_id()?;
-        self.send_app(kind, request_id, payload, Some(deadline))?;
-        let (kind, response_id, status, payload) = self.read_app(Some(deadline))?;
-        if kind != reply || response_id != request_id || status != 0 || !payload.is_empty() {
-            return Err(SessionError::Protocol(format!(
+        self.send(request_id, request, Some(deadline))?;
+        let reply = self.receive(Some(deadline))?;
+        match Frame::decode(&reply)? {
+            (id, frame) if id == request_id && ready(frame)?.is_some_and(<[u8]>::is_empty) => {
+                Ok(())
+            }
+            _ => Err(SessionError::Protocol(format!(
                 "the guest agent did not acknowledge {what}"
-            )));
+            ))),
         }
-        Ok(())
+    }
+}
+
+/// Returns what a `READY` reports about an activation, once it checked that the `READY` carries
+/// the protocol version, or `None` for another frame.
+fn ready(frame: Frame<'_>) -> Result<Option<&[u8]>, SessionError> {
+    match frame {
+        Frame::Ready {
+            version: v2::VERSION,
+            activation,
+        } => Ok(Some(activation)),
+        Frame::Ready { version, .. } => Err(SessionError::Protocol(format!(
+            "the guest agent speaks NVXC version {version}, not version {}",
+            v2::VERSION
+        ))),
+        _ => Ok(None),
     }
 }
 

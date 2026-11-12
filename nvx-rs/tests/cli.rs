@@ -121,62 +121,31 @@ fn text(data: &[u8]) -> String {
 }
 
 #[test]
-fn start_requires_the_guest_features_of_layered_sandboxes() {
+fn starts_ask_the_guest_for_no_features() {
+    // NVXC version 2 has no FEATURES: a guest that refuses that request of version 1, or that
+    // advertises none of the features, starts, runs workloads and stops all the same.
     let root = Root::new();
-    // A guest that lacks per-execution environments or host path mapping tables, or that
-    // predates feature negotiation, is stopped, and its start fails like any other.
-    for (state, command_line, missing) in [
-        (
-            "cancel-only",
-            "fake_guest_features=1",
-            "per-execution environments, host path mapping tables",
-        ),
-        (
-            "legacy",
-            "fake_legacy_guest=1",
-            "per-execution environments, host path mapping tables",
-        ),
-        (
-            "environments-only",
-            "fake_guest_features=16",
-            "host path mapping tables",
-        ),
+    for (state, command_line) in [
+        ("legacy", "fake_legacy_guest=1"),
+        ("featureless", "fake_guest_features=0"),
     ] {
         let output = run(&root, &provision(&root, state, command_line));
         assert!(output.status.success(), "{}", text(&output.stderr));
         let output = run(&root, &lifecycle("start", &root, state));
-        assert_eq!(output.status.code(), Some(1));
-        assert_eq!(
-            text(&output.stderr),
-            format!(
-                "error[guest-features-missing]: the guest image lacks control features that \
-                 layered sandboxes need ({missing}); use an NVX release or build that includes \
-                 them\n"
-            )
-        );
-        let mut names: Vec<String> = fs::read_dir(root.path.join(state))
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        names.sort();
-        assert_eq!(names, ["config.json", "openvmm.log", "sandbox.lock"]);
-        let output = run(&root, &lifecycle("deprovision", &root, state));
-        assert!(output.status.success(), "{}", text(&output.stderr));
-    }
-    // Per-execution environments and host path mapping tables are all that the CLI needs:
-    // neither cancellation nor workload accounts.
-    let output = run(
-        &root,
-        &provision(&root, "environments", "fake_guest_features=80"),
-    );
-    assert!(output.status.success(), "{}", text(&output.stderr));
-    for operation in ["start", "stop", "deprovision"] {
-        let output = run(&root, &lifecycle(operation, &root, "environments"));
-        assert!(
-            output.status.success(),
-            "{operation}: {}",
-            text(&output.stderr)
-        );
+        assert!(output.status.success(), "{state}: {}", text(&output.stderr));
+        let mut exec = lifecycle("exec", &root, state);
+        exec.extend(["--entrypoint", "/bin/echo", "--arg", "ran"].map(str::to_owned));
+        let output = run(&root, &exec);
+        assert!(output.status.success(), "{state}: {}", text(&output.stderr));
+        assert_eq!(text(&output.stdout), "ran\n");
+        for operation in ["stop", "deprovision"] {
+            let output = run(&root, &lifecycle(operation, &root, state));
+            assert!(
+                output.status.success(),
+                "{state} {operation}: {}",
+                text(&output.stderr)
+            );
+        }
     }
 }
 
@@ -3005,6 +2974,64 @@ mod interrupts {
     }
 
     #[test]
+    fn interrupting_an_exec_cancels_the_workload_that_streams() {
+        use std::io::{BufRead, BufReader, Write};
+
+        let root = Root::new();
+        for arguments in [
+            provision(&root, "state", ""),
+            lifecycle("start", &root, "state"),
+        ] {
+            let output = run(&root, &arguments);
+            assert!(output.status.success(), "{}", text(&output.stderr));
+        }
+        let mut arguments = lifecycle("exec", &root, "state");
+        arguments
+            .extend(["--entrypoint", "/bin/sh", "--arg=-c", "--arg", "cat"].map(str::to_owned));
+        let mut child = Command::new(NVX_RS)
+            .arg("--root")
+            .arg(&root.path)
+            .args(&arguments)
+            .current_dir(&root.path)
+            .env_remove("NVX_OPENVMM")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // The workload echoes its input as it reads it, which stays open.
+        let mut input = child.stdin.take().unwrap();
+        input.write_all(b"streamed\n").unwrap();
+        let mut echoed = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut echoed)
+            .unwrap();
+        assert_eq!(echoed, "streamed\n");
+        let interrupted = Instant::now();
+        let pid = nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap());
+        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(130), "{}", text(&output.stderr));
+        assert_eq!(text(&output.stderr), "Interrupted\n");
+        assert!(interrupted.elapsed() < Duration::from_secs(10));
+        drop(input);
+        // The guest ended the workload, so the sandbox runs another, and stops.
+        let mut echo = lifecycle("exec", &root, "state");
+        echo.extend(["--entrypoint", "/bin/echo", "--arg", "again"].map(str::to_owned));
+        let output = run(&root, &echo);
+        assert!(output.status.success(), "{}", text(&output.stderr));
+        assert_eq!(text(&output.stdout), "again\n");
+        for operation in ["stop", "deprovision"] {
+            let output = run(&root, &lifecycle(operation, &root, "state"));
+            assert!(
+                output.status.success(),
+                "{operation}: {}",
+                text(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
     fn interrupting_a_provision_that_waits_for_a_download_provisions_nothing() {
         use std::io::{BufRead, BufReader, Read};
 
@@ -3088,8 +3115,8 @@ mod interrupts {
 
     #[test]
     fn interrupting_an_exec_ends_its_write_to_a_full_pipe() {
-        // The CLI writes a workload's output once the workload ends. Like Python's, the write
-        // ends at Ctrl-C, also while it waits for a pipe's reader that does not read.
+        // The CLI writes a workload's output as it comes. Like Python's, the write ends at
+        // Ctrl-C, also while it waits for a pipe's reader that does not read.
         let root = Root::new();
         for arguments in [
             provision(&root, "state", ""),

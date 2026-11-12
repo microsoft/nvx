@@ -464,6 +464,25 @@ fn a_run_whose_guest_exits_during_startup_fails_as_a_start_does() {
     );
 }
 
+/// A run streams its workload's standard input, which the command's ends, and its output.
+#[test]
+fn a_run_streams_its_standard_input_and_output() {
+    let root = Root::new();
+    let before = root.snapshot();
+    let outcome = root.nvx_rs_with_input(
+        &sandbox_run(&[
+            "--entrypoint",
+            "/bin/sh",
+            "--arg=-c",
+            "--arg",
+            "cat; echoerr ended",
+        ]),
+        b"line one\nline two\n",
+    );
+    assert_ran(&root, &before, &outcome, 0, "line one\nline two\n");
+    assert_eq!(outcome.stderr(), "ended\n", "{}", outcome.describe());
+}
+
 #[test]
 fn a_run_whose_workload_the_guest_refuses_stops_its_vm() {
     let root = Root::new();
@@ -477,11 +496,13 @@ fn a_run_whose_workload_the_guest_refuses_stops_its_vm() {
         "{root/reports/run.json}",
     ]));
     assert_ran(&root, &before, &outcome, 1, "");
+    // The guest agent's diagnostic streams before the refusal, which the run reports.
     assert_eq!(
         outcome.stderr(),
         format!(
-            "error[exec-refused]: managed guest rejected exec (status=2, category=cwd-failed)\
-             {LINE_END}"
+            "nvx-managed-agent: cannot enter working directory /missing: No such file or \
+             directory\nerror[exec-refused]: managed guest rejected exec (status=2, \
+             category=cwd-failed){LINE_END}"
         )
     );
     assert_outcome_report(
@@ -555,6 +576,52 @@ fn a_run_forces_down_a_vm_that_does_not_stop() {
         "{}",
         outcome.describe()
     );
+}
+
+/// A run's own warnings start a line of their own after standard error that its workload left
+/// without a line end, which the run otherwise leaves as it is.
+#[test]
+fn a_runs_warnings_start_lines_of_their_own_after_its_workloads_output() {
+    let root = Root::new();
+    let before = root.snapshot();
+    let outcome = root.nvx_rs(&sandbox_run(&[
+        "--entrypoint",
+        "/bin/sh",
+        "--arg=-c",
+        "--arg",
+        "printerr partial",
+        "--timeout",
+        "1",
+        "--cmdline",
+        "fake_ignore_stop=1",
+    ]));
+    assert_ran(&root, &before, &outcome, 0, "");
+    let stderr = outcome.stderr();
+    assert!(
+        stderr.starts_with(&format!(
+            "partial{LINE_END}warning: managed guest shutdown failed: "
+        )),
+        "{}",
+        outcome.describe()
+    );
+    assert!(
+        stderr.ends_with(&format!(
+            "{LINE_END}warning: OpenVMM was forcibly terminated after the run{LINE_END}"
+        )),
+        "{}",
+        outcome.describe()
+    );
+    let root = Root::new();
+    let before = root.snapshot();
+    let outcome = root.nvx_rs(&sandbox_run(&[
+        "--entrypoint",
+        "/bin/sh",
+        "--arg=-c",
+        "--arg",
+        "printerr partial",
+    ]));
+    assert_ran(&root, &before, &outcome, 0, "");
+    assert_eq!(outcome.stderr(), "partial", "{}", outcome.describe());
 }
 
 /// A run forwards an outcome report that the caller can read whatever its umask, even one that

@@ -11,12 +11,13 @@ use crate::activation::{
 };
 use crate::host::process::Opened;
 use crate::host::session::ExecEvent;
-use crate::protocol::{ExitCategory, WorkloadEnvironment};
+use crate::protocol::WorkloadEnvironment;
+use crate::protocol::v2::Outcome;
 
 /// A stand-in for OpenVMM and its guest, which serves the control endpoint, sends the
 /// restore-ready event, attaches the host with the capability of its standard input, and answers
-/// NVXC requests as `case` asks, with `activation` in its Ready. It records each request in
-/// `trace`, and the step at which it stalls in `stage`.
+/// NVXC requests of version 2 as `case` asks, with `activation` in its Ready. It records each
+/// request in `trace`, and the step at which it stalls in `stage`.
 const PEER: &str = r#"
 import json, os, socket, struct, sys, time
 case, endpoint, ready, trace, stage, activation = sys.argv[1:]
@@ -78,7 +79,7 @@ def record(stream, kind, epoch, sequence, payload=b''):
     stream.write(struct.pack('<4sHBB16sQQI', b'NVXS', 1, kind, 0, bytes([7]) * 16, epoch,
                              sequence, len(payload)) + payload)
 def reply(stream, kind, rid, status, payload, epoch, sequence):
-    frame = struct.pack('<4sBBHQiI', b'NVXC', 1, kind, 0, rid, status, len(payload)) + payload
+    frame = struct.pack('<4sBBHQiI', b'NVXC', 2, kind, 0, rid, status, len(payload)) + payload
     record(stream, 5, epoch, sequence, frame)
 server = None if case == 'connect' else bind()
 if case == 'stall':
@@ -103,7 +104,7 @@ for session in range(1, 4):
         while True:
             header = exact(stream, 44)
             frame = exact(stream, struct.unpack('<I', header[40:])[0])
-            assert header[:4] == b'NVXS' and header[6] == 5 and frame[:4] == b'NVXC'
+            assert header[:4] == b'NVXS' and header[6] == 5 and frame[:5] == b'NVXC\x02'
             kind, rid, payload = frame[5], struct.unpack('<Q', frame[8:16])[0], frame[24:]
             with open(trace, 'a', encoding='ascii') as out:
                 out.write(json.dumps({'session': session, 'kind': kind, 'id': rid,
@@ -115,15 +116,16 @@ for session in range(1, 4):
                     stream.close()
                     break
                 if case == 'malformed':
-                    reply(stream, 0x81, rid, 0, b'\x00', session, sequence)
+                    reply(stream, 0x81, rid, 0, b'\x02\x00', session, sequence)
                     stall(case)
-                reply(stream, 0x81, rid, 0, bytes.fromhex(activation), session, sequence)
+                reply(stream, 0x81, rid, 0, b'\x02' + bytes.fromhex(activation), session,
+                      sequence)
             elif kind == 6:
                 if case == 'maps-read': stall(case)
                 if case == 'maps-error':
                     reply(stream, 0xff, rid, 5, b'mapping-failed', session, sequence)
                     stall(case)
-                reply(stream, 0x81, rid, 0, b'', session, sequence)
+                reply(stream, 0x81, rid, 0, b'\x02', session, sequence)
             elif kind == 2:
                 reply(stream, 0x82, rid, 0, b'restored', session, sequence)
                 reply(stream, 0x84, rid, 0, b'exit', session, sequence + 1)
@@ -338,7 +340,7 @@ fn a_lost_session_is_replaced_with_the_same_activate_message_and_the_live_sessio
             .next_exec_event(workload.request_id, deadline)
             .unwrap(),
         ExecEvent::Exit {
-            category: ExitCategory::Exit,
+            category: Outcome::Exit,
             status: 0
         }
     );
