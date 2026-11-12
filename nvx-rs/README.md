@@ -161,7 +161,9 @@ frames, the `EXEC` payload that the host encodes and the guest agent decodes,
 and the control features that a guest image advertises. Beside version 1's
 frames, `protocol::app::v2` holds the codec of version 2's, which carry every
 control path, with version 1's payloads, and stream an execution's standard
-input, output and error.
+input, output and error. The guest loop that nvx-init and the managed agent
+share, and the fake OpenVMM, serve both versions, so `v2` follows their
+features, `guest` and `testing`, until the host speaks it too.
 
 The [conformance vectors](tests/vectors/README.md) of version 1,
 `tests/vectors/nvxc-v1.txt`, and OpenVMM's vectors and cases of the `NVXS`
