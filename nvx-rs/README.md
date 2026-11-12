@@ -115,13 +115,11 @@ changes only when the module's purpose does.
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: pure configuration, cold-boot kernel/OpenVMM arguments, portable length checks, and capture identity |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
-| [`nvx::host::network::policy`](#nvxhostnetworkpolicy) | Egress policy files and their compilation into OpenVMM's native rules |
 | [`nvx::host::filesystem`](#nvxhostfilesystem) | The planner of the host paths that every NVX caller exports to the guest through OpenVMM's virtio-fs device |
 | [`nvx::host::nvxs`](#nvxhostnvxs) | Compatibility paths for the host NVXS connection and its retained cause details |
 | [`nvx::host::transport`](#nvxhosttransport) | A verified VM endpoint connection and the blocking host NVXS driver, with the existing timed transport |
 | [`nvx::host::process`](#nvxhostprocess) | Verified references to OpenVMM processes, through which callers wait for them and end them |
 | [`nvx::host::report`](#nvxhostreport) | OpenVMM's outcome report |
-| [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its live shares and option checks; its layer and bindings are private to the CLI |
 | [`nvx::guest`](#nvxguest) | The programs that run in Linux guests; see [Guest binaries](#guest-binaries) |
 | [`nvx::guest::mappings`](#nvxguestmappings) | `Mapping` and `MappingTable`: host mappings, and the account of a host's mapping table, for any guest init or agent |
 | [`nvx::guest::nvxs`](#nvxguestnvxs) | `GuestConnection`: the guest's role of the NVXS session over a byte stream, such as the control console |
@@ -943,12 +941,6 @@ lowering of egress policy files, with at most 256 rules for each action.
 the host, and fails with an `Unsupported` error for a malformed rule or for an
 action that needs more than 256 rules.
 
-### `nvx::host::network::policy`
-
-Egress policy files: `compile_policy_file`, `compile_policy_bytes`, and
-`compile_policy` compile one to a `CompiledEgressPolicy` of native rules; see
-[Egress policy files](#egress-policy-files).
-
 ### `nvx::host::filesystem`
 
 The planner of every NVX caller: `plan` turns an `ExportRequest`, the mapped
@@ -1069,31 +1061,6 @@ limit; a `STOP` ends an execution that runs.
 unreadable or malformed report, retaining the underlying error. It keeps today's
 summary of the outcome category, status code and teardown steps, not free-form
 fields.
-
-### `nvx::host::sandbox`
-
-The launch profile of `nvx-rs sandbox`, with native input validation: the
-workload identity that `--workload-user` names, the live shares, and the checks
-of the options. The image staging of the profile is private to the crate, for
-the CLI (feature `cli`): `layer`'s `SandboxLayer`, the distro layer of a
-sandbox, an EROFS layer or a GPT disk, the one layer that a sandbox takes;
-`distro`'s `DistroBinding` of the layer, which explicit verification makes, and
-its check from metadata alone; `scratch`'s `ScratchBinding` of a scratch image,
-its identity, kind, and length, and its check from metadata alone, which claims
-the image for one sandbox at a time; and the seals of `nvx::host`'s private
-`seal`, which they record. See [Distro bindings](#distro-bindings) and
-[Images by path](#images-by-path).
-
-`mount`: `SandboxMount` requests of live shares of host directories and files,
-their guest targets and the reserved ones, their access policies and owner, and
-the checks of their host paths; and `plan_mounts`, which plans them through
-`nvx::host::filesystem` for the container root.
-
-`options`: the checks that `nvx-rs sandbox` and `nvx-rs run` apply to their
-options: the attribution of `--mount-deny`, `--mount-allow`, and `--mount-write`
-to shares, the systemd entrypoint check and the explicit verification of the
-distro layer, the targets of `nvx-rs run` shares, and the managed exec
-environment; see [Sandbox input contract](#sandbox-input-contract).
 
 ### `nvx::guest`
 
@@ -1351,9 +1318,11 @@ cloned, and formats none of them. `nvx-reseed` runs them.
 
 ## Egress policy files
 
-`nvx::host::network::policy` compiles the egress policy files that
-`nvx-rs run` and `nvx-rs sandbox` take with `--network-egress-policy-file`
-([format](../doc/run.md#run-openvmm-directly)). It replaced the former
+The crate's private `host::network::policy`, which only the CLI builds (feature
+`cli`), compiles the egress policy files that `nvx-rs run` and `nvx-rs sandbox`
+take with `--network-egress-policy-file`
+([format](../doc/run.md#run-openvmm-directly)), and whose rules
+[`egress compile`](#egress-compile-path) prints. It replaced the former
 `scripts/nvx_tools/egress_policy.py` when `nvx.py` delegated to `nvx-rs`, and
 compiles the policies that it compiled to the same rules, but reads policy
 files as strict JSON
@@ -1545,6 +1514,22 @@ does, and holds the claim until its VM exits. A sandbox whose upper is in RAM,
 `--upper ram`, has no scratch image: `provision` records `null` for the image
 and its binding, and neither `start` nor `run` binds or claims one.
 ## Sandbox input contract
+
+The crate's private `host::sandbox` is the launch profile of `nvx-rs sandbox`,
+which only the CLI uses (feature `cli`), but for the block geometry that
+`nvx::host::vm` and `nvx::host::snapshot` read and the tag of the shares'
+virtio-fs device, which a snapshot's key names: the workload identity that
+`--workload-user` names; the live shares of `--mount`, their guest targets and
+the reserved ones, their access policies and owner, and the checks of their
+host paths, which it plans through `nvx::host::filesystem` for the container
+root; and the checks that `nvx-rs sandbox` and `nvx-rs run` apply to their
+options: the attribution of `--mount-deny`, `--mount-allow`, and `--mount-write`
+to shares, the systemd entrypoint check and the explicit verification of the
+distro layer, the targets of `nvx-rs run` shares, and the managed exec
+environment. Its image staging, the `layer`, the `distro` and `scratch`
+bindings, and the seals of the private `host::seal` that they record, is
+described in [Distro bindings](#distro-bindings) and
+[Images by path](#images-by-path).
 
 The sandbox launch profile specifies its own inputs rather than emulating Python.
 A UID or GID contains only ASCII decimal digits, without signs, whitespace,
@@ -2864,8 +2849,8 @@ own facilities replaced it:
   through their links, on Linux and Windows, and those of the scratch image
   and of the export planner that paths that are not valid Unicode are refused.
 
-The sandbox specification tests, those of `nvx::host::sandbox`, specify the
-documented option grammar. Properties cover canonical layer UUIDs, reserved
+The sandbox specification tests, those of the private `host::sandbox`, specify
+the documented option grammar. Properties cover canonical layer UUIDs, reserved
 targets, policy option sequences, and paths on the host's own filesystem. They check
 that a launch refuses both systemd entrypoints whatever the distro layer's
 manifest lists, and that verification refuses a manifest that lists `systemd`
