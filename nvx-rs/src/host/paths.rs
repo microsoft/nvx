@@ -134,6 +134,7 @@ fn drive(path: &Path) -> Option<u8> {
 ///
 /// Fails as [`std::fs::canonicalize`] fails for a prefix for another reason than that it does not
 /// exist, and as [`text`] fails for a resolved path that is not valid Unicode.
+#[cfg(feature = "cli")]
 pub(crate) fn resolve(path: &Path) -> io::Result<PathBuf> {
     let absolute = absolute(path)?;
     let mut existing = absolute.as_path();
@@ -160,7 +161,7 @@ pub(crate) fn resolve(path: &Path) -> io::Result<PathBuf> {
 
 /// Returns `path`, which [`std::fs::canonicalize`] gave, without its verbatim prefix, unless only
 /// the verbatim path names the object that it names.
-#[cfg(windows)]
+#[cfg(all(feature = "cli", windows))]
 fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
     let Some(text) = path.to_str() else {
         return path;
@@ -180,7 +181,7 @@ fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
 }
 
 /// Returns `path` as it is: hosts other than Windows have no verbatim prefix.
-#[cfg(not(windows))]
+#[cfg(all(feature = "cli", not(windows)))]
 fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
     path
 }
