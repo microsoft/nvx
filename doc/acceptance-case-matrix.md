@@ -512,4 +512,4 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/host/snapshot/capture.rs - host::snapshot::capture::finish_capture (line 48)` | kept |  |
 | `nvx-rs/src/host/store/mod.rs - host::store (line 104)` | retired | The sandbox store leaves (SL6.1, #1121) |
 | `nvx-rs/README.md`, its Example: an instance through `LaunchSpec` and the sandbox store | rewritten | Nothing compiles it. `nvx-rs/examples/host-workflows.rs` compiles the documented host workflows, and the library's guide (SL6.10a) replaces the example. SL6.1 (#1121) made it the cold boot that `nvx-rs/src/lib.rs - (line 57)` compiles |
-| `nvx-rs/examples/external-launch.rs` | kept | Compiled with the crate's targets, and run by hand on a host |
+| `nvx-rs/examples/external-launch.rs` | kept | Compiled with the crate's targets, and run by hand on a host. Since SL6.3 (#1122), which deletes `host::supervisor`, a minimal launcher of its own on `std::process` starts its VMM |

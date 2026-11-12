@@ -571,8 +571,15 @@ Read the resolved NIC or capture context, or build an activation record,
 before consuming `Prepared` into the command.
 
 The compiled [external-launch example](examples/external-launch.rs) consumes
-this command, launches it with the transitional `supervisor::spawn_vm`, checks the
-cold guest's boot marker and shell response, then asks it to exit cleanly.
+this command, starts it with a minimal launcher of its own on `std::process`,
+checks the cold guest's boot marker and shell response, then asks it to exit
+cleanly. Its launcher passes the VMM no descriptor or handle besides its
+standard streams, and starts it neither in a new session with the owner's bits
+cleared from its umask on Linux nor in its log's job on Windows: a production
+launcher adds what the command's contract asks, as `vm::spawn` does, and the
+example's docs list what it leaves out. It holds the VMM through a `ProcessRef`
+whose start time it reads as `ProcessRef` defines it: the `starttime` field of
+`/proc/<pid>/stat` on Linux, and the process's creation time on Windows.
 It requires the VMM's actual exit status 0 and a successful
 outcome with complete teardown. Build with
 `cargo build --locked --example external-launch` and supply the backend, OpenVMM,
