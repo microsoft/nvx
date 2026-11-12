@@ -1,45 +1,29 @@
 //! `nvx-time`, the guest side of NVX time ABI v2, and the typed calls through which any guest
-//! init or agent runs the ABI's steps in its own process.
+//! init or agent runs the ABI's boot steps in its own process.
 //!
 //! [`TimeAbi`] runs the cold-boot time step and, separately, starts the time daemon, a process
-//! that the caller supervises; it reads the VM generation ID, requests a capture and repairs a
-//! restore, and finishes a restore, with typed inputs, results, and errors. Each call holds the
-//! permission for OpenVMM's ports only for its port transactions, on the calling thread, and no
-//! call waits for a child that it did not start. `nvx-time` runs those steps through the same
-//! calls, and the rest of the ABI itself.
-//!
-//! A restore hands over its fresh entropy in the [`CaptureRequest`]'s mode: the file mode, which
-//! `nvx-time capture` keeps, writes it to a file, and the in-memory mode returns it as the
-//! [`Restore`]'s owned [`Seed`](crate::guest::reseed::Seed), and writes no file:
+//! that the caller supervises; it reads the VM generation ID, with typed results and errors.
+//! Each call holds the permission for OpenVMM's ports only for its port transactions, on the
+//! calling thread, and no call waits for a child that it did not start:
 //!
 //! ```no_run
-//! use nvx::guest::reseed;
-//! use nvx::guest::time::{CaptureOutcome, CaptureRequest, RestoreFinish, ScratchPolicy, TimeAbi};
+//! use nvx::guest::time::TimeAbi;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let abi = TimeAbi::new();
 //! // At boot, before the process starts any thread.
 //! let daemon = abi.start_daemon(abi.cold_boot()?)?;
 //! // The caller supervises the process `daemon`.
-//!
-//! // A snapshot's capture, after `nvx-time pre-capture`.
-//! let request = CaptureRequest::in_memory(ScratchPolicy::Fresh, abi.generation_id()?);
-//! if let CaptureOutcome::Restored(mut restore) = abi.capture(request)? {
-//!     // A clone of the snapshot continues here, with its wall clock repaired. The seed zeroes
-//!     // its bytes when it is dropped, after the reseed.
-//!     if let Some(seed) = restore.take_seed() {
-//!         reseed::reseed(&seed)?;
-//!     }
-//!     let mut finish = RestoreFinish::new();
-//!     if restore.acknowledgement_required() {
-//!         finish = finish.acknowledge();
-//!     }
-//!     abi.restore_finish(finish)?;
-//! }
 //! # let _ = daemon;
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! The ABI's capture request, which repairs the time of a restore, and the restore's finish are
+//! private: [`snapshot::capture`](crate::guest::snapshot::capture) runs them, and hands the
+//! restore's fresh entropy to its repair in memory, as an owned
+//! [`Seed`](crate::guest::reseed::Seed), while `nvx-time capture` writes it to a file. `nvx-time`
+//! runs each step through the same calls, and the rest of the ABI itself.
 //!
 //! A violation of the ABI stops the VM in enforcing mode, the mode of the command tools, with a
 //! status that `nvx::protocol::status` publishes: 193 for a conformance check, 194 for the time
@@ -74,11 +58,11 @@ use std::ffi::CString;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-pub(crate) use api::PreCaptureError;
-pub use api::{
-    CaptureOutcome, CaptureRequest, ColdBoot, CpuSet, MemoryRange, Restore, RestoreFinish,
-    RestoreNetwork, ScratchPolicy, TimeAbi, TimeError, Violation,
+pub(crate) use api::{
+    CaptureOutcome, CaptureRequest, CpuSet, MemoryRange, PreCaptureError, Restore, RestoreFinish,
+    ScratchPolicy,
 };
+pub use api::{ColdBoot, TimeAbi, TimeError, Violation};
 
 use super::status::{CommandError, run_main};
 use super::sys;

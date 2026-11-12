@@ -36,8 +36,9 @@ const REPORT_ONLY_TOKEN: Token<'static> = Token {
 };
 
 /// The guest side of NVX time ABI version one: its cold-boot time step and the start of its time
-/// daemon, its VM generation ID, the capture request with the repair of a restore, and the
-/// restore's finish, which run in the calling process.
+/// daemon, and its VM generation ID, which run in the calling process. Its capture request, with
+/// the repair of a restore, and the restore's finish are private: `nvx-time` and
+/// [`snapshot::capture`](crate::guest::snapshot::capture) run them.
 ///
 /// A call needs the privileges of `nvx-time`: `CAP_SYS_RAWIO` for OpenVMM's I/O ports, and
 /// write access to `/run/nvx`. It takes the permission for the ports only for each of its port
@@ -143,14 +144,13 @@ impl TimeAbi {
     ///
     /// The child runs the deferred boot checks in the background, at idle priority, and then
     /// becomes the time daemon: it disciplines the wall clock, watches the kernel log for
-    /// violations, and runs repair step 7 of the restores that
-    /// [`restore_finish`](Self::restore_finish) hands it. It runs in a session of its own, with
-    /// its standard streams on the null device, until the VM stops or `SIGTERM` stops it, and
-    /// waits only for the children that it starts itself. It takes the command name `nvx-time`,
-    /// by which the calls of the time ABI recognize it. The caller supervises it and collects
-    /// its status: no call of the time ABI waits for it. The child enforces the ABI even when it
-    /// is [strict](Self::strict), since no caller owns its failures: a violation that it reports
-    /// stops the VM, unless the ABI is report-only.
+    /// violations, and runs repair step 7 of the restores whose finish hands it over. It runs in a
+    /// session of its own, with its standard streams on the null device, until the VM stops or
+    /// `SIGTERM` stops it, and waits only for the children that it starts itself. It takes the
+    /// command name `nvx-time`, by which the calls of the time ABI recognize it. The caller
+    /// supervises it and collects its status: no call of the time ABI waits for it. The child
+    /// enforces the ABI even when it is [strict](Self::strict), since no caller owns its failures:
+    /// a violation that it reports stops the VM, unless the ABI is report-only.
     ///
     /// The call returns when the child starts, so the boot checks' failures, which the child
     /// reports by their events, do not fail it.
@@ -172,7 +172,7 @@ impl TimeAbi {
         }
     }
 
-    /// Reads the VM generation ID, which a [capture](Self::capture) needs.
+    /// Reads the VM generation ID, which a capture request needs.
     pub fn generation_id(&self) -> Result<GenerationId, TimeError> {
         let runtime = self.runtime();
         settled(&runtime, read_generation_id(&runtime))
@@ -202,7 +202,7 @@ impl TimeAbi {
     /// requested it, in which the call does not return. With [`CaptureRequest::finish`],
     /// [`Restore::finished`] tells whether the call finished the restore, and how it reports a
     /// failed handoff of repair step 7.
-    pub fn capture(&self, request: CaptureRequest) -> Result<CaptureOutcome, TimeError> {
+    pub(crate) fn capture(&self, request: CaptureRequest) -> Result<CaptureOutcome, TimeError> {
         self.capture_until(request, None)
             .map_err(|(error, _)| error)
     }
@@ -232,7 +232,7 @@ impl TimeAbi {
     /// passes to init, or to the nearest subreaper, without the process's descriptors. The call
     /// returns when step 7 ends, which reports its failures by their events only, as
     /// `nvx-time restore-finish` does.
-    pub fn restore_finish(&self, request: RestoreFinish) -> Result<(), TimeError> {
+    pub(crate) fn restore_finish(&self, request: RestoreFinish) -> Result<(), TimeError> {
         let runtime = self.runtime();
         settled(&runtime, restore_finish(&runtime, request))
     }
@@ -560,7 +560,7 @@ fn pre_capture(runtime: &Runtime<'_>) -> Result<(), PreCaptureError> {
 
 /// How a snapshot treats the guest's scratch disk, which the capture request selects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ScratchPolicy {
+pub(crate) enum ScratchPolicy {
     /// The snapshot keeps no scratch disk: the capture happens before the scratch disk is
     /// mounted, and a restore attaches a new one.
     Fresh,
@@ -584,7 +584,7 @@ impl ScratchPolicy {
 /// [`in_memory`](Self::in_memory), which writes no file, and returns it as the [`Restore`]'s
 /// owned [`Seed`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CaptureRequest {
+pub(crate) struct CaptureRequest {
     /// The snapshot's scratch policy.
     scratch: ScratchPolicy,
     /// The VM generation ID before the capture, which a restore must replace.
@@ -611,7 +611,11 @@ impl CaptureRequest {
     /// generation ID, from [`TimeAbi::generation_id`], is `generation_id`. A restore writes the
     /// 64 bytes of fresh entropy of its restore packet, which start with the new generation ID,
     /// to a file at `entropy_path` that only its owner may read and write.
-    pub fn new(scratch: ScratchPolicy, generation_id: GenerationId, entropy_path: PathBuf) -> Self {
+    pub(crate) fn new(
+        scratch: ScratchPolicy,
+        generation_id: GenerationId,
+        entropy_path: PathBuf,
+    ) -> Self {
         Self {
             scratch,
             generation_id,
@@ -625,7 +629,7 @@ impl CaptureRequest {
     /// writes no file: its [`Restore`] holds the 64 bytes of fresh entropy of its restore
     /// packet, which start with the new generation ID, as an owned [`Seed`], which
     /// [`Restore::take_seed`] hands over.
-    pub fn in_memory(scratch: ScratchPolicy, generation_id: GenerationId) -> Self {
+    pub(crate) fn in_memory(scratch: ScratchPolicy, generation_id: GenerationId) -> Self {
         Self {
             scratch,
             generation_id,
@@ -640,7 +644,7 @@ impl CaptureRequest {
     /// then stay with the caller, who has no further step to run before the acknowledgement.
     /// Without a running daemon, or when the calling thread cannot take the permission for the
     /// acknowledgement, the restore stays unfinished, as [`Restore::finished`] tells.
-    pub fn finish(mut self) -> Self {
+    pub(crate) fn finish(mut self) -> Self {
         self.finish = true;
         self
     }
@@ -648,7 +652,7 @@ impl CaptureRequest {
 
 /// How a capture request ended, in the VM process in which it returned.
 #[derive(Debug)]
-pub enum CaptureOutcome {
+pub(crate) enum CaptureOutcome {
     /// The VM continued without a restore: no snapshot was taken, or the restore packet was of
     /// the recorded generation. The entropy file of the file mode is removed.
     Continued,
@@ -663,7 +667,7 @@ pub enum CaptureOutcome {
 /// [`take_seed`](Self::take_seed) hands it over, so it is neither `Clone` nor comparable: the
 /// seed has one owner.
 #[derive(Debug)]
-pub struct Restore {
+pub(crate) struct Restore {
     /// The packet's flags.
     flags: u8,
     /// The packet's online processor count, or zero for no processor target.
@@ -691,35 +695,35 @@ impl Restore {
     /// A restore whose handoff of step 7 fails after its acknowledgement counts as finished,
     /// since finishing it again would acknowledge it twice, as `nvx-time capture --finish`
     /// does: in report-only mode, a violation of check C10 is the failure's only report.
-    pub fn finished(&self) -> bool {
+    pub(crate) fn finished(&self) -> bool {
         self.finished
     }
 
     /// Returns whether the host gates its input until the guest acknowledges the restore, which
     /// [`RestoreFinish::acknowledge`] does.
-    pub fn acknowledgement_required(&self) -> bool {
+    pub(crate) fn acknowledgement_required(&self) -> bool {
         self.flags & decoders::PACKET_ACK_REQUIRED != 0
     }
 
     /// Returns the number of online processors that the restore requests, 1, 2, 4, or 8, or
     /// `None` for none.
-    pub fn processor_target(&self) -> Option<u8> {
+    pub(crate) fn processor_target(&self) -> Option<u8> {
         (self.online_vp_count != 0).then_some(self.online_vp_count)
     }
 
     /// Returns whether the restore requests an explicit memory target, whose expansion ranges
     /// [`memory_ranges`](Self::memory_ranges) lists.
-    pub fn memory_target(&self) -> bool {
+    pub(crate) fn memory_target(&self) -> bool {
         self.flags & decoders::PACKET_MEMORY_TARGET != 0
     }
 
     /// Returns the memory ranges that the guest adds and onlines, in order.
-    pub fn memory_ranges(&self) -> &[MemoryRange] {
+    pub(crate) fn memory_ranges(&self) -> &[MemoryRange] {
         &self.memory_ranges
     }
 
     /// Returns the new VM generation ID, with which the restore's fresh entropy starts.
-    pub fn generation_id(&self) -> GenerationId {
+    pub(crate) fn generation_id(&self) -> GenerationId {
         self.generation_id
     }
 
@@ -730,7 +734,7 @@ impl Restore {
     /// The seed moves to the caller without a copy of its bytes, which it zeroes when it is
     /// dropped, so the caller drops it once it reseeded the kernel's random number generator
     /// with it, through [`reseed`](crate::guest::reseed::reseed).
-    pub fn take_seed(&mut self) -> Option<Seed> {
+    pub(crate) fn take_seed(&mut self) -> Option<Seed> {
         self.seed.take()
     }
 
@@ -747,7 +751,7 @@ impl Restore {
     /// Returns the network settings that the restore packet carries: those of a restore that
     /// replaced the network policy of a snapshot without a tier, which the guest applies before it
     /// finishes the restore, or `None` for a restore that carries none.
-    pub fn network(&self) -> Option<RestoreNetwork> {
+    pub(crate) fn network(&self) -> Option<RestoreNetwork> {
         self.network
     }
 
@@ -767,7 +771,7 @@ impl Restore {
 /// announces its listeners under it, as a cold boot under that policy learns them from the
 /// `virtnet_dns=` and `virtnet_ingress=` tokens of its command line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct RestoreNetwork {
+pub(crate) struct RestoreNetwork {
     /// The DNS server, one of the gateway's addresses, or `None` when the policy lets the guest
     /// reach no DNS service of the gateway.
     dns_server: Option<IpAddr>,
@@ -785,20 +789,20 @@ impl RestoreNetwork {
     }
 
     /// Returns the DNS server that the guest's resolver names, or `None` for none.
-    pub fn dns_server(&self) -> Option<IpAddr> {
+    pub(crate) fn dns_server(&self) -> Option<IpAddr> {
         self.dns_server
     }
 
     /// Returns whether the guest announces its listeners to its IPv4 gateway, which publishes
     /// them.
-    pub fn announces_listeners(&self) -> bool {
+    pub(crate) fn announces_listeners(&self) -> bool {
         self.announce_listeners
     }
 }
 
 /// A range of guest physical memory that a restore adds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MemoryRange {
+pub(crate) struct MemoryRange {
     /// The range's first guest physical address.
     start: u64,
     /// The range's length in bytes.
@@ -807,12 +811,12 @@ pub struct MemoryRange {
 
 impl MemoryRange {
     /// Returns the range's first guest physical address.
-    pub fn start(&self) -> u64 {
+    pub(crate) fn start(&self) -> u64 {
         self.start
     }
 
     /// Returns the range's length in bytes, which is not zero.
-    pub fn length(&self) -> u64 {
+    pub(crate) fn length(&self) -> u64 {
         self.length
     }
 }
@@ -1184,38 +1188,18 @@ fn apply_repair(
 /// Its `Display` form is a CPU list in the kernel's syntax, such as `1-3,6`, or `none` for the
 /// empty set.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct CpuSet(CpuMask);
+pub(crate) struct CpuSet(CpuMask);
 
 impl CpuSet {
     /// Returns the empty set.
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self(CpuMask::EMPTY)
     }
 
     /// Returns the set with `cpu` added, or `None` for a CPU that the time ABI does not cover.
     #[must_use]
-    pub fn with(self, cpu: usize) -> Option<Self> {
+    pub(crate) fn with(self, cpu: usize) -> Option<Self> {
         (cpu < super::MAX_CPUS).then(|| Self(self.0.with(cpu)))
-    }
-
-    /// Returns whether the set has `cpu`.
-    pub fn contains(&self, cpu: usize) -> bool {
-        self.0.contains(cpu)
-    }
-
-    /// Returns the number of CPUs in the set.
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Returns whether the set has no CPUs.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Returns the set's CPUs in ascending order.
-    pub fn iter(&self) -> impl Iterator<Item = usize> + use<> {
-        self.0.iter()
     }
 }
 
@@ -1235,7 +1219,7 @@ impl Display for CpuSet {
 
 /// The finish of a restore, [`TimeAbi::restore_finish`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RestoreFinish {
+pub(crate) struct RestoreFinish {
     /// Whether to acknowledge the restore through the snapshot port.
     acknowledge: bool,
     /// The CPUs that the restore brought online.
@@ -1244,20 +1228,20 @@ pub struct RestoreFinish {
 
 impl RestoreFinish {
     /// Describes a finish that records no new CPUs and sends no acknowledgement.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Acknowledges the restore through the snapshot port, which a restore whose host gates its
     /// input until then needs.
-    pub fn acknowledge(mut self) -> Self {
+    pub(crate) fn acknowledge(mut self) -> Self {
         self.acknowledge = true;
         self
     }
 
     /// Records `cpus` as the CPUs that the restore brought online, which repair step 7's
     /// restore checks check too.
-    pub fn new_cpus(mut self, cpus: CpuSet) -> Self {
+    pub(crate) fn new_cpus(mut self, cpus: CpuSet) -> Self {
         self.new_cpus = cpus;
         self
     }
