@@ -1,12 +1,14 @@
-//! `MAPS` payloads: the host mapping table that the `APP_MAPS` requests of NVX's own control
-//! protocol, `NVXC`, hand the guest agent.
+//! `MAPS` payloads: the host mapping table on the wire, which a host sends its guest agent in
+//! parts, in its own application protocol, as NVX's own control protocol does in its `APP_MAPS`
+//! requests.
 //!
 //! A payload holds the index of its first entry (`u32`) and its number of entries (`u32`),
 //! followed by the entries. Each entry holds its flags (`u16`), the lengths of its source and
 //! target (`u16` each), and then both. A source names a path relative to the guest's mount of the
 //! host's export, and an empty source names the export's root itself, which is how the table of a
-//! directory export maps the whole directory. NVX's managed agent, whose export is an aggregate,
-//! whose root lists its children, refuses an empty source.
+//! directory export maps the whole directory. The guest's `nvx::guest::mappings::MappingTable`,
+//! whose entries come from an aggregate export, whose root lists its children, refuses an empty
+//! source.
 
 use super::{ProtocolError, u16_at, u32_at, violation};
 
@@ -33,8 +35,8 @@ pub struct HostMap {
     pub read_only: bool,
 }
 
-/// Encodes the host mapping table as the payloads of consecutive `APP_MAPS` requests, each at
-/// most `limit` bytes long.
+/// Encodes the host mapping table as consecutive `MAPS` payloads, each at most `limit` bytes
+/// long, which the host sends in order, such as in NVX's own `APP_MAPS` requests.
 ///
 /// A payload holds the index of its first entry and its number of entries, so the guest agent
 /// applies the entries in order and only up to the number that the kernel command line
