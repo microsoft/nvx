@@ -5,8 +5,8 @@
 //! - `run`, the default, runs one workload in a sandbox of its own, without a state directory: it
 //!   launches the VM that a `provision` and a `start` of the same options would launch, in a
 //!   temporary VM directory, prints its OpenVMM command as `>> COMMAND`, executes the workload
-//!   once over NVXC, as `exec` would, with `exec`'s options, stops the VM, and exits with the
-//!   workload's status, after its output. A dry run prints the command and launches nothing. See
+//!   once over NVXC, as `exec` would, with `exec`'s options and its streams, stops the VM, and
+//!   exits with the workload's status. A dry run prints the command and launches nothing. See
 //!   [`lifecycle::run`].
 //! - `provision`, `start`, `exec`, `stop`, and `deprovision` manage a persistent sandbox in its
 //!   `--state-dir`; see [`lifecycle`].
@@ -380,15 +380,12 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
                 options.timeout,
                 options.wait,
             )?;
-            output::write_stdout(&result.stdout)
-                .and_then(|()| output::write_stderr(&result.stderr))
-                .map_err(Exit::from_os_error)?;
             if let Some(report) = &options.outcome_report {
                 // An error of the report follows the workload's output, and starts a line of its
                 // own even after standard error that the workload left without a line end, so
                 // that callers find it as they find any other.
                 lifecycle::write_exec_outcome(report, &result)
-                    .inspect_err(|_| output::end_stderr_line(&result.stderr))?;
+                    .inspect_err(|_| output::end_stderr_line(result.stderr_end.as_slice()))?;
             }
             Err(Exit::Status(result.returncode))
         }
@@ -420,9 +417,6 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
             else {
                 return Ok(());
             };
-            output::write_stdout(&result.stdout)
-                .and_then(|()| output::write_stderr(&result.stderr))
-                .map_err(Exit::from_os_error)?;
             Err(Exit::Status(result.returncode))
         }
         (SandboxOperation::Run | SandboxOperation::Provision, None) => {

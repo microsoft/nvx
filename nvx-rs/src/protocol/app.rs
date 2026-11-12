@@ -7,11 +7,16 @@
 //! path and streams an execution's standard input, output and error.
 
 #[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+use super::array;
+#[cfg(any(
     feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
-use super::{ProtocolError, array, violation};
+use super::{ProtocolError, violation};
 #[cfg(any(
     feature = "cli",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
@@ -44,6 +49,7 @@ pub(crate) mod workload {
 }
 
 #[cfg(any(
+    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -51,14 +57,12 @@ pub(crate) mod v2;
 
 /// Magic of every application frame.
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) const APP_MAGIC: [u8; 4] = *b"NVXC";
 /// Version of the application frame format.
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -73,28 +77,24 @@ pub(crate) const APP_HEADER_LEN: usize = 24;
 
 /// Request that the guest agent acknowledge readiness with [`APP_READY`].
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) const APP_PING: u8 = 1;
 /// Request that the guest agent run a workload; the payload is an `EXEC` payload.
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) const APP_EXEC: u8 = 2;
 /// Request that the guest agent shut the VM down, which it acknowledges with [`APP_STOPPED`].
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) const APP_STOP: u8 = 3;
 /// Request that the guest agent terminate the workload of the request with the frame's ID.
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -102,7 +102,6 @@ pub(crate) const APP_CANCEL: u8 = 4;
 /// Request for the guest's control features, which the guest agent answers with [`APP_READY`]
 /// and a [`GuestFeatures`](super::GuestFeatures) payload.
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -110,40 +109,30 @@ pub(crate) const APP_FEATURES: u8 = 5;
 /// Request that the guest agent mount entries of the host mapping table; the payload is a `MAPS`
 /// payload.
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) const APP_MAPS: u8 = 6;
 /// Request that nvx-init capture the VM after optionally killing its executions.
-#[cfg(any(
-    feature = "cli",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) const APP_CAPTURE: u8 = 7;
 /// Request that nvx-init activate a restored VM with its record and workload identity.
-#[cfg(any(
-    feature = "cli",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) const APP_ACTIVATE: u8 = 8;
 /// Response that acknowledges a request.
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) const APP_READY: u8 = 0x81;
 /// Response that carries a chunk of a workload's standard output.
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) const APP_STDOUT: u8 = 0x82;
 /// Response that carries a chunk of a workload's standard error.
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -151,14 +140,12 @@ pub(crate) const APP_STDERR: u8 = 0x83;
 /// Response that ends a workload: the status is its exit status, and the payload its
 /// [`ExitCategory`].
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) const APP_EXIT: u8 = 0x84;
 /// Response that acknowledges [`APP_STOP`].
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -166,7 +153,6 @@ pub(crate) const APP_STOPPED: u8 = 0x85;
 /// Response that refuses a request: the status is an error number, and the payload an error
 /// category such as [`LAUNCH_FAILED`].
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -174,7 +160,6 @@ pub(crate) const APP_ERROR: u8 = 0xff;
 
 /// Error category with which a guest agent refuses a request kind that it does not know.
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -222,7 +207,6 @@ pub(crate) const MAPPING_FAILED: &str = "mapping-failed";
 
 /// Decoded application frame.
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -240,7 +224,6 @@ pub(crate) struct AppFrame<'a> {
 
 /// Encodes one application frame.
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -260,7 +243,6 @@ pub(crate) fn encode_app(kind: u8, request_id: u64, status: i32, payload: &[u8])
 
 /// Decodes and validates an application frame.
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -386,6 +368,13 @@ pub(crate) enum ExitCategory {
 impl ExitCategory {
     /// Parses the payload of an [`APP_EXIT`] response.
     #[cfg(feature = "cli")]
+    #[cfg_attr(
+        not(all(test, feature = "testing")),
+        expect(
+            dead_code,
+            reason = "NVX's host speaks NVXC version 2 since SL4.4c, and SL4.4d deletes version 1"
+        )
+    )]
     pub(crate) fn parse(payload: &[u8]) -> Result<Self, ProtocolError> {
         match payload {
             b"exit" => Ok(Self::Exit),

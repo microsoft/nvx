@@ -31,12 +31,22 @@ use crate::host::sandbox::{DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY};
 use crate::host::snapshot::tests::RestoreFixture;
 use crate::host::snapshot::{DESCRIPTION_FILE, KEY_FILE, OPENVMM_DIR};
 use crate::protocol::root::RootImage;
+use crate::protocol::v2::{self, Frame, Outcome};
 use crate::protocol::{
-    APP_ACTIVATE, APP_EXEC, APP_EXIT, APP_HEADER_LEN, APP_MAPS, APP_READY, APP_STDOUT, OUTER_DATA,
-    OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_MAX_PAYLOAD, OUTER_READY, decode_app,
-    decode_outer_header, encode_app, encode_exec_payload, encode_maps_payloads, encode_outer,
-    status,
+    OUTER_DATA, OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_READY, decode_outer_header,
+    encode_exec_payload, encode_maps_payloads, encode_outer, status,
 };
+
+/// The codes of the requests of NVXC that the fake guest of the fixture's restores serves: the
+/// activate message, the mapping table and the workload's Start, and the end of its standard
+/// input.
+const ACTIVATE: u8 = 0x08;
+/// See [`ACTIVATE`].
+const MAPS: u8 = 0x06;
+/// See [`ACTIVATE`].
+const EXEC: u8 = 0x02;
+/// See [`ACTIVATE`].
+const STDIN_END: u8 = 0x0a;
 
 /// The fake VMM and guest that the fixture's restores spawn in place of OpenVMM.
 const HELPER: &str = "host::cli::sandbox::lifecycle::start::tests::restore::restore_helper";
@@ -286,7 +296,7 @@ fn named_snapshots_restore_each_image_format_and_upper_with_their_own_policy_and
         fixture.start("state", config, "ready", 30.0).unwrap();
         let requests = fixture.requests("state");
         let kinds: Vec<u8> = requests.iter().map(|(kind, _)| *kind).collect();
-        assert_eq!(kinds, [APP_ACTIVATE, APP_MAPS, APP_EXEC]);
+        assert_eq!(kinds, [ACTIVATE, MAPS, EXEC, STDIN_END]);
         let (record, identity) = activation(&requests[0].1);
         assert_eq!(identity, (1000, 1001, 0));
         let configuration = record.configuration();
@@ -306,7 +316,7 @@ fn named_snapshots_restore_each_image_format_and_upper_with_their_own_policy_and
         assert_eq!(configuration.resources.cpus, 2);
         assert_eq!(
             requests[1].1,
-            encode_maps_payloads(&maps, OUTER_MAX_PAYLOAD - APP_HEADER_LEN).unwrap()[0]
+            encode_maps_payloads(&maps, v2::MAX_PAYLOAD).unwrap()[0]
         );
         let workload = protocol::Workload {
             argv: WORKLOAD.map(str::to_owned).to_vec(),
@@ -390,7 +400,7 @@ fn a_one_off_restore_installs_the_network_options_of_run_as_its_own_policy() {
     // The guest learns the DNS server that the policy lets it reach, and announces its listeners,
     // which the policy publishes on host loopback.
     let requests = fixture.requests("state");
-    assert_eq!(requests[0].0, APP_ACTIVATE);
+    assert_eq!(requests[0].0, ACTIVATE);
     assert_eq!(
         activation(&requests[0].1).0.configuration().network,
         Some(Network {
@@ -506,7 +516,7 @@ fn concurrent_restores_of_one_snapshot_wait_for_its_lock_until_the_first_vm_has_
     assert!(spawned[1].2);
     assert!(fixture.exited(0));
     assert!(fixture.requests("first").is_empty());
-    assert_eq!(fixture.requests("second").len(), 2);
+    assert_eq!(fixture.requests("second").len(), 3);
     assert!(fixture.snapshot_free());
 }
 
@@ -655,14 +665,14 @@ fn a_later_start_restores_again_with_an_upper_in_ram_but_never_with_a_scratch_im
         if ram {
             again.unwrap();
             assert_eq!(fixture.spawned().len(), 2);
-            assert_eq!(fixture.requests("state").len(), 4);
+            assert_eq!(fixture.requests("state").len(), 6);
         } else {
             // The guest of the first start may have written the image, which a restore's guest
             // refuses: nothing launches, and the view stays for deprovision.
             let error = again.unwrap_err();
             assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
             assert_eq!(fixture.spawned().len(), 1);
-            assert_eq!(fixture.requests("state").len(), 2);
+            assert_eq!(fixture.requests("state").len(), 3);
         }
         assert_eq!(fixture.view("state"), 3, "{ram}");
         assert!(fixture.snapshot_free());
@@ -957,7 +967,7 @@ fn read_record(stream: &mut impl Read) -> Option<(u8, Vec<u8>)> {
 }
 
 /// Serves one session of the host as the guest of the recipe's behavior does, and traces its
-/// requests.
+/// requests, and the end of the standard input of the workload that the Start runs.
 fn serve(stream: &mut (impl Read + Write), capability: &[u8], epoch: u64, recipe: &Value) {
     let Some((kind, payload)) = read_record(stream) else {
         return;
@@ -968,26 +978,39 @@ fn serve(stream: &mut (impl Read + Write), capability: &[u8], epoch: u64, recipe
         return;
     }
     let trace = recipe["trace"].as_str().unwrap();
-    let mut sequence = 1;
-    while let Some((kind, payload)) = read_record(stream) {
-        assert_eq!(kind, OUTER_DATA);
-        let request = decode_app(&payload).unwrap();
-        let line = json!({"kind": request.kind, "payload": hex(request.payload)});
+    // Traces the frame of a DATA record, and returns its kind, its request ID and its payload.
+    let request = |frame: &[u8]| {
+        let (request_id, _) = Frame::decode(frame).unwrap();
+        let (kind, payload) = (frame[5], &frame[24..]);
+        let line = json!({"kind": kind, "payload": hex(payload)});
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(trace)
             .unwrap();
         writeln!(file, "{line}").unwrap();
+        (kind, request_id, payload.to_vec())
+    };
+    let mut sequence = 1;
+    while let Some((kind, frame)) = read_record(stream) {
+        assert_eq!(kind, OUTER_DATA);
+        let (kind, request_id, payload) = request(&frame);
         // A guest that hangs up does once it has the workload's Start, which it never answers.
-        if request.kind == APP_EXEC && recipe["behavior"] == "hangup" {
+        if kind == EXEC && recipe["behavior"] == "hangup" {
             return;
         }
-        let replies = match request.kind {
-            APP_ACTIVATE if recipe["behavior"] == "malformed" => vec![(APP_READY, 0, vec![0])],
+        let ready = |activation: &[u8]| {
+            let frame = Frame::Ready {
+                version: v2::VERSION,
+                activation,
+            };
+            frame.encode(request_id).unwrap()
+        };
+        let replies = match kind {
+            ACTIVATE if recipe["behavior"] == "malformed" => vec![ready(&[0])],
             // The guest cannot assemble its root, and powers off with the status of the failure's
             // class, which OpenVMM reports, and then exits with, or reports unreadably.
-            APP_ACTIVATE
+            ACTIVATE
                 if matches!(
                     recipe["behavior"].as_str(),
                     Some("unusable-root" | "unreadable-report")
@@ -1006,24 +1029,29 @@ fn serve(stream: &mut (impl Read + Write), capability: &[u8], epoch: u64, recipe
                 fs::write(recipe["outcome"].as_str().unwrap(), report).unwrap();
                 std::process::exit(code.into());
             }
-            APP_ACTIVATE => {
-                let ready = ReadyActivation::of(&activation(request.payload).0);
-                vec![(APP_READY, 0, ready.encode())]
+            ACTIVATE => vec![ready(
+                &ReadyActivation::of(&activation(&payload).0).encode(),
+            )],
+            MAPS => vec![ready(&[])],
+            // The workload reads its standard input until its end, which follows the Start,
+            // writes its output, then exits, with status 3 if it fails, or SIGTERM ends it.
+            _ => {
+                let (_, end) = read_record(stream).unwrap();
+                assert_eq!(request(&end), (STDIN_END, request_id, Vec::new()));
+                let (status, outcome) = match recipe["behavior"].as_str() {
+                    Some("failing") => (3, Outcome::Exit),
+                    Some("signaled") => (143, Outcome::Signal),
+                    _ => (0, Outcome::Exit),
+                };
+                [
+                    Frame::Stdout(b"restored\n"),
+                    Frame::Exit { status, outcome },
+                ]
+                .map(|frame| frame.encode(request_id).unwrap())
+                .to_vec()
             }
-            APP_MAPS => vec![(APP_READY, 0, Vec::new())],
-            // The workload writes its output, then exits, with status 3 if it fails, or SIGTERM
-            // ends it.
-            _ => vec![
-                (APP_STDOUT, 0, b"restored\n".to_vec()),
-                match recipe["behavior"].as_str() {
-                    Some("failing") => (APP_EXIT, 3, b"exit".to_vec()),
-                    Some("signaled") => (APP_EXIT, 143, b"signal".to_vec()),
-                    _ => (APP_EXIT, 0, b"exit".to_vec()),
-                },
-            ],
         };
-        for (kind, status, payload) in replies {
-            let reply = encode_app(kind, request.request_id, status, &payload);
+        for reply in replies {
             let record = encode_outer(OUTER_DATA, &[7; 16], epoch, sequence, &reply).unwrap();
             if stream.write_all(&record).is_err() {
                 return;

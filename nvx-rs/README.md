@@ -151,9 +151,10 @@ frames, the `EXEC` payload that the host encodes and the guest agent decodes,
 and the control features that a guest image advertises. Beside version 1's
 frames, `protocol::app::v2` holds the codec of version 2's, which carry every
 control path, with version 1's payloads, and stream an execution's standard
-input, output and error. The guest loop that nvx-init and the managed agent
-share, and the fake OpenVMM, serve both versions, so `v2` follows their
-features, `guest` and `testing`, until the host speaks it too.
+input, output and error. NVX's host speaks version 2 alone, and the guest loop
+that nvx-init and the managed agent share, and the fake OpenVMM, serve both
+versions, so `v2` follows the features `cli`, `guest` and `testing`, and
+version 1's frames those of their servers, `guest` and `testing`.
 
 The [conformance vectors](tests/vectors/README.md) of version 1,
 `tests/vectors/nvxc-v1.txt`, and OpenVMM's vectors and cases of the `NVXS`
@@ -1057,7 +1058,11 @@ OpenVMM's outcome report. The Linux and Windows primitives are private to the
 crate, in `host::platform`, and so is the authenticated control session, which
 carries NVX's own control protocol, `NVXC`, one frame per DATA record of a
 `HostConnection`: the CLI and its restore driver use it, with the `cli`
-feature.
+feature. The session speaks version 2 alone, and requires the guest's `READY`
+to name that version. It streams an execution's standard input, with an
+explicit end, and keeps at most 64 KiB of it that the guest has not
+acknowledged writing, and receives the execution's output without a total
+limit; a `STOP` ends an execution that runs.
 
 `report::read` returns `Ok(None)` for a missing report, and an `Io` error for an
 unreadable or malformed report, retaining the underlying error. It keeps today's
@@ -1914,16 +1919,17 @@ before them.
   as `nvx.py` quoted it with `subprocess.list2cmdline` and `shlex.join`.
   Unless `--dry-run` is given, it then executes the workload once through the
   control session, as `exec` does, with its working directory and environment
-  options, asks the guest to shut the VM down, waits up to `--timeout` seconds
-  for OpenVMM to exit before it terminates it, removes the VM directory, and
-  prints the workload's standard output and then its standard error, and exits
-  with its status. `--outcome-report` forwards OpenVMM's outcome report of the
-  VM's stop.
+  options, streaming its standard input, output and error, asks the guest to
+  shut the VM down, waits up to `--timeout` seconds for OpenVMM to exit before
+  it terminates it, removes the VM directory, and exits with the workload's
+  status. `--outcome-report` forwards OpenVMM's outcome report of the VM's
+  stop.
 - `provision` records the sandbox in its state directory. `start` launches
   OpenVMM detached with the managed lifecycle, passes it a fresh capability
   through its standard input, and waits until the guest answers. `exec` runs a
-  workload, prints its standard output and then its standard error, and exits
-  with its status; `--outcome-report` writes
+  workload, streams its own standard input to it, until that ends, and the
+  workload's standard output and error back as they arrive, and exits with the
+  workload's status; Ctrl-C cancels the workload. `--outcome-report` writes
   `{"operation_id": HEX, "outcome": {"category": CATEGORY, "operation":
   "exec", "status_code": STATUS}, "schema_version": 1}`. `stop` shuts the VM
   down and prints nothing, but for a warning when it terminates a VM of another
@@ -2024,24 +2030,21 @@ OpenVMM that a start of such a build left behind when it was interrupted has no
 record, and that build asked for it to be ended by hand: end it before the
 switch too, since this build finds no VM in that sandbox.
 
-#### Guest features
+#### Guest protocol
 
-After the guest answers, `start`, and `sandbox run`, ask it for its control
-features and require `GuestFeatures::LAYERED_SANDBOX`, the features that their
-launches use: per-execution environments (bit 4), since `exec` and
-`sandbox run` send a working directory and an environment, and host path
-mapping tables (bit 6), since they then send the mapping table of the
-sandbox's shares, which the guest agent mounts before
-it runs any workload; a mapping that it refuses fails the start, after the
-guest shuts down as `stop` has it do. It needs neither cancellation (bit 0),
-since the CLI never cancels a workload, and Ctrl-C ends the session, nor
-workload account creation (bit 2), since a layered sandbox runs its workloads
-as an account of the image. A guest image that lacks a required feature, or
-that predates the request, is stopped as a failed start is, and the start
-fails with
-`the guest image lacks control features that layered sandboxes need (...)`,
-which names the missing features. `nvx.py` does not ask; this, the checks of
-the [distro binding](#distro-bindings) and of the
+After the guest answers, `start`, and `sandbox run`, speak version 2 of `NVXC`
+to it, whose `READY` names the version that the guest agent speaks, and require
+that version: a guest image whose agent answers in another version, as one
+that predates version 2 does, is stopped as a failed start is, and the start
+fails. They ask for no control features, which only version 1's `FEATURES`
+request reports, and which `start` required before: per-execution environments
+and host path mapping tables, which every guest agent of version 2 provides.
+`exec` and `sandbox run` send a working directory and an environment, and the
+start then sends the mapping table of the sandbox's shares, which the guest
+agent mounts before it runs any workload; a mapping that it refuses fails the
+start, after the guest shuts down as `stop` has it do. `nvx.py` does not check
+the version; this, the streams of `exec` and `sandbox run`, the checks of the
+[distro binding](#distro-bindings) and of the
 [scratch binding](#images-by-path), and the claim of the scratch image are the
 intended changes of behavior.
 
@@ -2119,8 +2122,11 @@ intended changes of behavior.
   launched exits, as `nvx::host::transport::connect_verified` does, and fails
   at once with `exited`, where `nvx.py` waited until `--timeout` passed before
   it reported the exit.
-- `exec` refuses more than 1 MiB of workload output, which the guest agent
-  never forwards.
+- `exec` and `sandbox run` stream the workload's standard input, output and
+  error while it runs, where `nvx.py` gave it no input and printed its output
+  once it ended. So a guest's diagnostic of a request that it refuses, such as
+  a working directory that the workload cannot enter, precedes the error.
+  Ctrl-C cancels the workload, where `nvx.py` closed the session.
 - `provision`, and `start` again, refuse a share whose resolved host path
   equals, contains, or lies inside the sandbox's state directory, image, or
   scratch image, or the OpenVMM, kernel, or initramfs of the artifact root, as
@@ -2650,8 +2656,9 @@ tests, only the test hooks that
 
 The tests need no hypervisor. The fake-OpenVMM test runs `nvx-fake-openvmm`
 directly, as `nvx-rs run` runs OpenVMM on the terminal. The CLI test runs the
-[scenario tests](#scenario-tests) of `nvx-rs`, and checks the guest-feature
-requirement and, on Linux, Ctrl-C. The
+[scenario tests](#scenario-tests) of `nvx-rs`, and checks that a start asks
+the guest for no features, that `exec` and `sandbox run` stream, and, on
+Linux, Ctrl-C, which also cancels an `exec`. The
 [conformance vectors](tests/vectors/README.md) of the wire formats cover both
 sides of every record, frame, and payload: the codec decodes each vector of
 `tests/vectors/nvxc-v1.txt` to its values and encodes them to its bytes, it

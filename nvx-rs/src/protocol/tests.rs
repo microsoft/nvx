@@ -46,7 +46,12 @@ use crate::tests::{NVXC_V1, of_kind, vector};
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
-use super::app::{APP_HEADER_LEN, APP_VERSION, AppFrame};
+use super::app::APP_HEADER_LEN;
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+use super::app::{APP_VERSION, AppFrame};
 #[cfg(all(
     feature = "cli",
     feature = "testing",
@@ -87,7 +92,6 @@ const MAX_CWD_BYTES: usize = 4095;
 const MAX_TIMEOUT_MS: u32 = u32::MAX;
 
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -143,7 +147,6 @@ fn record_type(name: &str) -> RecordType {
 
 /// Returns the frame kind that a vector names.
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -248,7 +251,6 @@ fn records_match_their_vectors() {
 
 /// Each `FRAME` vector decodes to its values, which encode to its bytes.
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -757,7 +759,6 @@ fn exec_requests_are_refused_where_the_guest_agent_refuses_them() {
 }
 
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -1046,7 +1047,6 @@ fn maps_decoders_refuse_the_invalid_vectors() {
 // them yet breaks compatibility with released peers. These tests pin each value literally.
 
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
