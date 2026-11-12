@@ -9,12 +9,11 @@ package's ``.cargo_vcs_info.json`` records the run's commit, as dirty when the
 version differs from the declared one.
 
 Before the upload, the package must hold the commit's files byte for byte, but
-for the version, and must build with every feature, ``bundled`` included,
-which downloads and verifies the release that ``artifacts.json`` pins. The
-package job checks and builds the package without the right to publish it, so
-that no build script or procedural macro can publish either. The publish job
-builds nothing: it packs the same bytes again and uploads them, and then
-crates.io must serve those very bytes.
+for the version, and must build with every feature. The package job checks
+and builds the package without the right to publish it, so that no build
+script or procedural macro can publish either. The publish job builds
+nothing: it packs the same bytes again and uploads them, and then crates.io
+must serve those very bytes.
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ import json
 import os
 import re
 import shutil
-import sys
 import tarfile
 import time
 import urllib.error
@@ -72,13 +70,8 @@ REQUIRED_FILES = (
     "Cargo.lock",
     "LICENSE",
     "README.md",
-    "build.rs",
-    "artifacts.json",
     "src/lib.rs",
 )
-# Environment variables that would make `bundled` stage something else than
-# the release that artifacts.json pins.
-BUNDLE_VARIABLES = ("NVX_BUNDLE", "NVX_BUNDLE_DIR", "NVX_BUNDLE_HYPERVISOR")
 # The state that the package step hands to the publish step.
 STATE_FILE = "state.json"
 # The most problems that a failed package check lists.
@@ -720,23 +713,13 @@ def cargo_package(
     return package
 
 
-def bundle_hypervisors(platform: str = sys.platform) -> tuple[str | None, ...]:
-    """Return the values of NVX_BUNDLE_HYPERVISOR with which to build the
-    package: Linux has a KVM and an MSHV package, and Windows one."""
-    return ("kvm", "mshv") if platform.startswith("linux") else (None,)
-
-
 def build_package(
     files: Mapping[str, bytes],
     root: str,
     work_dir: Path,
     environment: Mapping[str, str],
-    *,
-    platform: str = sys.platform,
 ) -> None:
-    """Build the package's files with every feature, as a dependent would.
-    `bundled` downloads the release that the package's artifacts.json pins,
-    which must match its digest and declare the crate's control contract."""
+    """Build the package's files with every feature, as a dependent would."""
     source = work_dir / "build" / root
     if source.exists():
         shutil.rmtree(source)
@@ -744,29 +727,20 @@ def build_package(
         destination = source.joinpath(*PurePosixPath(relative).parts)
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(data)
-    base = {
-        key: value for key, value in environment.items() if key not in BUNDLE_VARIABLES
-    }
-    for hypervisor in bundle_hypervisors(platform):
-        build_environment = dict(base)
-        description = "with every feature"
-        if hypervisor is not None:
-            build_environment["NVX_BUNDLE_HYPERVISOR"] = hypervisor
-            description += f", bundling the {hypervisor} release"
-        print(f">> building {root} {description}")
-        run_checked(
-            [
-                "cargo",
-                "build",
-                "--locked",
-                "--all-features",
-                "--manifest-path",
-                source / "Cargo.toml",
-                "--target-dir",
-                work_dir / "build-target",
-            ],
-            env=build_environment,
-        )
+    print(f">> building {root} with every feature")
+    run_checked(
+        [
+            "cargo",
+            "build",
+            "--locked",
+            "--all-features",
+            "--manifest-path",
+            source / "Cargo.toml",
+            "--target-dir",
+            work_dir / "build-target",
+        ],
+        env=environment,
+    )
 
 
 @dataclass(frozen=True)
@@ -974,7 +948,6 @@ def package_release(
     *,
     registry: Registry | None = None,
     environment: Mapping[str, str] | None = None,
-    platform: str = sys.platform,
 ) -> Plan:
     """The package job: decide whether the checkout's commit needs a new
     version, and if so, pack the crate with that version, check the package,
@@ -1006,13 +979,7 @@ def package_release(
         f"{checkout.commit}"
     )
     package, files = checkout.pack(plan.version, work_dir, environment)
-    build_package(
-        files,
-        f"{manifest.name}-{plan.version}",
-        work_dir,
-        environment,
-        platform=platform,
-    )
+    build_package(files, f"{manifest.name}-{plan.version}", work_dir, environment)
     sha256 = sha256_file(package)
     for name, value in (
         ("publish", "true"),

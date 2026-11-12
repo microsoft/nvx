@@ -2029,15 +2029,13 @@ class NvxRsTests(unittest.TestCase):
         for name in (
             "nvx-rs/Cargo.toml",
             "nvx-rs/Cargo.lock",
-            "nvx-rs/build.rs",
             "nvx-rs/src/bin/nvx-rs.rs",
             "rust-toolchain.toml",
         ):
             self.assertIn(name, relative)
-        # Tests, documentation, and the bundled release pin build no part of
-        # the executable.
+        # Tests and documentation build no part of the executable.
         for name in relative:
-            self.assertNotRegex(name, r"^nvx-rs/(tests/|README\.md$|artifacts\.json$)")
+            self.assertNotRegex(name, r"^nvx-rs/(tests/|README\.md$)")
         self.assertEqual(nvx_rs.source_sha256(), nvx_rs.source_sha256())
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -2046,7 +2044,6 @@ class NvxRsTests(unittest.TestCase):
                 for name in (
                     "nvx-rs/Cargo.toml",
                     "nvx-rs/Cargo.lock",
-                    "nvx-rs/build.rs",
                     "nvx-rs/src/lib.rs",
                     "nvx-rs/src/bin/nvx-rs.rs",
                     "rust-toolchain.toml",
@@ -6521,31 +6518,6 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn("uses: ./.github/actions/check-nvx-rs", definition)
         self.assertEqual(ci.REQUIRED_CI_RESULT_ENVIRONMENTS["nvx-rs"], "NVX_RS_RESULT")
 
-    def test_nvx_rs_bundles_a_release_in_the_current_layout(self):
-        # The bundled feature stages what a release holds besides nvx-rs, so
-        # its synthetic release ships nvx-rs and its provenance, as releases
-        # do, and the pinned older release, which doesn't, stages as well.
-        action = (
-            BuildConstants.REPO_ROOT
-            / ".github"
-            / "actions"
-            / "check-nvx-rs"
-            / "action.yml"
-        ).read_text(encoding="utf-8")
-        script = _composite_action_script(action, "Check artifact bundling")
-        for member in (
-            "bin/${executable}",
-            "bin/${cli}",
-            "guest/vmlinux",
-            "guest/initramfs.cpio.gz",
-            f"provenance/{nvx_rs.PROVENANCE_NAME}",
-        ):
-            with self.subTest(member=member):
-                self.assertIn(f'"${{bundle}}/{member}"', script)
-                self.assertIn(member, script.split("sha256sum", 1)[1])
-        self.assertIn("cli=nvx-rs.exe", script)
-        self.assertIn("--features bundled artifacts", script)
-
     def test_nvx_rs_builds_and_checks_every_guest_binary_for_musl(self):
         crate = BuildConstants.REPO_ROOT / "nvx-rs"
         action = (
@@ -8153,12 +8125,10 @@ class CiConfigurationTests(unittest.TestCase):
             "nvx-rs/src/protocol/nvxs/tests/host.rs",
             "nvx-rs/src/guest/managed_agent/tests/loopback.rs",
             "nvx-rs/tests/guest_tools.rs",
-            "nvx-rs/artifacts.json",
         )
         guest_side = (
             "nvx-rs/Cargo.toml",
             "nvx-rs/Cargo.lock",
-            "nvx-rs/build.rs",
             "nvx-rs/src/lib.rs",
             "nvx-rs/src/protocol/nvxs/host.rs",
             "nvx-rs/src/guest/time/checks.rs",
@@ -17470,7 +17440,6 @@ class BuildTests(unittest.TestCase):
             sources = {
                 crate / "Cargo.toml": "[package]\nname = 'fixture'\n",
                 crate / "Cargo.lock": "# lock\n",
-                crate / "build.rs": "fn main() {}\n",
                 crate / "src" / "lib.rs": "pub fn fixture() {}\n",
                 checkout / "rust-toolchain.toml": (
                     f'[toolchain]\nchannel = "{GuestRustBuildConstants.TOOLCHAIN}"\n'

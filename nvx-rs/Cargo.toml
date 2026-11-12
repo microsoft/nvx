@@ -10,11 +10,7 @@ readme = "README.md"
 keywords = ["sandbox", "microvm", "openvmm", "virtualization"]
 categories = ["virtualization"]
 publish = ["crates-io"]
-# Lets the build scripts of dependents read the staged bundle as `DEP_NVX_ARTIFACTS_DIR`.
-links = "nvx"
 
-# docs.rs builds without network access, so its documentation leaves out `bundled`, whose build
-# script downloads a release.
 [package.metadata.docs.rs]
 features = ["cli", "testing", "guest"]
 targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
@@ -35,10 +31,6 @@ host = [
     "dep:nix",
     "dep:windows-sys",
 ]
-# Stages the OpenVMM executable, guest kernel, and control initramfs at build time; see
-# `Artifacts::bundled`. The build script downloads the release pinned in `artifacts.json`, or
-# copies the release directory named by `NVX_BUNDLE_DIR`.
-bundled = ["host", "dep:sha2"]
 # NVX's own `nvx-fake-openvmm` binary, a fake OpenVMM for tests. It adds no API.
 testing = ["dep:getrandom", "dep:serde", "dep:serde_json", "dep:nix", "dep:windows-sys"]
 # NVX's own `nvx-rs` binary, the command-line interface that runs NVX's microVMs and sandboxes,
@@ -55,7 +47,6 @@ crossterm = { version = "0.29", default-features = false, features = ["windows"]
 getrandom = { version = "0.4", optional = true }
 serde = { version = "1.0.200", features = ["derive"], optional = true }
 serde_json = { version = "1.0.120", optional = true }
-# The same release as the build script's: `host` enables both.
 sha2 = { version = "0.10", optional = true }
 
 [target.'cfg(windows)'.dependencies]
@@ -93,12 +84,6 @@ nix = { version = "0.31.3", default-features = false, optional = true, features 
     "uio",
     "user",
 ] }
-
-[build-dependencies]
-# Only the `bundled` build script reads JSON and computes digests; `host`, which `bundled`
-# enables, enables both here too.
-serde_json = { version = "1.0.120", optional = true }
-sha2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 # The property tests of the protocol's codecs, which need none of the forking and timeouts of its
