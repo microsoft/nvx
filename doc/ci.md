@@ -2370,7 +2370,12 @@ list follows re-exports, and leaves trait implementations out. The check,
 which `python3 scripts/public_api.py` runs on any host, prints how the API
 differs from a snapshot, and fails; a pull request that
 changes the public API runs `python3 scripts/public_api.py --update` and
-commits the snapshots, so that its diff shows the change. rustdoc's JSON is
+commits the snapshots, so that its diff shows the change. The check also fails
+unless the API's hidden items are the entry points of NVX's programs alone, one
+per binary: the function `main` that the binary's code calls, outside its
+comments and literals, such as `nvx::host::cli::main` for `nvx-rs`, which a
+snapshot lists as hidden and none lists without hiding it, and the modules that
+hold it. rustdoc's JSON is
 unstable, so the script reads only the format version of the pinned release,
 and a new pin may need a change to the script.
 
