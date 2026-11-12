@@ -10,9 +10,10 @@
   summary, and commit mapping below cover positions 001-131, the PR09 fixups at positions
   241-243, the PR13 fixup at position 247, the PR18 fixup at position 248, the PR20 fixup at
   position 249, and the PR19 fixup at position 250.
-- NVX's pinned OpenVMM revision: `90f87319d30d8c35bc3526f12fc7b6529c882cf0`, position 255, the
-  head of microsoft/openvmm#5052, whose two commits follow position 253, `3cd9f149b`, the head of
-  `feature/microvm/dev`, which microsoft/openvmm#5046 merged after position 252, `9f10ce7a8`,
+- NVX's pinned OpenVMM revision: `024ecee62d7c9b70456b63a5b4f94a6488f835cd`, position 258, the
+  head of microsoft/openvmm#5053, whose three commits follow position 255, `90f87319d`, the head
+  of `feature/microvm/dev`, which microsoft/openvmm#5052 merged with position 254 after position
+  253, `3cd9f149b`, which microsoft/openvmm#5046 merged after position 252, `9f10ce7a8`,
   which microsoft/openvmm#5044 merged after position 251, `174da3a0d`,
   which microsoft/openvmm#5042 merged after position 250, `23136b647`,
   which microsoft/openvmm#5041 merged after position 249, `fb4f34126`,
@@ -44,8 +45,8 @@
   position 221 into positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits
   of microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
   positions 149-220 are positions 148-219, and the tree of position 220 is the tree of
-  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 124 commits past
-  the mapped tip on the same first-parent chain. Positions 132-240, 244-246, and 251-255 are not
+  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 127 commits past
+  the mapped tip on the same first-parent chain. Positions 132-240, 244-246, and 251-258 are not
   yet assigned to PRs, positions 241-243 are PR09 fixups, position 247 is a PR13 fixup, position 248
   is a PR18 fixup, position 249 is a PR20 fixup, and position 250 is a PR19 fixup; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1027,7 +1028,8 @@ ba105dd7f
   -> clock tokens split at Linux's whitespace [252]
   -> 365-day maximum snapshot downtime [253]
   -> restored VM time run from the TSCs' restart [254-255]
-  -> 90f87319d (NVX pin)
+  -> LAPIC timer restores without drift or a downtime refire [256-258]
+  -> 024ecee62 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -1064,7 +1066,7 @@ helper that the case uses.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. Of the 124 later commits,
+The NVX pin extends the chain past position 131 without merges. Of the 127 later commits,
 positions 241-243 are PR09 fixups, position 247 is a PR13 fixup, position 248 is a PR18 fixup,
 position 249 is a PR20 fixup, position 250 is a PR19 fixup, and the others are not yet classified
 or assigned to PRs.
@@ -1072,7 +1074,7 @@ Each of positions 132-186 combines the v2.4 commits that the table lists, as v3.
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 187-191 followed the v3.0 reorganization, positions 192-205 are the ABI restart
 of the v4.0 reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
-reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-255 followed the
+reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-258 followed the
 v6.0 reorganization, so they combine none, apart from position 220, which combines v5.1 positions
 222 and 223. Each commit has the position that it
 had in v5.1 through position 147, and one less from v5.1 position 149 on; see
@@ -1205,6 +1207,9 @@ at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4
 | 253 | `3cd9f149b` | - | - | - | - | virt: accept a snapshot downtime of up to 365 days (microsoft/openvmm#5046) |
 | 254 | `bce9b3673` | - | - | - | - | virt: report when the synchronized TSC set lets the TSCs run (microsoft/openvmm#5052) |
 | 255 | `90f87319d` | - | - | - | - | openvmm: run restored VM time from the instant the TSCs resume (microsoft/openvmm#5052) |
+| 256 | `2a0401c43` | - | - | - | - | virt_kvm: share the guest RAM of the real-mode KVM tests (microsoft/openvmm#5053) |
+| 257 | `21a76f878` | - | - | - | - | virt_kvm: do not fire an expired LAPIC timer whose interrupt is pending (microsoft/openvmm#5053) |
+| 258 | `024ecee62` | - | - | - | - | vmm_core, virt: run a restored LAPIC timer from the time ABI anchors (microsoft/openvmm#5053) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1816,6 +1821,31 @@ but the Guide's timekeeping page, whose description of `VmTimeKeeper` upstream m
 upstream main lacks the time ABI of positions 132-140, the time advance of position 019, the tests
 of positions 241, 244, and 245, and the snapshot guide's paragraph on the VM-time cut that
 positions 147, 156, and 201 write, so they follow PR10 and the time ABI series upstream.
+
+Positions 256-258 change how a restore runs a one-shot LAPIC timer, and change nothing that a
+mapped PR adds. Position 256 moves the guest RAM of the real-mode KVM tests of `virt_kvm`'s ExtINT
+module, which upstream main has and position 138 also changes, into a test module that position
+257's tests share. Replaying it on upstream main conflicts only in the module list of `virt_kvm`'s
+x86-64 module, which PR10's positions 023 and 026, PR17's position 077, and positions 133, 138,
+144, 147, 149, and 150 also change, where its test module joins the modules of positions 133 and
+138; its new module and its change of the ExtINT tests apply there.
+
+Position 257 changes the KVM backend's `set_apic`, in a file that upstream main has and PR10's
+position 026 and position 147 also change, and the Guide's timekeeping reference, which position
+255 also changes. Replaying it on upstream main applies without conflicts, but its KVM tests use
+position 256's guest RAM, position 139's LAPIC timer advance, position 132's TSC target, position
+160's host TSC bracket, and the TSC accessors that PR10's position 026 adds to the `kvm` crate,
+which upstream main lacks, so it follows them upstream.
+
+Position 258 changes the time ABI restore of the LAPIC timers that position 139 adds to `virt`'s
+VP snapshot module, the VP set, the partition unit, and the VM worker, which positions 146, 147,
+155, 158, and 255 also change, and the snapshot guide's sentence on it that position 147 adds. It
+sets each timer again after the synchronized TSC set, so that the timer runs as the TSCs do, as
+position 255's VM time does. It adds a LAPIC tick conversion to the rate module of position 132
+and extends position 257's KVM tests. Replaying it on upstream main conflicts in all 12 of its
+files, seven of which upstream main lacks, those that PR10's positions 024 and 029, PR12's
+position 036, and positions 132, 135, 139, and 256 add, so it follows the time ABI series
+upstream.
 
 ## PR summary
 
