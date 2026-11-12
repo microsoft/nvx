@@ -444,6 +444,7 @@ SCRATCH_FRESH_POST_MARKER = b"NVX-SCRATCH-FRESH-POST-OUT"
 SCRATCH_FRESH_VALUE_PREFIX = b"NVX-SCRATCH-FRESH-VALUE-"
 SCRATCH_FRESH_VALUE_SUFFIX = b"-END"
 WORKLOAD_IDENTITY_MARKER = b"NVX-WORKLOAD-IDENTITY-OK uid=65534 gid=65534"
+OPENVMM_IDENTITY_REFUSAL = b"nvx_identity must name OpenVMM's workload identity"
 BOOT_MARKER = b"NVX-GUEST-BOOT-OK:"
 GUEST_BOOT_COMPLETION_MARKER = b"NVX-GUEST-BOOT-CHECK-OK"
 GUEST_IDENTITY_COMPLETION_MARKER = b"NVX-GUEST-IDENTITY-OK"
@@ -1416,18 +1417,17 @@ def run_workload_identity(
     timeout: float,
     output_dir: Path,
 ) -> None:
-    def command(identity: str) -> list[str]:
-        # The guest's init reads the identity from the CLI's token; OpenVMM
-        # checks its own option, and appends tokens that the init ignores.
+    def command(identity: str, cli_identity: str | None = None) -> list[str]:
+        # The guest's init reads the identity from the CLI's token, and boots
+        # only if it names the identity of OpenVMM's option, which OpenVMM
+        # checks and appends as tokens of its own.
+        cli_identity = identity if cli_identity is None else cli_identity
+        tokens = "quiet loglevel=0 nvx_exec=/sbin/nvx-identity-probe"
+        if cli_identity:
+            tokens += f" nvx_identity={cli_identity}"
         return [
             *workload_boot_command(
-                executable,
-                backend,
-                kernel,
-                initrd,
-                memory_mib,
-                "quiet loglevel=0 nvx_exec=/sbin/nvx-identity-probe "
-                f"nvx_identity={identity}",
+                executable, backend, kernel, initrd, memory_mib, tokens
             ),
             "--microvm-workload-identity",
             identity,
@@ -1465,6 +1465,29 @@ def run_workload_identity(
         result = process.wait(timeout)
     if result.returncode == 0 or BOOT_MARKER in result.output:
         raise RuntimeError("root workload identity was not rejected before boot")
+
+    # Without the CLI's identity, or with another one, the guest fails closed
+    # before its workload starts: it neither runs the workload as root nor as
+    # an identity that OpenVMM's option does not name.
+    for name, description, refused in (
+        ("missing", "no CLI workload identity", command("65534:65534", "")),
+        (
+            "other",
+            "another CLI workload identity",
+            command("12345:12345", "65534:65534"),
+        ),
+    ):
+        with OpenvmmProcess(
+            refused,
+            output_dir / f"workload-identity-{name}.log",
+        ) as process:
+            result = process.wait(timeout)
+        if (
+            result.returncode == 0
+            or WORKLOAD_IDENTITY_MARKER in result.output
+            or OPENVMM_IDENTITY_REFUSAL not in result.output
+        ):
+            raise RuntimeError(f"a boot with {description} did not fail closed")
 
 
 # The ignored nvx-rs test that drives the managed lifecycle of a guest whose

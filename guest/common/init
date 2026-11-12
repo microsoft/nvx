@@ -166,6 +166,8 @@ nvx_exec=
 nvx_exec_seen=false
 workload_uid=
 workload_gid=
+openvmm_uid=
+openvmm_gid=
 workload_lifecycle=one-shot
 control_tty=
 workload_account=
@@ -187,6 +189,8 @@ for token in $cmdline; do
             [ -n "$nvx_exec" ] || fatal "nvx_exec must not be empty"
             ;;
         nvx_identity=*) read_workload_identity "${token#*=}" ;;
+        nvx_workload_uid=*) openvmm_uid=${token#*=} ;;
+        nvx_workload_gid=*) openvmm_gid=${token#*=} ;;
         nvx_mode=*) workload_lifecycle=${token#*=} ;;
         nvx_entrypoint=*)
             entrypoint=${token#*=}
@@ -198,6 +202,13 @@ for token in $cmdline; do
     esac
 done
 set +f
+# OpenVMM's --microvm-workload-identity appends nvx_workload_uid= and
+# nvx_workload_gid=, which no longer name the workload's identity. A boot that
+# has them fails closed unless nvx_identity= names the same one.
+if [ -n "$openvmm_uid$openvmm_gid" ] &&
+    [ "$openvmm_uid:$openvmm_gid" != "$workload_uid:$workload_gid" ]; then
+    workload_fatal "nvx_identity must name OpenVMM's workload identity"
+fi
 if [ -n "$nvx_exec" ] && [ "$sandbox_mode" = false ]; then
     case "$nvx_exec" in
         /*) ;;
