@@ -27,14 +27,14 @@ use crate::host::cli::sandbox::state::{
     Config, RecordedDistro, RecordedScratch, Source, read_config, serialize_launch,
 };
 use crate::host::cli::sandbox::{
-    Artifacts, Options, error_with_cause, path_string, refuse_own_files,
+    Artifacts, Options, error_with_cause, export_tokens, path_string, refuse_own_files,
 };
 use crate::host::cli::session::{ExecRequest, ExecResult, Session};
 use crate::host::cli::shell::format_command;
 use crate::host::cli::snapshots::Store;
 use crate::host::cli::store::StateFile;
 use crate::host::cli::{Exit, Result, hex, io_error, output, random_bytes};
-use crate::host::config::{RootConfig, UpperConfig, VmConfig};
+use crate::host::config::{COMMAND_LINE_BUDGET, RootConfig, UpperConfig, VmConfig};
 use crate::host::platform;
 use crate::host::process::KILL_TIMEOUT;
 use crate::host::report::Report;
@@ -43,10 +43,11 @@ use crate::host::restore_driver::{self, Cancel, ControlRestoreError, Workload};
 use crate::host::runtime::{ArtifactIdentity, Runtime, RuntimeIdentity};
 use crate::host::sandbox::distro::DISTRO_POLICY_REVISION;
 use crate::host::sandbox::scratch::{CLAIM_RELEASE_WAIT, CheckedScratch};
-use crate::host::sandbox::{SandboxLaunch, SandboxSettings, SandboxUpper};
 use crate::host::session::{ExecEvent, SessionError};
 use crate::host::snapshot::OPENVMM_DIR;
 use crate::host::vm::{self, Launched, Prepared, SavedVm, VmDir};
+use crate::protocol::cmdline::{self, Parameter};
+use crate::protocol::root::RootLayout;
 use crate::protocol::workload::WorkloadIdentity;
 use crate::protocol::{self, ExitCategory, HostMap, WorkloadEnvironment};
 use crate::{ErrorCode, ErrorKind};
@@ -133,8 +134,8 @@ fn start_locked(
         ),
         _ => None,
     };
-    // Keep provision's refusal of caller-owned nvx_* tokens, without launching its old plan.
-    check_command_line(&config)?;
+    let vm_config = config.vm_config()?;
+    check_command_line(&config, &vm_config)?;
     artifacts.require()?;
     let runtime = runtime_for(artifacts, &config, artifacts.launch_identity()?)?;
     let restore = source.as_ref().map(|source| Restore {
@@ -142,8 +143,15 @@ fn start_locked(
         identity: config.workload_identity(),
         forward_status,
     });
-    let config = config.vm_config()?;
-    let started = launch_locked(lock, &runtime, config, restore, scratch, timeout, vm::spawn);
+    let started = launch_locked(
+        lock,
+        &runtime,
+        vm_config,
+        restore,
+        scratch,
+        timeout,
+        vm::spawn,
+    );
     drop(distro);
     started
 }
@@ -574,8 +582,8 @@ pub(crate) fn run(
     let recorded = record(distro, scratch, provision).and_then(|config| {
         // As `start` does, refuse the user's own nvx_* tokens, and the command line that the
         // launch would refuse, such as one that holds double quotes.
-        check_command_line(&config)?;
         let vm_config = config.vm_config()?;
+        check_command_line(&config, &vm_config)?;
         vm_config.check_command_line().map_err(error_with_cause)?;
         Session::exec_payload(request)?;
         Ok((config, vm_config))
@@ -768,26 +776,65 @@ fn record(
     Ok(config)
 }
 
-/// Refuses the user's kernel command line of `config` as the plan of the sandbox profile refuses
-/// it: a NUL; a token that the profile or the `--mount` option owns, an `nvx_*` or `virtfs_*` one,
-/// as Linux or the guest's init reads it; and a line that, with the boot tokens of the root and
-/// the bootstrap tokens of the shares, exceeds its 1024-byte x86 budget, or conflicts with or hides
-/// those of the root. It builds that plan from the configuration: the one part of a start and a
-/// run that still goes through the old `host::sandbox` launch.
-fn check_command_line(config: &Config) -> Result {
-    let upper = match config.scratch() {
-        Some(scratch) => SandboxUpper::scratch_at(scratch),
-        None => SandboxUpper::RAM,
-    };
-    let settings = SandboxSettings {
-        hostname: config.hostname().to_owned(),
-        workload_identity: config.workload_identity(),
-        ..SandboxSettings::default()
-    };
-    SandboxLaunch::new(vec![config.distro()], upper, settings)?
-        .with_export(config.export().cloned())?
-        .bound_plan(config.distro_binding())?
-        .kernel_command_line(config.cmdline())?;
+/// Refuses the kernel command line that a start or a run of the sandbox of `config` launches, as
+/// `vm`, its VM's configuration, renders it: one whose user's part holds a NUL, or a token that
+/// the sandbox profile or the `--mount` option owns, an `nvx_*` or `virtfs_*` one, as Linux or
+/// the guest's init reads it; one that, with the bootstrap tokens that OpenVMM appends for the
+/// shares and a NUL, exceeds [`COMMAND_LINE_BUDGET`]; one from which the guest cannot read the
+/// boot tokens of its root, as when the user's part adds a virtio-mmio device at the scratch
+/// disk's base beside a RAM upper; and one that hides from Linux the tokens that OpenVMM appends
+/// to it, with a `--` or an unclosed quote, as Linux reads them.
+fn check_command_line(config: &Config, vm: &VmConfig) -> Result {
+    let refused = |message: &str| Exit::error(ErrorCode::Unsupported, message);
+    let user = config.cmdline().as_bytes();
+    if user.contains(&0) {
+        return Err(refused("kernel command line contains an embedded NUL"));
+    }
+    let guest = cmdline::init_tokens(user).map(|token| Parameter {
+        name: token.name,
+        value: token.value,
+    });
+    for Parameter { name, .. } in cmdline::parameters(user).chain(guest) {
+        let owner = if name.starts_with(b"nvx_") || name.starts_with(b"nvx-") {
+            "the sandbox profile"
+        } else if name.starts_with(b"virtfs_") || name.starts_with(b"virtfs-") {
+            "the sandbox --mount option"
+        } else {
+            continue;
+        };
+        let name = String::from_utf8_lossy(name);
+        return Err(refused(&format!("{name} is owned by {owner}")));
+    }
+    let line = vm.kernel_command_line().map_err(error_with_cause)?;
+    let shares = vm
+        .filesystem
+        .as_ref()
+        .map_or(0, |plan| export_tokens(plan).len());
+    if line.len() + shares + 1 > COMMAND_LINE_BUDGET {
+        return Err(refused(
+            "sandbox kernel command line exceeds its 1024-byte x86 budget; use shorter arguments \
+             and kernel parameters",
+        ));
+    }
+    RootLayout::parse(line.as_bytes()).map_err(|error| {
+        refused(&format!(
+            "sandbox kernel command line conflicts with the boot tokens of its root: {error}"
+        ))
+    })?;
+    // Linux must read the tokens that OpenVMM appends, as it reads one after the line whose name
+    // the user's part, which holds no `nvx_*` token, cannot spell.
+    let appended = format!("{line} nvx_appended");
+    if !matches!(
+        cmdline::parameters(appended.as_bytes()).last(),
+        Some(Parameter {
+            name: b"nvx_appended",
+            value: None
+        })
+    ) {
+        return Err(refused(
+            "sandbox kernel command line hides the tokens that OpenVMM appends to it",
+        ));
+    }
     Ok(())
 }
 
