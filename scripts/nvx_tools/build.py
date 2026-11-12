@@ -797,11 +797,6 @@ def _install_guest_files(
         scripts.extend(
             [
                 (
-                    "nvx-init-agent",
-                    common / "nvx-init-agent",
-                    root / "sbin" / "nvx-init-agent",
-                ),
-                (
                     "nvx-container-enter",
                     alpine / "nvx-container-enter",
                     root / "sbin" / "nvx-container-enter",
