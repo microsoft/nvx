@@ -54,7 +54,7 @@ use std::time::{Duration, Instant};
 use nvx::host::process::{Process, ProcessRef};
 use serde_json::{Value, json};
 
-use self::harness::{FAKE_OPENVMM, NVX_RS, Root, canonical};
+use self::harness::{FAKE_OPENVMM, NVX_RS, Root, canonical, sandbox_relative};
 
 /// Runs `nvx-rs --root ROOT ARGUMENTS` in the root, without the variables that change its
 /// output.
@@ -282,9 +282,9 @@ fn a_mapping_that_the_guest_refuses_leaves_no_usable_start() {
         }
         assert!(
             !root
-                .path
-                .join("build")
-                .join(format!("fake-openvmm-{state}-maps.json"))
+                .below(&sandbox_relative(&format!(
+                    "build/fake-openvmm-{state}-maps.json"
+                )))
                 .exists()
         );
         let mut exec = lifecycle("exec", &root, state);
@@ -903,7 +903,7 @@ fn a_restarted_cli_drives_only_a_vm_of_its_runtime_identity() {
 
     // Artifacts of another kernel did not start the VM, so no transition drives it, and it runs
     // on until a stop terminates it.
-    let kernel = root.below("build/vmlinux.provenance.json");
+    let kernel = root.below(&sandbox_relative("build/vmlinux.provenance.json"));
     let provenance = fs::read_to_string(&kernel).unwrap();
     fs::write(&kernel, other_kernel_provenance()).unwrap();
     let pid = record["process"]["pid"].as_u64().unwrap();
@@ -976,8 +976,10 @@ fn terminated(parts: &str, pid: u64) -> String {
 /// Returns how many connections to its control endpoint the fake OpenVMM of the sandbox in
 /// `state` below the root has accepted.
 fn sessions(root: &Root, state: &str) -> usize {
-    fs::read_to_string(root.below(&format!("build/fake-openvmm-{state}-sessions.log")))
-        .map_or(0, |log| log.lines().count())
+    fs::read_to_string(root.below(&sandbox_relative(&format!(
+        "build/fake-openvmm-{state}-sessions.log"
+    ))))
+    .map_or(0, |log| log.lines().count())
 }
 
 #[test]
@@ -992,7 +994,7 @@ fn a_stop_that_cannot_identify_the_runtime_keeps_the_vm_for_the_next_one() {
 
     // Without the install metadata of the initramfs, the runtime identity is indeterminate, and so
     // is whether the VM may be driven: the stop signals nothing, and keeps its record.
-    let initramfs = root.below("build/initramfs.provenance.json");
+    let initramfs = root.below(&sandbox_relative("build/initramfs.provenance.json"));
     fs::remove_file(&initramfs).unwrap();
     assert_eq!(
         transition(&root, "stop", "state", &[]),
@@ -1032,7 +1034,7 @@ fn a_stop_that_cannot_identify_the_runtime_keeps_the_vm_for_the_next_one() {
 fn a_stop_under_another_identity_never_ends_a_process_that_its_record_does_not_name() {
     let root = Root::new();
     provisioned(&root, "state");
-    let kernel = root.below("build/vmlinux.provenance.json");
+    let kernel = root.below(&sandbox_relative("build/vmlinux.provenance.json"));
     let provenance = fs::read_to_string(&kernel).unwrap();
     let path = root.path.join("state").join("runtime.json");
     // The record names the VMM's ID with another start time, as after the VMM exited and another
@@ -1116,7 +1118,7 @@ fn a_start_that_was_interrupted_is_ended_under_another_identity_too() {
     // Under another runtime identity, the next transition ends the start, whose OpenVMM it
     // verifies through the journal.
     fs::write(
-        root.below("build/vmlinux.provenance.json"),
+        root.below(&sandbox_relative("build/vmlinux.provenance.json")),
         other_kernel_provenance(),
     )
     .unwrap();
@@ -1995,11 +1997,8 @@ fn start_hands_openvmm_the_images_that_it_checked() {
         .unwrap();
 
     // OpenVMM has started, and has not opened its images yet.
-    wait_for(&root.path.join("build").join("fake-openvmm-state.json"));
-    let blocks = root
-        .path
-        .join("build")
-        .join("fake-openvmm-state-blocks.json");
+    wait_for(&root.below(&sandbox_relative("build/fake-openvmm-state.json")));
+    let blocks = root.below(&sandbox_relative("build/fake-openvmm-state-blocks.json"));
     assert!(!blocks.exists());
     for (path, replacement) in [
         (&distro, "replaced distro\n"),
@@ -2111,10 +2110,7 @@ fn a_start_that_ends_before_openvmm_opens_the_images_leaves_it_the_checked_ones(
     let process = Process::open(&reference)
         .unwrap()
         .expect("the OpenVMM of the start runs");
-    let blocks = root
-        .path
-        .join("build")
-        .join("fake-openvmm-state-blocks.json");
+    let blocks = root.below(&sandbox_relative("build/fake-openvmm-state-blocks.json"));
     assert!(!blocks.exists());
     for (path, replacement) in [
         (&distro, "replaced distro\n"),
@@ -2309,7 +2305,7 @@ fn a_run_passes_openvmm_no_handle_of_its_caller() {
     let mut cli = cli.unwrap();
 
     // Once OpenVMM has started, the CLI holds the handle, and OpenVMM does not.
-    wait_for(&root.path.join("build").join("fake-openvmm-.json"));
+    wait_for(&root.below(&sandbox_relative("build/fake-openvmm-.json")));
     let value = unrelated.as_raw_handle() as usize;
     let openvmm = children_named(cli.id(), "openvmm.exe");
     let cli_holds = holds(cli.id(), value);
@@ -2336,7 +2332,15 @@ fn a_run_passes_openvmm_no_handle_of_its_caller() {
 fn batch_openvmm(root: &Root) -> (BTreeMap<String, String>, PathBuf, String) {
     let marker = root.path.join("ran");
     let wrapper = root.path.join("openvmm.cmd");
-    fs::write(&wrapper, format!("@echo ran>\"{}\"\r\n", marker.display())).unwrap();
+    fs::write(
+        &wrapper,
+        format!(
+            "@echo ran>\"{}\"\r\n@rem {}\r\n",
+            marker.display(),
+            "x".repeat(64)
+        ),
+    )
+    .unwrap();
     let environment = BTreeMap::from([(
         "NVX_OPENVMM".to_owned(),
         wrapper.to_str().unwrap().to_owned(),
@@ -2355,6 +2359,14 @@ fn a_run_refuses_a_batch_file_as_openvmm() {
     // cmd.exe would read the `&` of the scratch image's path as a second command.
     let root = Root::new();
     let (environment, marker, refusal) = batch_openvmm(&root);
+    let refusal = if cfg!(target_arch = "aarch64") {
+        format!(
+            "error[unavailable]: ARM64 OpenVMM {}: not a Windows PE executable\n",
+            environment["NVX_OPENVMM"]
+        )
+    } else {
+        refusal
+    };
     let scratch = root.path.join("scratch&echo.ext4");
     fs::copy(root.path.join("scratch.ext4"), &scratch).unwrap();
     let layer = format!(

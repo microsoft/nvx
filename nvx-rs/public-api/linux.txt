@@ -8,6 +8,7 @@ const nvx::Artifacts::ENV_OPENVMM
 method nvx::Artifacts::artifact_dir
 method nvx::Artifacts::bundled
 method nvx::Artifacts::discover
+method nvx::Artifacts::from_artifact_dir
 method nvx::Artifacts::from_dir
 method nvx::Artifacts::from_release_dir
 method nvx::Artifacts::from_repo_layout
@@ -1690,6 +1691,7 @@ const nvx::host::artifacts::Artifacts::ENV_OPENVMM
 method nvx::host::artifacts::Artifacts::artifact_dir
 method nvx::host::artifacts::Artifacts::bundled
 method nvx::host::artifacts::Artifacts::discover
+method nvx::host::artifacts::Artifacts::from_artifact_dir
 method nvx::host::artifacts::Artifacts::from_dir
 method nvx::host::artifacts::Artifacts::from_release_dir
 method nvx::host::artifacts::Artifacts::from_repo_layout

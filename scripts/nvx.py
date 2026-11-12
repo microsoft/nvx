@@ -265,17 +265,15 @@ def command_build_initramfs(args: argparse.Namespace) -> None:
 
 
 def command_build_distro_layer(args: argparse.Namespace) -> None:
+    architecture = getattr(args, "architecture", "x86_64")
+    selected = BuildConfig.distro_layer_config(args.guest, architecture)
     build_distro_layer(
         DistroLayerBuildConfig(
             guest=args.guest,
-            work=(
-                BuildConstants.BUILD_DIR
-                / InitramfsBuildConstants.DISTRO_WORK_DIRECTORY_TEMPLATE.format(
-                    guest=args.guest
-                )
-            ),
-            output=args.output,
+            work=selected.work,
+            output=args.output if args.output is not None else selected.output,
             replace=args.replace,
+            architecture=architecture,
         )
     )
 
@@ -627,7 +625,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     distro_layer.add_argument(
         "--output",
         type=Path,
-        default=artifact_path(UbuntuBuildConstants.DISTRO_NAME),
+    )
+    distro_layer.add_argument(
+        "--architecture",
+        choices=GuestRustBuildConstants.ARCHITECTURES,
+        default="x86_64",
     )
     distro_layer.add_argument("--replace", action="store_true")
     distro_layer.set_defaults(handler=command_build_distro_layer)

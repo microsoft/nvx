@@ -598,7 +598,9 @@ def _counter_architecture(command: Sequence[str]) -> str:
         )
     kernel = _command_option(command, "--kernel")
     return (
-        "aarch64" if kernel is not None and Path(kernel).name == "Image" else "x86_64"
+        "aarch64"
+        if kernel is not None and Path(kernel).name in ("Image", "Image-debug")
+        else "x86_64"
     )
 
 
@@ -702,11 +704,19 @@ class TimeAbiMonitor:
     their boot and restore lines only for ``nvx-time status``: when a query
     ends, a cold boot must have reported a valid boot line, and a restored
     guest a restore line. The query's runtime line is kept as ``runtime``.
+    ``architecture`` supplies the selected ISA when known; otherwise the
+    command's explicit options or maintained product names select it.
     """
 
-    def __init__(self, command: Sequence[str] = ()) -> None:
+    def __init__(
+        self, command: Sequence[str] = (), *, architecture: str | None = None
+    ) -> None:
+        if architecture is not None and architecture not in ("x86_64", "aarch64"):
+            raise ValueError(f"unsupported counter architecture {architecture!r}")
         self.backend = _command_option(command, "--hypervisor")
-        self.architecture = _counter_architecture(command)
+        self.architecture = (
+            _counter_architecture(command) if architecture is None else architecture
+        )
         self.cold_boot = is_cold_boot_command(command)
         self.restored = _command_option(command, "--restore-snapshot") is not None
         self.boot: dict[str, str] | None = None

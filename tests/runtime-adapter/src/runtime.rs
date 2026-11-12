@@ -19,7 +19,7 @@
 use std::path::Path;
 
 use nvx::Result;
-use nvx::host::artifacts::{ArtifactDir, Artifacts};
+use nvx::host::artifacts::{Architecture, ArtifactDir, Artifacts};
 use nvx::host::store::{ArtifactIdentity, RuntimeIdentity};
 
 /// NVX's artifacts, and the runtime identity of the adapter's VMs that boot them with the guest
@@ -42,9 +42,18 @@ impl Runtime {
     /// [`ErrorKind::Unsupported`](nvx::ErrorKind::Unsupported) if the identity of the initramfs
     /// with `guest_build` is not an artifact identity.
     pub fn from_dir(directory: impl AsRef<Path>, guest_build: &str) -> Result<Self> {
-        let directory = directory.as_ref();
-        let artifacts = Artifacts::from_dir(directory)?;
-        let nvx = ArtifactDir::from_dir(directory)?.runtime_identity()?;
+        Self::from_dir_for_architecture(directory, guest_build, Architecture::X86_64)
+    }
+
+    /// Selects an architecture-qualified local runtime while keeping `from_dir`'s x86 default.
+    pub fn from_dir_for_architecture(
+        directory: impl AsRef<Path>,
+        guest_build: &str,
+        architecture: Architecture,
+    ) -> Result<Self> {
+        let directory = ArtifactDir::from_dir(directory)?.with_architecture(architecture)?;
+        let artifacts = Artifacts::from_artifact_dir(&directory)?;
+        let nvx = directory.runtime_identity()?;
         let identity = RuntimeIdentity::new(
             nvx.openvmm,
             nvx.kernel,

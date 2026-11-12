@@ -2554,6 +2554,7 @@ class GuestConsoleEchoTests(unittest.TestCase):
             time_abi_status=True,
             on_stderr=None,
             expected_exit_status=42,
+            architecture=None,
         )
         self.assertEqual(result["output"], "NVX-OUT none\r\nNVX-DONE\r\n")
         self.assertEqual(result["text"], transcript)
@@ -4289,6 +4290,10 @@ class MicrovmTests(unittest.TestCase):
         console: bytes = b"NVX-GUEST-BOOT-OK: managed\n",
         report: dict[str, object] | None = None,
         rejected: int = 1,
+        processors: int = 1,
+        layered: microvm_tests.WorkloadArtifacts | None = None,
+        scratch: Path | None = None,
+        expected_previous_state: str | None = None,
     ) -> list[tuple[list[str], dict[str, str], object]]:
         """Runs the scenario with a stand-in for the nvx-rs test, which leaves
         `console`, `report`, and `returncode` as the real one would."""
@@ -4327,6 +4332,10 @@ class MicrovmTests(unittest.TestCase):
                 memory_mib=256,
                 timeout=5,
                 output_dir=output_dir,
+                processors=processors,
+                layered=layered,
+                scratch=scratch,
+                expected_previous_state=expected_previous_state,
             )
         return runs
 
@@ -4407,6 +4416,56 @@ class MicrovmTests(unittest.TestCase):
             self.assertEqual(openvmm[openvmm.index(option) + 1], value)
         self.assertIn("--microvm-control-auth-stdin", openvmm)
         self.assertEqual(preserved, self._managed_report())
+
+    def test_managed_layered_inputs_reuse_the_same_authenticated_test(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifacts = microvm_tests.WorkloadArtifacts(
+                root / "distro.erofs", "fixture-uuid", root / "template.ext4"
+            )
+            for mode in ("scratch", "ram"):
+                output = root / mode
+                output.mkdir()
+                scratch = root / "scratch.ext4" if mode == "scratch" else None
+                runs = self._run_managed_lifecycle(
+                    output,
+                    processors=8,
+                    layered=artifacts,
+                    scratch=scratch,
+                    expected_previous_state="present" if scratch else "absent",
+                )
+                self.assertEqual(len(runs), 1)
+                command, environment, _ = runs[0]
+                self.assertIn("managed_lifecycle", command)
+                openvmm = json.loads(environment["NVX_MANAGED_LIFECYCLE_COMMAND"])
+                self.assertEqual(openvmm[openvmm.index("--processors") + 1], "8")
+                blocks = [
+                    openvmm[index + 1]
+                    for index, option in enumerate(openvmm)
+                    if option == "--microvm-sandbox-block"
+                ]
+                self.assertIn(f"distro:file:{artifacts.distro.resolve()},ro", blocks)
+                if scratch:
+                    self.assertIn(f"scratch:file:{scratch.resolve()}", blocks)
+                else:
+                    self.assertEqual(len(blocks), 1)
+                cmdline = openvmm[openvmm.index("--cmdline") + 1]
+                self.assertIn("nvx_sandbox=1", cmdline)
+                self.assertIn(
+                    "nvx_scratch=0xd0006000,ext4"
+                    if scratch
+                    else "nvx_overlay_upper=ramfs",
+                    cmdline.split(),
+                )
+                self.assertIn("--microvm-control-auth-stdin", openvmm)
+                self.assertEqual(environment["NVX_MANAGED_LIFECYCLE_PROCESSORS"], "8")
+                self.assertEqual(
+                    environment["NVX_MANAGED_LIFECYCLE_ROOT_MODE"], "sandbox"
+                )
+                self.assertEqual(
+                    environment["NVX_MANAGED_LIFECYCLE_PREVIOUS_STATE"],
+                    "present" if scratch else "absent",
+                )
 
     def test_managed_lifecycle_hands_the_test_an_absolute_pid_journal(self):
         # The nvx-rs test records OpenVMM in an adversarial campaign's journal
@@ -16153,7 +16212,10 @@ class MicrovmTests(unittest.TestCase):
             ):
                 self.assertEqual(microvm_tests.run(args), 0)
             run.assert_called_once_with(
-                "whp", timeout=args.timeout, output_dir=output_dir
+                "whp",
+                timeout=args.timeout,
+                output_dir=output_dir,
+                architecture="x86_64",
             )
 
     def test_runner_dispatches_public_sandbox_lifecycle(self):
@@ -16184,7 +16246,10 @@ class MicrovmTests(unittest.TestCase):
             ):
                 self.assertEqual(microvm_tests.run(args), 0)
             run.assert_called_once_with(
-                "mshv", timeout=args.timeout, output_dir=output_dir
+                "mshv",
+                timeout=args.timeout,
+                output_dir=output_dir,
+                architecture="x86_64",
             )
             managed_exec.assert_not_called()
 
@@ -16214,7 +16279,10 @@ class MicrovmTests(unittest.TestCase):
             ):
                 self.assertEqual(microvm_tests.run(args), 0)
             run.assert_called_once_with(
-                "kvm", timeout=args.timeout, output_dir=output_dir
+                "kvm",
+                timeout=args.timeout,
+                output_dir=output_dir,
+                architecture="x86_64",
             )
             lifecycle.assert_not_called()
 
@@ -16244,7 +16312,10 @@ class MicrovmTests(unittest.TestCase):
             ):
                 self.assertEqual(microvm_tests.run(args), 0)
             run.assert_called_once_with(
-                "whp", timeout=args.timeout, output_dir=output_dir
+                "whp",
+                timeout=args.timeout,
+                output_dir=output_dir,
+                architecture="x86_64",
             )
             lifecycle.assert_not_called()
 
@@ -16328,6 +16399,211 @@ class MicrovmTests(unittest.TestCase):
 
         guest_boot.assert_not_called()
         lifecycle.assert_not_called()
+
+    def test_arm_missing_sandbox_inputs_recommend_matching_producer_outputs(self):
+        paths = microvm_tests.workload_artifact_paths(architecture="aarch64")
+        for missing, _ in paths:
+            with (
+                self.subTest(missing=missing),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                args = nvx.parse_args(
+                    [
+                        "test-microvm",
+                        "--backend",
+                        "whp",
+                        "--architecture",
+                        "aarch64",
+                        "--scenario",
+                        "sandbox-lifecycle",
+                        "--output-dir",
+                        temporary,
+                    ]
+                )
+
+                def require(
+                    path: Path, description: str, missing: Path = missing
+                ) -> Path:
+                    if path == missing:
+                        raise common.ScriptError(f"{description} not found: {path}")
+                    return path
+
+                with (
+                    patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                    patch.object(microvm_tests, "require_file", side_effect=require),
+                    patch.object(microvm_tests, "_run_scenarios") as run,
+                    self.assertRaises(common.ScriptError) as raised,
+                ):
+                    microvm_tests.run(args)
+                run.assert_not_called()
+                message = str(raised.exception)
+                self.assertNotIn("nvx-rs download", message)
+                self.assertNotIn("build-guest --guest all", message)
+                commands = re.findall(r"`([^`]+)`", message)
+                self.assertEqual(
+                    commands,
+                    [
+                        "build-distro-layer --guest ubuntu --architecture aarch64",
+                        "build-scratch-template --output "
+                        "build/aarch64/ubuntu-smoke-scratch.ext4",
+                    ],
+                )
+                with (
+                    patch.object(nvx, "build_distro_layer") as distro,
+                    patch.object(nvx, "build_scratch_template") as scratch,
+                ):
+                    for command in commands:
+                        selected = nvx.parse_args(shlex.split(command))
+                        selected.handler(selected)
+                self.assertEqual(distro.call_args.args[0].architecture, "aarch64")
+                self.assertEqual(distro.call_args.args[0].output, paths[0][0])
+                self.assertEqual(
+                    BuildConstants.REPO_ROOT / scratch.call_args.args[0].output,
+                    paths[-1][0],
+                )
+                self.assertFalse(
+                    (Path(temporary) / microvm_durations.REPORT_NAME).exists()
+                )
+
+    def test_arm_debug_boot_passes_selected_architecture_to_the_shared_monitor(self):
+        marker = (
+            "NVX-TIME-ABI: v=1 phase=boot status=ok cpus=1 "
+            "tsc_hz=19200000 lapic_hz=0 generation=0 elapsed_us=1\n"
+            "NVX-TIME-STATUS-EXIT status=0\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            build = Path(temporary) / "build"
+            config = build / "aarch64" / "Image-debug.config"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                "\n".join(microvm_tests.KernelBuildConstants.DEBUG_WATCHDOG_CONFIG),
+                encoding="utf-8",
+            )
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--architecture",
+                    "aarch64",
+                    "--debug-kernel",
+                    "--scenario",
+                    "guest-boot",
+                    "--output-dir",
+                    temporary,
+                ]
+            )
+
+            def require(path: Path, _description: str) -> Path:
+                return path
+
+            def guest(
+                command: Sequence[str], _script: str, completion: bytes, **options: Any
+            ) -> benchmark.GuestCommandResult:
+                self.assertEqual(
+                    Path(command[command.index("--kernel") + 1]).name, "Image-debug"
+                )
+                self.assertEqual(options["architecture"], "aarch64")
+                monitor = time_abi.TimeAbiMonitor(
+                    command, architecture=options["architecture"]
+                )
+                monitor.feed(marker.encode())
+                monitor.require_boot("ARM debug guest")
+                return benchmark.GuestCommandResult(
+                    text=marker
+                    + "NVX-GUEST-SCRIPT-START\n"
+                    + completion.decode()
+                    + "\n",
+                    wall_ms=0.0,
+                    peak_rss_bytes=0,
+                )
+
+            with (
+                patch.object(BuildConstants, "BUILD_DIR", build),
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(microvm_tests, "require_file", side_effect=require),
+                patch.object(
+                    microvm_tests, "_run_guest_script", side_effect=guest
+                ) as run,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+            run.assert_called_once()
+
+    def test_arm_debug_kernel_requires_each_detector_before_running_scenarios(self):
+        detectors = microvm_tests.KernelBuildConstants.DEBUG_WATCHDOG_CONFIG
+        with tempfile.TemporaryDirectory() as temporary:
+            build = Path(temporary) / "build"
+            config = build / "aarch64" / "Image-debug.config"
+            config.parent.mkdir(parents=True)
+            for missing in (None, *detectors):
+                with self.subTest(missing=missing):
+                    config.write_text(
+                        "\n".join(option for option in detectors if option != missing),
+                        encoding="utf-8",
+                    )
+                    output = Path(temporary) / (missing or "valid")
+                    args = nvx.parse_args(
+                        [
+                            "test-microvm",
+                            "--backend",
+                            "whp",
+                            "--architecture",
+                            "aarch64",
+                            "--debug-kernel",
+                            "--scenario",
+                            "guest-boot",
+                            "--output-dir",
+                            str(output),
+                        ]
+                    )
+
+                    def require(path: Path, description: str) -> Path:
+                        if description == "microVM debug kernel config":
+                            self.assertEqual(path, config)
+                            return common.require_file(path, description)
+                        return path
+
+                    with (
+                        patch.object(BuildConstants, "BUILD_DIR", build),
+                        patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                        patch.object(
+                            microvm_tests, "require_file", side_effect=require
+                        ) as required,
+                        patch.object(microvm_tests, "_run_scenarios") as run,
+                        redirect_stdout(io.StringIO()),
+                    ):
+                        if missing is None:
+                            self.assertEqual(microvm_tests.run(args), 0)
+                            run.assert_called_once()
+                            self.assertEqual(
+                                run.call_args.kwargs["kernel"],
+                                config.with_suffix(""),
+                            )
+                        else:
+                            with self.assertRaises(common.ScriptError) as raised:
+                                microvm_tests.run(args)
+                            self.assertIn(f"lacks {missing}", str(raised.exception))
+                            run.assert_not_called()
+                            self.assertFalse(output.exists())
+                    self.assertIn(
+                        ((config, "microVM debug kernel config"), {}),
+                        required.call_args_list,
+                    )
+
+    def test_invalid_script_counter_architecture_fails_before_process_start(self):
+        with (
+            patch.object(benchmark, "InteractiveProcess") as process,
+            self.assertRaisesRegex(ValueError, "unsupported counter architecture"),
+        ):
+            benchmark.run_guest_script(
+                ["openvmm"],
+                "nvx-exit 0\n",
+                b"done",
+                timeout=1,
+                architecture="unknown",
+            )
+        process.assert_not_called()
 
     def test_managed_executions_enter_through_the_agent_not_the_container_helpers(self):
         root = Path(__file__).resolve().parent.parent

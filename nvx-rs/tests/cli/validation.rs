@@ -2,7 +2,9 @@
 //! anything changes: each refusal exits with status 1, names what it refuses, leaves the root as it
 //! was, with no state directory, and launches no OpenVMM.
 
-use crate::harness::{Content, Hosts, LAYER, Outcome, Root, SCRATCH, UUID, in_parallel};
+use crate::harness::{
+    Content, Hosts, LAYER, Outcome, Root, SCRATCH, UUID, in_parallel, sandbox_relative,
+};
 use crate::lifecycle::provision;
 
 /// An environment file of one entry.
@@ -1450,11 +1452,22 @@ fn validation_errors_exit_1_before_any_side_effect() {
         .collect();
     in_parallel(&cases, |case| {
         let root = Root::new();
+        let fixture = |text: &str| {
+            if case
+                .arguments
+                .first()
+                .is_some_and(|argument| argument == "sandbox")
+            {
+                sandbox_relative(text)
+            } else {
+                text.to_owned()
+            }
+        };
         for (relative, content) in &case.files {
-            root.write_content(relative, *content);
+            root.write_content(&fixture(relative), *content);
         }
         for relative in &case.removed {
-            root.remove(relative);
+            root.remove(&fixture(relative));
         }
         let before = root.snapshot();
         let arguments: Vec<&str> = case.arguments.iter().map(String::as_str).collect();
@@ -1462,7 +1475,7 @@ fn validation_errors_exit_1_before_any_side_effect() {
         let fragments: Vec<String> = case
             .fragments
             .iter()
-            .map(|fragment| root.expand(fragment))
+            .map(|fragment| root.expand(&fixture(fragment)))
             .collect();
         let fragments: Vec<&str> = fragments.iter().map(String::as_str).collect();
         eprintln!("case: {}", case.name);

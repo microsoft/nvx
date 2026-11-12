@@ -1158,19 +1158,36 @@ def build_distro_layer(config: DistroLayerBuildConfig) -> None:
     initramfs_config = InitramfsBuildConfig(
         guest=descriptor.name,
         work=config.work,
+        architecture=config.architecture,
     )
     root = _prepare_guest_root(initramfs_config, descriptor)
     helpers = _install_guest_files(initramfs_config, root, descriptor)
     ubuntu.apply_metadata_policy(root)
+    packages = (
+        ubuntu.package_records(root)
+        if config.architecture == "x86_64"
+        else ubuntu.package_records(root, architecture=config.architecture)
+    )
     if (root / "sbin" / "init").exists() or any(
-        package["name"] == "systemd" for package in ubuntu.package_records(root)
+        package["name"] == "systemd" for package in packages
     ):
         raise ScriptError("systemd is unsupported in the Ubuntu sandbox layer profile")
     _normalize_initramfs_metadata(root)
 
-    input_sha256 = ubuntu.converter_input_sha256(_guest_customization_files(descriptor))
+    input_sha256 = (
+        ubuntu.converter_input_sha256(_guest_customization_files(descriptor))
+        if config.architecture == "x86_64"
+        else ubuntu.converter_input_sha256(
+            ubuntu.customization_files(config.architecture),
+            architecture=config.architecture,
+        )
+    )
     filesystem_uuid = ubuntu.erofs_uuid(input_sha256)
-    document = ubuntu.package_manifest(root, helpers)
+    document = (
+        ubuntu.package_manifest(root, helpers)
+        if config.architecture == "x86_64"
+        else ubuntu.package_manifest(root, helpers, architecture=config.architecture)
+    )
     document.update(
         {
             "artifact": output.name,
@@ -1260,21 +1277,54 @@ def scratch_template_environment() -> dict[str, str]:
     return environment
 
 
-def _mkfs_ext4() -> str:
-    """Return mkfs.ext4 from PATH, or else from the system directories that
-    distributions such as Debian leave out of an unprivileged user's PATH."""
+def _e2fsprogs_tool(name: str) -> str:
+    """Find an e2fsprogs tool, including Debian's system directories."""
     search = os.pathsep.join(
         directory
         for directory in (os.environ.get("PATH", ""), "/usr/sbin", "/sbin")
         if directory
     )
-    executable = shutil.which("mkfs.ext4", path=search)
+    executable = shutil.which(name, path=search)
     if executable is None:
         raise ScriptError(
-            "mkfs.ext4 was not found on PATH, in /usr/sbin, or in /sbin; "
+            f"{name} was not found on PATH, in /usr/sbin, or in /sbin; "
             "install e2fsprogs"
         )
     return executable
+
+
+def _mkfs_ext4() -> str:
+    return _e2fsprogs_tool("mkfs.ext4")
+
+
+def _scratch_hash_flags(image: Path) -> int:
+    with image.open("rb") as volume:
+        volume.seek(1024)
+        superblock = volume.read(0x164)
+    if len(superblock) != 0x164 or superblock[0x38:0x3A] != b"\x53\xef":
+        raise ScriptError(f"scratch template has no valid ext4 superblock: {image}")
+    flags = int.from_bytes(superblock[0x160:0x164], "little")
+    if flags not in (1, 2):
+        raise ScriptError(
+            f"scratch template has unexpected directory-hash flags {flags}: {image}"
+        )
+    return flags
+
+
+def _canonicalize_scratch_hash(image: Path) -> None:
+    # libext2fs chooses signed/unsigned hashing from its compiler's char type.
+    # Keep the existing signed-hash format; let e2fsprogs update its checksums.
+    if _scratch_hash_flags(image) == 1:
+        return
+    run_checked(
+        [_e2fsprogs_tool("debugfs"), "-w", os.fspath(image)],
+        env=scratch_template_environment(),
+        input_bytes=b"set_super_value flags 1\nclose -a\n",
+    )
+    if _scratch_hash_flags(image) != 1:
+        raise ScriptError(
+            f"debugfs did not set the scratch directory-hash format: {image}"
+        )
 
 
 def build_scratch_template(config: ScratchTemplateBuildConfig) -> None:
@@ -1305,6 +1355,7 @@ def build_scratch_template(config: ScratchTemplateBuildConfig) -> None:
             [mkfs, *scratch_template_arguments(temporary)],
             env=scratch_template_environment(),
         )
+        _canonicalize_scratch_hash(temporary)
         digest = sha256_file(temporary)
         temporary.replace(output)
     finally:

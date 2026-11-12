@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::harness::{LAYER, NVX_RS, OPENVMM, Root, SCRATCH, UUID};
+use crate::harness::{LAYER, NVX_RS, OPENVMM, Root, SCRATCH, UUID, sandbox_relative};
 
 /// The files of a test root that a release installs.
 const INSTALLED: [&str; 6] = [
@@ -26,9 +26,18 @@ fn checkout(removed: &[&str]) -> Root {
     root.write("SOURCE-MANIFEST.json", "{}\n");
     fs::create_dir(root.below(".git")).unwrap();
     for relative in removed {
-        root.remove(relative);
+        remove_installed(&root, relative);
     }
     root
+}
+
+/// Removes both fixture ISAs when the same case invokes explicit-x86 run and native sandbox.
+fn remove_installed(root: &Root, relative: &str) {
+    root.remove(relative);
+    let native = sandbox_relative(relative);
+    if native != relative && root.below(&native).is_file() {
+        root.remove(&native);
+    }
 }
 
 /// Asserts that no download left its staging directory in the root's `build/`.
@@ -53,6 +62,14 @@ fn run_downloads_the_release_of_a_checkout_without_artifacts() {
         vec!["sandbox", "run", "--layer", LAYER, "--scratch", SCRATCH],
     ] {
         let outcome = root.nvx_rs(&arguments);
+        if cfg!(target_arch = "aarch64") && arguments[0] == "sandbox" {
+            outcome.assert_error(
+                "unsupported",
+                &["ARM64 release downloads are not qualified"],
+            );
+            assert_no_staging(&root);
+            continue;
+        }
         assert_eq!(outcome.status, Some(1), "{}", outcome.describe());
         assert!(outcome.stdout.is_empty(), "{}", outcome.describe());
         let stderr = outcome.stderr();
@@ -112,6 +129,16 @@ fn run_downloads_nothing_over_some_artifacts() {
         vec!["sandbox", "run", "--layer", LAYER, "--scratch", SCRATCH],
     ] {
         let outcome = root.nvx_rs(&arguments);
+        if cfg!(target_arch = "aarch64") && arguments[0] == "sandbox" {
+            outcome.assert_error(
+                "unsupported",
+                &["ARM64 release downloads are not qualified"],
+            );
+            let mut after = root.snapshot();
+            assert!(after.remove("build/.nvx-download.lock").is_some());
+            assert_eq!(after, before, "{arguments:?}");
+            continue;
+        }
         assert_eq!(outcome.status, Some(1), "{}", outcome.describe());
         assert!(outcome.stdout.is_empty(), "{}", outcome.describe());
         let stderr = outcome.stderr();
@@ -322,9 +349,17 @@ fn start_downloads_the_release_of_a_checkout_without_artifacts() {
     let outcome = root.nvx_rs(&crate::provision(&root, "state", ""));
     assert_eq!(outcome.status, Some(0), "{}", outcome.describe());
     for relative in INSTALLED {
-        root.remove(relative);
+        remove_installed(&root, relative);
     }
     let outcome = root.nvx_rs(&crate::lifecycle("start", &root, "state"));
+    if cfg!(target_arch = "aarch64") {
+        outcome.assert_error(
+            "unsupported",
+            &["ARM64 release downloads are not qualified"],
+        );
+        assert_no_staging(&root);
+        return;
+    }
     assert_eq!(outcome.status, Some(1), "{}", outcome.describe());
     let stderr = outcome.stderr();
     let lines: Vec<&str> = stderr.lines().collect();
@@ -401,7 +436,7 @@ fn the_variable_turns_downloads_off_with_0() {
 fn roots_that_are_no_git_checkout_download_nothing() {
     let root = Root::new();
     for relative in INSTALLED {
-        root.remove(relative);
+        remove_installed(&root, relative);
     }
     root.write("SOURCE-MANIFEST.json", "{}\n");
     let outcome = root.nvx_rs(&["run", "--dry-run"]);

@@ -46,7 +46,7 @@ use crate::host::store::RuntimeIdentity;
 pub use self::architecture::Architecture;
 pub use self::dir::{ArtifactDir, ArtifactPaths, GuestPaths, Layout};
 pub use self::guest::Guest;
-#[cfg(all(windows, feature = "cli"))]
+#[cfg(windows)]
 pub(crate) use self::identity::check_arm64_pe;
 #[cfg(feature = "cli")]
 pub(crate) use self::require::require_artifact;
@@ -128,6 +128,12 @@ impl Artifacts {
                  them in an NVX release or repository checkout, or supply their runtime identity",
             ));
         };
+        self.check_directory_paths(directory)?;
+        directory.runtime_identity()
+    }
+
+    /// Checks that the public paths still name the artifacts of `directory`.
+    fn check_directory_paths(&self, directory: &ArtifactDir) -> Result<()> {
         let located = Self::located(directory);
         for (path, expected, description) in [
             (&self.openvmm, &located.openvmm, "OpenVMM executable"),
@@ -143,10 +149,13 @@ impl Artifacts {
                 )));
             }
         }
-        directory.runtime_identity()
+        Ok(())
     }
 
     /// Checks that this host can run NVX VMs and that the three files exist.
+    ///
+    /// Located ARM artifacts must still name their directory's files, whose native format and
+    /// initramfs architecture are checked without reading runtime identity metadata.
     ///
     /// Fails with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) otherwise, with the
     /// code [`ErrorCode::ArtifactMissing`] for a missing file. It does not check the hypervisor;
@@ -168,6 +177,14 @@ impl Artifacts {
                     format!("{description} not found: {}", path.display()),
                 ));
             }
+        }
+        if let Some(directory) = self.artifact_dir()
+            && directory.architecture() == Architecture::Aarch64
+        {
+            self.check_directory_paths(directory)?;
+            directory.require_openvmm()?;
+            directory.require_kernel()?;
+            directory.require_initramfs(Guest::Alpine)?;
         }
         Ok(())
     }
@@ -202,7 +219,7 @@ impl Artifacts {
     ///
     /// Fails with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) as
     /// [`check_manifest`] does.
-    fn from_artifact_dir(directory: &ArtifactDir) -> Result<Self> {
+    pub fn from_artifact_dir(directory: &ArtifactDir) -> Result<Self> {
         check_manifest(&directory.root().join(MANIFEST_NAME))?;
         Ok(Self::located(directory))
     }
