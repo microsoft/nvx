@@ -1,5 +1,4 @@
-//! Tests of distro bindings: explicit verification, imports, and the staged check, which reads no
-//! content.
+//! Tests of distro bindings: explicit verification, and the staged check, which reads no content.
 
 use std::cell::Cell;
 use std::fs::{self, OpenOptions};
@@ -9,8 +8,9 @@ use std::time::Duration;
 
 use super::*;
 use crate::ErrorKind;
+use crate::host::config::BlockGeometry;
 use crate::host::paths;
-use crate::host::sandbox::LayerRole;
+use crate::host::sandbox::{LayerRole, block_geometry};
 use crate::host::seal::open_read;
 use crate::host::seal::tests::open_metadata_only;
 
@@ -158,18 +158,18 @@ fn verification_binds_the_layer_its_manifest_and_the_policy() {
     for with_manifest in [true, false] {
         let staged = Staged::new(with_manifest);
         let binding = DistroBinding::verify(&staged.layer()).unwrap();
-        assert_eq!(binding.format(), DistroFormat::Erofs);
-        assert_eq!(binding.identity(), UUID);
+        assert_eq!(binding.format, DistroFormat::Erofs);
+        assert_eq!(binding.identity, UUID);
         assert_eq!(
-            binding.policy(),
+            binding.policy,
             PolicyVerdict {
                 revision: DISTRO_POLICY_REVISION,
                 result: PolicyResult::Accepted,
             }
         );
-        assert_eq!(binding.image(), &seal_of(&staged.image()));
+        assert_eq!(binding.image, seal_of(&staged.image()));
         let manifest = with_manifest.then(|| seal_of(&staged.manifest()));
-        assert_eq!(binding.manifest(), manifest.as_ref());
+        assert_eq!(binding.manifest, manifest);
         binding
             .check(&staged.layer(), DISTRO_POLICY_REVISION)
             .unwrap();
@@ -186,7 +186,7 @@ fn bindings_round_trip_through_their_serde_form() {
     assert_eq!(value["identity"], UUID);
     assert_eq!(
         value["image"],
-        serde_json::to_value(binding.image()).unwrap()
+        serde_json::to_value(&binding.image).unwrap()
     );
     // The absence of a manifest is explicit.
     assert_eq!(value.get("manifest"), Some(&serde_json::Value::Null));
@@ -216,7 +216,7 @@ fn bindings_round_trip_through_their_serde_form() {
     assert_eq!(
         serde_json::from_value::<DistroBinding>(rejected)
             .unwrap()
-            .policy()
+            .policy
             .result,
         PolicyResult::Rejected
     );
@@ -227,16 +227,16 @@ fn the_staged_check_reads_no_content() {
     let staged = Staged::new(true);
     let layer = staged.layer();
     let binding = DistroBinding::verify(&layer).unwrap();
-    assert!(binding.manifest().is_some());
+    assert!(binding.manifest.is_some());
 
     // On a host that lets the check open the layer and its manifest and read their metadata, but
     // fails every read and mapping of their content, the check passes, and returns the layer.
     let checked = binding
         .check_with(&layer, DISTRO_POLICY_REVISION, METADATA_ONLY)
         .unwrap();
-    assert_eq!(&FileSeal::of(checked.file()).unwrap(), binding.image());
+    assert_eq!(FileSeal::of(&checked._file).unwrap(), binding.image);
     let mut byte = [0];
-    assert!(checked.into_file().read(&mut byte).is_err());
+    assert!((&checked._file).read(&mut byte).is_err());
 
     // Verification, the positive control, reads both files there: the manifest first, which it
     // fails to read...
@@ -301,27 +301,32 @@ fn checked_layers_present_the_geometry_that_openvmm_reads_through_them() {
             .unwrap();
     };
     let check = |layer: &SandboxLayer| {
-        import_with(layer, PolicyVerdict::ACCEPTED, METADATA_ONLY)
+        verify_with(layer, METADATA_ONLY)
             .unwrap()
             .check_with(layer, DISTRO_POLICY_REVISION, METADATA_ONLY)
             .unwrap()
     };
+    // The geometry that OpenVMM presents for the layer, read through the checked file.
+    let geometry = |layer: &SandboxLayer, checked: &CheckedDistro| {
+        block_geometry(&checked._file, layer.path(), &layer_description(layer))
+    };
     resize(8192);
-    let checked = check(&staged.layer());
-    let geometry = BlockGeometry {
+    let layer = staged.layer();
+    let checked = check(&layer);
+    let expected = BlockGeometry {
         length: 8192,
         logical_block_size: 512,
         physical_block_size: physical_block_size(&image),
     };
     // It reads the metadata of the checked file alone, which reads nothing.
-    assert_eq!(checked.geometry().unwrap(), geometry);
+    assert_eq!(geometry(&layer, &checked).unwrap(), expected);
     // The geometry is the checked file's, whatever later takes its path.
     #[cfg(target_os = "linux")]
     {
         let replacement = staged.other("replacement.erofs");
         fs::write(&replacement, [0; 4096]).unwrap();
         fs::rename(&replacement, &image).unwrap();
-        assert_eq!(checked.geometry().unwrap(), geometry);
+        assert_eq!(geometry(&layer, &checked).unwrap(), expected);
     }
     drop(checked);
     // OpenVMM attaches block devices of nonzero multiples of 512 bytes alone.
@@ -333,7 +338,7 @@ fn checked_layers_present_the_geometry_that_openvmm_reads_through_them() {
         for length in [0, 8191] {
             resize(length);
             assert_eq!(
-                failure(check(&layer).geometry()),
+                failure(geometry(&layer, &check(&layer))),
                 (
                     ErrorKind::Unsupported,
                     format!(
@@ -379,12 +384,12 @@ fn layers_present_the_block_size_of_their_filesystem() {
         open: &open,
         seal: &FileSeal::of,
     };
-    let checked = import_with(&staged.layer(), PolicyVerdict::ACCEPTED, access)
+    let checked = verify_with(&staged.layer(), access)
         .unwrap()
         .check_with(&staged.layer(), DISTRO_POLICY_REVISION, access)
         .unwrap();
     assert_eq!(
-        checked.geometry().unwrap(),
+        block_geometry(&checked._file, &image, "distro EROFS layer").unwrap(),
         BlockGeometry {
             length: HUGE_PAGE,
             logical_block_size: 512,
@@ -552,15 +557,13 @@ fn the_staged_check_fails_without_reading_for_another_policy_or_layer() {
     );
 
     // A verdict that rejects the layer passes no check.
-    let rejected = import_with(
-        &layer,
-        PolicyVerdict {
+    let rejected = DistroBinding {
+        policy: PolicyVerdict {
             revision: DISTRO_POLICY_REVISION,
             result: PolicyResult::Rejected,
         },
-        METADATA_ONLY,
-    )
-    .unwrap();
+        ..binding.clone()
+    };
     assert_eq!(
         failure(rejected.check_with(&layer, DISTRO_POLICY_REVISION, METADATA_ONLY)),
         (
@@ -666,8 +669,8 @@ fn the_checked_file_is_the_object_that_the_check_compared() {
     // The caller owns the file, which is still the object that the check compared, with its
     // content, whatever has its path now, and which processes that the caller launches do not
     // inherit. On Linux, the replacement unlinked the object, which may move its change time.
-    let mut file = checked.into_file();
-    let difference = binding.image().difference(&FileSeal::of(&file).unwrap());
+    let mut file = checked._file;
+    let difference = binding.image.difference(&FileSeal::of(&file).unwrap());
     assert!(
         difference.is_none() || (cfg!(target_os = "linux") && difference == Some("change time")),
         "{difference:?}"
@@ -690,64 +693,16 @@ fn the_checked_file_is_the_object_that_the_check_compared() {
 }
 
 #[test]
-fn imports_bind_a_staged_layer_without_reading_it() {
-    let staged = Staged::new(true);
-    let layer = staged.layer();
-    // The staging caller vouches for the layer and its manifest, which the import does not read:
-    // even a manifest that verification refuses.
-    fs::write(staged.manifest(), b"not JSON").unwrap();
-    let binding = import_with(&layer, PolicyVerdict::ACCEPTED, METADATA_ONLY).unwrap();
-    assert_eq!(binding.image(), &seal_of(&staged.image()));
-    assert_eq!(binding.manifest(), Some(&seal_of(&staged.manifest())));
-    assert_eq!(binding.policy(), PolicyVerdict::ACCEPTED);
-    assert_eq!(binding.identity(), UUID);
-    binding.check(&layer, DISTRO_POLICY_REVISION).unwrap();
-
-    // A verdict of the caller's own policy passes the checks of that policy's revision alone.
-    let own = PolicyVerdict {
-        revision: 7,
-        result: PolicyResult::Accepted,
-    };
-    let binding = DistroBinding::import(&layer, own).unwrap();
-    binding.check(&layer, 7).unwrap();
-    assert_eq!(
-        failure(binding.check(&layer, DISTRO_POLICY_REVISION)).0,
-        ErrorKind::Unavailable
-    );
-
-    // Without a manifest, the import binds its absence.
-    fs::remove_file(staged.manifest()).unwrap();
-    let binding = DistroBinding::import(&layer, PolicyVerdict::ACCEPTED).unwrap();
-    assert_eq!(binding.manifest(), None);
-    binding.check(&layer, DISTRO_POLICY_REVISION).unwrap();
-
-    // It binds regular files alone.
-    fs::remove_file(staged.image()).unwrap();
-    fs::create_dir(staged.image()).unwrap();
-    assert_eq!(
-        failure(DistroBinding::import(&layer, PolicyVerdict::ACCEPTED)),
-        (
-            ErrorKind::Unavailable,
-            format!("distro EROFS layer not found: {}", shown(&staged.image()))
-        )
-    );
-}
-
-#[test]
 fn gpt_disks_bind_by_their_disk_guid() {
     let staged = Staged::new(false);
     let image = shown(&staged.image());
     let gpt = SandboxLayer::gpt(LayerRole::Distro, staged.image().to_str().unwrap(), UUID);
 
-    // Verification of a disk without a manifest reads nothing, and binds what an import binds.
+    // Verification of a disk without a manifest reads nothing.
     let binding = verify_with(&gpt, METADATA_ONLY).unwrap();
     assert_eq!(
-        (binding.format(), binding.identity()),
+        (binding.format, binding.identity.as_str()),
         (DistroFormat::Gpt, UUID)
-    );
-    assert_eq!(
-        import_with(&gpt, PolicyVerdict::ACCEPTED, METADATA_ONLY).unwrap(),
-        binding
     );
     let value = serde_json::to_value(&binding).unwrap();
     assert_eq!(value["format"], "gpt");
@@ -760,7 +715,7 @@ fn gpt_disks_bind_by_their_disk_guid() {
     let checked = binding
         .check_with(&gpt, DISTRO_POLICY_REVISION, METADATA_ONLY)
         .unwrap();
-    assert_eq!(&FileSeal::of(checked.file()).unwrap(), binding.image());
+    assert_eq!(FileSeal::of(&checked._file).unwrap(), binding.image);
 
     // A binding of one format checks no image of the other, even at its path and identity.
     let erofs = staged.layer();
@@ -773,7 +728,7 @@ fn gpt_disks_bind_by_their_disk_guid() {
                 format!(
                     "the distro binding of {image} names the {} layer with identity {UUID}, not \
                      the {} layer with identity {UUID}",
-                    bound.format(),
+                    bound.format,
                     launched.format()
                 )
             )
@@ -783,7 +738,7 @@ fn gpt_disks_bind_by_their_disk_guid() {
     // Messages name a missing disk a GPT image.
     fs::remove_file(staged.image()).unwrap();
     assert_eq!(
-        failure(DistroBinding::import(&gpt, PolicyVerdict::ACCEPTED)),
+        failure(DistroBinding::verify(&gpt)),
         (
             ErrorKind::Unavailable,
             format!("distro GPT image not found: {image}")
@@ -806,26 +761,23 @@ fn link_to_itself(path: &Path) -> bool {
 fn a_manifest_path_whose_lookup_fails_is_no_absent_manifest_for_a_binding() {
     // Verification finds a manifest as `Path.exists` does, which counts a path whose lookup fails
     // as none. The binding of the manifest's absence holds only while nothing is at its path, so
-    // the staged check refuses such a path, without reading anything, and so does an import.
+    // the staged check refuses such a path, without reading anything.
     let staged = Staged::new(false);
     let layer = staged.layer();
     let binding = verify_with(&layer, METADATA_ONLY).unwrap();
-    assert_eq!(binding.manifest(), None);
+    assert_eq!(binding.manifest, None);
     if !link_to_itself(&staged.manifest()) {
         eprintln!("skipped: this host does not let the test create a symbolic link");
         return;
     }
     assert_eq!(verify_with(&layer, METADATA_ONLY).unwrap(), binding);
-    for (kind, message) in [
-        failure(binding.check_with(&layer, DISTRO_POLICY_REVISION, METADATA_ONLY)),
-        failure(import_with(&layer, PolicyVerdict::ACCEPTED, METADATA_ONLY)),
-    ] {
-        assert_eq!(kind, ErrorKind::Io, "{message}");
-        assert!(
-            message.starts_with(&format!("{:?}: ", shown(&staged.manifest()))),
-            "{message}"
-        );
-    }
+    let (kind, message) =
+        failure(binding.check_with(&layer, DISTRO_POLICY_REVISION, METADATA_ONLY));
+    assert_eq!(kind, ErrorKind::Io, "{message}");
+    assert!(
+        message.starts_with(&format!("{:?}: ", shown(&staged.manifest()))),
+        "{message}"
+    );
     // Once nothing is at the path, the binding holds again.
     fs::remove_file(staged.manifest()).unwrap();
     binding
