@@ -1,9 +1,9 @@
 //! Tests of the control protocol, including its conformance vectors.
 //!
-//! `tests/vectors/nvxc-v1.txt` holds the bytes of the records, frames, and payloads that these
-//! tests pin, which come from the protocol's definition rather than from this codec. The host's
-//! encoders, and the decoders that the guest agent and the fake OpenVMM share with it, must all
-//! match them, so a change to the codec that every side would agree on still fails here.
+//! `tests/vectors/nvxc-v1.txt` holds the bytes of the records and payloads that these tests pin,
+//! which come from the protocol's definition rather than from this codec. The host's encoders,
+//! and the decoders that the guest agent and the fake OpenVMM share with it, must all match them,
+//! so a change to the codec that every side would agree on still fails here.
 
 #[cfg(all(
     feature = "testing",
@@ -47,11 +47,6 @@ use crate::tests::{NVXC_V1, of_kind, vector};
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 use super::app::APP_HEADER_LEN;
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
-use super::app::{APP_VERSION, AppFrame};
 #[cfg(all(
     feature = "cli",
     feature = "testing",
@@ -91,36 +86,6 @@ const MAX_CWD_BYTES: usize = 4095;
 #[cfg(feature = "cli")]
 const MAX_TIMEOUT_MS: u32 = u32::MAX;
 
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
-impl GuestFeatures {
-    /// The features that the host once required, which the direct-mode managed agent announces.
-    /// Only tests read them.
-    #[cfg(all(
-        feature = "cli",
-        feature = "guest",
-        target_os = "linux",
-        target_arch = "x86_64"
-    ))]
-    pub(crate) const REQUIRED: Self = Self::DIRECT_AGENT;
-
-    /// Returns whether this set holds every feature of `other`.
-    #[cfg(any(
-        all(feature = "cli", feature = "testing"),
-        all(
-            any(feature = "cli", feature = "testing"),
-            feature = "guest",
-            target_os = "linux",
-            target_arch = "x86_64"
-        )
-    ))]
-    pub(crate) fn contains(self, other: Self) -> bool {
-        (self | other) == self
-    }
-}
-
 /// A workload that runs `argv` without a timeout in `/` with the default environment.
 #[cfg(feature = "cli")]
 fn program<'a>(argv: &[&str]) -> Workload<'a> {
@@ -143,29 +108,6 @@ fn record_type(name: &str) -> RecordType {
         .filter_map(RecordType::from_code)
         .find(|record_type| record_type.name() == name)
         .unwrap_or_else(|| panic!("no record type is named {name}"))
-}
-
-/// Returns the frame kind that a vector names.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
-fn frame_kind(name: &str) -> u8 {
-    match name {
-        "PING" => APP_PING,
-        "EXEC" => APP_EXEC,
-        "STOP" => APP_STOP,
-        "CANCEL" => APP_CANCEL,
-        "FEATURES" => APP_FEATURES,
-        "MAPS" => APP_MAPS,
-        "READY" => APP_READY,
-        "STDOUT" => APP_STDOUT,
-        "STDERR" => APP_STDERR,
-        "EXIT" => APP_EXIT,
-        "STOPPED" => APP_STOPPED,
-        "ERROR" => APP_ERROR,
-        _ => panic!("no frame kind is named {name}"),
-    }
 }
 
 /// Returns the bytes of a vector's text as the host's text, which is UTF-8.
@@ -249,34 +191,6 @@ fn records_match_their_vectors() {
     );
 }
 
-/// Each `FRAME` vector decodes to its values, which encode to its bytes.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
-#[test]
-fn frames_match_their_vectors() {
-    let names = ["PING", "STDOUT", "EXIT", "ERROR_CWD_FAILED"];
-    for vector in of_kind(NVXC_V1, "FRAME", &names) {
-        let name = vector.name;
-        let mut values = vector.values();
-        let kind = frame_kind(values.word());
-        let request_id: u64 = values.number();
-        let status: i32 = values.number();
-        let payload = values.bytes();
-        drop(values);
-        let encoded = encode_app(kind, request_id, status, &payload);
-        assert_eq!(encoded, vector.bytes, "{name}");
-        let frame = AppFrame {
-            kind,
-            request_id,
-            status,
-            payload: &payload,
-        };
-        assert_eq!(decode_app(&vector.bytes).unwrap(), frame, "{name}");
-    }
-}
-
 #[cfg(all(
     feature = "cli",
     feature = "guest",
@@ -287,11 +201,8 @@ fn frames_match_their_vectors() {
 fn capture_requests_round_trip_both_kill_flags() {
     for (payload, kill_executions) in [([0], false), ([1], true)] {
         assert_eq!(app::encode_capture_payload(kill_executions), payload);
-        let bytes = encode_app(app::APP_CAPTURE, 42, 0, &payload);
-        let frame = decode_app(&bytes).unwrap();
-        assert_eq!((frame.kind, frame.request_id, frame.status), (7, 42, 0));
         assert_eq!(
-            app::decode_capture_payload(frame.payload).unwrap(),
+            app::decode_capture_payload(&payload).unwrap(),
             kill_executions
         );
     }
@@ -331,11 +242,8 @@ fn activate_requests_round_trip_records_and_workload_identity() {
             let payload = app::encode_activate_payload(&record, &workload).unwrap();
             assert_eq!(payload[..9], [4, 3, 2, 1, 8, 7, 6, 5, flag]);
             assert_eq!(payload[9..], vector.bytes);
-            let bytes = encode_app(app::APP_ACTIVATE, 42, 0, &payload);
-            let frame = decode_app(&bytes).unwrap();
-            assert_eq!((frame.kind, frame.request_id, frame.status), (8, 42, 0));
             assert_eq!(
-                app::decode_activate_payload(frame.payload).unwrap(),
+                app::decode_activate_payload(&payload).unwrap(),
                 (record.clone(), workload)
             );
         }
@@ -525,40 +433,6 @@ fn maps_payloads_match_their_vectors() {
         let decoded = decode_guest_maps_payload(&vector.bytes).unwrap();
         assert_eq!(decoded, guest, "{name}");
     }
-}
-
-/// Each `FEATURES` vector decodes to its bits, which encode to its bytes.
-#[cfg(all(feature = "cli", feature = "testing"))]
-#[test]
-fn features_match_their_vectors() {
-    for vector in of_kind(NVXC_V1, "FEATURES", &["ALL"]) {
-        let mut values = vector.values();
-        let features = GuestFeatures::from_bits(values.number());
-        drop(values);
-        assert_eq!(features.encode()[..], vector.bytes, "{}", vector.name);
-        let decoded = GuestFeatures::decode(&vector.bytes).unwrap();
-        assert_eq!(decoded, features, "{}", vector.name);
-    }
-}
-
-#[cfg(all(
-    feature = "cli",
-    feature = "guest",
-    target_os = "linux",
-    target_arch = "x86_64"
-))]
-#[test]
-fn the_host_requires_every_feature() {
-    assert_eq!(
-        GuestFeatures::CANCEL
-            | GuestFeatures::WORKLOAD_ACCOUNT
-            | GuestFeatures::EXEC_ENVIRONMENT
-            | GuestFeatures::EXEC_CWD
-            | GuestFeatures::HOST_MAPPING_TABLE,
-        GuestFeatures::REQUIRED
-    );
-    assert!(!GuestFeatures::DIRECT_AGENT.contains(GuestFeatures::EXEC_CGROUP));
-    assert!(!GuestFeatures::REQUIRED.contains(GuestFeatures::EXEC_CGROUP));
 }
 
 #[cfg(all(feature = "cli", feature = "testing"))]
@@ -758,10 +632,6 @@ fn exec_requests_are_refused_where_the_guest_agent_refuses_them() {
     assert_eq!(most.argv.len(), MAX_ARGUMENTS);
 }
 
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
 #[test]
 fn decoders_reject_malformed_input() {
     let mut header = [0u8; OUTER_HEADER_LEN];
@@ -770,104 +640,6 @@ fn decoders_reject_malformed_input() {
     header[4] = 1;
     header[40..44].copy_from_slice(&(OUTER_MAX_PAYLOAD as u32 + 1).to_le_bytes());
     assert!(decode_outer_header(&header).is_err());
-
-    let mut frame = encode_app(APP_STDOUT, 1, 0, b"abc");
-    assert_eq!(decode_app(&frame).unwrap().payload, b"abc");
-    frame.push(0);
-    assert!(decode_app(&frame).is_err());
-    assert!(decode_app(&frame[..10]).is_err());
-}
-
-#[cfg(all(feature = "cli", feature = "testing"))]
-#[test]
-fn exit_categories_match_the_guest_agent() {
-    for category in [
-        ExitCategory::Exit,
-        ExitCategory::Timeout,
-        ExitCategory::OutputLimit,
-        ExitCategory::Signal,
-        ExitCategory::Failed,
-        ExitCategory::Cancelled,
-    ] {
-        assert_eq!(
-            ExitCategory::parse(category.as_str().as_bytes()).unwrap(),
-            category
-        );
-    }
-    assert_eq!(ExitCategory::parse(b"exit").unwrap(), ExitCategory::Exit);
-    assert_eq!(
-        ExitCategory::parse(b"timeout").unwrap(),
-        ExitCategory::Timeout
-    );
-    assert_eq!(
-        ExitCategory::parse(b"output-limit").unwrap(),
-        ExitCategory::OutputLimit
-    );
-    assert_eq!(
-        ExitCategory::parse(b"signal").unwrap(),
-        ExitCategory::Signal
-    );
-    assert_eq!(
-        ExitCategory::parse(b"failed").unwrap(),
-        ExitCategory::Failed
-    );
-    assert_eq!(
-        ExitCategory::parse(b"cancelled").unwrap(),
-        ExitCategory::Cancelled
-    );
-    assert!(ExitCategory::parse(b"canceled").is_err());
-}
-
-#[cfg(all(
-    feature = "cli",
-    feature = "testing",
-    feature = "guest",
-    target_os = "linux",
-    target_arch = "x86_64"
-))]
-#[test]
-fn guest_features_report_what_a_guest_lacks() {
-    let required = GuestFeatures::REQUIRED;
-    let complete = GuestFeatures::decode(&required.encode()).unwrap();
-    assert!(complete.missing(required).is_empty());
-    assert!(complete.contains(required));
-
-    // Trailing bytes belong to later revisions.
-    let cancel_only = GuestFeatures::decode(&[1, 0, 0, 0, 0xaa]).unwrap();
-    assert_eq!(cancel_only, GuestFeatures::CANCEL);
-    assert!(!cancel_only.contains(required));
-    assert_eq!(
-        cancel_only.missing(required),
-        [
-            "workload accounts",
-            "per-execution environments",
-            "working directories",
-            "host path mapping tables",
-        ]
-    );
-    assert!(GuestFeatures::decode(&[1, 0, 0]).is_err());
-
-    // A guest of the previous release announced its host mappings with bit 1, which no
-    // longer counts.
-    let previous = GuestFeatures::decode(&0b11_1111u32.to_le_bytes()).unwrap();
-    assert_eq!(previous.missing(required), ["host path mapping tables"]);
-
-    // Every required feature has a name, so a refusal can say what is missing.
-    assert_eq!(
-        GuestFeatures::NONE.missing(required).len(),
-        required.bits().count_ones() as usize
-    );
-}
-
-#[cfg(all(feature = "cli", feature = "testing"))]
-#[test]
-fn guest_features_use_distinct_bits() {
-    let mut seen = 1u32 << 1;
-    for (feature, name) in GuestFeatures::NAMES {
-        assert_eq!(feature.bits().count_ones(), 1, "{name}");
-        assert_eq!(seen & feature.bits(), 0, "{name} reuses a feature bit");
-        seen |= feature.bits();
-    }
 }
 
 fn map(source: &str, target: &str, read_only: bool) -> HostMap {
@@ -1062,31 +834,18 @@ fn record_definitions_keep_their_wire_values() {
     assert_eq!(OUTER_CREDIT, 9);
     assert_eq!(OUTER_RECEIVE_WINDOW, 1024 * 1024);
     assert_eq!(APP_HEADER_LEN, 24);
-    assert_eq!(APP_VERSION, 1);
     assert_eq!(APP_PING, 1);
     assert_eq!(APP_EXEC, 2);
     assert_eq!(APP_STOP, 3);
     assert_eq!(APP_CANCEL, 4);
+    assert_eq!(APP_MAPS, 6);
     assert_eq!(APP_READY, 0x81);
     assert_eq!(APP_STDOUT, 0x82);
     assert_eq!(APP_STDERR, 0x83);
-    assert_eq!(APP_EXIT, 0x84);
+    #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+    assert_eq!((APP_CAPTURE, APP_ACTIVATE, APP_EXIT), (7, 8, 0x84));
     assert_eq!(APP_STOPPED, 0x85);
     assert_eq!(APP_ERROR, 0xff);
-}
-
-#[cfg(all(feature = "cli", feature = "testing"))]
-#[test]
-fn feature_definitions_keep_their_wire_values() {
-    assert_eq!(APP_FEATURES, 5);
-    assert_eq!(APP_MAPS, 6);
-    assert_eq!(GuestFeatures::CANCEL.bits(), 0x01);
-    // Bit 1 is retired and stays unused, so hosts that still need it refuse the image.
-    assert_eq!(GuestFeatures::WORKLOAD_ACCOUNT.bits(), 0x04);
-    assert_eq!(GuestFeatures::EXEC_CGROUP.bits(), 0x08);
-    assert_eq!(GuestFeatures::EXEC_ENVIRONMENT.bits(), 0x10);
-    assert_eq!(GuestFeatures::EXEC_CWD.bits(), 0x20);
-    assert_eq!(GuestFeatures::HOST_MAPPING_TABLE.bits(), 0x40);
 }
 
 #[cfg(any(
@@ -1118,7 +877,6 @@ fn exec_extension_keeps_its_wire_values() {
     assert_eq!(MAX_ARGUMENTS, 64);
     assert_eq!(MAX_ARGUMENT_BYTES, 4096);
     assert_eq!(MAX_ENVIRONMENT, 256);
-    assert_eq!(MAX_OUTPUT_BYTES, 1024 * 1024);
     assert_eq!(CWD_FAILED, "cwd-failed");
     assert_eq!(LAUNCH_FAILED, "launch-failed");
     assert_eq!(INVALID_REQUEST, "invalid-request");
@@ -1236,49 +994,6 @@ fn host_mapping_count_splits_the_command_line_as_the_guest_init_does() {
             command_line.escape_ascii()
         );
     }
-}
-
-#[cfg(all(
-    feature = "testing",
-    feature = "guest",
-    target_os = "linux",
-    target_arch = "x86_64"
-))]
-#[test]
-fn both_agent_modes_announce_the_host_mapping_table() {
-    assert_eq!(GuestFeatures::DIRECT_AGENT.bits(), 0x75);
-    // The layered root creates no account, so it announces no workload accounts (bit 2).
-    assert_eq!(GuestFeatures::SANDBOX_AGENT.bits(), 0x51);
-    assert!(!GuestFeatures::SANDBOX_AGENT.contains(GuestFeatures::WORKLOAD_ACCOUNT));
-    assert!(GuestFeatures::DIRECT_AGENT.contains(GuestFeatures::WORKLOAD_ACCOUNT));
-    for features in [GuestFeatures::DIRECT_AGENT, GuestFeatures::SANDBOX_AGENT] {
-        assert!(features.contains(GuestFeatures::HOST_MAPPING_TABLE));
-    }
-    assert_eq!(
-        GuestFeatures::DIRECT_AGENT.bits() & (1 << 1),
-        0,
-        "retired bit one stays clear"
-    );
-}
-
-#[cfg(all(feature = "cli", feature = "testing"))]
-#[test]
-fn layered_sandboxes_need_per_execution_environments_and_mapping_tables() {
-    // The CLI's exec sends working directories and environments, and its start sends the
-    // mappings of the shares; it never cancels a workload or asks for a workload account
-    // (microsoft/nvx#566).
-    assert_eq!(GuestFeatures::LAYERED_SANDBOX.bits(), (1 << 4) | (1 << 6));
-    assert!(GuestFeatures::SANDBOX_AGENT.contains(GuestFeatures::LAYERED_SANDBOX));
-    assert!(
-        GuestFeatures::SANDBOX_AGENT
-            .missing(GuestFeatures::LAYERED_SANDBOX)
-            .is_empty()
-    );
-    assert_eq!(
-        (GuestFeatures::CANCEL | GuestFeatures::WORKLOAD_ACCOUNT)
-            .missing(GuestFeatures::LAYERED_SANDBOX),
-        ["per-execution environments", "host path mapping tables"]
-    );
 }
 
 #[cfg(all(

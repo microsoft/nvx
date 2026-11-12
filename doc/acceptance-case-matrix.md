@@ -357,7 +357,7 @@ suite in its shards, and the public sandbox scenarios in its guest and sandbox j
 | `untiered-network-policy` | rewritten | On named snapshots with a NIC, which `snapshot capture --net` captures, as [Snapshots](#snapshots) says, keeping its checks of a restore's DNS, egress, forwards and listener publication. Its raw-snapshot parts retire: the raw capture and restores, the guest's repair marker, the console release, and OpenVMM's refusals of raw restores that the CLI cannot issue, in whose place the CLI must refuse a restore without `--network-profile`, and one with `--net` |
 | `virtio-features` | kept |  |
 | `virtio-net` | kept |  |
-| `vm-lifecycle` | kept | A [cold boot](#cold-boots) through the public API: `nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_reattached_from_saved_values_and_stopped` |
+| `vm-lifecycle` | kept | A [cold boot](#cold-boots) through the public API: `nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_reattached_from_saved_values_and_stopped`. Since SL4.4d, it pings and stops nvx-init with NVXC version 2's frames, where it sent version 1's |
 | `workload-identity` | kept | Since SL6.3 (#1122), it also checks that a guest given OpenVMM's workload identity without `nvx_identity=`, or with another one, fails closed |
 
 ### Cold boots

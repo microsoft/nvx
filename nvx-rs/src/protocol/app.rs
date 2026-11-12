@@ -3,17 +3,15 @@
 //!
 //! A frame is a 24-byte header (the magic, the version, the frame kind, two zero flags bytes, the
 //! request ID, a status, and the payload length) followed by the payload. Responses repeat the ID
-//! of their request. This module holds version 1, and `v2` version 2, which carries every control
-//! path and streams an execution's standard input, output and error.
+//! of their request. `v2` holds version 2, NVXC's only version, which carries every control path
+//! and streams an execution's standard input, output and error. This module holds the codes of
+//! its kinds and its error categories, with which NVX's guest agents and the fake OpenVMM serve
+//! it, and the payloads of the capture and activate requests.
 
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 use super::array;
 #[cfg(any(
     feature = "cli",
-    feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 use super::{ProtocolError, violation};
@@ -55,18 +53,6 @@ pub(crate) mod workload {
 ))]
 pub(crate) mod v2;
 
-/// Magic of every application frame.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
-pub(crate) const APP_MAGIC: [u8; 4] = *b"NVXC";
-/// Version of the application frame format.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
-pub(crate) const APP_VERSION: u8 = 1;
 /// Length of an application frame header.
 #[cfg(any(
     feature = "cli",
@@ -99,13 +85,6 @@ pub(crate) const APP_STOP: u8 = 3;
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) const APP_CANCEL: u8 = 4;
-/// Request for the guest's control features, which the guest agent answers with [`APP_READY`]
-/// and a [`GuestFeatures`](super::GuestFeatures) payload.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
-pub(crate) const APP_FEATURES: u8 = 5;
 /// Request that the guest agent mount entries of the host mapping table; the payload is a `MAPS`
 /// payload.
 #[cfg(any(
@@ -137,12 +116,9 @@ pub(crate) const APP_STDOUT: u8 = 0x82;
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) const APP_STDERR: u8 = 0x83;
-/// Response that ends a workload: the status is its exit status, and the payload its
-/// [`ExitCategory`].
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+/// Response that ends a workload: the status is its exit status, and the payload how it ended,
+/// as [`v2::Outcome`] names it.
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) const APP_EXIT: u8 = 0x84;
 /// Response that acknowledges [`APP_STOP`].
 #[cfg(any(
@@ -206,10 +182,7 @@ pub(crate) const MAPPINGS_INCOMPLETE: &str = "mappings-incomplete";
 pub(crate) const MAPPING_FAILED: &str = "mapping-failed";
 
 /// Decoded application frame.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AppFrame<'a> {
     /// One of the `APP_*` frame kinds.
@@ -220,52 +193,6 @@ pub(crate) struct AppFrame<'a> {
     pub(crate) status: i32,
     /// Payload that follows the header.
     pub(crate) payload: &'a [u8],
-}
-
-/// Encodes one application frame.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
-pub(crate) fn encode_app(kind: u8, request_id: u64, status: i32, payload: &[u8]) -> Vec<u8> {
-    let length = u32::try_from(payload.len()).unwrap_or(u32::MAX);
-    let mut frame = Vec::with_capacity(APP_HEADER_LEN + payload.len());
-    frame.extend_from_slice(&APP_MAGIC);
-    frame.push(APP_VERSION);
-    frame.push(kind);
-    frame.extend_from_slice(&0u16.to_le_bytes());
-    frame.extend_from_slice(&request_id.to_le_bytes());
-    frame.extend_from_slice(&status.to_le_bytes());
-    frame.extend_from_slice(&length.to_le_bytes());
-    frame.extend_from_slice(payload);
-    frame
-}
-
-/// Decodes and validates an application frame.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
-pub(crate) fn decode_app(frame: &[u8]) -> Result<AppFrame<'_>, ProtocolError> {
-    if frame.len() < APP_HEADER_LEN {
-        return Err(violation(
-            "control endpoint returned a truncated application frame",
-        ));
-    }
-    let flags = u16::from_le_bytes([frame[6], frame[7]]);
-    let length = u32::from_le_bytes(array(&frame[20..24])) as usize;
-    let payload = &frame[APP_HEADER_LEN..];
-    if frame[..4] != APP_MAGIC || frame[4] != APP_VERSION || flags != 0 || length != payload.len() {
-        return Err(violation(
-            "control endpoint returned an invalid application frame",
-        ));
-    }
-    Ok(AppFrame {
-        kind: frame[5],
-        request_id: u64::from_le_bytes(array(&frame[8..16])),
-        status: i32::from_le_bytes(array(&frame[16..20])),
-        payload,
-    })
 }
 
 /// Encodes the capture request's flag as one byte, 0 or 1.
@@ -344,61 +271,4 @@ fn check_workload_identity(workload: &WorkloadIdentity) -> Result<(), ProtocolEr
         ));
     }
     Ok(())
-}
-
-/// Exit category reported by the guest agent, the payload of an [`APP_EXIT`] response.
-#[cfg(any(feature = "cli", feature = "testing"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExitCategory {
-    /// The workload exited; the status is its exit code.
-    Exit,
-    /// The workload's timeout elapsed and the guest agent killed it.
-    Timeout,
-    /// The workload exceeded the output limit and the guest agent killed it.
-    OutputLimit,
-    /// A signal ended the workload; the status is 128 plus the signal number.
-    Signal,
-    /// The guest agent could not supervise the workload.
-    Failed,
-    /// A cancellation request ended the workload.
-    Cancelled,
-}
-
-#[cfg(any(feature = "cli", feature = "testing"))]
-impl ExitCategory {
-    /// Parses the payload of an [`APP_EXIT`] response.
-    #[cfg(feature = "cli")]
-    #[cfg_attr(
-        not(all(test, feature = "testing")),
-        expect(
-            dead_code,
-            reason = "NVX's host speaks NVXC version 2 since SL4.4c, and SL4.4d deletes version 1"
-        )
-    )]
-    pub(crate) fn parse(payload: &[u8]) -> Result<Self, ProtocolError> {
-        match payload {
-            b"exit" => Ok(Self::Exit),
-            b"timeout" => Ok(Self::Timeout),
-            b"output-limit" => Ok(Self::OutputLimit),
-            b"signal" => Ok(Self::Signal),
-            b"failed" => Ok(Self::Failed),
-            b"cancelled" => Ok(Self::Cancelled),
-            _ => Err(violation(
-                "guest agent returned an unsupported exit category",
-            )),
-        }
-    }
-
-    /// Returns the payload of an [`APP_EXIT`] response that reports this category.
-    #[cfg(feature = "testing")]
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Exit => "exit",
-            Self::Timeout => "timeout",
-            Self::OutputLimit => "output-limit",
-            Self::Signal => "signal",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
 }

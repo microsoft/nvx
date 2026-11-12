@@ -4,9 +4,8 @@ use crate::guest::init::Runtime;
 use crate::guest::mappings::{Mapper, MappingTable, SourceRoot};
 use crate::guest::sys::{self, Errno, FileDescriptor};
 use crate::protocol::{
-    self, APP_ACTIVATE, APP_CANCEL, APP_CAPTURE, APP_EXEC, APP_FEATURES, APP_MAPS, APP_PING,
-    APP_READY, APP_STOP, APP_STOPPED, GuestFeatures, INVALID_REQUEST, MAPPINGS_INCOMPLETE,
-    UNSUPPORTED_OPERATION,
+    self, APP_ACTIVATE, APP_CANCEL, APP_CAPTURE, APP_EXEC, APP_MAPS, APP_PING, APP_READY, APP_STOP,
+    APP_STOPPED, INVALID_REQUEST, MAPPINGS_INCOMPLETE, UNSUPPORTED_OPERATION,
 };
 
 use super::diagnostics;
@@ -283,18 +282,6 @@ fn handle_data(
         }
         APP_CANCEL => {
             // The targeted workload has already reported its outcome.
-        }
-        APP_FEATURES => {
-            if request.payload.is_empty() {
-                session.send_app(
-                    APP_READY,
-                    request.request_id,
-                    0,
-                    &GuestFeatures::DIRECT_AGENT.encode(),
-                )?;
-            } else {
-                session.send_error(request.request_id, Errno::EINVAL as i32, INVALID_REQUEST)?;
-            }
         }
         APP_MAPS => match super::mappings::apply_request(system, mappings, request.payload) {
             Ok(()) => session.send_app(APP_READY, request.request_id, 0, &[])?,

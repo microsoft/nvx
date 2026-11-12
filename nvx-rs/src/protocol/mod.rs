@@ -2,9 +2,9 @@
 //!
 //! OpenVMM brokers an authenticated stream of outer records (magic `NVXS`) between one host
 //! client and the guest's agent. Data records carry the bytes of an application protocol. NVX's
-//! own, `NVXC`, with its frames, its `EXEC` payloads and the control features that a guest image
-//! advertises, is private to this crate: only NVX's programs speak it, the CLI, nvx-init, the
-//! managed agent and the fake OpenVMM. All integers are little-endian.
+//! own, `NVXC`, with its frames and its `EXEC` payloads, is private to this crate: only NVX's
+//! programs speak it, the CLI, nvx-init, the managed agent and the fake OpenVMM. All integers are
+//! little-endian.
 //!
 //! - Outer records: [`encode_outer`] and [`decode_outer_header`], and the `OUTER_*` record types.
 //! - `MAPS` payloads: the [`HostMap`] table that the host encodes with [`encode_maps_payloads`],
@@ -29,7 +29,7 @@
 //!   activation failed, the time ABI's included, from which the host classifies a clone's end.
 //!
 //! The module depends on nothing outside the standard library, so the host, the guest, and test
-//! doubles share it. Tests pin its wire constants as literals, and its records, frames, and
+//! doubles share it. Tests pin its wire constants and frames as literals, and its records and
 //! payloads with the conformance vectors of the crate's `tests/vectors/`, whose bytes no codec
 //! produced.
 
@@ -45,12 +45,6 @@ pub mod cmdline;
 ))]
 pub(crate) mod exec;
 pub mod export;
-#[cfg(any(
-    feature = "cli",
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
-mod features;
 pub mod maps;
 pub mod nvxs;
 mod outer;
@@ -66,6 +60,8 @@ pub mod view;
 pub(crate) use app::APP_ACTIVATE;
 #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) use app::APP_CAPTURE;
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+pub(crate) use app::APP_EXIT;
 #[cfg(any(
     feature = "cli",
     feature = "testing",
@@ -74,8 +70,6 @@ pub(crate) use app::APP_CAPTURE;
 pub(crate) use app::APP_HEADER_LEN;
 #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) use app::AppFrame;
-#[cfg(feature = "testing")]
-pub(crate) use app::ExitCategory;
 #[cfg(any(
     feature = "cli",
     feature = "testing",
@@ -102,8 +96,8 @@ pub(crate) use app::workload;
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) use app::{
-    APP_CANCEL, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_MAPS, APP_PING, APP_READY,
-    APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, UNSUPPORTED_OPERATION, decode_app, encode_app,
+    APP_CANCEL, APP_ERROR, APP_EXEC, APP_MAPS, APP_PING, APP_READY, APP_STDERR, APP_STDOUT,
+    APP_STOP, APP_STOPPED, UNSUPPORTED_OPERATION,
 };
 #[cfg(any(
     feature = "testing",
@@ -113,22 +107,12 @@ pub(crate) use app::{BUSY, CWD_FAILED, INVALID_REQUEST, LAUNCH_FAILED, MAPPINGS_
 #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) use app::{decode_activate_payload, decode_capture_payload};
 pub use boot::{MAPS_TOKEN, parse_host_mapping_count};
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
-pub(crate) use exec::MAX_OUTPUT_BYTES;
 #[cfg(feature = "testing")]
 pub(crate) use exec::decode_exec_payload;
 #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) use exec::{GuestExecPayload, decode_guest_exec_payload};
 #[cfg(feature = "cli")]
 pub(crate) use exec::{Workload, WorkloadEnvironment, encode_exec_payload};
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
-pub(crate) use features::GuestFeatures;
 pub use maps::{
     GuestHostMap, GuestMapsPayload, HostMap, MAP_ENTRY_HEADER_LEN, MAP_READ_ONLY, MAPS_HEADER_LEN,
     MAX_HOST_MAPPINGS, MAX_MAP_PATH_BYTES, MapsPayload, decode_guest_maps_payload,

@@ -1,14 +1,7 @@
 #![cfg(any(target_os = "linux", windows))]
 #![cfg_attr(windows, allow(unsafe_code))]
 
-// It speaks version 1 of NVXC, which only the guest agents and the fake OpenVMM build.
-#[cfg(all(
-    feature = "cli",
-    any(
-        feature = "testing",
-        all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-    )
-))]
+#[cfg(feature = "cli")]
 mod live_init;
 
 use std::io::{BufRead, BufReader, Write};

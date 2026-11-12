@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crate::guest::init::{self, Stream};
 use crate::guest::sys::{self, Errno, c_string};
 use crate::protocol::{
-    self, APP_ACTIVATE, APP_CANCEL, APP_CAPTURE, APP_EXIT, APP_STDERR, APP_STDOUT, APP_STOP, BUSY,
+    APP_ACTIVATE, APP_CANCEL, APP_CAPTURE, APP_EXIT, APP_STDERR, APP_STDOUT, APP_STOP, BUSY,
     CWD_FAILED, GuestExecPayload, LAUNCH_FAILED, OUTER_DATA, v2::STDIN_WINDOW,
 };
 
@@ -27,16 +27,14 @@ const ENVIRONMENT_DIAGNOSTIC: &[u8] = b"nvx-managed-agent: cannot configure work
 /// The agent drives its native plain-process workload in the C agent's loop: each turn polls the
 /// workload and the control session, serves a control record, forwards the workload's output,
 /// collects the statuses of the agent's children, and checks the workload's timeout. The agent
-/// keeps the C agent's policy: the output cap, checked for each read of up to 32 KiB, and the
-/// precedence of a cancellation, a timeout, and the cap over the workload's own status.
+/// keeps the C agent's precedence of a cancellation and a timeout over the workload's own status.
 ///
-/// An execution of NVXC version 2 has no output cap. Its workload reads a pipe, into which each
-/// turn writes what the host sent in `STDIN` frames, under [`STDIN_WINDOW`], and acknowledges
-/// what it wrote, and which it closes after `STDIN_END`. The session streams while it runs: its
-/// records go through the send queue, which never waits for the console, and the agent reads no
-/// more output while the queue is full, so the workload waits on its pipes while the agent serves
-/// control requests. `STOP` cancels it, and once its `EXIT` reports that, `stop` holds the
-/// `STOP`'s request ID.
+/// An execution has no output cap. Its workload reads a pipe, into which each turn writes what
+/// the host sent in `STDIN` frames, under [`STDIN_WINDOW`], and acknowledges what it wrote, and
+/// which it closes after `STDIN_END`. The session streams while it runs: its records go through
+/// the send queue, which never waits for the console, and the agent reads no more output while
+/// the queue is full, so the workload waits on its pipes while the agent serves control requests.
+/// `STOP` cancels it, and once its `EXIT` reports that, `stop` holds the `STOP`'s request ID.
 pub(crate) fn run(
     system: &mut impl System,
     session: &mut Session,
@@ -68,12 +66,9 @@ pub(crate) fn run(
         Err(LaunchError::Other) => return session.send_error(request_id, 125, LAUNCH_FAILED),
     };
     let started = Instant::now();
-    let mut state = RunState {
-        v2: session.v2(),
-        ..RunState::default()
-    };
+    let mut state = RunState::default();
     let mut buffer = [0u8; OUTPUT_CHUNK_BYTES];
-    session.stream(state.v2);
+    session.stream(true);
     while state.running(&workload) || (workload.has_open_output() && !state.ending()) {
         let session_ready = match poll(
             &workload,
@@ -88,7 +83,6 @@ pub(crate) fn run(
             }
         };
         if session_ready {
-            let stop = state.v2.then_some(&mut *stop);
             match handle_control(system, session, request_id, &mut state.input, stop) {
                 Ok(ExecControl::None) => {}
                 Ok(ExecControl::Cancel) if state.running(&workload) && !state.cancelled => {
@@ -120,7 +114,6 @@ pub(crate) fn run(
                     return Err(error);
                 }
             }
-            session.answer_in(state.v2);
         }
         if !state.session_lost {
             // The space that the console freed takes the input's acknowledgement before more
@@ -128,7 +121,7 @@ pub(crate) fn run(
             session.send_queued()?;
             state.input.write(&mut workload, session, request_id)?;
         }
-        let output = if state.session_lost || state.output_limited {
+        let output = if state.session_lost {
             &mut [][..]
         } else {
             &mut buffer[..]
@@ -144,7 +137,7 @@ pub(crate) fn run(
         }
     }
     let outcome = if state.ending() {
-        if !state.session_lost && !state.output_limited {
+        if !state.session_lost {
             state.forward(system, session, request_id, &mut workload, &mut buffer)?;
         }
         state.forward(system, session, request_id, &mut workload, &mut [])?;
@@ -197,8 +190,6 @@ pub(crate) fn run(
         )
     } else if state.timed_out {
         session.send_app(APP_EXIT, request_id, 124, b"timeout")
-    } else if state.output_limited {
-        session.send_app(APP_EXIT, request_id, 125, b"output-limit")
     } else {
         match outcome {
             Some(status) => match (status.code(), status.signal()) {
@@ -347,12 +338,6 @@ impl Workload {
         }
     }
 
-    fn discard(&mut self, stream: Stream) {
-        match self {
-            Self::Direct(workload) => workload.discard(stream),
-        }
-    }
-
     fn wait(&mut self, session: &Session) -> std::io::Result<std::process::ExitStatus> {
         loop {
             self.collect(session)?;
@@ -495,19 +480,12 @@ impl Input {
 /// outcome that it reports, and the workload's launch report and outcome.
 #[derive(Default)]
 struct RunState {
-    /// Whether the execution is of NVXC version 2, which streams the workload's input, and caps
-    /// no output.
-    v2: bool,
     /// The workload's standard input, in version 2.
     input: Input,
-    /// Bytes of output forwarded so far, which the 1 MiB cap bounds.
-    output_bytes: usize,
     /// Whether the host cancelled the workload while it ran.
     cancelled: bool,
     /// Whether the workload's timeout passed while it ran.
     timed_out: bool,
-    /// Whether the workload's output exceeded the cap.
-    output_limited: bool,
     /// Whether a reset detached the workload's session, after which its output is discarded.
     session_lost: bool,
     /// Whether the agent cannot collect the workload's status, as when another collector took
@@ -522,7 +500,7 @@ struct RunState {
 impl RunState {
     /// Whether the agent ended the workload, fixing its outcome or abandoning its session.
     fn ending(&self) -> bool {
-        self.cancelled || self.timed_out || self.output_limited || self.session_lost
+        self.cancelled || self.timed_out || self.session_lost
     }
 
     /// Returns whether the workload may still be running: its status is neither known nor lost.
@@ -533,10 +511,9 @@ impl RunState {
     }
 
     /// Takes the workload's events until it has no step to take, forwarding its output as NVXC
-    /// frames, until a read that the agent cannot forward: one beyond the cap, after which it
-    /// reads and drops the rest of the output, or a failure to read or send, which ends the
-    /// workload and the turn, as the C agent's did. A failure to collect the workload's status,
-    /// the execution's only one, ends the turn too.
+    /// frames, until a read that the agent cannot forward: a failure to read or send, which ends
+    /// the workload and the turn, as the C agent's did. A failure to collect the workload's
+    /// status, the execution's only one, ends the turn too.
     fn forward(
         &mut self,
         system: &mut impl System,
@@ -552,7 +529,7 @@ impl RunState {
             if let Some((id, status)) = session.take_status() {
                 workload.observe(id, status);
             }
-            let chunk = if session.queue_full() || (self.v2 && read) {
+            let chunk = if session.queue_full() || read {
                 &mut [][..]
             } else {
                 &mut *buffer
@@ -567,18 +544,6 @@ impl RunState {
             };
             match event {
                 Event::Output(stream, bytes) => {
-                    if !self.v2 && self.output_bytes > protocol::MAX_OUTPUT_BYTES - bytes.len() {
-                        self.output_limited = true;
-                        // The cap ends forwarding: read and drop the rest of both streams,
-                        // as a lost session does, so the client receives a prefix of what the
-                        // workload wrote, not a stream with a silent gap where a later chunk
-                        // fit the leftover room.
-                        workload.discard(Stream::Stdout);
-                        workload.discard(Stream::Stderr);
-                        workload.terminate();
-                        return Ok(());
-                    }
-                    self.output_bytes += bytes.len();
                     read = true;
                     let kind = match stream {
                         Stream::Stdout => APP_STDOUT,
@@ -691,7 +656,7 @@ fn launch(
     execution: &GuestExecPayload,
 ) -> Result<Workload, LaunchError> {
     let mut request = launch::direct_request(config, execution)?;
-    request.input = session.v2();
+    request.input = true;
     let workload = system.start_direct(request).map_err(LaunchError::Start)?;
     session.watch(workload.id());
     Ok(Workload::Direct(workload))
@@ -777,16 +742,15 @@ enum ExecControl {
     Capture,
 }
 
-/// Processes one control-console record while a workload runs: in version 2, the workload's
-/// standard input, of which bytes beyond the window or after its end end the session, and, for an
-/// execution of version 2, whose `stop` is given, a `STOP`, which cancels the workload and sets
-/// `stop`.
+/// Processes one control-console record while a workload runs: the workload's standard input, of
+/// which bytes beyond the window or after its end end the session, and a `STOP`, which cancels
+/// the workload and sets `stop`.
 fn handle_control(
     system: &mut impl System,
     session: &mut Session,
     exec_id: u64,
     input: &mut Input,
-    stop: Option<&mut Option<u64>>,
+    stop: &mut Option<u64>,
 ) -> Result<ExecControl, Errno> {
     let payload = match session.next_event() {
         Ok(SessionEvent::Reset) => {
@@ -794,9 +758,7 @@ fn handle_control(
             // earlier epoch's `STOP` is abandoned with its work.
             session.stream(false);
             session.acknowledge()?;
-            if let Some(stop) = stop {
-                *stop = None;
-            }
+            *stop = None;
             return Ok(ExecControl::SessionLost);
         }
         Ok(SessionEvent::Data(payload)) => payload,
@@ -819,10 +781,7 @@ fn handle_control(
             return Err(failure.into_error());
         }
     };
-    if request.kind == APP_STOP
-        && session.v2()
-        && let Some(stop) = stop
-    {
+    if request.kind == APP_STOP {
         *stop = Some(request.request_id);
         return Ok(ExecControl::Cancel);
     }
