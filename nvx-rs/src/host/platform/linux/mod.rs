@@ -19,7 +19,7 @@ pub(crate) use self::endpoint::{
 };
 #[cfg(feature = "cli")]
 pub(crate) use self::endpoint::{
-    endpoint_server_pid_until, interrupt_transfers, transport_from_handle,
+    connect_child_endpoint, endpoint_server_pid_until, interrupt_transfers, transport_from_handle,
 };
 pub use self::identity::file_identity;
 pub(crate) use self::identity::{
