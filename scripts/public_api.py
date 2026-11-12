@@ -12,14 +12,13 @@ API. A pull request that changes the public API updates the snapshots:
 Without `--update`, the script prints how the API differs from each snapshot,
 and fails if it does.
 
-The script builds the library's rustdoc JSON with every feature but `bundled`,
-whose build script downloads a release, for x86_64-unknown-linux-musl, the
-guests' target, and for x86_64-pc-windows-msvc, on the Rust release that
-rust-toolchain.toml pins. It first adds both targets to that release with
-rustup: rustdoc needs only a target's standard library, not its linker, so any
-host lists both platforms, and lists them alike. The JSON output is unstable,
-so the script enables it with RUSTC_BOOTSTRAP=1, and reads only the format
-version of the pinned release.
+The script builds the library's rustdoc JSON with every feature, for
+x86_64-unknown-linux-musl, the guests' target, and for x86_64-pc-windows-msvc,
+on the Rust release that rust-toolchain.toml pins. It first adds both targets
+to that release with rustup: rustdoc needs only a target's standard library,
+not its linker, so any host lists both platforms, and lists them alike. The
+JSON output is unstable, so the script enables it with RUSTC_BOOTSTRAP=1, and
+reads only the format version of the pinned release.
 
 It walks the public tree from the crate root, following re-exports, and lists
 the modules, structs, enums, unions, traits and their items, functions,
@@ -64,9 +63,8 @@ TARGETS = {
     "windows": OpenVMMBuildConstants.WINDOWS_RUST_TARGET,
 }
 
-# `default` names other features, and the build script of `bundled` downloads
-# a release.
-EXCLUDED_FEATURES = frozenset({"bundled", "default"})
+# `default` names other features.
+EXCLUDED_FEATURES = frozenset({"default"})
 
 # How rustdoc's JSON gives the attribute `#[doc(hidden)]`.
 HIDDEN = {"other": "#[doc(hidden)]"}
@@ -230,9 +228,8 @@ def api_lines(document: Any) -> list[str]:
 
 
 def feature_arguments(features: Mapping[str, object]) -> list[str]:
-    """Returns Cargo's arguments that enable every feature but `bundled`: no
-    default feature, which could enable `bundled`, and each other one by
-    name."""
+    """Returns Cargo's arguments that enable every feature: no default
+    feature, which only names others, and each other one by name."""
     return [
         "--no-default-features",
         "--features",

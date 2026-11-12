@@ -266,14 +266,13 @@ class ListingTests(unittest.TestCase):
             public_api.api_lines(crate.document(root)),
             ["mod demo", "mod demo::cli", "fn demo::cli::main"],
         )
-        # The listing documents every feature but `bundled`, which no default
-        # feature enables either.
+        # The listing documents every feature, each by name rather than
+        # through `default`.
         self.assertEqual(
             public_api.feature_arguments(
                 {
                     "default": ["host"],
                     "host": ["serde"],
-                    "bundled": ["host"],
                     "testing": [],
                     "cli": ["host"],
                     "serde": [],
