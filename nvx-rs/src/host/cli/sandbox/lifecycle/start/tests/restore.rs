@@ -35,6 +35,7 @@ use crate::protocol::{
     APP_ACTIVATE, APP_EXEC, APP_EXIT, APP_HEADER_LEN, APP_MAPS, APP_READY, APP_STDOUT, OUTER_DATA,
     OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_MAX_PAYLOAD, OUTER_READY, decode_app,
     decode_outer_header, encode_app, encode_exec_payload, encode_maps_payloads, encode_outer,
+    status,
 };
 
 /// The fake VMM and guest that the fixture's restores spawn in place of OpenVMM.
@@ -155,7 +156,7 @@ impl Fixture {
             .unwrap();
         let recipe = json!({
             "endpoint": prepared.outputs().endpoint, "ready": ready, "behavior": behavior,
-            "trace": state_dir.with_extension("trace"),
+            "trace": state_dir.with_extension("trace"), "outcome": prepared.outputs().outcome,
         });
         fs::write(
             state_dir.with_extension("json"),
@@ -539,6 +540,47 @@ fn a_failed_restore_ends_its_vm_and_its_launch_before_its_snapshot_goes_free() {
             .unwrap();
         assert!(locked.journal().unwrap().is_none(), "{behavior}");
         assert!(locked.runtime().unwrap().is_none(), "{behavior}");
+        assert!(fixture.snapshot_free(), "{behavior}");
+    }
+}
+
+/// A restore whose guest fails before it is ready reports what the restore's evidence attributes
+/// the failure to: the request, for a guest that ends its VM with the status of a root that does
+/// not assemble, after the VM's outcome, the host, for an outcome report that cannot be read,
+/// after the report's error, and nothing that it establishes for a malformed Ready.
+#[test]
+fn a_restore_that_fails_before_its_guest_is_ready_reports_its_attribution() {
+    for (behavior, code, prefix, attribution) in [
+        (
+            "unusable-root",
+            ErrorCode::Exited,
+            "OpenVMM exited during startup: guest-exit status 54; restore failed during ",
+            ": UnusableRoot, attributed to the request",
+        ),
+        (
+            "unreadable-report",
+            ErrorCode::Io,
+            "cannot parse outcome report ",
+            ": ReportUnreadable, attributed to the host",
+        ),
+        (
+            "malformed",
+            ErrorCode::Protocol,
+            "snapshot restore failed: restore failed during ",
+            ": Malformed, of unknown attribution",
+        ),
+    ] {
+        let fixture = Fixture::new(false);
+        let error = fixture
+            .start("state", fixture.restore.config.clone(), behavior, 30.0)
+            .unwrap_err();
+        assert_eq!(error.code(), Some(code), "{behavior}: {error:?}");
+        let message = error.message().unwrap_or_default();
+        assert!(
+            message.starts_with(prefix) && message.ends_with(attribution),
+            "{behavior}: {message}"
+        );
+        assert!(fixture.exited(0), "{behavior}");
         assert!(fixture.snapshot_free(), "{behavior}");
     }
 }
@@ -943,6 +985,27 @@ fn serve(stream: &mut (impl Read + Write), capability: &[u8], epoch: u64, recipe
         }
         let replies = match request.kind {
             APP_ACTIVATE if recipe["behavior"] == "malformed" => vec![(APP_READY, 0, vec![0])],
+            // The guest cannot assemble its root, and powers off with the status of the failure's
+            // class, which OpenVMM reports, and then exits with, or reports unreadably.
+            APP_ACTIVATE
+                if matches!(
+                    recipe["behavior"].as_str(),
+                    Some("unusable-root" | "unreadable-report")
+                ) =>
+            {
+                let code = status::ACTIVATION_ROOT;
+                let report = json!({
+                    "schema_version": 1,
+                    "outcome": {"operation": "managed", "category": "guest-exit", "status_code": code},
+                    "teardown": {"workers": true},
+                });
+                let report = match recipe["behavior"].as_str() {
+                    Some("unreadable-report") => "{ truncated".to_owned(),
+                    _ => report.to_string(),
+                };
+                fs::write(recipe["outcome"].as_str().unwrap(), report).unwrap();
+                std::process::exit(code.into());
+            }
             APP_ACTIVATE => {
                 let ready = ReadyActivation::of(&activation(request.payload).0);
                 vec![(APP_READY, 0, ready.encode())]

@@ -494,6 +494,16 @@ is ready never completes, and the next command of the sandbox ends its VM.
 [`run --restore-snapshot`](#run) restores a snapshot once, in a sandbox that it
 removes.
 
+A restore that fails before its guest is ready, in `snapshot restore`, a later
+`sandbox start`, or `run --restore-snapshot`, fails with the restore's evidence
+and what it attributes the failure to: the request, the host, the snapshot, the
+guest's repair, or nothing that it establishes. A guest that cannot activate
+the restore, such as one that cannot mount its scratch image as its upper, ends
+its VM with the status of the failure's class, which `nvx::protocol::status`
+defines, and the command reports the guest's exit with that evidence, such as
+`OpenVMM exited during startup: guest-exit status 54; restore failed during
+Activate: UnusableRoot, attributed to the request`.
+
 ### `download`
 
 ```text

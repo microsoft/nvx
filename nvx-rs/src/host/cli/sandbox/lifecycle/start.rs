@@ -38,7 +38,7 @@ use crate::host::config::{COMMAND_LINE_BUDGET, RootConfig, UpperConfig, VmConfig
 use crate::host::platform;
 use crate::host::process::KILL_TIMEOUT;
 use crate::host::report::Report;
-use crate::host::restore::RestoreEvidence;
+use crate::host::restore::{Attribution, RestoreError, RestoreEvidence};
 use crate::host::restore_driver::{self, Cancel, ControlRestoreError, Workload};
 use crate::host::runtime::{ArtifactIdentity, Runtime, RuntimeIdentity};
 use crate::host::sandbox::distro::DISTRO_POLICY_REVISION;
@@ -287,12 +287,14 @@ fn launch_locked(
     };
     let maps = config.mapping_table();
     let mut stopping = false;
+    // The restore driver's error of a restore that failed before its guest was ready.
+    let mut failure = None;
     let ready = starting
         .record_process(&saved.process)
         .map_err(error_with_cause)
         .and_then(|()| match (&activation, &restore) {
             (Some(record), Some(restore)) => {
-                restore_guest(&mut launched, record, restore, &maps, timeout)
+                restore_guest(&mut launched, record, restore, &maps, timeout, &mut failure)
             }
             _ => check_ready(&saved, runtime, timeout).and_then(|mut session| {
                 if maps.is_empty() {
@@ -340,9 +342,14 @@ fn launch_locked(
     lock.clear_runtime()?;
     // The VM has exited, which ends its claim of the scratch image and its use of the snapshot.
     drop((scratch, held));
-    let report = stopped.report.map_err(error_with_cause)?;
+    let report = stopped
+        .report
+        .map_err(|report| with_attribution(error_with_cause(report), failure.as_ref()))?;
     if stopped.self_exited && !stopping && !matches!(error, Exit::Interrupted) {
-        return Err(exited_during_startup(report));
+        return Err(with_attribution(
+            exited_during_startup(report),
+            failure.as_ref(),
+        ));
     }
     Err(error)
 }
@@ -361,6 +368,32 @@ fn exited_during_startup(report: Option<Report>) -> Exit {
         ErrorCode::Exited,
         format!("OpenVMM exited during startup{detail}"),
     )
+}
+
+/// Returns the error `error` of a restore that failed before its guest was ready, with the
+/// restore driver's error `restore`, if it failed, and what its evidence, such as the guest's
+/// status, attributes the failure to.
+fn with_attribution(error: Exit, restore: Option<&RestoreError>) -> Exit {
+    match (error, restore) {
+        (Exit::Error { code, message }, Some(restore)) => {
+            Exit::error(code, format!("{message}; {}", attributed(restore)))
+        }
+        (error, _) => error,
+    }
+}
+
+/// Returns the message of the restore driver's `error`, with what its evidence attributes the
+/// restore's failure to: the request, the host, the snapshot, or the guest's repair, or nothing
+/// that it establishes.
+fn attributed(error: &RestoreError) -> String {
+    let attribution = match error.attribution {
+        Attribution::Request => "attributed to the request",
+        Attribution::Host => "attributed to the host",
+        Attribution::Snapshot => "attributed to the snapshot",
+        Attribution::Repair => "attributed to the guest's repair",
+        Attribution::Unknown => "of unknown attribution",
+    };
+    format!("{error}, {attribution}")
 }
 
 /// Returns the error of a start whose distro layer or scratch image fails the check of its
@@ -406,13 +439,16 @@ fn check_ready(saved: &SavedVm, runtime: &Runtime, timeout: f64) -> Result<Sessi
 /// `restore` after the mapping table `maps`, through the blocking restore driver, within its own
 /// budgets, which `timeout` seconds and Ctrl-C cut short, then forwards the workload's output
 /// until it exits, which it must do with status 0 in those `timeout` seconds. Another status ends
-/// the start with an error, or with [`Exit::Status`] of it if `restore` forwards it.
+/// the start with an error, or with [`Exit::Status`] of it if `restore` forwards it. A restore
+/// that fails before its guest is ready fails with what its evidence attributes the failure to,
+/// and keeps the restore driver's error in `failure`.
 fn restore_guest(
     launched: &mut Launched,
     record: &ActivationRecord,
     restore: &Restore<'_>,
     maps: &[HostMap],
     timeout: f64,
+    failure: &mut Option<RestoreError>,
 ) -> Result {
     let (uid, gid) = restore.identity;
     let workload = Workload {
@@ -503,9 +539,13 @@ fn restore_guest(
             _ => ErrorCode::Protocol,
         },
     };
+    let message = match error {
+        ControlRestoreError::Machine(error) => attributed(failure.insert(error)),
+        error => error.to_string(),
+    };
     Err(Exit::error(
         code,
-        format!("snapshot restore failed: {error}"),
+        format!("snapshot restore failed: {message}"),
     ))
 }
 
