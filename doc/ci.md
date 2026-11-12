@@ -2189,10 +2189,20 @@ the commit's files in the version alone.
 - Every file is the commit's byte for byte, which rules out CRLF line endings,
   but for the rewritten version and the files that Cargo generates,
   `Cargo.toml` and `.cargo_vcs_info.json`, which must hold no CR either.
-- It holds the license and the readme.
+- It holds the license, the readme, and the snapshots of the public API, with
+  which its users check the API that it promises. The `nvx-rs` job, which
+  `Required status check` requires, checked them against the API of the run's
+  commit, and that its hidden items are one `main` per binary (see
+  [Rust crates](#rust-crates)).
 - Its files build with every feature, as a dependent's build does.
+- From the job's work directory, `$RUNNER_TEMP/nvx-crate`, outside the
+  checkout, `cargo install --locked --path` installs `nvx-ingress` from its
+  files with `--no-default-features --features guest --profile guest`, as a
+  user installs the guest tools from the published crate. The installed
+  program's test mode then reads a snapshot of the socket tables that holds no
+  socket, and must print one scan that announces no listener.
 
-The job outputs the version and the package's SHA-256. Its build runs the
+The job outputs the version and the package's SHA-256. Its builds run the
 build scripts and procedural macros of the crate's dependencies, so it holds
 no right to publish. `Publish nvx crate` builds nothing: it decides again
 whether crates.io needs the version, packs the crate again, and checks that
