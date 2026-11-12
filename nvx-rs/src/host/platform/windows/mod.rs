@@ -28,6 +28,9 @@ pub(crate) use self::endpoint::{ReadyListener, connect_endpoint};
 pub(crate) use self::endpoint::{
     endpoint_server_pid_until, interrupt_transfers, transport_from_handle,
 };
+// Only the CLI, which plans the exports of host paths and checks them again before each start,
+// and the tests, which compare the files and volumes that paths name, read file identities.
+#[cfg(any(test, feature = "cli"))]
 pub(crate) use self::identity::file_identity;
 #[cfg(feature = "cli")]
 pub(crate) use self::identity::{

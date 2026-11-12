@@ -94,6 +94,7 @@ pub(crate) fn monotonic_ns() -> io::Result<u64> {
 }
 
 /// Fails: this host cannot export host paths.
+#[cfg(any(test, feature = "cli"))]
 pub(crate) fn file_identity(_path: &Path) -> io::Result<(u64, u64)> {
     Err(unsupported())
 }

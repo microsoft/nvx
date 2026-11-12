@@ -1,18 +1,20 @@
-//! Host paths exposed to the guest through OpenVMM's aggregate virtio-fs export, as the one
-//! planner of every NVX caller plans them, for the blockless root and for the container root of a
-//! layered sandbox alike.
+//! Host paths exposed to the guest through OpenVMM's aggregate virtio-fs export, for the blockless
+//! root and for the container root of a layered sandbox alike: the [`ExportPlan`] that a caller
+//! records, checks, and lowers into OpenVMM's options and the guest's mapping table. The planner
+//! that makes a plan of host paths, with its path rules, and the checks of a plan's host objects
+//! before each start belong to NVX's CLI, private to the crate (feature `cli`).
 //!
-//! OpenVMM offers one virtio-fs device. [`plan`] attaches it as an aggregate: a synthetic,
+//! OpenVMM offers one virtio-fs device, which a plan attaches as an aggregate: a synthetic,
 //! read-only root that lists one child per exported host directory or file, named by its index,
 //! which the guest mounts at a directory that only the guest's root can enter. The guest then
 //! bind-mounts each mapped path at its target, read-only or read-write, in the order of the plan's
 //! [`Bind`]s: from the mapping table that it receives over the control channel, or from boot
 //! tokens that a caller renders from the same binds.
 //!
-//! An [`ExportRequest`] names the mapped host paths, each read-only or read-write at its guest
-//! target; the host paths that OpenVMM hides inside them, and the paths inside those that stay
-//! visible; the paths to which the writes of a read-write directory are narrowed; the host
-//! identity of the file operations; and the guest targets that the guest's root keeps for itself.
+//! A plan names the mapped host paths, each read-only or read-write at its guest target; the host
+//! paths that OpenVMM hides inside them, and the paths inside those that stay visible; the paths to
+//! which the writes of a read-write directory are narrowed; and the host identity of the file
+//! operations.
 //!
 //! - A caller gives each target, such as the guest path that MXC's convention for Linux guests
 //!   derives from a resolved host path ([`fn@guest_path`]): a Windows path `C:\work\src` appears
@@ -31,7 +33,7 @@
 //! denied paths, except for the allowed paths inside them.
 //!
 //! The plan records the identities of the mapped and denied paths that a workload could move,
-//! those inside a writable part, and [`ExportPlan::verify`] checks them again before each start.
+//! those inside a writable part, and the CLI checks them again before each start.
 //! A policy that would need more children than OpenVMM offers is refused rather than served
 //! through the directories of its files, which would grant more than the files.
 
@@ -41,22 +43,30 @@ mod limits;
 mod policy;
 mod verify;
 
+#[cfg(feature = "cli")]
 use std::fs;
 use std::path::{Component, Path, PathBuf, Prefix};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "cli")]
 use crate::error::{Error, Result};
+#[cfg(feature = "cli")]
 use crate::protocol::MAX_HOST_MAPPINGS;
 use crate::protocol::export::EXPORT_DIRECTORY;
 use crate::protocol::share::{RESERVED_EXACT_MOUNT_TARGETS, RESERVED_MOUNT_TARGETS};
 
+#[cfg(feature = "cli")]
+use self::guest_path::depth;
 pub use self::guest_path::guest_path;
+use self::guest_path::guest_source;
 pub(crate) use self::guest_path::within;
-use self::guest_path::{depth, guest_source};
 pub(crate) use self::host_path::{canonicalize, is_reparse_point};
+#[cfg(feature = "cli")]
 use self::host_path::{identity, relative_text};
+#[cfg(feature = "cli")]
 use self::limits::{check_policy_paths, check_root};
+#[cfg(feature = "cli")]
 use self::policy::{
     Writable, allowed_paths, canonicals, check_allowed_paths, check_read_only, check_write_paths,
     denied_paths, distinct_roots, nearest_rule, needed_denied_paths, writable_part, write_paths,
@@ -89,6 +99,7 @@ pub const RESERVED_TARGETS: [&str; 13] = [
 ];
 
 /// Why a request for the caller owner fails on a Windows host.
+#[cfg(feature = "cli")]
 const CALLER_OWNER_ON_WINDOWS: &str = "the caller owner requires a Linux host; Windows has no \
                                        per-request POSIX identity for OpenVMM to switch to";
 
@@ -160,7 +171,7 @@ impl Owner {
     }
 }
 
-/// The host paths of one sandbox, as [`plan`] exports them: the children of OpenVMM's aggregate
+/// The host paths of one sandbox, as OpenVMM's aggregate export exports them: the children of the
 /// export, the bind mounts of the guest, and the host identity of the file operations.
 ///
 /// Callers record the plan, so its serde form is part of their state: a caller versions its
@@ -238,58 +249,62 @@ impl Bind {
 }
 
 /// Where the guest sees a mapped host path.
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Target<'a> {
+pub(crate) enum Target<'a> {
     /// At this absolute guest path: a path other than the root, of at most 4,095 bytes, without
     /// NUL characters or empty, `.`, or `..` components.
     Guest(&'a str),
 }
 
 /// A host directory or regular file that the guest reads, or reads and writes, at a target.
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, Copy)]
-pub struct Mapping<'a> {
+pub(crate) struct Mapping<'a> {
     /// How messages name the list or option that requested the mapping, such as
     /// `filesystem.readonlyPaths`.
-    pub name: &'a str,
+    pub(crate) name: &'a str,
     /// The host path.
-    pub path: &'a Path,
+    pub(crate) path: &'a Path,
     /// Where the guest sees it.
-    pub target: Target<'a>,
+    pub(crate) target: Target<'a>,
     /// Whether the guest may only read it.
-    pub read_only: bool,
+    pub(crate) read_only: bool,
 }
 
 /// A list of host paths, and the name by which messages refer to its entries, such as
 /// `readOnly`.
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, Copy)]
-pub struct PathList<'a> {
+pub(crate) struct PathList<'a> {
     /// The name of the list in messages.
-    pub name: &'a str,
+    pub(crate) name: &'a str,
     /// The host paths.
-    pub paths: &'a [PathBuf],
+    pub(crate) paths: &'a [PathBuf],
 }
 
 /// The host paths that a sandbox maps, those that it hides inside them and shows again inside
 /// those, the paths to which it narrows writes, the host identity of the file operations, and the
 /// guest targets that the guest's root keeps for itself.
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, Copy)]
-pub struct ExportRequest<'a> {
+pub(crate) struct ExportRequest<'a> {
     /// The mapped host paths, each at its target with its access.
-    pub mappings: &'a [Mapping<'a>],
+    pub(crate) mappings: &'a [Mapping<'a>],
     /// Host paths hidden inside the mapped paths. A mapped directory may be denied itself when
     /// allowed paths inside it stay visible.
-    pub denied: PathList<'a>,
+    pub(crate) denied: PathList<'a>,
     /// Host paths inside denied paths that stay visible, with the directories on the way to
     /// them listing only them.
-    pub allowed: PathList<'a>,
+    pub(crate) allowed: PathList<'a>,
     /// Host paths to which the guest's writes are narrowed inside the read-write directory that
     /// they lie in, which must be mapped whole: the guest may then write only them and the
     /// read-write mappings inside that directory.
-    pub write: PathList<'a>,
+    pub(crate) write: PathList<'a>,
     /// The host identity of the file operations.
-    pub owner: Owner,
+    pub(crate) owner: Owner,
     /// The guest targets that the guest's root keeps for itself.
-    pub reserved: ReservedTargets<'a>,
+    pub(crate) reserved: ReservedTargets<'a>,
 }
 
 /// Plans the export of `request`, or returns `None` if it maps nothing.
@@ -318,7 +333,8 @@ pub struct ExportRequest<'a> {
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when the request breaks
 /// these rules or exceeds a limit of OpenVMM or the guest agent.
-pub fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
+#[cfg(feature = "cli")]
+pub(crate) fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
     let unsupported = |message: String| Err(Error::unsupported(message));
     if request.owner == Owner::Caller && cfg!(windows) {
         return unsupported(CALLER_OWNER_ON_WINDOWS.to_owned());
@@ -512,6 +528,7 @@ pub fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
 
 /// Resolves one requested mapping: its host path must exist as a directory or regular file that
 /// is not a whole volume, and its target must be a guest path that `reserved` leaves free.
+#[cfg(feature = "cli")]
 fn resolve_mapping<'a>(mapping: &Mapping<'a>, reserved: ReservedTargets<'_>) -> Result<Mapped<'a>> {
     let unsupported = |message: String| Err(Error::unsupported(message));
     let Mapping {
@@ -596,6 +613,7 @@ fn target_problem(target: &str) -> Option<&'static str> {
 /// Refuses mappings whose targets collide: two objects at one target, or a target inside another
 /// mapping's that does not show the very object that the other mapping shows there, which it
 /// would hide.
+#[cfg(feature = "cli")]
 fn check_targets(mapped: &[Mapped<'_>]) -> Result<()> {
     for (index, entry) in mapped.iter().enumerate() {
         for other in &mapped[..index] {
@@ -639,6 +657,7 @@ fn check_targets(mapped: &[Mapped<'_>]) -> Result<()> {
 /// host path from `outer`'s object to `inner`'s, as a plan's bind sources spell it. A Windows host
 /// reads a backslash in a name as a separator, and a name with a root or a drive as another path,
 /// so such a guest name never matches.
+#[cfg(feature = "cli")]
 fn shows(outer: &Mapped<'_>, inner: &Mapped<'_>) -> bool {
     let Some(rest) = inner
         .target
@@ -654,6 +673,7 @@ fn shows(outer: &Mapped<'_>, inner: &Mapped<'_>) -> bool {
 /// Refuses an exported directory or file that belongs to UID 0 or GID 0, to which the caller
 /// owner would squash guest root, and fails as `uninspected` returns for one whose owner cannot be
 /// read, with its path and the failure.
+#[cfg(feature = "cli")]
 fn check_caller_roots(
     children: &[ExportChild],
     uninspected: fn(&Path, std::io::Error) -> Error,
@@ -679,12 +699,14 @@ fn check_caller_roots(
 
 /// Returns the failure of a plan that cannot inspect `path`, with `error`, which refuses the
 /// request.
+#[cfg(feature = "cli")]
 fn unsupported_inspection(path: &Path, error: std::io::Error) -> Error {
     Error::unsupported(format!("cannot inspect {}", path.display())).with_source(error)
 }
 
 /// Returns the failure of [`ExportPlan::verify`] for `path`, which no longer names the host object
 /// that the plan found there.
+#[cfg(feature = "cli")]
 fn changed_object(path: &Path) -> Error {
     Error::other(format!(
         "{} no longer names the host object it named at provision; deprovision the sandbox and \
@@ -698,6 +720,7 @@ fn changed_object(path: &Path) -> Error {
 /// object went, a component of which is no longer a directory or is a link that [`loops`], or
 /// that the host may no longer search or open, names it no longer, [`changed_object`], and any
 /// other failure is the host's own, which shows nothing of the object.
+#[cfg(feature = "cli")]
 fn uninspected(path: &Path, error: std::io::Error) -> Error {
     if matches!(
         error.kind(),
@@ -715,6 +738,7 @@ fn uninspected(path: &Path, error: std::io::Error) -> Error {
 /// Returns whether `error` is the host's refusal to resolve a path whose links loop, or nest
 /// deeper than the host follows them, as a link that names itself does: the failure that the
 /// standard library's unstable `ErrorKind::FilesystemLoop` names.
+#[cfg(feature = "cli")]
 fn loops(error: &std::io::Error) -> bool {
     #[cfg(unix)]
     let code = Some(nix::errno::Errno::ELOOP as i32);
@@ -779,6 +803,7 @@ fn outermost(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 /// Canonicalized, validated form of one requested host mapping.
+#[cfg(feature = "cli")]
 struct Mapped<'a> {
     /// How messages name the list or option that requested it.
     name: &'a str,

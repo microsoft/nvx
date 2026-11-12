@@ -1,10 +1,13 @@
+#[cfg(feature = "cli")]
 use super::host_path::display_path;
 use super::*;
 use crate::ErrorKind;
+#[cfg(feature = "cli")]
 use crate::host::platform;
 
 /// The lists of a filesystem policy as callers hold them, under the names that messages give
 /// them.
+#[cfg(feature = "cli")]
 #[derive(Debug, Default)]
 struct FilesystemPolicy {
     readonly_paths: Vec<PathBuf>,
@@ -14,6 +17,7 @@ struct FilesystemPolicy {
 
 /// Plans `policy` into the blockless root, each path at the guest path at which MXC's convention
 /// for Linux guests places it, [`convention`].
+#[cfg(feature = "cli")]
 fn plan(policy: &FilesystemPolicy) -> Result<Option<ExportPlan>> {
     let entries: Vec<(&str, &Path, String, bool)> = [
         ("filesystem.readonlyPaths", &policy.readonly_paths, true),
@@ -48,6 +52,7 @@ fn plan(policy: &FilesystemPolicy) -> Result<Option<ExportPlan>> {
 /// [`guest_path`] derives from the resolved host path, so that every spelling of one object
 /// (links, letter case, or short names) takes one target. A path that does not resolve takes an
 /// empty target, which the planner never reads, since it refuses the path first.
+#[cfg(feature = "cli")]
 fn convention(path: &Path) -> String {
     canonicalize(path)
         .ok()
@@ -57,6 +62,7 @@ fn convention(path: &Path) -> String {
 
 /// Returns the request that maps `mappings` into a root that reserves `reserved`, as the VMM,
 /// without denied, allowed, or write paths.
+#[cfg(feature = "cli")]
 fn plain_request<'a>(
     mappings: &'a [Mapping<'a>],
     reserved: ReservedTargets<'a>,
@@ -75,6 +81,7 @@ fn plain_request<'a>(
     }
 }
 
+#[cfg(feature = "cli")]
 fn root() -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
     for name in [
@@ -93,10 +100,12 @@ fn root() -> tempfile::TempDir {
     directory
 }
 
+#[cfg(feature = "cli")]
 fn canonical(path: &Path) -> PathBuf {
     canonicalize(path).unwrap()
 }
 
+#[cfg(feature = "cli")]
 fn sources(mapping: &ExportPlan) -> Vec<(String, bool)> {
     mapping
         .binds
@@ -105,6 +114,7 @@ fn sources(mapping: &ExportPlan) -> Vec<(String, bool)> {
         .collect()
 }
 
+#[cfg(feature = "cli")]
 fn option_values(arguments: &[String], option: &str) -> Vec<String> {
     arguments
         .windows(2)
@@ -163,6 +173,7 @@ fn guest_paths_are_within_themselves_and_their_ancestors() {
 
 /// The layout of microsoft/nvx#281: directories that share no directory but the volume's
 /// root, each with its own access.
+#[cfg(feature = "cli")]
 #[test]
 fn unrelated_directories_are_exported_with_their_own_access() {
     let directory = root();
@@ -228,6 +239,7 @@ fn unrelated_directories_are_exported_with_their_own_access() {
 
 /// The layout of microsoft/nvx#283: directories whose names hold commas, each with a denied
 /// subdirectory.
+#[cfg(feature = "cli")]
 #[test]
 fn host_paths_may_contain_commas() {
     let directory = root();
@@ -297,6 +309,7 @@ fn host_paths_may_contain_commas() {
     assert!(table[1].0.ends_with("/reports/2026, final"), "{table:?}");
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn mapped_files_are_exported_alone() {
     let directory = root();
@@ -398,6 +411,7 @@ fn mapped_files_are_exported_alone() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn policies_beyond_the_children_of_an_aggregate_are_refused() {
     let directory = root();
@@ -455,6 +469,7 @@ fn policies_beyond_the_children_of_an_aggregate_are_refused() {
     assert_eq!(mapping.children.len(), 2);
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn nested_mappings_merge_into_the_outermost_directory() {
     let directory = root();
@@ -514,6 +529,7 @@ fn nested_mappings_merge_into_the_outermost_directory() {
 /// Only the guest's bind mount could keep a read-only path inside a read-write directory
 /// read-only, so such a path is refused on every host, under any of its names, while the
 /// inverse nesting and denied paths inside a read-write directory stay valid.
+#[cfg(feature = "cli")]
 #[test]
 fn read_only_paths_inside_read_write_directories_are_refused() {
     let directory = root();
@@ -599,6 +615,7 @@ fn read_only_paths_inside_read_write_directories_are_refused() {
     assert_eq!(plan(&denied).unwrap().unwrap().children[0].denied.len(), 1);
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn denied_paths_belong_to_the_directory_that_contains_them() {
     let directory = root();
@@ -652,6 +669,7 @@ fn outermost_paths_are_sorted_once_without_the_paths_inside_others() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn unenforceable_policies_are_rejected() {
     let directory = root();
@@ -721,6 +739,7 @@ fn whole_volumes_are_refused() {
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn spellings_of_one_object_share_its_guest_path() {
     let directory = root();
@@ -753,7 +772,7 @@ fn spellings_of_one_object_share_its_guest_path() {
     );
 }
 
-#[cfg(windows)]
+#[cfg(all(feature = "cli", windows))]
 #[test]
 fn paths_that_only_a_verbatim_path_names_are_refused() {
     let directory = root();
@@ -797,6 +816,7 @@ fn paths_that_only_a_verbatim_path_names_are_refused() {
     assert_eq!(exported.children[0].root, canonical(&base.join("work")));
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn policy_paths_follow_openvmm_rules() {
     let directory = root();
@@ -843,6 +863,7 @@ fn policy_paths_follow_openvmm_rules() {
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn openvmm_limits_are_checked_per_directory() {
     let directory = root();
@@ -876,6 +897,7 @@ fn openvmm_limits_are_checked_per_directory() {
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn swapped_objects_fail_verification() {
     let directory = root();
@@ -938,6 +960,7 @@ fn swapped_objects_fail_verification() {
 
 /// A path that no longer reaches its object names it no longer, but any other failure to
 /// inspect an object shows nothing of it, so it is the host's own, with its cause.
+#[cfg(feature = "cli")]
 #[test]
 fn objects_that_cannot_be_inspected_fail_verification_by_what_the_failure_shows() {
     let directory = root();
@@ -1033,6 +1056,7 @@ fn objects_that_cannot_be_inspected_fail_verification_by_what_the_failure_shows(
 
 /// A recorded plan with a read-only bind in a part of a child that the guest may write, which
 /// only the guest's bind mount would keep read-only, is refused before a guest runs.
+#[cfg(feature = "cli")]
 #[test]
 fn read_only_binds_that_the_host_cannot_enforce_fail_verification() {
     let directory = root();
@@ -1078,6 +1102,7 @@ fn read_only_binds_that_the_host_cannot_enforce_fail_verification() {
 /// that `NVX_TEST_SECOND_VOLUME` names, or the runner's temporary directory
 /// on GitHub's Windows runners. Tests create their files below it. Linux's `/dev/shm` does
 /// not qualify, because it lies in the guest's reserved `/dev`.
+#[cfg(feature = "cli")]
 fn second_volume() -> Option<PathBuf> {
     let candidate = std::env::var_os("NVX_TEST_SECOND_VOLUME")
         .or_else(|| std::env::var_os("RUNNER_TEMP"))
@@ -1088,6 +1113,7 @@ fn second_volume() -> Option<PathBuf> {
     (candidate.is_dir() && volume(&candidate) != volume(&temporary)).then_some(candidate)
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn directories_on_other_volumes_are_exported_too() {
     let Some(volume) = second_volume() else {
@@ -1112,6 +1138,7 @@ fn directories_on_other_volumes_are_exported_too() {
     assert!(modes.contains(&true) && modes.contains(&false));
 }
 /// Returns a mapping of `path` at the guest path `target`.
+#[cfg(feature = "cli")]
 fn at<'a>(path: &'a Path, target: &'a str, read_only: bool) -> Mapping<'a> {
     Mapping {
         name: "mappings",
@@ -1121,6 +1148,7 @@ fn at<'a>(path: &'a Path, target: &'a str, read_only: bool) -> Mapping<'a> {
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn explicit_targets_place_mappings_at_any_free_guest_path() {
     let directory = root();
@@ -1325,6 +1353,7 @@ fn reserved_targets_depend_on_the_root() {
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn policy_paths_hide_show_and_narrow_writes() {
     let directory = root();
@@ -1488,6 +1517,7 @@ fn policy_paths_hide_show_and_narrow_writes() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn narrowed_writes_pin_only_what_lies_in_writable_paths() {
     let directory = root();
@@ -1565,6 +1595,7 @@ fn narrowed_writes_pin_only_what_lies_in_writable_paths() {
     assert_eq!(mapping.verify().unwrap_err().kind(), ErrorKind::Other);
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn the_caller_owner_reaches_openvmm_on_linux_hosts() {
     let directory = root();
@@ -1624,6 +1655,7 @@ fn the_caller_owner_reaches_openvmm_on_linux_hosts() {
     assert!(serde_json::to_value(&vmm).unwrap().get("owner").is_none());
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn read_write_mappings_to_which_writes_are_narrowed_stay_visible() {
     let directory = root();
@@ -1685,6 +1717,7 @@ fn read_write_mappings_to_which_writes_are_narrowed_stay_visible() {
     assert_eq!(child.allowed, [canonical(&private).join("public")]);
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn denied_mapped_directories_inside_denied_ones_show_their_allowed_paths() {
     let directory = root();
@@ -1783,7 +1816,7 @@ fn recorded_plans_hold_no_more_policy_than_one_aggregate_accepts() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "cli", target_os = "linux"))]
 #[test]
 fn mapped_paths_resolve_to_utf8_paths() {
     use std::ffi::OsStr;
@@ -1812,10 +1845,12 @@ fn mapped_paths_resolve_to_utf8_paths() {
 }
 
 /// Plans the export of `mappings` into the blockless root.
+#[cfg(feature = "cli")]
 fn plan_blockless(mappings: &[Mapping<'_>]) -> Result<Option<ExportPlan>> {
     super::plan(&plain_request(mappings, ReservedTargets::BLOCKLESS_ROOT))
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn an_export_refuses_guest_targets_that_are_not_canonical_or_that_a_root_reserves() {
     let directory = tempfile::tempdir().unwrap();
@@ -1851,6 +1886,7 @@ fn an_export_refuses_guest_targets_that_are_not_canonical_or_that_a_root_reserve
     plan.verify().unwrap();
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn an_export_refuses_a_read_only_path_inside_a_writable_directory() {
     let directory = tempfile::tempdir().unwrap();
@@ -1876,7 +1912,7 @@ fn an_export_refuses_a_read_only_path_inside_a_writable_directory() {
     );
 }
 
-#[cfg(windows)]
+#[cfg(all(feature = "cli", windows))]
 #[test]
 fn the_caller_owner_is_refused_on_windows() {
     let request = ExportRequest {
@@ -1889,6 +1925,7 @@ fn the_caller_owner_is_refused_on_windows() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn an_exported_object_that_a_workload_could_move_is_checked_again_before_a_start() {
     let directory = tempfile::tempdir().unwrap();

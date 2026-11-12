@@ -2,11 +2,16 @@
 
 use std::path::{Path, PathBuf};
 
+use super::ExportChild;
+#[cfg(feature = "cli")]
 use super::host_path::{canonicalize, canonicalize_lenient, identity};
-use super::{ExportChild, FileIdentity, Mapped, PathList, outermost};
+#[cfg(feature = "cli")]
+use super::{FileIdentity, Mapped, PathList, outermost};
+#[cfg(feature = "cli")]
 use crate::error::{Error, Result};
 
 /// A path of an access policy, resolved.
+#[cfg(feature = "cli")]
 pub(super) struct PolicyPath {
     /// Host path as the caller supplied it, for diagnostics.
     given: PathBuf,
@@ -15,11 +20,13 @@ pub(super) struct PolicyPath {
 }
 
 /// Returns the resolved paths of `paths`.
+#[cfg(feature = "cli")]
 pub(super) fn canonicals(paths: &[PolicyPath]) -> Vec<PathBuf> {
     paths.iter().map(|path| path.canonical.clone()).collect()
 }
 
 /// Resolves the path of the list `field`, which must exist.
+#[cfg(feature = "cli")]
 fn resolve_policy_path(field: &str, path: &Path) -> Result<PathBuf> {
     canonicalize(path).map_err(|error| {
         Error::unsupported(format!(
@@ -32,6 +39,7 @@ fn resolve_policy_path(field: &str, path: &Path) -> Result<PathBuf> {
 
 /// Resolves the write paths of `list`: each must lie inside a read-write directory that a child
 /// of `roots` exports whole, other than that directory itself.
+#[cfg(feature = "cli")]
 pub(super) fn write_paths(
     list: PathList<'_>,
     mapped: &[Mapped<'_>],
@@ -71,6 +79,7 @@ pub(super) fn write_paths(
 /// of its paths, but cannot keep a path inside them read-only. Only the guest's bind mount would
 /// then protect the path, and guest root can bypass it: through the export, or on a Windows host,
 /// which opens files case-insensitively, through another spelling of a file's name.
+#[cfg(feature = "cli")]
 pub(super) fn check_read_only(
     mapped: &[Mapped<'_>],
     write: &[PolicyPath],
@@ -135,6 +144,7 @@ pub(super) fn check_read_only(
 
 /// Refuses roots that name one directory or file: OpenVMM refuses one object exported twice,
 /// which bind mounts and hard links make possible.
+#[cfg(feature = "cli")]
 pub(super) fn distinct_roots(roots: &[PathBuf]) -> Result<()> {
     let mut identities: Vec<(FileIdentity, &Path)> = Vec::with_capacity(roots.len());
     for root in roots {
@@ -153,6 +163,7 @@ pub(super) fn distinct_roots(roots: &[PathBuf]) -> Result<()> {
 
 /// Resolves the allowed paths of `list`, which must exist inside a child of `roots`, below its
 /// root.
+#[cfg(feature = "cli")]
 pub(super) fn allowed_paths(list: PathList<'_>, roots: &[PathBuf]) -> Result<Vec<PolicyPath>> {
     let field = list.name;
     let mut paths: Vec<PolicyPath> = Vec::with_capacity(list.paths.len());
@@ -182,6 +193,7 @@ pub(super) fn allowed_paths(list: PathList<'_>, roots: &[PathBuf]) -> Result<Vec
 
 /// Resolves the denied paths of `list` that exist, and refuses one that hides a mapped path,
 /// which `allowed` paths do not show again, or one that does not exist inside a mapped path.
+#[cfg(feature = "cli")]
 pub(super) fn denied_paths(
     list: PathList<'_>,
     mapped: &[Mapped<'_>],
@@ -255,6 +267,7 @@ pub(super) fn denied_paths(
 
 /// Refuses an allowed path that is also denied, or whose nearest enclosing policy path is not a
 /// denied one, which OpenVMM refuses.
+#[cfg(feature = "cli")]
 pub(super) fn check_allowed_paths(
     allowed_name: &str,
     denied_name: &str,
@@ -291,6 +304,7 @@ pub(super) fn check_allowed_paths(
 }
 
 /// Refuses a write path that a denied path hides, which OpenVMM refuses.
+#[cfg(feature = "cli")]
 pub(super) fn check_write_paths(
     write_name: &str,
     denied_name: &str,
@@ -318,6 +332,7 @@ pub(super) fn check_write_paths(
 ///
 /// It takes one child's paths alone: a denied path outside the child, such as one that contains a
 /// denied root, hides none of the child for OpenVMM, which receives each child's policy alone.
+#[cfg(feature = "cli")]
 pub(super) fn needed_denied_paths(denied: &[PathBuf], allowed: &[PathBuf]) -> Vec<PathBuf> {
     let mut needed: Vec<PathBuf> = denied
         .iter()
@@ -454,6 +469,7 @@ impl Writable {
 /// Returns the writable part of the child at `root`: its read-write mappings, or, when one of them
 /// is the whole child, all of it, unless write paths narrow its writes to them and the read-write
 /// mappings inside it.
+#[cfg(feature = "cli")]
 pub(super) fn writable_part(root: &Path, mapped: &[Mapped<'_>], write: &[PolicyPath]) -> Writable {
     let read_write: Vec<PathBuf> = mapped
         .iter()
