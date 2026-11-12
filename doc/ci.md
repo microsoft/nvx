@@ -1833,21 +1833,8 @@ revision, in a run of either workflow whose head is the revision in
 All six x86 requirements remain, and the standalone command still defaults
 to x86-only coverage. Both ISAs use the same latest-attempt assessment and
 missing/pending/failure rules; a skipped ARM job is not a pass. This extends
-coverage, not trust, except for the following explicitly authorized trial.
-**TEMPORARY:** the isolated Phase 3 trial admits only upstream-hosted run
-`43109699910` of microsoft/openvmm#5045, while that PR is open/unmerged with
-head `38016f6637f0c61fb55c9ee31033ceec428e346c` in
-`ahuja-gautam/openvmm:openvmm-arm64-microvm-dev-20261111`, targeting
-`microsoft/openvmm:feature/microvm/dev`. Its event must be `pull_request` and
-its workflow `.github/workflows/openvmm-pr.yaml`, whose file at that exact
-pin must have the audited Git blob `2cabb910cd6d8c974b809a30870502f69ac68e83`
-(421776 bytes), identical to the workflow reviewed at upstream
-`174da3a0d236b4b01182a8d73a47598e4fcb1eca`. No moving base SHA is trusted.
-Missing, malformed or mismatched proof fails closed. All selected latest-job
-requirements remain mandatory; failed, skipped or missing jobs are not waived,
-and no other fork/run/PR/revision is admitted. The coordinator will direct a
-separate revert after the trial, not while its run is active. The ordinary
-trusted-upstream path and default six-job x86 selection are unchanged.
+coverage, not trust: the existing fork-headed run rejection remains intact,
+including for the selected PR until an exception is explicitly approved.
 A pull request's run tests GitHub's merge of the pull
 request into the branch, which holds the tree of the head while the head
 descends from the branch, as landing it requires. The job reads the pin from
