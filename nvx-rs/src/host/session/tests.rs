@@ -9,6 +9,9 @@ use crate::protocol::{
     OUTER_WAIT, WorkloadEnvironment, decode_app, decode_outer_header, encode_app, encode_outer,
 };
 
+#[cfg(any(target_os = "linux", windows))]
+mod managed_lifecycle;
+
 const INSTANCE: [u8; 16] = [7; 16];
 
 #[test]

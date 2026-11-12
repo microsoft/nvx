@@ -740,8 +740,9 @@ both through the
 [`package-release`](../.github/actions/package-release/action.yml) action,
 the provenance into `build/`, so that each package ships the `nvx-rs` of its
 operating system. The `managed-lifecycle` and `vm-lifecycle` scenarios also
-build and run the ignored `nvx-rs` tests `tests/managed_lifecycle.rs` and
-`tests/vm_lifecycle.rs` with Cargo on the runner.
+build and run the ignored `nvx-rs` tests
+`src/host/session/tests/managed_lifecycle.rs`, a unit test of the library with
+the `cli` feature, and `tests/vm_lifecycle.rs` with Cargo on the runner.
 
 Once the required artifacts are
 ready, benchmarks run in parallel with the NVX test layer, each on its backend's

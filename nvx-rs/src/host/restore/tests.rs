@@ -1,6 +1,7 @@
 #![cfg(any(target_os = "linux", windows))]
 #![cfg_attr(windows, allow(unsafe_code))]
 
+#[cfg(feature = "cli")]
 mod live_init;
 
 use std::io::{BufRead, BufReader, Write};

@@ -1457,8 +1457,13 @@ def run_workload_identity(
 
 
 # The ignored nvx-rs test that drives the managed lifecycle of a guest whose
-# init hands the boot to the managed agent: nvx-rs/tests/managed_lifecycle.rs.
-MANAGED_LIFECYCLE_TEST = "managed_lifecycle"
+# init hands the boot to the managed agent: a unit test of the host's control
+# session, which is private to nvx and which the cli feature builds, in
+# nvx-rs/src/host/session/tests/managed_lifecycle.rs.
+MANAGED_LIFECYCLE_TEST = (
+    "host::session::tests::managed_lifecycle::"
+    "a_managed_guest_runs_request_scoped_workloads_until_it_stops"
+)
 
 
 def ignored_nvx_rs_test_command(cargo: str, test: str) -> list[str]:
@@ -1479,8 +1484,23 @@ def ignored_nvx_rs_test_command(cargo: str, test: str) -> list[str]:
 
 
 def managed_lifecycle_test_command(cargo: str) -> list[str]:
-    """Return the Cargo command that runs MANAGED_LIFECYCLE_TEST."""
-    return ignored_nvx_rs_test_command(cargo, MANAGED_LIFECYCLE_TEST)
+    """Return the Cargo command that runs MANAGED_LIFECYCLE_TEST, an ignored
+    unit test of nvx-rs's library, with the cli feature."""
+    return [
+        cargo,
+        "test",
+        "--manifest-path",
+        os.fspath(nvx_rs.DIRECTORY / "Cargo.toml"),
+        "--locked",
+        "--features",
+        "cli",
+        "--lib",
+        "--",
+        "--ignored",
+        "--nocapture",
+        "--exact",
+        MANAGED_LIFECYCLE_TEST,
+    ]
 
 
 def run_managed_lifecycle(

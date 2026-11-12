@@ -18,7 +18,7 @@ use crate::{Error, ErrorKind};
 
 /// Failure of a control session.
 #[derive(Debug)]
-pub enum SessionError {
+pub(crate) enum SessionError {
     /// The deadline passed.
     TimedOut,
     /// The OpenVMM process exited.
@@ -74,7 +74,7 @@ impl From<io::Error> for SessionError {
 
 /// Connects to the control endpoint of OpenVMM process `pid`, retrying until `deadline` while
 /// the endpoint is not yet available and the process is still alive.
-pub fn connect(
+pub(crate) fn connect(
     endpoint: &str,
     pid: u32,
     start_time: u64,
@@ -114,7 +114,7 @@ fn connect_failure(error: Error) -> SessionError {
 
 /// Event observed while an execution runs.
 #[derive(Debug, PartialEq, Eq)]
-pub enum ExecEvent {
+pub(crate) enum ExecEvent {
     /// A chunk of the workload's standard output.
     Stdout(Vec<u8>),
     /// A chunk of the workload's standard error.
@@ -143,7 +143,7 @@ pub enum ExecEvent {
 /// loses nothing and callers can poll with short deadlines. A failure that leaves the stream
 /// unusable, such as a reset or a record that the protocol does not allow, ends the session, and
 /// later calls fail.
-pub struct ControlSession {
+pub(crate) struct ControlSession {
     /// The host's NVXS connection to OpenVMM's control endpoint.
     pub(crate) connection: HostConnection,
 }
@@ -151,7 +151,7 @@ pub struct ControlSession {
 impl ControlSession {
     /// Authenticates with the capability OpenVMM received at launch, and waits until `deadline`
     /// while OpenVMM's broker waits for the guest to acknowledge the session.
-    pub fn attach(
+    pub(crate) fn attach(
         transport: Box<dyn Transport>,
         capability: &[u8; CAPABILITY_LEN],
         deadline: Instant,
@@ -162,15 +162,18 @@ impl ControlSession {
     }
 
     /// Waits until the guest agent acknowledges readiness.
-    pub fn ping(&mut self, deadline: Instant) -> Result<(), SessionError> {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "SL4.4c's host paths ping the guest through the session"
+        )
+    )]
+    pub(crate) fn ping(&mut self, deadline: Instant) -> Result<(), SessionError> {
         self.acknowledged(APP_PING, &[], APP_READY, "readiness", deadline)
     }
 
     /// Asks nvx-init to capture the VM, killing its executions first when requested.
-    #[cfg_attr(
-        not(any(test, feature = "cli")),
-        expect(dead_code, reason = "NVX's capture command requires the cli feature")
-    )]
     pub(crate) fn capture(
         &mut self,
         kill_executions: bool,
@@ -187,7 +190,6 @@ impl ControlSession {
 
     /// Sends nvx-init's activate message, whose `payload` carries a restore's activation record
     /// and workload identity, and returns the activation that the guest's Ready reports.
-    #[cfg(feature = "cli")]
     pub(crate) fn activate(
         &mut self,
         payload: &[u8],
@@ -211,7 +213,14 @@ impl ControlSession {
     ///
     /// An agent that predates the request refuses it as an unsupported operation, which means
     /// that the image provides none of them.
-    pub fn features(&mut self, deadline: Instant) -> Result<GuestFeatures, SessionError> {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no host path sends FEATURES here, and SL4.4d deletes it"
+        )
+    )]
+    pub(crate) fn features(&mut self, deadline: Instant) -> Result<GuestFeatures, SessionError> {
         let request_id = request_id()?;
         self.send_app(APP_FEATURES, request_id, &[], Some(deadline))?;
         let (kind, status, payload) = self.read_reply(request_id, Some(deadline))?;
@@ -226,7 +235,7 @@ impl ControlSession {
 
     /// Hands the guest agent the host mapping table, in as many requests as it takes, and waits
     /// until it has mounted every entry.
-    pub fn map_host_paths(
+    pub(crate) fn map_host_paths(
         &mut self,
         maps: &[HostMap],
         deadline: Instant,
@@ -261,7 +270,14 @@ impl ControlSession {
     }
 
     /// Starts a workload and returns the request ID that identifies its events.
-    pub fn start_exec(
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "SL4.4c's sandbox exec and run start workloads through it"
+        )
+    )]
+    pub(crate) fn start_exec(
         &mut self,
         workload: &Workload<'_>,
         deadline: Instant,
@@ -273,7 +289,7 @@ impl ControlSession {
     }
 
     /// Reads the next event of the workload started with `request_id`.
-    pub fn next_exec_event(
+    pub(crate) fn next_exec_event(
         &mut self,
         request_id: u64,
         deadline: Option<Instant>,
@@ -301,19 +317,37 @@ impl ControlSession {
     /// The guest reports the workload's outcome as a regular exec event, with the cancelled
     /// category if the request arrived before the workload exited. A request for a workload that
     /// already finished is ignored.
-    pub fn cancel_exec(&mut self, request_id: u64, deadline: Instant) -> Result<(), SessionError> {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "SL4.4c's sandbox exec and run cancel through it on Ctrl-C"
+        )
+    )]
+    pub(crate) fn cancel_exec(
+        &mut self,
+        request_id: u64,
+        deadline: Instant,
+    ) -> Result<(), SessionError> {
         self.send_app(APP_CANCEL, request_id, &[], Some(deadline))
     }
 
     /// Asks the guest agent to shut the VM down.
-    pub fn stop(&mut self, deadline: Instant) -> Result<(), SessionError> {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "SL4.4c's sandbox exec and run stop the guest through it"
+        )
+    )]
+    pub(crate) fn stop(&mut self, deadline: Instant) -> Result<(), SessionError> {
         self.acknowledged(APP_STOP, &[], APP_STOPPED, "stop", deadline)
     }
 
     /// Sends an application request of `kind` with `request_id` and `payload` in the next
     /// sequenced outer record, for a caller that checks the responses itself, as the `nvx-rs`
     /// CLI does with the messages of `nvx.py`.
-    pub fn send_request(
+    pub(crate) fn send_request(
         &mut self,
         kind: u8,
         request_id: u64,
@@ -325,7 +359,7 @@ impl ControlSession {
 
     /// Reads the next application frame, checked against the session's identity and sequence,
     /// and returns its kind, request ID, status, and payload.
-    pub fn read_response(
+    pub(crate) fn read_response(
         &mut self,
         deadline: Option<Instant>,
     ) -> Result<(u8, u64, i32, Vec<u8>), SessionError> {
