@@ -139,7 +139,7 @@ changes only when the module's purpose does.
 | [`nvx::guest::process`](#nvxguestprocess) | `Child`: the status of one child that the caller names, and of no other |
 | [`nvx::guest::cgroup`](#nvxguestcgroup) | Cgroup v2 handles through which a guest init or agent places, accounts, kills, and settles its executions |
 | [`nvx::guest::exec`](#nvxguestexec) | `Execution`: drives one program as an execution, for any guest init or agent |
-| [`nvx::guest::time`](#nvxguesttime) | x86_64: the steps of NVX time ABI v1 as typed calls in the caller's process, for any guest init or agent |
+| [`nvx::guest::time`](#nvxguesttime) | x86_64: the boot steps of NVX time ABI v1 as typed calls in the caller's process, for any guest init or agent |
 | [`nvx::guest::snapshot`](#nvxguestsnapshot) | x86_64: bounded Fresh capture with inline restore repair and staged failure dispositions, without execution control |
 | [`nvx::guest::activation`](#nvxguestactivation) | x86_64: fence-free activation of each clone that its capture repaired |
 | [`nvx::guest::reseed`](#nvxguestreseed) | A restore's fresh entropy, and the reseed of the kernel's random number generator with it |
@@ -1438,15 +1438,15 @@ NVX's managed agent is one caller.
 
 ### `nvx::guest::time`
 
-x86_64: `TimeAbi`, the steps of NVX time ABI v1 as typed calls in the caller's
-process, for any guest init or agent: the cold-boot time step and, separately,
-the start of the time daemon in a child process that the caller supervises, the
-VM generation ID, a `CaptureRequest` that repairs a `Restore`, and a
-`RestoreFinish`.
+x86_64: `TimeAbi`, the boot steps of NVX time ABI v1 as typed calls in the
+caller's process, for any guest init or agent: the cold-boot time step and,
+separately, the start of the time daemon in a child process that the caller
+supervises, and the VM generation ID.
 
-The request's mode selects how a restore hands over its fresh entropy: the file
-mode, which `nvx-time` keeps, writes it to a file, and the in-memory mode
-returns it as the `Restore`'s owned `Seed`, and writes no file.
+The ABI's capture request, which repairs the time of a restore, and the
+restore's finish are private: `nvx::guest::snapshot::capture` runs them, and
+hands the restore's fresh entropy to its repair in memory, as an owned `Seed`,
+while `nvx-time capture` writes it to a file.
 
 A violation of the ABI stops the VM in enforcing mode, with the time ABI's
 status, as `nvx-time` does; in strict mode, `TimeAbi::strict`, which a caller
@@ -2912,8 +2912,8 @@ their host mapping table through
 `mappings`, from its mount of the host's export, beneath `/` in direct mode and
 beneath the container's assembled root in sandbox mode, where it unmounts the
 table before it returns to the init agent, and any other guest init or agent
-can use them too. Any guest init or agent can also run the steps of `nvx-time`
-and `nvx-reseed` in its own process, through the
+can use them too. Any guest init or agent can also run the boot steps of
+`nvx-time` and the steps of `nvx-reseed` in its own process, through the
 `nvx::guest::time` and `nvx::guest::reseed` calls, on which both programs run,
 and a template's guest captures before its root's assembly through
 `nvx::guest::snapshot::capture`, which runs the steps of `nvx-time pre-capture`
