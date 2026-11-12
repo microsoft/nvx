@@ -10,38 +10,41 @@
 
 use std::collections::BTreeSet;
 
-use super::{APP_HEADER_LEN, OUTER_MAX_PAYLOAD, ProtocolError, u16_at, u32_at, violation};
+#[cfg(feature = "cli")]
+use super::{APP_HEADER_LEN, OUTER_MAX_PAYLOAD};
+use super::{ProtocolError, violation};
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+use super::{u16_at, u32_at};
 
 /// Largest number of workload arguments, including the program.
-pub const MAX_ARGUMENTS: usize = 64;
+pub(crate) const MAX_ARGUMENTS: usize = 64;
 /// Largest encoded size of one workload argument, working directory, or environment entry.
-pub const MAX_ARGUMENT_BYTES: usize = 4096;
-/// Largest working directory that hosts send: Linux's `PATH_MAX` without the terminating NUL, one
-/// byte below the agent's bound.
-pub const MAX_CWD_BYTES: usize = 4095;
+pub(crate) const MAX_ARGUMENT_BYTES: usize = 4096;
 /// Largest working directory that the C guest decoder accepts. Unlike host paths, the guest's
 /// wire bound includes all 4096 non-NUL bytes because its terminating NUL is allocated separately.
-pub const MAX_GUEST_CWD_BYTES: usize = MAX_ARGUMENT_BYTES;
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+pub(crate) const MAX_GUEST_CWD_BYTES: usize = MAX_ARGUMENT_BYTES;
 /// Largest number of workload environment entries.
-pub const MAX_ENVIRONMENT: usize = 256;
-/// Largest workload timeout the guest agent accepts: any value of the exec request's 32-bit
-/// timeout field, which is also the largest `process.timeout` that MXC's schema allows.
-pub const MAX_TIMEOUT_MS: u32 = u32::MAX;
+pub(crate) const MAX_ENVIRONMENT: usize = 256;
 /// Largest combined stdout and stderr volume the guest agent forwards for one execution.
-pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Extension field of a payload that carries flags, a working directory, and an environment.
-pub const EXEC_EXTENDED: u16 = 1;
+pub(crate) const EXEC_EXTENDED: u16 = 1;
 /// Flag of an extended payload that carries a working directory.
-pub const EXEC_CWD_PRESENT: u16 = 1 << 0;
+pub(crate) const EXEC_CWD_PRESENT: u16 = 1 << 0;
 /// Flag of an extended payload that carries an explicit environment.
-pub const EXEC_ENVIRONMENT_PRESENT: u16 = 1 << 1;
+pub(crate) const EXEC_ENVIRONMENT_PRESENT: u16 = 1 << 1;
 /// Flag of an extended payload whose environment entries layer over the default environment.
-pub const EXEC_INHERIT_DEFAULT_ENV: u16 = 1 << 2;
+pub(crate) const EXEC_INHERIT_DEFAULT_ENV: u16 = 1 << 2;
 
 /// The environment that the guest agent gives a workload.
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkloadEnvironment<'a> {
+pub(crate) enum WorkloadEnvironment<'a> {
     /// The guest's default environment.
     Default,
     /// Exactly these `KEY=VALUE` entries; an empty slice is an empty environment.
@@ -52,17 +55,18 @@ pub enum WorkloadEnvironment<'a> {
 }
 
 /// A workload that an `EXEC` request asks the guest agent to run.
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Workload<'a> {
+pub(crate) struct Workload<'a> {
     /// The program, an absolute guest path, followed by its arguments.
-    pub argv: Vec<String>,
+    pub(crate) argv: Vec<String>,
     /// Timeout in milliseconds; zero disables it.
-    pub timeout_ms: u32,
+    pub(crate) timeout_ms: u32,
     /// Absolute guest directory that the guest agent enters before it starts the program;
     /// `None` selects `/`.
-    pub cwd: Option<&'a str>,
+    pub(crate) cwd: Option<&'a str>,
     /// The program's environment.
-    pub environment: WorkloadEnvironment<'a>,
+    pub(crate) environment: WorkloadEnvironment<'a>,
 }
 
 /// Encodes the payload of an `EXEC` request.
@@ -70,10 +74,11 @@ pub struct Workload<'a> {
 /// The guest agent requires 1 to [`MAX_ARGUMENTS`] non-empty arguments without NUL bytes, each
 /// at most [`MAX_ARGUMENT_BYTES`] long, an absolute program path, an absolute working directory
 /// of at most [`MAX_ARGUMENT_BYTES`] without NUL bytes, and at most [`MAX_ENVIRONMENT`]
-/// `KEY=VALUE` environment entries with unique names. It accepts any timeout up to
-/// [`MAX_TIMEOUT_MS`], and zero disables it. A workload without a working directory or an
-/// explicit environment keeps the legacy payload.
-pub fn encode_exec_payload(workload: &Workload<'_>) -> Result<Vec<u8>, ProtocolError> {
+/// `KEY=VALUE` environment entries with unique names. It accepts any value of the 32-bit
+/// timeout, and zero disables it. A workload without a working directory or an explicit
+/// environment keeps the legacy payload.
+#[cfg(feature = "cli")]
+pub(crate) fn encode_exec_payload(workload: &Workload<'_>) -> Result<Vec<u8>, ProtocolError> {
     let argv = &workload.argv;
     if argv.is_empty() || argv.len() > MAX_ARGUMENTS {
         return Err(violation(format!(
@@ -164,19 +169,20 @@ pub fn encode_exec_payload(workload: &Workload<'_>) -> Result<Vec<u8>, ProtocolE
 }
 
 /// An `EXEC` payload as the guest agent reads it.
+#[cfg(feature = "testing")]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExecPayload {
+pub(crate) struct ExecPayload {
     /// Timeout in milliseconds; zero disables it.
-    pub timeout_ms: u32,
+    pub(crate) timeout_ms: u32,
     /// The program, followed by its arguments.
-    pub argv: Vec<String>,
+    pub(crate) argv: Vec<String>,
     /// Absolute guest directory to start the program in; `None` selects `/`.
-    pub cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     /// The explicit `KEY=VALUE` environment entries, or `None` for the default environment.
-    pub environment: Option<Vec<String>>,
+    pub(crate) environment: Option<Vec<String>>,
     /// Whether the program starts from the default environment: true without explicit entries,
     /// and true when the entries layer over the default environment rather than replace it.
-    pub inherit_default_env: bool,
+    pub(crate) inherit_default_env: bool,
 }
 
 /// An `EXEC` payload as the guest agent reads it, without imposing UTF-8 on guest byte strings.
@@ -184,21 +190,26 @@ pub struct ExecPayload {
 /// Linux arguments, paths, and environment entries are byte strings. Keeping this form separate
 /// from [`ExecPayload`] preserves the host and fake-OpenVMM APIs, which intentionally use UTF-8,
 /// while accepting every non-NUL byte sequence that the C guest accepted.
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GuestExecPayload {
+pub(crate) struct GuestExecPayload {
     /// Timeout in milliseconds; zero disables it.
-    pub timeout_ms: u32,
+    pub(crate) timeout_ms: u32,
     /// The absolute program, followed by its arguments.
-    pub argv: Vec<Vec<u8>>,
+    pub(crate) argv: Vec<Vec<u8>>,
     /// Absolute guest directory to start the program in; `None` selects `/`.
-    pub cwd: Option<Vec<u8>>,
+    pub(crate) cwd: Option<Vec<u8>>,
     /// Explicit `KEY=VALUE` entries, or `None` for the default environment.
-    pub environment: Option<Vec<Vec<u8>>>,
+    pub(crate) environment: Option<Vec<Vec<u8>>>,
     /// Whether explicit entries layer over the default environment.
-    pub inherit_default_env: bool,
+    pub(crate) inherit_default_env: bool,
 }
 
 /// The fixed fields of an `EXEC` payload, which both decoders read and check alike.
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 struct ExecHeader {
     /// Timeout in milliseconds; zero disables it.
     timeout_ms: u32,
@@ -221,6 +232,10 @@ struct ExecHeader {
 /// unknown extension or flag, a working-directory length without the working-directory flag or
 /// the reverse, environment entries without the environment flag, and more than
 /// [`MAX_ENVIRONMENT`] entries.
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 fn decode_exec_header(payload: &[u8], max_cwd: usize) -> Result<ExecHeader, ProtocolError> {
     let truncated = || violation("the exec request is truncated");
     if payload.len() < 8 {
@@ -273,6 +288,10 @@ fn decode_exec_header(payload: &[u8], max_cwd: usize) -> Result<ExecHeader, Prot
 }
 
 /// An `EXEC` payload as both decoders read it, with each string as one decoder holds it.
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 struct DecodedExec<S> {
     /// Timeout in milliseconds; zero disables it.
     timeout_ms: u32,
@@ -294,6 +313,10 @@ struct DecodedExec<S> {
 /// entry, or one longer than [`MAX_ARGUMENT_BYTES`], one that contains NUL characters or that `S`
 /// refuses, a relative program or working directory, an entry without a name, a name that
 /// repeats, and trailing bytes.
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 fn decode_exec<S: ExecString>(
     payload: &[u8],
     max_cwd: usize,
@@ -368,7 +391,8 @@ fn decode_exec<S: ExecString>(
 /// longer than [`MAX_ARGUMENT_BYTES`], text that is not UTF-8 or contains NUL characters, a
 /// relative program or working directory, an entry without a name, a name that repeats, and
 /// trailing bytes.
-pub fn decode_exec_payload(payload: &[u8]) -> Result<ExecPayload, ProtocolError> {
+#[cfg(feature = "testing")]
+pub(crate) fn decode_exec_payload(payload: &[u8]) -> Result<ExecPayload, ProtocolError> {
     let DecodedExec {
         timeout_ms,
         flags,
@@ -395,7 +419,8 @@ pub fn decode_exec_payload(payload: &[u8]) -> Result<ExecPayload, ProtocolError>
 /// [`EXEC_INHERIT_DEFAULT_ENV`] alone, so unlike the host's, it is false without explicit entries.
 /// The host-facing decoder remains text-oriented, so this guest decoder does not broaden host
 /// behavior.
-pub fn decode_guest_exec_payload(payload: &[u8]) -> Result<GuestExecPayload, ProtocolError> {
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+pub(crate) fn decode_guest_exec_payload(payload: &[u8]) -> Result<GuestExecPayload, ProtocolError> {
     let DecodedExec {
         timeout_ms,
         flags,
@@ -416,6 +441,10 @@ pub fn decode_guest_exec_payload(payload: &[u8]) -> Result<GuestExecPayload, Pro
 /// entry, as one decoder holds it. Each decoder's implementation holds what it does differently
 /// from the other: the host's reads UTF-8 text, the guest's reads Linux byte strings, and they
 /// word the refusals of an entry's name differently.
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 trait ExecString: AsRef<[u8]> + Sized {
     /// Converts the bytes of a string of the payload, which `what` names, as soon as they are
     /// read.
@@ -429,6 +458,7 @@ trait ExecString: AsRef<[u8]> + Sized {
 }
 
 /// The host's decoder refuses bytes that are not UTF-8, and names a variable that repeats.
+#[cfg(feature = "testing")]
 impl ExecString for String {
     fn convert(bytes: Vec<u8>, what: &str) -> Result<Self, ProtocolError> {
         String::from_utf8(bytes).map_err(|_| violation(format!("exec {what} must be valid UTF-8")))
@@ -448,6 +478,7 @@ impl ExecString for String {
 }
 
 /// The guest's decoder keeps Linux byte strings as they are.
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 impl ExecString for Vec<u8> {
     fn convert(bytes: Vec<u8>, _what: &str) -> Result<Self, ProtocolError> {
         Ok(bytes)
@@ -464,6 +495,10 @@ impl ExecString for Vec<u8> {
 
 /// Reads the string at `offset` that its `u32` length precedes, of 1 to [`MAX_ARGUMENT_BYTES`]
 /// bytes, as `S`, and advances `offset` past it.
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 fn prefixed_string<S: ExecString>(
     payload: &[u8],
     offset: &mut usize,
@@ -473,6 +508,10 @@ fn prefixed_string<S: ExecString>(
 }
 
 /// Reads one little-endian length-prefixed byte string and advances `offset`.
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 fn prefixed_bytes(
     payload: &[u8],
     offset: &mut usize,
@@ -496,6 +535,10 @@ fn prefixed_bytes(
 }
 
 /// Returns one bounded non-NUL byte range without imposing UTF-8.
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 fn bytes_at<'a>(
     payload: &'a [u8],
     offset: usize,

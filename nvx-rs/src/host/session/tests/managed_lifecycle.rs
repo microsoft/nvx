@@ -37,9 +37,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::host::platform::process_start_time;
 use crate::host::session::{self, ControlSession, ExecEvent};
 use crate::protocol::{
-    self, APP_ERROR, APP_MAPS, APP_READY, CAPABILITY_LEN, CWD_FAILED, ExitCategory, HostMap,
-    Workload, WorkloadEnvironment,
+    self, APP_ERROR, APP_MAPS, APP_READY, CAPABILITY_LEN, ExitCategory, HostMap, Workload,
+    WorkloadEnvironment,
 };
+
+/// The categories with which the guest refuses a working directory that the workload cannot
+/// enter, a malformed request, and a workload before it applied every host mapping: NVXC's wire
+/// values, which the guest's own constants hold, but which the `cli` feature alone, with which
+/// this test runs, does not build.
+const CWD_FAILED: &str = "cwd-failed";
+/// See [`CWD_FAILED`].
+const INVALID_REQUEST: &str = "invalid-request";
+/// See [`CWD_FAILED`].
+const MAPPINGS_INCOMPLETE: &str = "mappings-incomplete";
 
 /// An entry whose value has spaces, an equals sign, and a character beyond ASCII.
 const COMPLEX: &str = "COMPLEX=space = \u{2603}";
@@ -390,12 +400,7 @@ fn layered_mapping_session(
         let expected = if accepted {
             (APP_READY, 900, 0, Vec::new())
         } else {
-            (
-                APP_ERROR,
-                900,
-                22,
-                protocol::INVALID_REQUEST.as_bytes().to_vec(),
-            )
+            (APP_ERROR, 900, 22, INVALID_REQUEST.as_bytes().to_vec())
         };
         assert_eq!(session.read_response(Some(deadline)).unwrap(), expected);
     };
@@ -410,10 +415,7 @@ fn layered_mapping_session(
                 None,
                 WorkloadEnvironment::Default,
             );
-            assert_eq!(
-                outcome.refusal,
-                Some((11, protocol::MAPPINGS_INCOMPLETE.to_owned()))
-            );
+            assert_eq!(outcome.refusal, Some((11, MAPPINGS_INCOMPLETE.to_owned())));
             assert!(outcome.exit.is_none());
         };
         incomplete(&mut session);
