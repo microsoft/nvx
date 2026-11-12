@@ -1,21 +1,18 @@
-//! Verified process references, event-driven exit waits, and the supervision of VMM processes,
-//! through the public API of `nvx::host::process`, `nvx::host::supervisor`, and
-//! `nvx::host::store`, as an orchestrator uses them.
+//! Verified process references, event-driven exit waits, and the spawn of VMM processes,
+//! through the public API of `nvx::host::process` and the low-level spawn that
+//! `nvx::host::supervisor` exports, as an orchestrator uses them.
 //!
-//! The processes are this test executable, run again as one of three fixtures. A VMM fixture
+//! The processes are this test executable, run again as one of two fixtures. A VMM fixture
 //! reads the capability that `nvx::host::supervisor::spawn` passes on its standard input, as
 //! OpenVMM does, reports its descriptors on Linux, writes a line through each descriptor or handle
 //! that its arguments name as inherited, and runs until a file named `exit` appears in its working
 //! directory. A launcher fixture spawns a VMM fixture, prints the VMM's reference as an
-//! orchestrator would record it, and runs until its standard input closes. An orchestrator fixture
-//! launches a VMM fixture through the supervisor in a sandbox store, and exits without unwinding
-//! after the launch step that the test names, as a crash would, or, once it has committed the
-//! launch, runs until its standard input closes. A fixture that the test kills, or whose job
-//! object the test closes, stands for an orchestrator that crashed and restarts within the same
-//! boot: the test then finds the VMM again, as the restarted orchestrator would.
+//! orchestrator would record it, and runs until its standard input closes. A launcher that the
+//! test kills, or whose job object the test closes, stands for an orchestrator that crashed and
+//! restarts within the same boot: the test then finds the VMM again, as the restarted
+//! orchestrator would.
 #![cfg(all(feature = "host", any(target_os = "linux", windows)))]
 
-use std::convert::Infallible;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -28,18 +25,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nvx::ErrorKind;
-use nvx::host::launch::MAX_TIMEOUT;
 use nvx::host::process::{BootId, Opened, Process, ProcessRef, WaitMethod};
-#[cfg(windows)]
-use nvx::host::store::FORMAT;
-use nvx::host::store::{
-    ArtifactIdentity, IdentityPart, LaunchId, LaunchState, LockedStore, RUNTIME_NAME, Recovery,
-    RuntimeIdentity, SandboxStore,
-};
-use nvx::host::supervisor::{self, Inherited, Launched, Reattached, StopOutcome, Vmm, VmmCommand};
+use nvx::host::supervisor::{self, Inherited, Launched, VmmCommand};
 use nvx::protocol::CAPABILITY_LEN;
-use serde_json::json;
 
 /// File whose presence in its working directory marks a VMM fixture. Without it, the fixture
 /// returns at once, as it does when `cargo test -- --ignored` runs it.
@@ -54,24 +42,13 @@ const DESCRIPTORS_REPORT: &str = "descriptors";
 /// fixture inherited, and through which it writes a line. Libtest takes the argument for a test
 /// name that matches no test.
 const INHERITED_PREFIX: &str = "inherited=";
-/// Environment variable that marks a launcher fixture, and names the working directory of the VMM
-/// of a launcher or orchestrator fixture.
+/// Environment variable that marks a launcher fixture, and names the working directory of its
+/// VMM.
 const LAUNCHER_DIR: &str = "NVX_SUPERVISOR_TEST_VMM_DIR";
-/// Environment variable that asks a launcher or orchestrator fixture to start its VMM outside its
-/// job object.
+/// Environment variable that asks a launcher fixture to start its VMM outside its job object.
 const LAUNCHER_BREAKAWAY: &str = "NVX_SUPERVISOR_TEST_BREAKAWAY";
-/// Environment variable that marks an orchestrator fixture, and names its sandbox store.
-const ORCHESTRATOR_STORE: &str = "NVX_SUPERVISOR_TEST_STORE";
-/// Environment variable that names the launch step after which an orchestrator fixture crashes:
-/// `before-spawn`, `after-spawn`, or `after-identity`; or `committed`, after which it runs until
-/// its standard input closes.
-const ORCHESTRATOR_STEP: &str = "NVX_SUPERVISOR_TEST_STEP";
-/// Environment variable that asks an orchestrator fixture to launch the fake OpenVMM, which
-/// serves its control endpoint, instead of a VMM fixture.
-#[cfg(feature = "testing")]
-const ORCHESTRATOR_FAKE: &str = "NVX_SUPERVISOR_TEST_FAKE";
-/// Marker before the reference that a launcher or orchestrator fixture prints. Libtest's own
-/// output, the name of the fixture, precedes it on its line.
+/// Marker before the reference that a launcher fixture prints. Libtest's own output, the name of
+/// the fixture, precedes it on its line.
 const REFERENCE_PREFIX: &str = "vmm-reference ";
 /// The capability of every VMM of these tests.
 const CAPABILITY: [u8; CAPABILITY_LEN] = [0x5a; CAPABILITY_LEN];
@@ -183,90 +160,6 @@ fn launcher_fixture() {
     io::copy(&mut input, &mut io::sink()).unwrap();
 }
 
-/// The orchestrator fixture: when the test writes a line to its standard input, launches a VMM
-/// fixture, or the fake OpenVMM, through the supervisor in the store that [`ORCHESTRATOR_STORE`]
-/// names, and stops after the step that [`ORCHESTRATOR_STEP`] names. It prints the reference of
-/// the VMM once it has spawned it.
-#[test]
-#[ignore = "fixture that the supervision tests run as an orchestrator"]
-fn orchestrator_fixture() {
-    let Some(store) = env::var_os(ORCHESTRATOR_STORE) else {
-        return;
-    };
-    let step = env::var(ORCHESTRATOR_STEP).unwrap();
-    let directory = PathBuf::from(env::var_os(LAUNCHER_DIR).unwrap());
-    let breakaway = env::var_os(LAUNCHER_BREAKAWAY).is_some();
-    let mut input = io::stdin().lock();
-    input.read_line(&mut String::new()).unwrap();
-    let store = SandboxStore::open(store).unwrap();
-    let mut locked = store.lock(None).unwrap();
-    let command = |endpoint: &str| -> nvx::Result<VmmCommand<'static>> {
-        #[cfg(feature = "testing")]
-        if env::var_os(ORCHESTRATOR_FAKE).is_some() {
-            return Ok(fake_openvmm(&directory, endpoint, &store));
-        }
-        let _ = endpoint;
-        Ok(vmm_command(&directory, breakaway))
-    };
-    match step.as_str() {
-        "before-spawn" => {
-            let _ = supervisor::launch(
-                &mut locked,
-                &LaunchId::generate().unwrap(),
-                &runtime(),
-                &CAPABILITY,
-                |_| crash(),
-            );
-            unreachable!("the orchestrator crashed before its spawn");
-        }
-        "after-spawn" => {
-            // The steps of `supervisor::launch`, up to the spawn.
-            let mut launch = locked
-                .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
-                .unwrap();
-            let command = command(launch.endpoint()).unwrap();
-            let log = launch.take_log().unwrap();
-            let launched = supervisor::spawn(&command, &CAPABILITY, log).unwrap();
-            print_reference(launched.process().unwrap().reference());
-            crash();
-        }
-        "after-identity" => {
-            let starting = supervisor::launch(
-                &mut locked,
-                &LaunchId::generate().unwrap(),
-                &runtime(),
-                &CAPABILITY,
-                command,
-            )
-            .unwrap();
-            print_reference(starting.process().reference());
-            crash();
-        }
-        "committed" => {
-            let starting = supervisor::launch(
-                &mut locked,
-                &LaunchId::generate().unwrap(),
-                &runtime(),
-                &CAPABILITY,
-                command,
-            )
-            .unwrap();
-            let vmm = starting.commit().unwrap();
-            drop(locked);
-            print_reference(vmm.record().process());
-            io::copy(&mut input, &mut io::sink()).unwrap();
-        }
-        step => panic!("unknown launch step {step}"),
-    }
-}
-
-/// Ends this process at once, once its output is flushed, without unwinding or running
-/// destructors, as a crash would.
-fn crash() -> ! {
-    io::stdout().flush().unwrap();
-    std::process::exit(0)
-}
-
 /// Prints `reference` as JSON, after [`REFERENCE_PREFIX`].
 fn print_reference(reference: &ProcessRef) {
     println!(
@@ -291,23 +184,6 @@ fn fixture_arguments(name: &str) -> Vec<OsString> {
     .to_vec()
 }
 
-/// Returns the identity `sha256:` and 64 copies of `digit`.
-fn artifact(digit: char) -> ArtifactIdentity {
-    ArtifactIdentity::sha256(&digit.to_string().repeat(64)).unwrap()
-}
-
-/// Returns the runtime identity of the launches of these tests.
-fn runtime() -> RuntimeIdentity {
-    RuntimeIdentity::new(artifact('1'), artifact('2'), artifact('3'))
-}
-
-/// Returns a sandbox store in a fresh temporary directory, which it returns too.
-fn sandbox() -> (tempfile::TempDir, SandboxStore) {
-    let directory = tempfile::tempdir().unwrap();
-    let store = SandboxStore::create(directory.path().join("sandbox")).unwrap();
-    (directory, store)
-}
-
 /// Returns the command of a VMM fixture in `directory`, which it marks, outside the caller's job
 /// object if `breakaway`.
 fn vmm_command(directory: &Path, breakaway: bool) -> VmmCommand<'static> {
@@ -321,28 +197,6 @@ fn vmm_command(directory: &Path, breakaway: bool) -> VmmCommand<'static> {
     command
 }
 
-/// Returns the command of the fake OpenVMM in `directory`, which serves `endpoint` at once, and
-/// writes its outcome report to that of `store`.
-#[cfg(feature = "testing")]
-fn fake_openvmm(directory: &Path, endpoint: &str, store: &SandboxStore) -> VmmCommand<'static> {
-    use nvx::host::launch::LaunchSpec;
-    use nvx::{Artifacts, Hypervisor};
-
-    fs::write(directory.join("vmlinux"), b"kernel").unwrap();
-    fs::write(directory.join("initramfs.cpio.gz"), b"initrd").unwrap();
-    let artifacts = Artifacts::new(
-        env!("CARGO_BIN_EXE_nvx-fake-openvmm"),
-        directory.join("vmlinux"),
-        directory.join("initramfs.cpio.gz"),
-    );
-    let mut spec = LaunchSpec::new(artifacts, Hypervisor::platform_default().unwrap());
-    spec.kernel_parameters = "fake_boot_delay_ms=0".to_owned();
-    let arguments = spec
-        .openvmm_arguments(endpoint, &store.outcome_path())
-        .unwrap();
-    VmmCommand::new(&spec.openvmm, arguments, directory)
-}
-
 /// Spawns a VMM fixture in `directory` as OpenVMM is spawned, outside the caller's job object if
 /// `breakaway`.
 fn spawn_vmm(directory: &Path, breakaway: bool) -> Launched {
@@ -350,69 +204,8 @@ fn spawn_vmm(directory: &Path, breakaway: bool) -> Launched {
     supervisor::spawn(&vmm_command(directory, breakaway), &CAPABILITY, log).unwrap()
 }
 
-/// Launches a VMM fixture in `vmm` through the supervisor in `locked`, under [`runtime`], and
-/// commits the launch, as an orchestrator does once the VMM serves its control endpoint.
-fn launch_vmm(locked: &mut LockedStore, vmm: &mut VmmDirectory) -> Vmm {
-    let starting = supervisor::launch(
-        locked,
-        &LaunchId::generate().unwrap(),
-        &runtime(),
-        &CAPABILITY,
-        |endpoint| {
-            assert!(!endpoint.is_empty());
-            Ok(vmm_command(vmm.path(), false))
-        },
-    )
-    .unwrap();
-    vmm.record(starting.process().reference());
-    // The launch recorded its VMM before it returned.
-    assert_eq!(starting.journal().state(), LaunchState::Spawned);
-    assert_eq!(
-        starting.journal().process(),
-        Some(starting.process().reference())
-    );
-    starting.commit().unwrap()
-}
-
-/// Reattaches until the result is determinate, as a caller retries an indeterminate reattach, and
-/// returns it.
-///
-/// On Windows, a scanner that briefly opens the log of a launch can keep its claim held for a
-/// moment.
-fn reattach_until_determinate(locked: &mut LockedStore) -> Reattached {
-    let deadline = Instant::now() + TIMEOUT;
-    loop {
-        match supervisor::reattach(locked, &runtime()).unwrap() {
-            Reattached::Indeterminate(reason) if Instant::now() < deadline => {
-                eprintln!("reattach is indeterminate: {reason}");
-                thread::sleep(SHORT_WAIT);
-            }
-            reattached => return reattached,
-        }
-    }
-}
-
-/// Writes the runtime record of a VM whose VMM is `process` to `store`, as another orchestrator
-/// would have committed it.
-#[cfg(windows)]
-fn write_record(store: &SandboxStore, process: &ProcessRef) {
-    let record = json!({
-        "format": FORMAT,
-        "launch": "5d41402abc4b2a76b9719d911017c592",
-        "process": process,
-        "endpoint": r"\\.\pipe\openvmm-microvm-5d41402abc4b2a76b9719d911017c592",
-        "runtime": runtime(),
-    });
-    fs::write(
-        store.dir().join(RUNTIME_NAME),
-        serde_json::to_vec(&record).unwrap(),
-    )
-    .unwrap();
-}
-
 /// The working directory of a VMM fixture. Dropping it ends the fixture, or a VMM that ignores
-/// the exit marker, as the fake OpenVMM does, and waits for it to exit, so that a failed test
-/// leaves no process behind.
+/// the exit marker, and waits for it to exit, so that a failed test leaves no process behind.
 struct VmmDirectory {
     /// The reference of the VMM, once the test knows it.
     reference: Option<ProcessRef>,
@@ -460,7 +253,7 @@ impl Drop for VmmDirectory {
     }
 }
 
-/// A launcher or orchestrator fixture, which the test drives through its standard streams.
+/// A launcher fixture, which the test drives through its standard streams.
 struct Launcher {
     /// The fixture's process.
     child: Child,
@@ -480,24 +273,6 @@ impl Launcher {
             command.env(LAUNCHER_BREAKAWAY, "1");
         }
         Self::spawn(command)
-    }
-
-    /// Returns the command of an orchestrator that launches a VMM in `directory` through `store`,
-    /// and stops after `step`.
-    fn orchestrator(store: &SandboxStore, directory: &Path, step: &str) -> Command {
-        let mut command = Command::new(env::current_exe().unwrap());
-        command
-            .args(fixture_arguments("orchestrator_fixture"))
-            .env(ORCHESTRATOR_STORE, store.dir())
-            .env(ORCHESTRATOR_STEP, step)
-            .env(LAUNCHER_DIR, directory);
-        command
-    }
-
-    /// Starts an orchestrator that launches a VMM in `directory` through `store`, and stops after
-    /// `step`.
-    fn orchestrate(store: &SandboxStore, directory: &Path, step: &str) -> Self {
-        Self::spawn(Self::orchestrator(store, directory, step))
     }
 
     /// Starts the fixture that `command` runs, with its standard input and output piped.
@@ -594,47 +369,6 @@ fn processes_can_be_shared_between_threads() {
     fn shared<T: Send + Sync>() {}
     shared::<Process>();
     shared::<ProcessRef>();
-    shared::<Vmm>();
-}
-
-#[test]
-#[cfg(windows)]
-fn long_stores_launch_with_a_short_working_directory() {
-    use std::os::windows::ffi::OsStrExt;
-
-    let _spawns = serialized();
-    let root = tempfile::tempdir().unwrap();
-    let mut parent = root.path().to_path_buf();
-    while parent.as_os_str().encode_wide().count() < 320 {
-        parent.push("long-state-root-component");
-    }
-    fs::create_dir_all(&parent).unwrap();
-    let store = SandboxStore::create(parent.join("sandbox")).unwrap();
-    let log = File::create(parent.join("refused.log")).unwrap();
-    let error = supervisor::spawn(&vmm_command(&parent, false), &CAPABILITY, log).unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-    assert!(error.to_string().contains("working directory"));
-    assert!(error.to_string().contains("258"));
-
-    let mut vmm = VmmDirectory::new();
-    let mut locked = store.lock(None).unwrap();
-    let running = launch_vmm(&mut locked, &mut vmm);
-    assert!(
-        running
-            .process()
-            .wait(Instant::now() + SHORT_WAIT)
-            .unwrap()
-            .is_none()
-    );
-    let stopped = running
-        .stop(&mut locked, Instant::now() + TIMEOUT, None, |_, _| {
-            vmm.end();
-            Ok::<(), Infallible>(())
-        })
-        .unwrap();
-    assert_eq!(stopped.outcome, StopOutcome::Graceful);
-    assert!(stopped.graceful_error.is_none());
-    assert!(store.runtime().unwrap().is_none());
 }
 
 #[test]
@@ -833,300 +567,6 @@ fn references_that_name_no_process_are_never_opened() {
         Opened::Exited(_)
     ));
     assert!(process.has_exited().unwrap());
-}
-
-#[test]
-fn a_launch_that_crashes_before_its_spawn_is_ended_on_reattach() {
-    let _spawns = serialized();
-    let (_directory, store) = sandbox();
-    let vmm = VmmDirectory::new();
-    let mut orchestrator = Launcher::orchestrate(&store, vmm.path(), "before-spawn");
-    assert_eq!(orchestrator.try_launch(), None);
-    assert!(orchestrator.wait().success());
-    assert_eq!(
-        store.journal().unwrap().unwrap().state(),
-        LaunchState::Prepared
-    );
-    assert!(!vmm.path().join(VMM_MARKER).exists());
-    // The crash released the orchestrator's lock, and the claim of the log that it never passed
-    // on.
-    let mut locked = store.lock(Some(Instant::now() + TIMEOUT)).unwrap();
-    match reattach_until_determinate(&mut locked) {
-        Reattached::Exited {
-            record: None,
-            recovery: Recovery::Exited,
-        } => {}
-        other => panic!("unexpected reattach: {other:?}"),
-    }
-    assert!(store.journal().unwrap().is_none());
-    assert!(store.read_capability().is_err());
-}
-
-#[test]
-fn an_unrecorded_vmm_that_serves_no_endpoint_is_never_signaled() {
-    let _spawns = serialized();
-    let (_directory, store) = sandbox();
-    let mut vmm = VmmDirectory::new();
-    let mut orchestrator = Launcher::orchestrate(&store, vmm.path(), "after-spawn");
-    let reference = orchestrator.launch_reference();
-    vmm.record(&reference);
-    assert!(orchestrator.wait().success());
-    assert_eq!(
-        store.journal().unwrap().unwrap().state(),
-        LaunchState::Prepared
-    );
-    // The VMM, which is no child of this process, holds the claim of its launch, and serves no
-    // control endpoint that would name it, so reattach can neither prove that it exited nor
-    // verify it: it signals nothing, and keeps the journal.
-    let process = open_running(&reference);
-    let mut locked = store.lock(Some(Instant::now() + TIMEOUT)).unwrap();
-    let Reattached::Indeterminate(reason) = supervisor::reattach(&mut locked, &runtime()).unwrap()
-    else {
-        panic!("reattach ended a launch whose VMM runs unverified");
-    };
-    assert!(
-        reason.contains("no process serves its control endpoint yet"),
-        "{reason}"
-    );
-    assert!(!process.has_exited().unwrap());
-    assert!(store.journal().unwrap().is_some());
-    // Once the VMM exits, the claim that it released proves it.
-    vmm.end();
-    assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
-    match reattach_until_determinate(&mut locked) {
-        Reattached::Exited {
-            record: None,
-            recovery: Recovery::Exited,
-        } => {}
-        other => panic!("unexpected reattach: {other:?}"),
-    }
-    assert!(store.journal().unwrap().is_none());
-}
-
-#[cfg(feature = "testing")]
-#[test]
-fn an_unrecorded_vmm_that_serves_its_endpoint_is_ended_on_reattach() {
-    let _spawns = serialized();
-    let (_directory, store) = sandbox();
-    let mut vmm = VmmDirectory::new();
-    let mut command = Launcher::orchestrator(&store, vmm.path(), "after-spawn");
-    command.env(ORCHESTRATOR_FAKE, "1");
-    let mut orchestrator = Launcher::spawn(command);
-    let reference = orchestrator.launch_reference();
-    vmm.record(&reference);
-    assert!(orchestrator.wait().success());
-    let process = open_running(&reference);
-    // Once the fake OpenVMM serves its endpoint, which names it, reattach verifies that it holds
-    // the claimed log, and ends it.
-    let mut locked = store.lock(Some(Instant::now() + TIMEOUT)).unwrap();
-    match reattach_until_determinate(&mut locked) {
-        Reattached::Exited {
-            record: None,
-            recovery: Recovery::Terminated(terminated),
-        } => assert_eq!(terminated, reference),
-        other => panic!("unexpected reattach: {other:?}"),
-    }
-    assert_ended(&process);
-    assert!(store.journal().unwrap().is_none());
-}
-
-#[test]
-fn a_launch_that_crashes_before_it_commits_ends_its_recorded_vmm_on_reattach() {
-    let _spawns = serialized();
-    let (_directory, store) = sandbox();
-    let mut vmm = VmmDirectory::new();
-    let mut orchestrator = Launcher::orchestrate(&store, vmm.path(), "after-identity");
-    let reference = orchestrator.launch_reference();
-    vmm.record(&reference);
-    assert!(orchestrator.wait().success());
-    let journal = store.journal().unwrap().unwrap();
-    assert_eq!(journal.state(), LaunchState::Spawned);
-    assert_eq!(journal.process(), Some(&reference));
-    let process = open_running(&reference);
-    // The VMM is no child of this process, and its verified reference ends it.
-    let mut locked = store.lock(Some(Instant::now() + TIMEOUT)).unwrap();
-    match supervisor::reattach(&mut locked, &runtime()).unwrap() {
-        Reattached::Exited {
-            record: None,
-            recovery: Recovery::Terminated(terminated),
-        } => assert_eq!(terminated, reference),
-        other => panic!("unexpected reattach: {other:?}"),
-    }
-    assert_ended(&process);
-    assert!(store.journal().unwrap().is_none());
-    assert!(store.read_capability().is_err());
-}
-
-#[test]
-fn a_committed_vmm_outlives_its_orchestrator_and_stops_gracefully() {
-    let _spawns = serialized();
-    let (_directory, store) = sandbox();
-    let mut vmm = VmmDirectory::new();
-    let mut orchestrator = Launcher::orchestrate(&store, vmm.path(), "committed");
-    let reference = orchestrator.launch_reference();
-    vmm.record(&reference);
-    orchestrator.finish();
-
-    // The restarted orchestrator holds the VMM, which is no child of it, again.
-    let mut locked = store.lock(Some(Instant::now() + TIMEOUT)).unwrap();
-    let Reattached::Live(running) = supervisor::reattach(&mut locked, &runtime()).unwrap() else {
-        panic!("the committed VMM was not reattached");
-    };
-    assert_eq!(running.record().process(), &reference);
-    assert_eq!(running.record().runtime(), &runtime());
-    assert_eq!(running.process().wait_method(), WaitMethod::Event);
-    assert!(!running.wait(Instant::now() + SHORT_WAIT).unwrap());
-    assert_eq!(store.read_capability().unwrap(), CAPABILITY);
-
-    // The graceful step asks the VMM to exit through the caller's own channel, and the stop waits
-    // for the VMM's exit event.
-    let stopped = running
-        .stop(
-            &mut locked,
-            Instant::now() + TIMEOUT,
-            None,
-            |stopping, _deadline| {
-                assert_eq!(stopping.endpoint(), running.endpoint());
-                vmm.end();
-                Ok::<(), Infallible>(())
-            },
-        )
-        .unwrap();
-    assert_eq!(stopped.outcome, StopOutcome::Graceful);
-    assert!(stopped.graceful_error.is_none());
-    assert_ended(running.process());
-    // The stop cleared the runtime record, and kept the log.
-    assert!(store.runtime().unwrap().is_none());
-    assert!(store.read_capability().is_err());
-    assert!(store.log_path().exists());
-    match supervisor::reattach(&mut locked, &runtime()).unwrap() {
-        Reattached::Exited {
-            record: None,
-            recovery: Recovery::Clean,
-        } => {}
-        other => panic!("unexpected reattach: {other:?}"),
-    }
-}
-
-#[test]
-fn a_vmm_of_another_runtime_is_ended_only_by_its_termination() {
-    let _spawns = serialized();
-    let (_directory, store) = sandbox();
-    let (_other_directory, other) = sandbox();
-    let mut vmm = VmmDirectory::new();
-    let mut locked = store.lock(None).unwrap();
-    // The orchestrator that launched the VMM restarts.
-    drop(launch_vmm(&mut locked, &mut vmm));
-
-    // Another build of the orchestrator would launch another initramfs.
-    let mut upgraded = runtime();
-    upgraded.initramfs = artifact('4');
-    let Reattached::Mismatched {
-        vmm: running,
-        differences,
-    } = supervisor::reattach(&mut locked, &upgraded).unwrap()
-    else {
-        panic!("a VMM of another runtime was not reported as mismatched");
-    };
-    assert_eq!(differences, [IdentityPart::Initramfs]);
-    // The VMM heeds no graceful step of this build. Without the forced step, the stop gives up at
-    // its deadline, and leaves the VMM running, with its record.
-    let ignored = |_: &Vmm, _: Instant| Ok::<(), Infallible>(());
-    let stopped = running
-        .stop(&mut locked, Instant::now() + SHORT_WAIT, None, ignored)
-        .unwrap();
-    assert_eq!(stopped.outcome, StopOutcome::TimedOut);
-    // A termination through another sandbox's store, or with a bound that is zero or too long,
-    // signals nothing.
-    let error = running
-        .terminate(&mut other.lock(None).unwrap(), TIMEOUT)
-        .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Other, "{error}");
-    for bound in [Duration::ZERO, MAX_TIMEOUT + Duration::from_secs(1)] {
-        let error = running.terminate(&mut locked, bound).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Unsupported, "{bound:?}");
-    }
-    assert!(!running.has_exited().unwrap());
-    assert!(store.runtime().unwrap().is_some());
-
-    // The termination ends it through its verified handle, with no graceful step, and clears its
-    // runtime record. The log outlives it.
-    assert_eq!(
-        running.terminate(&mut locked, TIMEOUT).unwrap(),
-        StopOutcome::Forced
-    );
-    assert_ended(running.process());
-    assert!(store.runtime().unwrap().is_none());
-    assert!(store.read_capability().is_err());
-    assert!(store.log_path().exists());
-    // A VMM that exited is not signaled again.
-    assert_eq!(
-        running.terminate(&mut locked, TIMEOUT).unwrap(),
-        StopOutcome::Graceful
-    );
-    match supervisor::reattach(&mut locked, &upgraded).unwrap() {
-        Reattached::Exited {
-            record: None,
-            recovery: Recovery::Clean,
-        } => {}
-        other => panic!("unexpected reattach: {other:?}"),
-    }
-}
-
-#[test]
-fn records_of_reused_ids_and_earlier_boots_name_vmms_that_exited() {
-    let _spawns = serialized();
-    let (_directory, store) = sandbox();
-    let mut vmm = VmmDirectory::new();
-    let mut locked = store.lock(None).unwrap();
-    let launched = launch_vmm(&mut locked, &mut vmm);
-    let reference = launched.record().process().clone();
-    let path = store.dir().join(RUNTIME_NAME);
-    let recorded: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    // The recorded ID with another start time names another process, which reused the ID after
-    // the VMM exited, and a record of another boot names a VMM that exited with that boot. Under
-    // another runtime identity too, neither is mismatched, which would end it: only a VMM that
-    // reattach verified is.
-    let mut other_boot = *reference.boot.as_bytes();
-    other_boot[0] ^= 1;
-    let mut upgraded = runtime();
-    upgraded.kernel = artifact('5');
-    for (field, value) in [
-        ("startTime", json!(reference.start_time + 1)),
-        ("boot", json!(BootId::from_bytes(other_boot))),
-    ] {
-        let mut tampered = recorded.clone();
-        tampered["process"][field] = value;
-        fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
-        let Reattached::Exited {
-            record: Some(record),
-            recovery: Recovery::Clean,
-        } = supervisor::reattach(&mut locked, &upgraded).unwrap()
-        else {
-            panic!("a record with another {field} named a live VMM");
-        };
-        assert_ne!(record.process(), &reference);
-        assert!(store.runtime().unwrap().is_none());
-        // The process that has the ID was not signaled.
-        assert!(!launched.has_exited().unwrap());
-    }
-    // The true record still names the VMM.
-    fs::write(&path, serde_json::to_vec(&recorded).unwrap()).unwrap();
-    let Reattached::Live(running) = supervisor::reattach(&mut locked, &runtime()).unwrap() else {
-        panic!("the recorded VMM was not reattached");
-    };
-    let stopped = running
-        .stop(
-            &mut locked,
-            Instant::now() + TIMEOUT,
-            Some(TIMEOUT),
-            |_, _| {
-                vmm.end();
-                Ok::<(), Infallible>(())
-            },
-        )
-        .unwrap();
-    assert_eq!(stopped.outcome, StopOutcome::Graceful);
 }
 
 /// Sets its flag when dropped, also when its thread panics.
@@ -1464,64 +904,6 @@ fn sleeper() -> Command {
 
 #[cfg(windows)]
 #[test]
-fn a_vmm_that_breaks_away_survives_its_orchestrators_job() {
-    let _spawns = serialized();
-    let (_directory, store) = sandbox();
-    let mut vmm = VmmDirectory::new();
-    let job = job::Job::new(true);
-    let mut command = Launcher::orchestrator(&store, vmm.path(), "committed");
-    command.env(LAUNCHER_BREAKAWAY, "1");
-    let mut orchestrator = Launcher::spawn(command);
-    job.assign(&orchestrator.child);
-    let reference = orchestrator.launch_reference();
-    vmm.record(&reference);
-    // The orchestrator crashes with its job, and its VMM, which broke away, survives it.
-    drop(job);
-    orchestrator.wait();
-    let mut locked = store.lock(Some(Instant::now() + TIMEOUT)).unwrap();
-    let Reattached::Live(running) = supervisor::reattach(&mut locked, &runtime()).unwrap() else {
-        panic!("the VMM that broke away was not reattached");
-    };
-    assert_eq!(running.record().process(), &reference);
-    let stopped = running
-        .stop(&mut locked, Instant::now() + TIMEOUT, None, |_, _| {
-            vmm.end();
-            Ok::<(), Infallible>(())
-        })
-        .unwrap();
-    assert_eq!(stopped.outcome, StopOutcome::Graceful);
-    assert!(store.runtime().unwrap().is_none());
-}
-
-#[cfg(windows)]
-#[test]
-fn a_vmm_in_its_orchestrators_job_ends_with_it() {
-    let _spawns = serialized();
-    let (_directory, store) = sandbox();
-    let mut vmm = VmmDirectory::new();
-    let job = job::Job::new(false);
-    let mut orchestrator = Launcher::orchestrate(&store, vmm.path(), "committed");
-    job.assign(&orchestrator.child);
-    let reference = orchestrator.launch_reference();
-    vmm.record(&reference);
-    let process = open_running(&reference);
-    // The VMM did not break away, so closing the job ends it with its orchestrator.
-    drop(job);
-    orchestrator.wait();
-    assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
-    let mut locked = store.lock(Some(Instant::now() + TIMEOUT)).unwrap();
-    match supervisor::reattach(&mut locked, &runtime()).unwrap() {
-        Reattached::Exited {
-            record: Some(record),
-            recovery: Recovery::Clean,
-        } => assert_eq!(record.process(), &reference),
-        other => panic!("unexpected reattach: {other:?}"),
-    }
-    assert!(store.runtime().unwrap().is_none());
-}
-
-#[cfg(windows)]
-#[test]
 fn a_job_that_ends_its_vmm_wakes_the_waiters() {
     let _spawns = serialized();
     let mut vmm = VmmDirectory::new();
@@ -1558,22 +940,6 @@ fn a_process_that_this_user_may_not_query_has_an_unknown_state() {
         child.0.try_wait().unwrap().is_none(),
         "the process was ended"
     );
-
-    // A sandbox whose runtime record names it cannot tell whether its VMM runs: reattach keeps
-    // the record, and signals nothing.
-    let (_directory, store) = sandbox();
-    write_record(&store, &reference);
-    let mut locked = store.lock(None).unwrap();
-    let Reattached::Indeterminate(reason) = supervisor::reattach(&mut locked, &runtime()).unwrap()
-    else {
-        panic!("a VMM whose identity cannot be checked was classified");
-    };
-    assert!(reason.contains("cannot be examined"), "{reason}");
-    assert!(store.runtime().unwrap().is_some());
-    assert!(
-        child.0.try_wait().unwrap().is_none(),
-        "the process was ended"
-    );
 }
 
 #[cfg(windows)]
@@ -1605,55 +971,6 @@ fn a_process_that_this_user_may_not_terminate_is_waited_for_but_never_signaled()
     assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     process.kill().unwrap();
     assert_ended(&process);
-}
-
-#[cfg(windows)]
-#[test]
-fn a_vmm_of_another_runtime_that_cannot_be_terminated_keeps_its_record() {
-    use windows_sys::Win32::System::Threading::{
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
-    };
-
-    let _spawns = serialized();
-    let (mut child, reference) =
-        restricted::spawn(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE);
-    if restricted::may_open(&child.0, PROCESS_TERMINATE) {
-        eprintln!("skipping: this user's privileges bypass the security descriptors of processes");
-        return;
-    }
-    // Another build of the orchestrator, which would launch another kernel, finds the VM.
-    let (_directory, store) = sandbox();
-    write_record(&store, &reference);
-    let mut upgraded = runtime();
-    upgraded.kernel = artifact('5');
-    let mut locked = store.lock(None).unwrap();
-    let Reattached::Mismatched { vmm, differences } =
-        supervisor::reattach(&mut locked, &upgraded).unwrap()
-    else {
-        panic!("a VMM of another runtime was not reported as mismatched");
-    };
-    assert_eq!(differences, [IdentityPart::Kernel]);
-    // The termination fails, and reports it: the VMM still runs, and keeps its record.
-    let error = vmm.terminate(&mut locked, TIMEOUT).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Io, "{error}");
-    assert_eq!(
-        error.message(),
-        format!("cannot terminate VMM process {}", reference.pid)
-    );
-    assert!(store.runtime().unwrap().is_some());
-    assert!(
-        child.0.try_wait().unwrap().is_none(),
-        "the process was ended"
-    );
-
-    // Once the VMM has exited, the next termination finds it so, and clears the record.
-    child.0.kill().unwrap();
-    assert!(vmm.wait(Instant::now() + TIMEOUT).unwrap());
-    assert_eq!(
-        vmm.terminate(&mut locked, TIMEOUT).unwrap(),
-        StopOutcome::Graceful
-    );
-    assert!(store.runtime().unwrap().is_none());
 }
 
 /// Processes whose security descriptor restricts what this user may do with them.

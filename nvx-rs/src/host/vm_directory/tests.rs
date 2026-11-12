@@ -199,6 +199,7 @@ fn existing_vm_directories_that_grant_others_or_inherit_are_refused_and_left_unc
     let full = format!("(A;OICI;FA;;;{sid})");
     for other in ["SY", "BA", "OW"] {
         platform::tests::set_access(&path, &format!("D:P{full}(A;OICI;FA;;;{other})")).unwrap();
+        #[cfg(feature = "cli")]
         assert_eq!(platform::check_store_dir(&path).unwrap(), None, "{other}");
         refused(&path, "allows others than the current user");
     }
@@ -224,6 +225,7 @@ fn existing_vm_directories_that_grant_others_or_inherit_are_refused_and_left_unc
     platform::tests::set_access(&path, &format!("D:P{full}")).unwrap();
     let inheriting = path.join("inheriting");
     fs::create_dir(&inheriting).unwrap();
+    #[cfg(feature = "cli")]
     assert_eq!(platform::check_store_dir(&inheriting).unwrap(), None);
     let owned = platform::tests::access(&inheriting)
         .unwrap()

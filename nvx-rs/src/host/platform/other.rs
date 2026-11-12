@@ -100,27 +100,33 @@ pub fn file_identity(_path: &Path) -> io::Result<(u64, u64)> {
 
 /// Returns whether the file at `path` is deleted: whether no file has that name, which a removal
 /// takes at once.
+#[cfg(feature = "cli")]
 pub(crate) fn is_deleted(path: &Path) -> bool {
     fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn opened_file_identity(_file: &File) -> io::Result<(u64, u64)> {
     Err(unsupported())
 }
 
 /// Fails: this host keeps no store.
+#[cfg(feature = "cli")]
 pub(crate) fn file_id(_path: &Path) -> io::Result<(u64, u128)> {
     Err(unsupported())
 }
 
 /// Fails: this host keeps no store.
+#[cfg(feature = "cli")]
 pub(crate) fn opened_file_id(_file: &File) -> io::Result<(u64, u128)> {
     Err(unsupported())
 }
 
 /// An open directory, which this host never holds: it keeps no sandbox's store.
+#[cfg(feature = "cli")]
 pub(crate) enum Directory {}
 
+#[cfg(feature = "cli")]
 impl Directory {
     /// Fails: this host keeps no sandbox's store.
     pub(crate) fn open(_path: &Path) -> io::Result<Self> {
@@ -129,26 +135,6 @@ impl Directory {
 
     /// Never called: no directory is open.
     pub(crate) fn entry_id(&self, _name: &str) -> io::Result<Option<(u64, u128)>> {
-        match *self {}
-    }
-
-    /// Never called: no directory is open.
-    pub(crate) fn open_file(&self, _name: &str) -> io::Result<Option<File>> {
-        match *self {}
-    }
-
-    /// Never called: no directory is open.
-    pub(crate) fn open_dir(&self, _name: &str) -> io::Result<Option<Self>> {
-        match *self {}
-    }
-
-    /// Fails: this host keeps no store.
-    pub(crate) fn search(_path: &Path) -> io::Result<Option<Self>> {
-        Err(unsupported())
-    }
-
-    /// Never called: no directory is open.
-    pub(crate) fn search_dir(&self, _name: &str) -> io::Result<Option<Self>> {
         match *self {}
     }
 
@@ -163,14 +149,17 @@ impl Directory {
     }
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn claim_log(_file: &File) -> io::Result<()> {
     Err(unsupported())
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn log_claim_held(_path: &Path, _identity: (u64, u64)) -> io::Result<bool> {
     Err(unsupported())
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn serves_launch(_pid: u32, _start_time: u64, _log: (u64, u64)) -> io::Result<bool> {
     Err(unsupported())
 }
@@ -237,10 +226,6 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
     }
 }
 
-pub(crate) fn control_endpoint(_socket_path: &Path) -> io::Result<String> {
-    Err(unsupported())
-}
-
 /// The listener of the restore-ready endpoint of a restore, which this host never makes.
 #[derive(Debug)]
 pub(crate) struct ReadyListener;
@@ -267,10 +252,6 @@ pub(crate) fn connect_endpoint(
     _timeout: Duration,
 ) -> io::Result<Box<dyn Transport>> {
     Err(unsupported())
-}
-
-pub(crate) fn endpoint_server_pid(_endpoint: &str) -> io::Result<Option<u32>> {
-    Ok(None)
 }
 
 #[cfg(feature = "cli")]

@@ -6,13 +6,16 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::endpoint::{UnixTransport, endpoint_server_pid_until};
+use super::endpoint::UnixTransport;
+#[cfg(feature = "cli")]
+use super::endpoint::endpoint_server_pid_until;
 pub(crate) use super::private::store_dir_problem;
 use super::process::wait_step;
 pub(crate) use super::process::{check_identity, start_time_from_stat};
 use super::*;
 use crate::host::platform::Transport;
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_full_control_backlog_never_replaces_the_callers_probe_deadline() {
     use std::os::unix::net::UnixListener;
@@ -58,7 +61,7 @@ fn a_full_control_backlog_never_replaces_the_callers_probe_deadline() {
         std::io::ErrorKind::WouldBlock
     );
     assert_eq!(
-        endpoint_server_pid(endpoint).unwrap(),
+        endpoint_server_pid_until(endpoint, Instant::now() + Duration::from_secs(5)).unwrap(),
         Some(std::process::id())
     );
     drop(listener);

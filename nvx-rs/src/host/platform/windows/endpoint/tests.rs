@@ -70,7 +70,7 @@ impl StaleServer {
         let endpoint = format!(
             r"\\.\pipe\nvx-stale-probe-{}-{}",
             std::process::id(),
-            crate::host::store::LaunchId::generate().unwrap().as_str()
+            crate::host::tests::unique_suffix()
         );
         // SAFETY: this creates an unnamed, non-inheritable job for this fixture alone.
         let job = owned(unsafe { CreateJobObjectW(ptr::null(), ptr::null()) })
@@ -337,12 +337,13 @@ fn stale_probe_accept_helper() {
     (&server).write_all(&[9]).unwrap();
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_busy_control_pipe_never_replaces_the_callers_probe_deadline() {
     let endpoint = format!(
         r"\\.\pipe\nvx-probe-budget-{}-{}",
         std::process::id(),
-        crate::host::store::LaunchId::generate().unwrap().as_str()
+        crate::host::tests::unique_suffix()
     );
     let server = control_server(&endpoint);
     let client = connect_endpoint(&endpoint, std::process::id(), Duration::from_secs(2)).unwrap();
@@ -372,7 +373,7 @@ fn a_busy_control_pipe_never_replaces_the_callers_probe_deadline() {
     );
     let server = control_server(&endpoint);
     assert_eq!(
-        endpoint_server_pid(&endpoint).unwrap(),
+        endpoint_server_pid_until(&endpoint, Instant::now() + Duration::from_secs(5)).unwrap(),
         Some(std::process::id())
     );
     drop(server);
@@ -383,7 +384,7 @@ fn a_duplicated_transport_keeps_the_verified_connection_without_reconnecting() {
     let endpoint = format!(
         r"\\.\pipe\nvx-transport-{}-{}",
         std::process::id(),
-        crate::host::store::LaunchId::generate().unwrap().as_str()
+        crate::host::tests::unique_suffix()
     );
     let server = control_server(&endpoint);
     let transport =

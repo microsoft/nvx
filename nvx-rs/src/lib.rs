@@ -33,9 +33,8 @@
 //! - [`Hypervisor`]: the hypervisors that run the VMs.
 //! - [`host`] (feature `host`): artifact discovery, the OpenVMM command line, the lowering of
 //!   network and filesystem policies, the host's NVXS connection, control sessions, process and
-//!   platform primitives, the supervision of VM instances: starting, reattaching, executing
-//!   workloads, and stopping, the store of a sandbox's runtime records and launch journal, and the
-//!   manifests and compatibility keys of templates.
+//!   platform primitives, VMs that a caller creates, starts, reattaches to, and stops in private
+//!   directories that it owns, and the manifests and compatibility keys of templates.
 //! - `guest` (feature `guest`, Linux): the programs that run in NVX guests, such as
 //!   `nvx-console-pending`, the guest's NVXS connection, the libraries through which any guest
 //!   init or agent opens the terminal on which it serves its session (`guest::terminal`), starts
@@ -55,56 +54,72 @@
 //!
 //! # Example
 //!
+//! A cold boot through [`host::vm`], in a private directory that the caller owns, and the VM's
+//! stop. The `host-workflows` example also captures a VM, restores one, and finds one again after
+//! its caller restarts.
+//!
 //! ```no_run
 //! # #[cfg(feature = "host")]
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! use std::sync::atomic::AtomicBool;
-//! use std::time::Duration;
+//! use std::path::Path;
+//! use std::time::{Duration, Instant};
 //!
-//! use nvx::host::instance::{Found, Instance};
-//! use nvx::host::launch::LaunchSpec;
-//! use nvx::host::store::CallerFiles;
-//! use nvx::protocol::{Workload, WorkloadEnvironment};
+//! use nvx::activation::{MachineIdMode, View};
+//! use nvx::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
+//! use nvx::host::runtime::{LaunchOptions, Runtime};
+//! use nvx::host::vm::{self, VmDir};
 //! use nvx::{Artifacts, Hypervisor};
 //!
-//! // Locates OpenVMM, the guest kernel, and the Alpine initramfs, which the install metadata of
-//! // their release or checkout identifies.
+//! // Locates OpenVMM, the guest kernel, and the Alpine initramfs, with the identity that the
+//! // install metadata of their release or checkout gives them.
 //! let artifacts = Artifacts::discover()?;
-//! let runtime = artifacts.runtime_identity()?;
-//! let spec = LaunchSpec::new(artifacts, Hypervisor::from_env_or_default()?);
-//! // The example keeps no files of its own beside the instance's store.
-//! let directory = std::env::temp_dir().join("nvx-example");
-//! let instance = Instance::create(directory, "example", CallerFiles::none())?;
-//! // Lifecycle transitions hold the instance's lock; executions need none.
-//! let mut locked = instance.lock(None)?;
-//! let Found::Stopped = locked.find(|| Ok(runtime.clone()))? else {
-//!     return Err("the example's VM runs already".into());
+//! let runtime = Runtime {
+//!     identity: artifacts.runtime_identity()?,
+//!     openvmm: artifacts.openvmm,
+//!     kernel: artifacts.kernel,
+//!     initramfs: artifacts.initrd,
+//!     hypervisor: Hypervisor::from_env_or_default()?,
+//!     cpu_profile: None,
+//!     windows_breakaway: false,
+//!     options: LaunchOptions::default(),
 //! };
-//! locked.start(&spec, &runtime, Duration::from_secs(60))?;
-//! let Found::Running(running) = locked.find(|| Ok(runtime.clone()))? else {
-//!     return Err("the example's VM stopped".into());
-//! };
-//!
-//! let workload = Workload {
-//!     argv: vec!["/bin/echo".to_owned(), "hello".to_owned()],
-//!     timeout_ms: 0,
-//!     cwd: None,
-//!     environment: WorkloadEnvironment::Default,
-//! };
-//! let timeout = Duration::from_secs(60);
-//! let execution = instance.exec(&running, &workload, timeout, timeout)?;
-//! let mut stdout = Vec::new();
-//! let outcome = execution.pump(
-//!     &mut |chunk: &[u8]| {
-//!         stdout.extend_from_slice(chunk);
-//!         Ok(())
+//! let config = VmConfig {
+//!     processors: 1,
+//!     memory_mib: 256,
+//!     root: RootConfig::Blockless,
+//!     view: View {
+//!         hostname: b"example".to_vec(),
+//!         machine_id: MachineIdMode::Image,
 //!     },
-//!     &mut |_: &[u8]| Ok(()),
-//!     &AtomicBool::new(false),
+//!     network: None,
+//!     filesystem: None,
+//!     console: ConsoleAttachment::Disconnected,
+//!     boot: Some(Boot {
+//!         command_line: "quiet".to_owned(),
+//!         memory_capacity_mib: None,
+//!         capture: None,
+//!     }),
+//! };
+//! // The caller creates and owns the VM's private directory.
+//! let directory = Path::new("example-vm");
+//! vm::create_private_dir(directory)?;
+//! let dir = VmDir::open(directory)?;
+//! // Creation checks the whole launch and creates its log, but starts nothing; the spawn starts
+//! // OpenVMM detached, and returns its verified process.
+//! let launched = vm::spawn(vm::create(&runtime, &config, None, &dir)?)?;
+//! // The caller speaks its own protocol with its guest at `launched.outputs.endpoint`, with the
+//! // secret `launched.capability`. To stop the VM, the callback would ask the guest in that
+//! // protocol to end it, and return whether it sent the request; this one sends none, so the
+//! // stop ends OpenVMM's verified process once the grace period has passed, unless it exited.
+//! let grace = Instant::now() + Duration::from_secs(10);
+//! let stopped = vm::stop(
+//!     &launched.process,
+//!     &launched.outputs,
+//!     |_| false,
+//!     grace,
+//!     grace + Duration::from_secs(10),
 //! )?;
-//! println!("{outcome:?}: {}", String::from_utf8_lossy(&stdout));
-//!
-//! locked.stop(running, Duration::from_secs(30))?;
+//! println!("forced: {}, report: {:?}", stopped.forced, stopped.report?);
 //! # Ok(())
 //! # }
 //! # #[cfg(not(feature = "host"))]

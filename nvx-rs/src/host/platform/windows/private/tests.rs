@@ -28,6 +28,7 @@ fn private_directories_support_long_paths() {
         let directory = parent.join(format!("store-{index}-\u{1f600}"));
         assert_eq!(create_store_dir(&directory).unwrap(), None);
         assert_eq!(create_store_dir(&directory).unwrap(), None);
+        #[cfg(feature = "cli")]
         assert_eq!(check_store_dir(&directory).unwrap(), None);
         let file = OpenOptions::new()
             .write(true)

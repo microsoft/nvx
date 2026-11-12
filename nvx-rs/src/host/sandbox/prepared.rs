@@ -353,12 +353,11 @@ impl PreparedLaunch {
     /// VMM keeps its own opens of the images, and the scratch image's claim, which it inherited.
     ///
     /// `vmm` must be the VMM that inherited [`inherited`](Self::inherited), held as its launch
-    /// holds it: through [`Starting::process`](crate::host::supervisor::Starting::process), or
-    /// [`Launched::process`](crate::host::supervisor::Launched::process). A VMM that has exited
-    /// has closed its copies. A launch that failed needs no release: dropping the prepared launch
-    /// once the launch is torn down closes the checked files, and the VMM's copies went with it. A
-    /// prepared launch that is dropped without a release, as when its caller ends before the guest
-    /// is ready, leaves the VMM its copies until it exits.
+    /// holds it: through [`Launched::process`](crate::host::supervisor::Launched::process). A
+    /// VMM that has exited has closed its copies. A launch that failed needs no release: dropping
+    /// the prepared launch once the launch is torn down closes the checked files, and the VMM's
+    /// copies went with it. A prepared launch that is dropped without a release, as when its
+    /// caller ends before the guest is ready, leaves the VMM its copies until it exits.
     ///
     /// Fails on Windows with [`ErrorKind::Io`](crate::ErrorKind::Io) if the VMM's copy of a
     /// checked file cannot be closed: for a `vmm` that did not inherit it, which keeps all of its

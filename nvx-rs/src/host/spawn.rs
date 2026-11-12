@@ -34,7 +34,8 @@ pub struct VmmCommand<'a> {
     /// store.
     ///
     /// Windows permits at most 258 UTF-16 code units in its absolute path, including any verbatim
-    /// prefix and trailing separator, which a store's paths may exceed.
+    /// prefix and trailing separator. It may differ from the directories of the files that the
+    /// VMM uses, whose paths can be longer.
     pub working_dir: PathBuf,
     /// Whether the VMM starts outside the caller's job object on Windows, which must permit
     /// breakaway, so that the VMM survives the job. Other hosts ignore it.
@@ -103,11 +104,10 @@ pub fn vmm_working_dir(store: &Path) -> io::Result<PathBuf> {
 /// `log` is not a file of a disk volume, such as `NUL` or a pipe, or what takes that name is not
 /// the user's job. A process that the caller spawns while the VMM is created, which can inherit
 /// the log as [`Inherited`] describes, never joins the VMM's job, so it holds the log's claim only
-/// if the VMM has none: see [the store](crate::host::store#the-log-claim).
+/// if the VMM has none.
 ///
-/// Record the VMM's identity right after the spawn, with
-/// [`Launch::record_process`](crate::host::store::Launch::record_process), as
-/// [`launch`](crate::host::supervisor::launch) does. Fails with [`io::ErrorKind::InvalidInput`] on
+/// Record the VMM's identity right after the spawn, through [`Launched::process`], if the caller
+/// recovers its launches. Fails with [`io::ErrorKind::InvalidInput`] on
 /// Linux for a descriptor of a standard stream, 0 to 2, or one that is not close-on-exec, and on
 /// Windows for a working directory whose absolute path exceeds 258 UTF-16 code units, including
 /// any verbatim prefix and trailing separator, or for a batch file, which Windows would run
@@ -118,7 +118,8 @@ pub fn vmm_working_dir(store: &Path) -> io::Result<PathBuf> {
 /// [`io::ErrorKind::Unsupported`] for any descriptor or handle on hosts other than Linux and
 /// Windows.
 ///
-/// On Windows, give each VMM a log file of its own, created anew, as a store's launch does. The
+/// On Windows, give each VMM a log file of its own, created anew, as
+/// [`vm::create`](crate::host::vm::create) does. The
 /// job of `log` is named after the file's identity, which the file keeps when it is truncated, as
 /// [`File::create`](std::fs::File::create) truncates an existing file, and its name stays taken
 /// while another spawn with the file holds the job, or while a process that inherited the job's
@@ -237,8 +238,7 @@ fn spawn_inner(
 /// process until [`wait_timeout`](Self::wait_timeout) reaps it; hold it with
 /// [`process`](Self::process) before waiting to keep a verified handle after it exits.
 ///
-/// Record it with [`Launch::record_process`](crate::host::store::Launch::record_process), or hold
-/// it with [`process`](Self::process). Then release it with [`detach`](Self::detach), or end it
+/// Hold it with [`process`](Self::process). Then release it with [`detach`](Self::detach), or end it
 /// with [`kill_and_confirm_exit`](Self::kill_and_confirm_exit); the [`Process`] stays valid
 /// either way. [`kill_and_wait`](Self::kill_and_wait) provides legacy, time-bounded cleanup.
 pub struct Launched {

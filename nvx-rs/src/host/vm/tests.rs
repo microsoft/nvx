@@ -2132,7 +2132,7 @@ fn library_spawns_refuse_taken_and_untrusted_log_job_names() {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "cli"))]
 #[test]
 fn an_unrelated_process_started_in_the_library_spawn_window_gets_no_vm_claim() {
     struct ChildGuard(std::process::Child);

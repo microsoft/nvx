@@ -25,8 +25,8 @@ name = "nvx"
 [features]
 default = ["host"]
 # The host side: artifact discovery, launch, network and filesystem lowering, control sessions,
-# process and platform primitives, the supervision of VM instances, and the sandbox launch
-# profile, whose aggregate child names are SHA-256 digests.
+# process and platform primitives, VMs in private directories that their callers own, and the
+# sandbox launch profile, whose aggregate child names are SHA-256 digests.
 host = [
     "serde",
     "dep:getrandom",

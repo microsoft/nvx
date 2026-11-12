@@ -1,8 +1,7 @@
 //! The managed lifecycle of a guest whose init hands the boot to the managed agent, on a real
 //! hypervisor: authenticated sessions and reconnects, request-scoped working directories and
 //! environments, the workload identity, timeouts, descendants that outlive their workload,
-//! refused working directories, and stop, driven through `nvx::host::session` as
-//! `nvx::host::instance` drives it.
+//! refused working directories, and stop, driven through `nvx::host::session`.
 //!
 //! `scripts/nvx.py test-microvm --scenario managed-lifecycle` runs it for the selected guest and
 //! backend, then checks the outcome report that OpenVMM wrote and the guest console. It sets:

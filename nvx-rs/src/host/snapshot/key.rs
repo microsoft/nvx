@@ -210,26 +210,10 @@ identity!(
     /// capture-time anchors do not contribute to it.
     ///
     /// Its text form, which `Display` writes and `FromStr` parses, is 64 lowercase hexadecimal
-    /// digits; parsing also accepts uppercase ones. It converts to and from the
-    /// [`activation::Identity`] by which a clone's lease and durable records name the key of its
-    /// template, in their [`TemplateReference`](activation::TemplateReference), without loss.
+    /// digits; parsing also accepts uppercase ones.
     KeyIdentity,
     "a template key's identity"
 );
-
-impl From<KeyIdentity> for activation::Identity {
-    /// Returns the identity whose bytes are the key identity's.
-    fn from(identity: KeyIdentity) -> Self {
-        Self::from_bytes(identity.0)
-    }
-}
-
-impl From<activation::Identity> for KeyIdentity {
-    /// Returns the key identity whose bytes are the identity's.
-    fn from(identity: activation::Identity) -> Self {
-        Self(*identity.as_bytes())
-    }
-}
 
 identity!(
     /// The identity of a [`CaptureClass`]: the SHA-256 digest of its canonical encoding, after the

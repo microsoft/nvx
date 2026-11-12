@@ -3,8 +3,9 @@
 //! [`probe_hypervisor`] checks, and the [`LaunchOptions`].
 //!
 //! The runtime identity of a VM is the identities of its VMM, kernel, and initramfs, and the
-//! versions of the contracts between its host, its VMM, and its guest. The sandbox
-//! [`store`](crate::host::store) records it, and re-exports its types.
+//! versions of the contracts between its host, its VMM, and its guest. A caller saves it with
+//! each VM, in a [`SavedVm`](crate::host::vm::SavedVm), which [`vm::verify`](crate::host::vm::verify)
+//! checks against the current one.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -227,7 +228,7 @@ impl fmt::Display for IdentityPart {
 /// build of the host's own code keeps the VM running and reattaches to it. A different runtime
 /// identity would drive the VM through artifacts or contracts that did not start it, so the VM
 /// must be stopped instead, through its verified process identity; see
-/// [`RuntimeRecord::check_identity`](crate::host::store::RuntimeRecord::check_identity).
+/// [`vm::verify`](crate::host::vm::verify).
 ///
 /// The caller takes the artifact identities from install or staging metadata, and
 /// [`RuntimeIdentity::new`] adds the contract versions that this crate speaks.

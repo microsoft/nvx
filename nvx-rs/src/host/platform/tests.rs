@@ -7,9 +7,9 @@ pub(crate) use super::windows::tests::set_access;
 #[cfg(windows)]
 pub(crate) use super::windows::tests::{accept_control, control_server, wait_exit_handle};
 #[cfg(windows)]
-pub(crate) use super::windows::tests::{
-    access, claim_released_within, inherits_file, untrusted_log_job, user_sid, with_spawn_window,
-};
+pub(crate) use super::windows::tests::{access, inherits_file, untrusted_log_job, user_sid};
+#[cfg(all(windows, feature = "cli"))]
+pub(crate) use super::windows::tests::{claim_released_within, with_spawn_window};
 use super::*;
 
 #[test]
@@ -175,7 +175,7 @@ fn the_hosts_identity_and_monotonic_time_are_read() {
 /// The stores tell files apart by the identities that their seals hold, with the 128-bit file
 /// IDs of `FILE_ID_INFO` on Windows, whether they examine a path, an open file, or an entry of
 /// an open directory.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(any(target_os = "linux", windows), feature = "cli"))]
 #[test]
 fn the_stores_tell_files_apart_by_the_identities_that_their_seals_hold() {
     use crate::host::seal::FileSeal;

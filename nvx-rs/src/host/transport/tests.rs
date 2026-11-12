@@ -36,7 +36,7 @@ fn endpoint(directory: &tempfile::TempDir) -> String {
         format!(
             r"\\.\pipe\nvx-verified-{}-{}",
             std::process::id(),
-            crate::host::store::LaunchId::generate().unwrap().as_str()
+            crate::host::tests::unique_suffix()
         )
     }
 }
