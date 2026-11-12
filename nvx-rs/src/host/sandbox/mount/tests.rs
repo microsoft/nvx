@@ -8,9 +8,11 @@ pub(crate) use super::host_paths::validate_mount_host_paths_with;
 use super::request::require_mount_owner_supported_on;
 use super::*;
 use crate::ErrorKind;
-use crate::host::filesystem::{Bind, Owner, ReservedTargets};
+use crate::host::filesystem::{Owner, ReservedTargets};
 use crate::host::paths;
-use crate::host::sandbox::tests::{deny, exported, host, host_text, native, policy};
+#[cfg(windows)]
+use crate::host::sandbox::tests::host_text;
+use crate::host::sandbox::tests::{host, native, policy};
 
 fn parse(value: &str, policy: MountPolicy) -> Result<SandboxMount> {
     SandboxMount::parse(value, policy, MountOwner::Vmm, MountKind::Directory)
@@ -37,31 +39,6 @@ fn mount_parser_defaults_to_read_only_and_accepts_rw() {
     .unwrap();
     assert_eq!(writable.access(), MountAccess::ReadWrite);
     assert_eq!(writable.policy().denied, ["logs", "secrets"]);
-    // One directory uses the device directly, with the absolute denied paths of its plan.
-    let mut plan = exported(&[(
-        "/opt/hostedtoolcache",
-        "/host/dir",
-        MountAccess::ReadWrite,
-        MountKind::Directory,
-    )]);
-    deny(&mut plan, 0, &["/host/dir/logs", "/host/dir/secrets"]);
-    let boot = boot_shares(&plan).unwrap();
-    assert_eq!(
-        boot.arguments,
-        [
-            "--mount".to_owned(),
-            format!("/opt/hostedtoolcache,{},rw", host_text("/host/dir")),
-            "--mount-deny".to_owned(),
-            host_text("/host/dir/logs"),
-            "--mount-deny".to_owned(),
-            host_text("/host/dir/secrets"),
-        ]
-    );
-    assert!(boot.tokens.is_empty());
-    assert_eq!(
-        boot.fragment,
-        " virtfs_dir=/opt/hostedtoolcache virtfs_tag=microvm virtfs_mode=rw"
-    );
 }
 
 #[test]
@@ -163,70 +140,13 @@ fn mount_parser_accepts_host_paths_with_commas() {
         let mount = parse(&value, policy(&["secret"], &[], &[])).unwrap();
         assert_eq!(mount.host_path(), Path::new(&native(host_path)));
         assert_eq!(mount.access(), access);
-        // OpenVMM finds the end of the host path before the mode, which NVX therefore always
-        // gives.
-        let mut plan = exported(&[(target, "/unused", access, MountKind::Directory)]);
-        plan.children[0].root = PathBuf::from(native(host_path));
-        assert_eq!(
-            boot_shares(&plan).unwrap().arguments,
-            [
-                "--mount".to_owned(),
-                format!("{target},{},{access}", native(host_path)),
-            ]
-        );
     }
-    let mut plan = exported(&[
-        (
-            "/work",
-            "/unused/a",
-            MountAccess::ReadWrite,
-            MountKind::Directory,
-        ),
-        (
-            "/reports",
-            "/unused/b",
-            MountAccess::ReadOnly,
-            MountKind::Directory,
-        ),
-    ]);
-    plan.children[0].root = PathBuf::from(native(alpha));
-    plan.children[1].root = PathBuf::from(native(reports));
-    let arguments = boot_shares(&plan).unwrap().arguments;
-    let children: Vec<&String> = arguments
-        .iter()
-        .zip(arguments.iter().skip(1))
-        .filter(|(option, _)| *option == "--mount-child")
-        .map(|(_, value)| value)
-        .collect();
-    assert_eq!(
-        children,
-        [
-            &format!("{},{},rw", aggregate_child_name(0, "/work"), native(alpha)),
-            &format!(
-                "{},{},ro",
-                aggregate_child_name(1, "/reports"),
-                native(reports)
-            ),
-        ]
-    );
 }
 
 #[test]
 fn mount_owner_defaults_to_vmm_and_forwards_caller() {
     let default = parse("/workspace,host-dir,rw", MountPolicy::default()).unwrap();
     assert_eq!(default.owner(), MountOwner::Vmm);
-    let mut plan = exported(&[(
-        "/workspace",
-        "/host/dir",
-        MountAccess::ReadWrite,
-        MountKind::Directory,
-    )]);
-    assert!(
-        !boot_shares(&plan)
-            .unwrap()
-            .arguments
-            .contains(&"--mount-owner".to_owned())
-    );
     let caller = SandboxMount::parse(
         "/workspace,host-dir,rw",
         policy(&["secrets"], &[], &[]),
@@ -234,23 +154,7 @@ fn mount_owner_defaults_to_vmm_and_forwards_caller() {
         MountKind::Directory,
     )
     .unwrap();
-    deny(&mut plan, 0, &["/host/dir/secrets"]);
-    let vmm = boot_shares(&plan).unwrap();
-    plan.owner = Owner::Caller;
-    let boot = boot_shares(&plan).unwrap();
-    assert_eq!(
-        boot.arguments,
-        [
-            "--mount".to_owned(),
-            format!("/workspace,{},rw", host_text("/host/dir")),
-            "--mount-deny".to_owned(),
-            host_text("/host/dir/secrets"),
-            "--mount-owner".to_owned(),
-            "caller".to_owned(),
-        ]
-    );
     assert_eq!(caller.absolute().unwrap().owner(), MountOwner::Caller);
-    assert_eq!(boot.fragment, vmm.fragment);
     assert_eq!(
         message(MountOwner::from_name("root")),
         "unsupported sandbox mount owner \"root\"; choose vmm or caller"
@@ -268,40 +172,9 @@ fn mount_access_policy_is_validated_and_forwarded() {
         policy(&["mcp-logs"], &["mcp-logs/payloads"], &["agent", "cache"]),
     )
     .unwrap();
-    let mut plan = exported(&[(
-        "/tmp/mcp-runtime",
-        "/host/dir",
-        MountAccess::ReadWrite,
-        MountKind::Directory,
-    )]);
-    plan.children[0].write = vec![host("/host/dir/agent"), host("/host/dir/cache")];
-    deny(&mut plan, 0, &["/host/dir/mcp-logs"]);
-    plan.children[0].allowed = vec![host("/host/dir/mcp-logs/payloads")];
-    let boot = boot_shares(&plan).unwrap();
-    assert_eq!(
-        boot.arguments,
-        [
-            "--mount".to_owned(),
-            format!("/tmp/mcp-runtime,{},rw", host_text("/host/dir")),
-            "--mount-deny".to_owned(),
-            host_text("/host/dir/mcp-logs"),
-            "--mount-allow".to_owned(),
-            host_text("/host/dir/mcp-logs/payloads"),
-            "--mount-write".to_owned(),
-            host_text("/host/dir/agent"),
-            "--mount-write".to_owned(),
-            host_text("/host/dir/cache"),
-        ]
-    );
     let absolute = mount.absolute().unwrap();
     assert_eq!(absolute.policy().allowed, ["mcp-logs/payloads"]);
     assert_eq!(absolute.policy().writable, ["agent", "cache"]);
-    // OpenVMM enforces the policy on the host, so the guest's bootstrap tokens are those of the
-    // plain share.
-    assert_eq!(
-        boot.fragment,
-        " virtfs_dir=/tmp/mcp-runtime virtfs_tag=microvm virtfs_mode=rw"
-    );
     let paths: Vec<String> = (0..129).map(|index| format!("path-{index}")).collect();
     let many: Vec<&str> = paths.iter().map(String::as_str).collect();
     for (value, policy, expected) in [
@@ -596,41 +469,6 @@ fn mount_target_validation_rejects_unsafe_and_reserved_targets() {
     validate_mount_target(&format!("/{}", "x".repeat(4095))).unwrap();
 }
 
-#[test]
-fn aggregate_child_names_pin_their_targets() {
-    let name = aggregate_child_name(0, "/workspace");
-    assert_eq!(name, "0-c52ddf65534b7b46035084358ab7902b");
-    // Equal targets give equal names, so a restore names its children as the boot did, and
-    // another target or position gives another name.
-    assert_eq!(aggregate_child_name(0, "/workspace"), name);
-    assert_ne!(aggregate_child_name(0, "/workspace2"), name);
-    assert_ne!(aggregate_child_name(1, "/workspace"), name);
-    // Every name follows OpenVMM's rule for the name of a child.
-    for (index, target) in [
-        (0, "/w".to_owned()),
-        (999, format!("/{}", "x".repeat(1000))),
-    ] {
-        let name = aggregate_child_name(index, &target);
-        let (number, digest) = name.split_once('-').unwrap();
-        assert!(number.chars().all(|c| c.is_ascii_digit()));
-        assert_eq!(digest.len(), 32);
-        assert!(digest.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')));
-    }
-    assert!(aggregate_child_name(999, "/w").len() <= 64);
-    assert_eq!(
-        aggregate_child_argument("n", "/h,x", MountAccess::ReadWrite, MountKind::File),
-        "n,/h,x,rw,file"
-    );
-    assert_eq!(
-        mount_argument("/t", "/h", MountAccess::ReadOnly),
-        "/t,/h,ro"
-    );
-    assert_eq!(
-        aggregate_command_line_fragment(&[MountAccess::ReadOnly, MountAccess::ReadOnly]),
-        " virtfs_dir=/run/nvx/shares virtfs_tag=microvm virtfs_mode=ro virtfs_aggregate=1"
-    );
-}
-
 /// Returns the resolved form of `path`, without Windows' verbatim prefix, as the planner records
 /// host paths.
 fn resolved(path: &Path) -> PathBuf {
@@ -726,34 +564,6 @@ fn shares_are_planned_through_the_export_planner() {
     plan.verify().unwrap();
     plan.check(ReservedTargets::CONTAINER_ROOT).unwrap();
 
-    // The guest's shell binds each child from its token, in child order.
-    let names = [
-        aggregate_child_name(0, "/etc/app/settings.json"),
-        aggregate_child_name(1, "/opt/tools"),
-        aggregate_child_name(2, "/workspace"),
-    ];
-    let boot = boot_shares(&plan).unwrap();
-    assert_eq!(
-        boot.tokens,
-        [
-            format!("nvx_share={},/etc/app/settings.json,ro,file", names[0]),
-            format!("nvx_share={},/opt/tools,ro", names[1]),
-            format!("nvx_share={},/workspace,rw", names[2]),
-        ]
-    );
-    let text = |path: &Path| path.to_str().unwrap().to_owned();
-    assert_eq!(
-        boot.arguments[boot.arguments.len() - 6..],
-        [
-            "--mount-deny".to_owned(),
-            text(&work.join("secrets")),
-            "--mount-allow".to_owned(),
-            text(&work.join("secrets").join("public")),
-            "--mount-write".to_owned(),
-            text(&work.join("out")),
-        ]
-    );
-
     // The planner refuses what OpenVMM would: here, a writable path that a denied path hides.
     let error = plan_mounts(&[share(
         format!("/workspace,{},rw", joined("work").display()),
@@ -774,10 +584,6 @@ fn shares_are_planned_through_the_export_planner() {
         if owned.uid() != 0 && owned.gid() != 0 {
             let plan = plan_mounts(&mounts(MountOwner::Caller)).unwrap().unwrap();
             assert_eq!(plan.owner, Owner::Caller);
-            assert_eq!(
-                boot_shares(&plan).unwrap().arguments[boot.arguments.len()..],
-                ["--mount-owner", "caller"]
-            );
         }
     }
 }
@@ -856,78 +662,4 @@ fn planned_shares_keep_their_owner_and_kind() {
             .contains("lies inside the host directory of another share"),
         "{error}"
     );
-}
-
-#[test]
-fn boot_tokens_refuse_what_the_shell_cannot_bind() {
-    let plan = exported(&[(
-        "/workspace",
-        "/host/work",
-        MountAccess::ReadWrite,
-        MountKind::Directory,
-    )]);
-    // A path below a share's root.
-    let mut below = plan.clone();
-    below.binds[0].source = "sub".to_owned();
-    assert_eq!(
-        message(boot_shares(&below)),
-        format!(
-            "the boot tokens of a share cannot map {}, a path below the share's root {}",
-            host("/host/work").join("sub").display(),
-            host_text("/host/work")
-        )
-    );
-    // One child at two targets.
-    let mut twice = plan.clone();
-    twice.binds.push(Bind {
-        target: "/workspace2".to_owned(),
-        ..twice.binds[0].clone()
-    });
-    assert_eq!(
-        message(boot_shares(&twice)),
-        format!(
-            "the boot tokens of a share map {} at one target, not 2",
-            host_text("/host/work")
-        )
-    );
-    // A bind of no child.
-    let mut unknown = plan.clone();
-    unknown.binds.push(Bind {
-        child: 1,
-        target: "/other".to_owned(),
-        ..unknown.binds[0].clone()
-    });
-    assert_eq!(
-        message(boot_shares(&unknown)),
-        "the boot tokens of a share cannot map a path of an unknown host directory"
-    );
-    // A read-only bind of a directory whose writes OpenVMM narrows to a path inside it, which the
-    // tokens would mount read-write, and a read-write bind of a read-only directory.
-    let mut narrowed = plan.clone();
-    narrowed.children[0].write = vec![host("/host/work/out")];
-    narrowed.binds[0].read_only = true;
-    assert_eq!(
-        message(boot_shares(&narrowed)),
-        format!(
-            "the boot tokens of a share cannot map {} read-only while OpenVMM exports it \
-             read-write",
-            host_text("/host/work")
-        )
-    );
-    assert!(narrowed.check(ReservedTargets::CONTAINER_ROOT).is_err());
-    let mut read_only = plan.clone();
-    read_only.children[0].writable = false;
-    assert_eq!(
-        message(boot_shares(&read_only)),
-        format!(
-            "the boot tokens of a share cannot map {} read-write while OpenVMM exports it \
-             read-only",
-            host_text("/host/work")
-        )
-    );
-    assert!(read_only.check(ReservedTargets::CONTAINER_ROOT).is_err());
-    // A target that a token cannot carry.
-    let mut comma = plan;
-    comma.binds[0].target = "/work,space".to_owned();
-    assert!(message(boot_shares(&comma)).contains("invalid sandbox mount target"));
 }

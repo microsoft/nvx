@@ -5,8 +5,8 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use super::{
-    MAX_MOUNT_POLICY_PATHS, MAX_MOUNT_TARGET_BYTES, MOUNT_COMMAND_LINE_FRAGMENT, MOUNT_TAG,
-    MountAccess, MountKind, MountOwner, MountPolicy, POLICY_KINDS, PolicyKind,
+    MAX_MOUNT_POLICY_PATHS, MAX_MOUNT_TARGET_BYTES, MountAccess, MountKind, MountOwner,
+    MountPolicy, POLICY_KINDS, PolicyKind,
 };
 use crate::error::{Error, Result};
 use crate::host::filesystem::within;
@@ -419,12 +419,6 @@ impl SandboxMount {
 /// them.
 fn absolute_host_path(directory: &Path, path: &Path) -> Result<PathBuf> {
     paths::absolute_in(directory, path).map_err(|error| os_error(&error, Some(path)))
-}
-
-/// Returns the bootstrap tokens of a share at `target` with `access`.
-pub(super) fn command_line_fragment(target: &str, access: MountAccess) -> String {
-    let [directory, tag, mode] = MOUNT_COMMAND_LINE_FRAGMENT;
-    format!("{directory}{target}{tag}{MOUNT_TAG}{mode}{access}")
 }
 
 /// Checks the live shares that one sandbox attaches, in child order: no target may overlap

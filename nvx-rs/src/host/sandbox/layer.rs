@@ -11,8 +11,8 @@ use crate::uuid::Uuid;
 
 /// The role of a read-only layer of `nvx-rs sandbox`.
 ///
-/// A sandbox takes exactly one layer, the distro layer, which its plan attaches as the `distro`
-/// [`BlockRole`](super::BlockRole).
+/// A sandbox takes exactly one layer, the distro layer, which OpenVMM attaches as the `distro`
+/// sandbox block device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum LayerRole {
     /// The distribution, the only layer of a sandbox.

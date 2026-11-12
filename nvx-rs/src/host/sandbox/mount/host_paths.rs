@@ -102,6 +102,13 @@ pub(crate) fn validate_mount_host_paths_with(
 /// [`ErrorKind::Io`](crate::ErrorKind::Io) if a path cannot be examined.
 ///
 /// [`plan_mounts`]: crate::host::sandbox::mount::plan_mounts
+#[cfg_attr(
+    not(feature = "cli"),
+    allow(
+        dead_code,
+        reason = "only the CLI's sandboxes check their shares again"
+    )
+)]
 pub(crate) fn check_distinct_export_roots(
     export: &ExportPlan,
     host: &HostQueries<'_>,
