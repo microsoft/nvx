@@ -662,9 +662,8 @@ impl SnapshotKey {
     /// The bytes must be the key's one encoding, of version [`VERSION`](Self::VERSION), with no
     /// value of another form than a key derived from a manifest has, and no byte left over.
     ///
-    /// Fails with [`ErrorCode::FormatUnsupported`](crate::ErrorCode::FormatUnsupported) for a key
-    /// of another version, and with [`ErrorKind::Io`](crate::ErrorKind::Io) for bytes that are
-    /// not such a key.
+    /// Fails with [`ErrorKind::Io`](crate::ErrorKind::Io) for a key of another version, and for
+    /// bytes that are not such a key.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() > Self::MAX_LEN {
             return Err(Error::io(format!(
