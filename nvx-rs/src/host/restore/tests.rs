@@ -14,8 +14,8 @@ use crate::activation::{
     ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image, MachineIdMode,
     OverlayMode, ReadyActivation, RestoreSection, TransactionId, Upper, View,
 };
-use crate::host::platform::inherit::spawn_command;
 use crate::host::process::{BootId, Opened};
+use crate::host::tests::spawn_locked;
 use crate::host::vm::create_private_dir;
 use crate::protocol::restore_ready::parse_ready_event;
 
@@ -90,7 +90,7 @@ impl Client {
             .env("NVX_TEST_READY_CLOSE", if close { "1" } else { "0" })
             .stdin(Stdio::piped())
             .stdout(Stdio::piped());
-        let child = spawn_command(&mut command).unwrap();
+        let child = spawn_locked(&mut command).unwrap();
         let process = held_process(child.id());
         let mut client = Self { child, process };
         client
@@ -233,7 +233,7 @@ fn a_queued_peer_cannot_be_the_vm_that_reuses_its_pid() {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            let output = spawn_command(&mut command)
+            let output = spawn_locked(&mut command)
                 .and_then(Child::wait_with_output)
                 .unwrap_or_else(|error| panic!("{diagnostics}\n{route} helper: {error}"));
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -278,7 +278,7 @@ fn a_queued_peer_cannot_be_the_vm_that_reuses_its_pid() {
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
-    let child = spawn_command(&mut command).unwrap();
+    let child = spawn_locked(&mut command).unwrap();
     assert_eq!(child.id(), recycled);
     let process = held_process(child.id());
     let mut vm = Client { child, process };
@@ -323,7 +323,7 @@ fn the_receiver_fails_closed_without_original_peer_pidfds() {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
             crate::host::sys::tests::refuse_peer_pidfd_on_spawn(&mut command, errno);
-            let output = spawn_command(&mut command)
+            let output = spawn_locked(&mut command)
                 .unwrap()
                 .wait_with_output()
                 .unwrap();

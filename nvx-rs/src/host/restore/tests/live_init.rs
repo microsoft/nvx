@@ -15,7 +15,7 @@ use crate::activation::{
 use crate::host::nvxs::HostConnection;
 use crate::host::session;
 use crate::host::snapshot::SnapshotManifest;
-use crate::host::supervisor::{Launched, VmmCommand, spawn};
+use crate::host::spawn::{Launched, VmmCommand, spawn_vm_with_mode};
 use crate::protocol::{
     APP_ERROR, APP_EXEC, APP_EXIT, APP_MAPS, APP_READY, APP_STDERR, APP_STDOUT, APP_STOP,
     APP_STOPPED, CAPABILITY_LEN, HostMap, Workload, WorkloadEnvironment, decode_app, encode_app,
@@ -36,7 +36,7 @@ impl Drop for OwnedVm {
                 .is_ok_and(|done| done)
             {
                 vm.detach();
-            } else if !vm.kill_and_wait() {
+            } else if vm.kill_and_confirm_exit().is_err() {
                 eprintln!("OWNED_RESTORE_TEARDOWN_FAILED");
             }
         }
@@ -296,8 +296,14 @@ fn run() -> Result<(), AnyError> {
     ];
     let mut capability = [0; CAPABILITY_LEN];
     getrandom::fill(&mut capability)?;
-    let command = VmmCommand::new(vmm, options, &root);
-    let mut owned = OwnedVm(Some(spawn(&command, &capability, log)?));
+    let command = VmmCommand {
+        program: vmm,
+        arguments: options,
+        working_dir: root.clone(),
+        breakaway_from_job: false,
+        inherit: Vec::new(),
+    };
+    let mut owned = OwnedVm(Some(spawn_vm_with_mode(&command, &capability, log, false)?));
     let running = owned.0.as_ref().ok_or("missing owned VM")?;
     let process = running.process()?;
     let pid = running.id();

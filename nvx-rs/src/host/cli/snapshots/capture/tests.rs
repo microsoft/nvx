@@ -81,7 +81,8 @@ impl Fixture {
         options.timeout = timeout;
         let result = capture(&options, &runtime(self.root.path()), |prepared| {
             write_recipe(self.root.path(), &prepared, behavior);
-            // As `spawn_vm` does, this hands the VMM its capability on its standard input.
+            // As the crate's spawn of a VMM does, this hands the VMM its capability on its standard
+            // input.
             stdin.write_all(prepared.capability().as_bytes()).unwrap();
             drop(stdin);
             Ok(process)
@@ -262,17 +263,20 @@ fn write_recipe(root: &Path, prepared: &Prepared, behavior: &str) {
 
 fn fake_spawn(root: &Path, prepared: Prepared, behavior: &str) -> Process {
     write_recipe(root, &prepared, behavior);
-    let command = VmmCommand::new(
-        std::env::current_exe().unwrap(),
-        ["--exact", HELPER, "--ignored", "--nocapture"]
+    let command = VmmCommand {
+        program: std::env::current_exe().unwrap(),
+        arguments: ["--exact", HELPER, "--ignored", "--nocapture"]
             .map(Into::into)
             .to_vec(),
-        prepared.outputs().log.parent().unwrap(),
-    );
-    let child = spawn::spawn_vm(
+        working_dir: prepared.outputs().log.parent().unwrap().to_path_buf(),
+        breakaway_from_job: false,
+        inherit: Vec::new(),
+    };
+    let child = spawn::spawn_vm_with_mode(
         &command,
         prepared.capability().as_bytes(),
         prepared.log().try_clone().unwrap(),
+        false,
     )
     .unwrap();
     let process = child.process().unwrap();

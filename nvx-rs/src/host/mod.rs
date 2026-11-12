@@ -18,9 +18,6 @@
 //!   `nvx-rs sandbox` accept, into OpenVMM's rules, and [`filesystem`] plans the export of host
 //!   paths through OpenVMM's aggregate virtio-fs device.
 //! - [`report`] reads OpenVMM's outcome report.
-//! - [`supervisor`] is the transitional public path, until SL6.3 (#1122), of the low-level spawn
-//!   of the private `spawn` module, which starts a VMM detached, passing it only the descriptors
-//!   or handles that the caller allows, and no other descriptor or handle of the caller's.
 //! - [`snapshot`] holds the compatibility key, [`SnapshotKey`](snapshot::SnapshotKey), derived
 //!   from a [`CaptureClass`](snapshot::CaptureClass) and [`SnapshotManifest`](snapshot::SnapshotManifest),
 //!   the strict manifest reader, and the capture's public time and eligibility information.
@@ -50,7 +47,9 @@
 //!   sandboxes, looks up and downloads artifacts, and compiles egress policies.
 //!
 //! The private `paths` module makes host paths absolute and resolves their links, with
-//! `std::path` and `std::fs`, for the sandbox launch profile and the CLI.
+//! `std::path` and `std::fs`, for the sandbox launch profile and the CLI. The private `spawn`
+//! module starts a VMM for [`vm`], detached, passing it only the descriptors or handles that the
+//! caller allows, and no other descriptor or handle of the caller's.
 //!
 //! The children of `host` depend on one another without cycles: each builds only on children
 //! beneath it, as [`vm`] does on `spawn`, and `spawn` on [`platform`]. An item that
@@ -88,7 +87,6 @@ pub mod seal;
 pub(crate) mod session;
 pub mod snapshot;
 mod spawn;
-pub mod supervisor;
 #[cfg(unix)]
 #[allow(unsafe_code)]
 mod sys;
