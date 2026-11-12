@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -23,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import publish_nvx_crate  # noqa: E402
 from nvx_tools import crate_release  # noqa: E402
 from nvx_tools.build_constants import BuildConstants  # noqa: E402
-from nvx_tools.common import ScriptError  # noqa: E402
+from nvx_tools.common import CommandResult, ScriptError, run_capture  # noqa: E402
 from nvx_tools.crate_release import Version  # noqa: E402
 
 NAME = "demo"
@@ -72,6 +73,8 @@ CRATE_FILES = {
     "Cargo.lock": LOCKFILE,
     "LICENSE": "MIT\n",
     "README.md": "# demo\n",
+    "public-api/linux.txt": "mod demo\n",
+    "public-api/windows.txt": "mod demo\n",
     "src/lib.rs": "//! Demo.\n",
     "src/main.rs": "fn main() {}\n",
 }
@@ -262,19 +265,23 @@ def package_url(version: str) -> str:
 
 
 class _Cargo:
-    """`cargo package`, `cargo build`, and `cargo publish` over a checkout,
-    as `run_checked` runs them."""
+    """`cargo package`, `cargo build`, `cargo install`, and `cargo publish`
+    over a checkout, as `run_checked` runs them, and the guest tool that
+    `cargo install` installs, as `run_capture` runs it."""
 
     def __init__(self, checkout: _Checkout, crates_io: _CratesIo) -> None:
         self.checkout = checkout
         self.crates_io = crates_io
         self.commands: list[list[str]] = []
         self.environments: list[dict[str, str]] = []
+        self.directories: list[Path | None] = []
         # Changes the files of every package, as a broken packer would.
         self.transform: Callable[[dict[str, bytes]], None] | None = None
         # Changes what an upload stores, as a broken registry would; None
         # stores nothing.
         self.store: Callable[[bytes], bytes | None] = lambda package: package
+        # What the installed guest tool's test mode exits with and prints.
+        self.tool = CommandResult((), 0, crate_release.GUEST_TOOL_OUTPUT, b"")
 
     def __call__(
         self,
@@ -287,10 +294,16 @@ class _Cargo:
         command = [os.fspath(arg) for arg in args]
         self.commands.append(command)
         self.environments.append(dict(env or {}))
+        self.directories.append(cwd)
         if command[:2] == ["cargo", "build"]:
             manifest = Path(command[command.index("--manifest-path") + 1])
             if not manifest.is_file():
                 raise ScriptError(f"{manifest} does not exist")
+            return
+        if command[:2] == ["cargo", "install"]:
+            source = Path(command[command.index("--path") + 1])
+            if not (source / "Cargo.toml").is_file():
+                raise ScriptError(f"{source} holds no package")
             return
         if command[:2] not in (["cargo", "package"], ["cargo", "publish"]):
             raise AssertionError(f"unexpected command {command}")
@@ -309,12 +322,31 @@ class _Cargo:
         if stored is not None:
             self.crates_io.add(root.removeprefix(f"{NAME}-"), stored)
 
+    def capture(
+        self,
+        args: Sequence[str | os.PathLike[str]],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandResult:
+        """Run the installed guest tool, which records its command, or Git."""
+        command = [os.fspath(arg) for arg in args]
+        if Path(command[0]).name != crate_release.GUEST_TOOL:
+            return run_capture(args, cwd=cwd, env=env)
+        self.commands.append(command)
+        self.environments.append(dict(env or {}))
+        self.directories.append(cwd)
+        return CommandResult(
+            tuple(command), self.tool.returncode, self.tool.stdout, self.tool.stderr
+        )
+
     def subcommands(self) -> list[str]:
         return [command[1] for command in self.commands]
 
     def reset(self) -> None:
         self.commands.clear()
         self.environments.clear()
+        self.directories.clear()
 
 
 class _Response:
@@ -830,6 +862,19 @@ class PackageCheckTests(unittest.TestCase):
                 ):
                     self.check("0.1.0-alpha.4", transform)
 
+    def test_a_package_must_hold_the_snapshots_of_its_public_api(self):
+        # Its users check the public API that it promises against them.
+        for snapshot in ("public-api/linux.txt", "public-api/windows.txt"):
+
+            def missing(files: dict[str, bytes], snapshot: str = snapshot) -> None:
+                del files[snapshot]
+
+            with self.subTest(snapshot=snapshot):
+                with self.assertRaisesRegex(
+                    ScriptError, "\n" + re.escape(f"{snapshot} is missing") + "$"
+                ):
+                    self.check(DECLARED, missing)
+
     def test_a_package_of_the_declared_version_is_clean(self):
         def dirty(files: dict[str, bytes]) -> None:
             document = json.loads(files[".cargo_vcs_info.json"])
@@ -915,7 +960,10 @@ class ReleaseTests(unittest.TestCase):
         }
 
     def package(self) -> crate_release.Plan:
-        with patch.object(crate_release, "run_checked", self.cargo):
+        with (
+            patch.object(crate_release, "run_checked", self.cargo),
+            patch.object(crate_release, "run_capture", self.cargo.capture),
+        ):
             return crate_release.package_release(
                 self.checkout.crate_dir,
                 self.work_dir,
@@ -984,7 +1032,9 @@ class ReleaseTests(unittest.TestCase):
         )
         self.assertEqual(self.checkout.status(), "")
         self.assertFalse((self.work_dir / crate_release.STATE_FILE).exists())
-        self.assertEqual(self.cargo.subcommands(), ["package", "build"])
+        self.assertEqual(
+            self.cargo.subcommands(), ["package", "build", "install", "test"]
+        )
         self.assertNotIn("--allow-dirty", self.cargo.commands[0])
         self.assertIn("--no-verify", self.cargo.commands[0])
         self.assertIn("--locked", self.cargo.commands[0])
@@ -1002,6 +1052,69 @@ class ReleaseTests(unittest.TestCase):
             "crates.io has no version of demo.",
             self.summary.read_text(encoding="utf-8"),
         )
+
+    def test_the_package_job_installs_and_runs_the_guest_tool_of_the_package(self):
+        # A user installs the guest tools from the published crate, with the
+        # guest feature and profile and nothing of the repository.
+        self.package()
+        built = self.work_dir / "build" / f"demo-{DECLARED}"
+        install, run = self.cargo.commands[2:]
+        tools = self.work_dir / "guest-tools"
+        self.assertEqual(
+            install,
+            [
+                "cargo",
+                "install",
+                "--locked",
+                "--path",
+                str(built),
+                "--no-default-features",
+                "--features",
+                "guest",
+                "--profile",
+                "guest",
+                "--bin",
+                "nvx-ingress",
+                "--root",
+                str(tools),
+                "--target-dir",
+                str(self.work_dir / "guest-target"),
+            ],
+        )
+        snapshot = self.work_dir / "guest-snapshot"
+        self.assertEqual(
+            run, [str(tools / "bin" / "nvx-ingress"), "test", str(snapshot)]
+        )
+        # Both run in the job's work directory, outside the checkout.
+        self.assertEqual(self.cargo.directories[2:], [self.work_dir, self.work_dir])
+        self.assertFalse(self.work_dir.is_relative_to(self.checkout.root))
+        self.assertEqual((snapshot / "0" / "time").read_bytes(), b"0\n")
+        for table in ("tcp", "tcp6", "udp", "udp6"):
+            with self.subTest(table=table):
+                self.assertEqual(
+                    (snapshot / "0" / "net" / table).read_bytes(),
+                    b"  sl  local_address rem_address st tx rx tr tm retr uid "
+                    b"timeout inode\n",
+                )
+        self.assertEqual(self.outputs()["publish"], "true")
+
+    def test_a_guest_tool_that_does_not_run_as_it_should_publishes_nothing(self):
+        for tool, message in (
+            (
+                CommandResult((), 1, b"", b"failed\n"),
+                "nvx-ingress test exited 1\nfailed",
+            ),
+            (
+                CommandResult((), 0, b"0 4e56584c0100000111011c21\n", b""),
+                r"nvx-ingress test printed b'0 4e56584c0100000111011c21\\n', not "
+                r"b'0 4e56584c01000000\\n'",
+            ),
+        ):
+            with self.subTest(message=message):
+                self.cargo.tool = tool
+                with self.assertRaisesRegex(ScriptError, message):
+                    self.package()
+                self.assertEqual(self.outputs(), {})
 
     def test_a_changed_crate_publishes_the_next_number(self):
         self.crates_io.release(self.checkout)

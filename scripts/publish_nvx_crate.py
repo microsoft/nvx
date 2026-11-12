@@ -3,8 +3,10 @@
 
 The package job runs `package`. It decides whether the checkout's commit
 needs a new version of the crate, and if so, it gives the checkout that
-version, packs the crate, checks the package against the commit, and builds
-it with every feature. It outputs the version and the package's SHA-256.
+version, packs the crate, checks the package against the commit, builds it
+with every feature, and installs nvx-ingress from it with the guest feature
+and profile, outside the checkout, and runs it. It outputs the version and the
+package's SHA-256.
 
 The publish job, which never builds, runs `prepare` with those outputs. It
 checks that crates.io still needs the version and that its checkout packs the
@@ -37,8 +39,8 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "command",
         choices=("package", "prepare", "publish"),
-        help="decide, pack, check, and build in the package job; or check "
-        "the package again, and publish it, in the publish job",
+        help="decide, pack, check, build, and install in the package job; or "
+        "check the package again, and publish it, in the publish job",
     )
     parser.add_argument(
         "--crate-dir",
