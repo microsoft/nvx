@@ -555,8 +555,9 @@ backend also runs the public `managed-exec-config`, `sandbox-lifecycle`,
 of `test-microvm`, which drive `nvx-rs sandbox run`, `provision`, `start`,
 `exec`, `stop`, and `deprovision` as subprocesses (see
 [Run](run.md#managed-lifecycle)): request-scoped working directories and
-environments, timeouts, nonzero exits, stdout and stderr, bounded output and
-outcome reports, warm-guest state across requests and restarts, identity
+environments, timeouts, nonzero exits, stdout and stderr, output that `exec`
+streams whole past the 1 MiB that version 1 of NVXC forwarded, outcome
+reports, warm-guest state across requests and restarts, identity
 refusal, fail-closed lifecycle transitions, a crashed OpenVMM's stale runtime
 state, teardown that leaves no OpenVMM process, control endpoint,
 capability, or runtime record while the layer and scratch artifacts survive,
@@ -650,8 +651,8 @@ groups, or create a device node. When the test process also passes
 `CAP_SETUID` and `CAP_SETGID` to OpenVMM, as on a privileged developer host,
 the scenario requires the foreign identity to own the files it creates.
 Linux/KVM runs the
-broader Ubuntu SMP, managed lifecycle, network snapshot, blockless snapshot,
-and workload-identity set.
+broader Ubuntu SMP, managed lifecycle, network snapshot, and workload-identity
+set.
 
 OpenVMM release executables and provenance are built once by the independently
 addressable `build-openvmm-linux-gnu`, `build-openvmm-linux-musl`, and
@@ -817,7 +818,8 @@ operating system hands it, as described above.
 Each also runs the ignored `nvx-rs` test `tests/openvmm_vectors.rs`, which
 compares the submodule's control-session protocol vectors, and the lines of its
 platform allowlist of kernel command-line tokens, with the copies that the
-protocol and template tests read in the `nvx-rs` job, which cannot check out
+tests of `nvx::protocol::nvxs` and `nvx::host::config` read in the `nvx-rs`
+job, which cannot check out
 OpenVMM, and the versions of OpenVMM's snapshot format, saved-state schema,
 time ABI, and restore packets with those of `nvx::contract`;
 see [OpenVMM's vectors](../nvx-rs/tests/vectors/README.md#openvmms-vectors).
@@ -2289,10 +2291,22 @@ through the [`check-nvx-rs`](../.github/actions/check-nvx-rs/action.yml)
 action, on the Rust release that `rust-toolchain.toml` pins. It runs rustfmt,
 Clippy with warnings denied for all targets and features, for the library with
 and without default features, and for the `serde`, `cli` and `testing`
-features alone, the unit, protocol
-conformance-vector and property, and fake-OpenVMM instance tests, a test that
-the direct children of `nvx::host` depend on one another without cycles, rustdoc
-with warnings denied, the minimum Rust version check, and the macOS cross-check.
+features alone, the crate's tests with every feature and with the default
+features, and the library's without default features, rustdoc with warnings
+denied, the minimum Rust version check, and the macOS cross-check. The tests
+are the unit tests of each module, among them the protocol's conformance-vector
+and property tests and the process tests of `nvx::host::process`, and the
+integration tests of `nvx-rs/tests/`: the CLI's scenario tests, which run
+`nvx-rs` with the fake OpenVMM; the fake OpenVMM's own behavior; on Linux, the
+command lines, exit statuses, and output of the guest binaries; the NVXS
+session, whose host and guest roles exchange messages through a broker that
+relays records as OpenVMM's does; the
+[security checklist](../nvx-rs/tests/security_checklist.rs), which checks
+through the public API alone the security requirements that the host's
+documentation states for a VM's directory and outputs and for a snapshot's
+directory; and a test that the direct children of `nvx::host` depend on one
+another without cycles. The crate's [Testing](../nvx-rs/README.md#testing)
+section describes them, and the ignored tests that other jobs run.
 Clippy checks `serde`, `cli` and `testing` alone so that the compiler checks the
 code that each of them builds, which the code of other features may
 otherwise use; the musl check of the guest binaries checks `guest` alone.
@@ -2311,8 +2325,9 @@ rustup. rustdoc needs only a target's standard library, not its linker, so the
 Linux runner checks both snapshots, and any host lists both platforms alike.
 Each snapshot lists one public item a line, sorted by path: its kind, its path,
 and `(hidden)` if `#[doc(hidden)]` hides it or an item that contains it. The
-list follows re-exports, and leaves trait implementations out. The check
-prints how the API differs from a snapshot, and fails; a pull request that
+list follows re-exports, and leaves trait implementations out. The check,
+which `python3 scripts/public_api.py` runs on any host, prints how the API
+differs from a snapshot, and fails; a pull request that
 changes the public API runs `python3 scripts/public_api.py --update` and
 commits the snapshots, so that its diff shows the change. rustdoc's JSON is
 unstable, so the script reads only the format version of the pinned release,
