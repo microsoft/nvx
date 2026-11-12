@@ -11,10 +11,8 @@ use super::{
     CaptureContext, DESCRIPTION_FILE, KEY_FILE, MANIFEST_NAME, OPENVMM_DIR, SNAPSHOT_ARTIFACTS,
     SnapshotKey, SnapshotManifest, check_openvmm,
 };
-use crate::host::platform;
+use crate::host::platform::{self, open_regular, read_at_most, sync_dir, write_private};
 use crate::host::process::Exited;
-use crate::host::store::files::{sync_dir, write_private};
-use crate::host::store::regular::{open_regular, read_at_most};
 use crate::host::vm_directory::{OUTCOME, VmDir};
 use crate::{Error, ErrorKind, Result};
 

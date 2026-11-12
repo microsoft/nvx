@@ -1011,7 +1011,7 @@ pub(in crate::host) struct SnapshotFixture {
 impl SnapshotFixture {
     pub(in crate::host) fn new() -> Self {
         use crate::host::platform;
-        use crate::host::store::files::{create_new, write_private};
+        use crate::host::platform::{create_new, write_private};
 
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("snapshot");
@@ -1097,7 +1097,7 @@ fn snapshot_open_refuses_every_missing_entry() {
 
 #[test]
 fn snapshot_open_refuses_extra_entries_and_alternate_names() {
-    use crate::host::store::files::write_private;
+    use crate::host::platform::write_private;
 
     for nested in [false, true] {
         let fixture = SnapshotFixture::new();
@@ -1127,7 +1127,7 @@ fn snapshot_open_refuses_every_directory_in_place_of_a_regular_file() {
 
 #[test]
 fn snapshot_open_refuses_files_in_place_of_its_directories() {
-    use crate::host::store::files::write_private;
+    use crate::host::platform::write_private;
 
     let fixture = SnapshotFixture::new();
     let file = fixture.root.path().join("file");
@@ -1159,7 +1159,7 @@ fn snapshot_open_refuses_both_artifact_length_mismatches() {
 
 #[test]
 fn snapshot_open_uses_the_strict_manifest_and_bounded_key_decoders() {
-    use crate::host::store::files::write_private;
+    use crate::host::platform::write_private;
 
     for bytes in [vec![0x80], vec![0; super::MAX_MANIFEST_LEN as usize + 1]] {
         let fixture = SnapshotFixture::new();
@@ -1184,7 +1184,7 @@ fn snapshot_open_uses_the_strict_manifest_and_bounded_key_decoders() {
 
 #[test]
 fn snapshot_open_refuses_a_key_from_another_manifest_machine() {
-    use crate::host::store::files::write_private;
+    use crate::host::platform::write_private;
 
     let mutations: [fn(&mut ManifestSpec); 4] = [
         |spec| spec.cpu().digest[0] ^= 1,
@@ -1205,7 +1205,7 @@ fn snapshot_open_refuses_a_key_from_another_manifest_machine() {
 
 #[test]
 fn snapshot_description_contents_do_not_affect_opening() {
-    use crate::host::store::files::write_private;
+    use crate::host::platform::write_private;
 
     let fixture = SnapshotFixture::new();
     for contents in [b"".as_slice(), b"{broken JSON", &[0xff, 0, 0x80]] {
@@ -1216,7 +1216,7 @@ fn snapshot_description_contents_do_not_affect_opening() {
 
 #[test]
 fn snapshot_open_refuses_a_compatible_key_with_another_capture_time() {
-    use crate::host::store::files::write_private;
+    use crate::host::platform::write_private;
 
     let mutations: &[fn(&mut ManifestSpec)] = &[
         |spec| spec.time().capture_tsc += 1,
@@ -1486,7 +1486,7 @@ impl RestoreFixture {
         let image = snapshot.root.path().join("image.raw");
         let scratch = snapshot.root.path().join("scratch.raw");
         for (index, path, length) in [(0, &image, MIB), (1, &scratch, 2 * MIB)] {
-            let file = crate::host::store::files::create_new(path).unwrap();
+            let file = crate::host::platform::create_new(path).unwrap();
             crate::host::platform::make_sparse(&file).unwrap();
             file.set_len(length).unwrap();
             let geometry = crate::host::sandbox::block_geometry(&file, path, "fixture").unwrap();
@@ -1577,12 +1577,12 @@ impl RestoreFixture {
                 .unwrap()
             });
         self.snapshot.key = SnapshotKey::new(&class, &manifest).unwrap();
-        crate::host::store::files::write_private(
+        crate::host::platform::write_private(
             &self.snapshot.dir.join(KEY_FILE),
             &self.snapshot.key.to_bytes(),
         )
         .unwrap();
-        crate::host::store::files::write_private(
+        crate::host::platform::write_private(
             &self.snapshot.dir.join(OPENVMM_DIR).join(MANIFEST_NAME),
             &self.snapshot.spec.encode(),
         )
@@ -1877,7 +1877,7 @@ fn snapshot_nic_returns_only_the_captured_presence_and_address_without_rereading
 
 #[test]
 fn snapshot_open_refuses_captured_network_gateway_and_broadcast_addresses_as_io() {
-    use crate::host::store::files::write_private;
+    use crate::host::platform::write_private;
 
     for address in [[10, 42, 0, 0], [10, 42, 0, 1], [10, 42, 0, 255]] {
         let mut fixture = RestoreFixture::new(true);
