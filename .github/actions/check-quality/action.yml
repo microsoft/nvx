@@ -40,8 +40,7 @@ runs:
         python -m ruff check scripts .github/specula
         python -m compileall -q .github/specula
         ${SHELLCHECK} --shell=sh \
-          guest/common/init guest/alpine/nvx-container-enter \
-          guest/alpine/nvx-container-launch \
+          guest/common/init \
           guest/common/nvx-hostmount guest/common/nvx-identity-probe \
           guest/common/nvx-sandbox-smoke guest/common/nvx-snapshot \
           guest/common/nvx-virtio-restore-probe \
@@ -53,8 +52,7 @@ runs:
         python -m pyright --pythonplatform Windows
         python -m ruff format --check scripts .github/specula
         ${SHFMT} -d -ln posix -i 4 -ci \
-          guest/common/init guest/alpine/nvx-container-enter \
-          guest/alpine/nvx-container-launch \
+          guest/common/init \
           guest/common/nvx-hostmount guest/common/nvx-identity-probe \
           guest/common/nvx-sandbox-smoke guest/common/nvx-snapshot \
           guest/common/nvx-virtio-restore-probe \
