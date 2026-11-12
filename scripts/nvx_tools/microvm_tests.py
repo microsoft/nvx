@@ -2733,6 +2733,11 @@ SNAPSHOT_CORE_EXCLUSION_SECONDS = 2.0
 # How much longer than the capture, with the clocks' tolerance on either side,
 # the downtime before snapshot-core's first restore is.
 SNAPSHOT_CORE_DOWNTIME_MARGIN_SECONDS = 1.0
+# The status with which nvx-init ends the VM of a restore whose root does not
+# assemble over its upper, ACTIVATION_ROOT of nvx::protocol::status, and how
+# the CLI's error ends, with the restore's evidence and its attribution.
+SNAPSHOT_CORE_UNUSABLE_ROOT_STATUS = 54
+SNAPSHOT_CORE_UNUSABLE_ROOT_ATTRIBUTION = ": UnusableRoot, attributed to the request"
 
 
 class SnapshotCoreAcceptance(SnapshotAcceptance):
@@ -2748,7 +2753,9 @@ class SnapshotCoreAcceptance(SnapshotAcceptance):
     managed sandbox of the restore as provisioned, with an error that names
     the requested scratch, which attributes the failure to the request;
     a zeroed scratch image, which the guest cannot mount as its upper, ends
-    its VM before its workload runs, and the CLI reports the guest's exit.
+    its VM before its workload runs, with nvx-init's status of a root that
+    does not assemble, and the CLI reports the guest's exit with the restore's
+    evidence, which attributes the failure to the request.
     Three managed restores at once, each with a host share of its own, take
     turns at the snapshot's lock, and a one-off restore that cannot wait for it
     fails; the three then run at once, each with its own share, machine ID, and
@@ -2832,8 +2839,11 @@ class SnapshotCoreAcceptance(SnapshotAcceptance):
         and outcome report and the view of the snapshot. A one-off restore
         over a zeroed scratch image of the dormant scratch's length, which the
         guest cannot mount as its upper, ends its VM before its workload runs,
-        which the CLI reports as the guest's exit with status 125; the
-        restores that follow take the snapshot's lock, which it freed.
+        with nvx-init's status of a root that does not assemble,
+        SNAPSHOT_CORE_UNUSABLE_ROOT_STATUS, which the CLI reports as the
+        guest's exit with the restore's evidence of an unusable root, which it
+        attributes to the request; the restores that follow take the
+        snapshot's lock, which it freed.
         """
         size = self.artifacts.scratch_template.stat().st_size
         short, zeroed = "short-scratch", "zeroed-scratch"
@@ -2913,10 +2923,20 @@ class SnapshotCoreAcceptance(SnapshotAcceptance):
             *options(zeroed, size),
             expected=1,
             code="exited",
-            message="OpenVMM exited during startup: guest-exit status 125",
+            message=(
+                "OpenVMM exited during startup: guest-exit status "
+                f"{SNAPSHOT_CORE_UNUSABLE_ROOT_STATUS}; restore failed during "
+            ),
         )
         if SNAPSHOT_PROBE_PREFIX in failed.stdout:
             raise RuntimeError(f"the {zeroed} restore ran its workload")
+        reported = nvx_rs.reported_error(failed.stderr)
+        assert reported is not None
+        if not reported.message.endswith(SNAPSHOT_CORE_UNUSABLE_ROOT_ATTRIBUTION):
+            raise RuntimeError(
+                f"the {zeroed} restore does not attribute its unusable root to the "
+                f"request: {reported.message!r}"
+            )
         self.require_processes((), f"after the {zeroed} restore")
 
     def check_concurrent_restores(self) -> list[dict[str, str]]:
