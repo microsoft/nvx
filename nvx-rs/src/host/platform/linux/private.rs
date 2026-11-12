@@ -12,7 +12,9 @@ use nix::sys::stat::Mode;
 use nix::unistd::Uid;
 
 use super::{GROUP_AND_OTHER_BITS, PRIVATE_DIR_MODE, STORE_DIR_MODE};
-use crate::host::sys::{self, Errno};
+#[cfg(feature = "cli")]
+use crate::host::sys;
+use crate::host::sys::Errno;
 
 /// Creates `path` if needed and restricts it to the current user.
 pub fn create_private_dir(path: &Path) -> io::Result<()> {
@@ -42,18 +44,6 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
 pub(crate) fn create_store_dir(path: &Path) -> io::Result<Option<String>> {
     create_dir_of_mode(path, STORE_DIR_MODE)?;
     check_store_dir(path)
-}
-
-/// Creates the directory `path` with mode 0700, or checks that an existing one is private to the
-/// current user, as [`check_owner_only_dir`] does, and returns why it is not, if it is not.
-///
-/// A new directory takes the setgid bit of its parent, and loses the bits that the umask clears,
-/// even the current user's permission to read it, so its mode is set again. An existing directory
-/// is never changed: others could have placed files in it, or still hold them open, which a
-/// change of its mode would not revoke.
-pub(crate) fn create_owner_only_dir(path: &Path) -> io::Result<Option<String>> {
-    create_dir_of_mode(path, PRIVATE_DIR_MODE)?;
-    check_owner_only_dir(path)
 }
 
 /// Creates the directory `path`, whose parent must exist, with exactly the mode `mode`, unless it
@@ -101,8 +91,7 @@ pub(crate) fn check_store_dir(path: &Path) -> io::Result<Option<String>> {
 }
 
 /// Returns why the directory `path` is not private to the current user, if it is not: unless it
-/// is a directory, not a link to one, that belongs to the user and grants no one else any access,
-/// which [`create_owner_only_dir`] makes it.
+/// is a directory, not a link to one, that belongs to the user and grants no one else any access.
 pub(crate) fn check_owner_only_dir(path: &Path) -> io::Result<Option<String>> {
     let Some(directory) = open_plain_dir(path)? else {
         return Ok(Some("is not a plain directory".to_owned()));
@@ -155,28 +144,6 @@ pub(crate) fn check_snapshot_dir(path: &Path) -> io::Result<Option<String>> {
     check_owner_only_dir(path)
 }
 
-/// Returns why another user than the current one, or root, may change the file that `file` holds
-/// open, if one may: unless it belongs to the current user or to root, and grants neither its
-/// group nor others the permission to write it.
-pub(crate) fn foreign_writer_problem(file: &File) -> io::Result<Option<String>> {
-    let (uid, mode) = owner_and_mode(&file.metadata()?);
-    Ok(foreign_writer(uid, mode, Uid::effective()))
-}
-
-/// Returns why another user than `euid`, or root, may change a file that the user `uid` owns with
-/// the permission bits `mode`, if one may.
-pub(crate) fn foreign_writer(uid: Uid, mode: Mode, euid: Uid) -> Option<String> {
-    if uid != euid && !uid.is_root() {
-        Some(format!(
-            "belongs to user {uid}, neither the current user {euid} nor root"
-        ))
-    } else if mode.intersects(Mode::S_IWGRP | Mode::S_IWOTH) {
-        Some(format!("is writable by other users (mode {mode:03o})"))
-    } else {
-        None
-    }
-}
-
 /// Lets the regular file that `file` holds open for writing take no space for the blocks that
 /// nobody writes: nothing to do on Linux, whose filesystems allocate no block that a file's
 /// extension leaves unwritten.
@@ -187,6 +154,7 @@ pub(crate) fn make_sparse(_file: &File) -> io::Result<()> {
 /// Renames `from` to `to` unless `to` exists, which it leaves as it is, failing with
 /// [`io::ErrorKind::AlreadyExists`]: `renameat2` with `RENAME_NOREPLACE`, which a filesystem that
 /// cannot rename without replacing refuses.
+#[cfg(feature = "cli")]
 pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     sys::rename_no_replace(from, to)
 }

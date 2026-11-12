@@ -2,9 +2,8 @@
 //! [clone binding](CLONE_BINDING_NAME) records it, and the reading of the records of the template
 //! store, in whose format the binding is.
 //!
-//! The sandbox's store reads the binding before it begins a launch. The template store,
-//! [`template::Store`](crate::host::template::Store), grants and ends leases, and reads its own
-//! records, with these, and [`template`](crate::host::template) re-exports what is public here.
+//! The sandbox's store reads the binding before it begins a launch, and as it removes the control
+//! socket of a clone's VMM.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -19,23 +18,23 @@ use serde::{Deserialize, Serialize};
 
 use super::regular::{open_regular, open_regular_in, read_at_most, was_removed};
 use super::{CLONE_BINDING_NAME, LaunchId, SandboxStore};
-use crate::activation::{Identity, StoreGeneration, TemplateReference};
+use crate::activation::{Identity, StoreGeneration};
 use crate::error::{Error, ErrorCode, ErrorKind, Result};
 use crate::host::platform::{self, parse_hex_id, parse_hex32};
 
 /// Version of the store's records: its identity record and its index.
-pub const STORE_FORMAT: u32 = 1;
+pub(crate) const STORE_FORMAT: u32 = 1;
 
 /// Name of the directory of the generations' payloads.
-pub const GENERATIONS_NAME: &str = "generations";
+pub(crate) const GENERATIONS_NAME: &str = "generations";
 
 /// Name of the store's identity record.
-pub const STORE_RECORD_NAME: &str = "store.json";
+pub(crate) const STORE_RECORD_NAME: &str = "store.json";
 
 /// Longest identity record, in bytes.
 pub(crate) const MAX_STORE_RECORD_LEN: u64 = 4 * 1024;
 
-/// Bytes of a [`StoreId`] and of a [`StorageGeneration`](crate::host::template::StorageGeneration).
+/// Bytes of a [`StoreId`] and of a [`LeaseId`].
 pub(crate) const ID_LEN: usize = 16;
 
 /// Longest record of a lease, of a clone binding, or of a tombstone, in bytes: more than a record
@@ -55,19 +54,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 /// Its text form, which `Display` writes and `FromStr` parses, is 32 lowercase hexadecimal
 /// digits; parsing also accepts uppercase ones.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StoreId([u8; ID_LEN]);
-
-impl StoreId {
-    /// Returns the identity whose bytes are `bytes`.
-    pub const fn from_bytes(bytes: [u8; ID_LEN]) -> Self {
-        Self(bytes)
-    }
-
-    /// Returns the bytes of the identity.
-    pub const fn as_bytes(&self) -> &[u8; ID_LEN] {
-        &self.0
-    }
-}
+pub(crate) struct StoreId([u8; ID_LEN]);
 
 impl fmt::Display for StoreId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -100,19 +87,7 @@ impl FromStr for StoreId {
 /// Its text form, which `Display` writes and `FromStr` parses, is 32 lowercase hexadecimal
 /// digits; parsing also accepts uppercase ones.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LeaseId([u8; ID_LEN]);
-
-impl LeaseId {
-    /// Returns the identity whose bytes are `bytes`.
-    pub const fn from_bytes(bytes: [u8; ID_LEN]) -> Self {
-        Self(bytes)
-    }
-
-    /// Returns the bytes of the identity.
-    pub const fn as_bytes(&self) -> &[u8; ID_LEN] {
-        &self.0
-    }
-}
+pub(crate) struct LeaseId([u8; ID_LEN]);
 
 impl fmt::Display for LeaseId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -145,16 +120,13 @@ impl FromStr for LeaseId {
 ///
 /// The store keeps the record of each lease that it granted, and the sandbox keeps the same
 /// record as its clone binding, [`CLONE_BINDING_NAME`], beside its launch journal. A lease names
-/// its sandbox by the path of its directory with its links resolved, so that no removal or change
-/// of a link, or of a directory that a `..` component passes through, hides the sandbox from a
-/// [retirement](crate::host::template::Store::retire). A sandbox that holds a lease must not move,
-/// and goes only through its store's [removal](super::LockedStore::remove), which makes the
-/// binding's absence durable before the sandbox goes. The lease allows one launch of the clone, as
-/// the identity that it reserves, [`launch`](Self::launch), under the lock that acquired it, and no
-/// other launch of the sandbox until a release ends it, as
+/// its sandbox by the path of its directory with its links resolved. A sandbox that holds a lease
+/// must not move, and goes only through its store's [removal](super::LockedStore::remove), which
+/// makes the binding's absence durable before the sandbox goes. The lease reserves one launch of
+/// the clone, [`launch`](Self::launch), and allows no launch of the sandbox, as
 /// [`LockedStore::begin_launch`](super::LockedStore::begin_launch) requires.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Lease {
+pub(crate) struct Lease {
     /// The lease's identity.
     id: LeaseId,
     /// The identity of the store that granted it.
@@ -171,75 +143,34 @@ pub struct Lease {
 }
 
 impl Lease {
-    /// Returns the lease `id`, which the store `store` granted, of its generation `generation`,
-    /// whose key's identity is `key`, to the sandbox in `sandbox`, an absolute path with its links
-    /// resolved, which is valid Unicode, for the launch `launch` of its clone.
-    pub(crate) fn new(
-        id: LeaseId,
-        store: StoreId,
-        generation: StoreGeneration,
-        key: Identity,
-        sandbox: PathBuf,
-        launch: LaunchId,
-    ) -> Self {
-        Self {
-            id,
-            store,
-            generation,
-            key,
-            sandbox,
-            launch,
-        }
-    }
-
     /// Reads the clone binding of the sandbox of `sandbox`: the lease that it holds, if it holds
     /// one.
     ///
     /// A read that holds no lock sees one whole binding, as the latest transition left it. Fails
     /// with [`ErrorKind::Io`] for a binding that cannot be read, or is malformed, and with
     /// [`ErrorCode::FormatUnsupported`] for one of another format.
-    pub fn of(sandbox: &SandboxStore) -> Result<Option<Self>> {
+    pub(crate) fn of(sandbox: &SandboxStore) -> Result<Option<Self>> {
         read_binding(sandbox.dir())
     }
 
     /// Returns the lease's identity.
-    pub fn id(&self) -> LeaseId {
+    pub(crate) fn id(&self) -> LeaseId {
         self.id
     }
 
     /// Returns the identity of the store that granted the lease.
-    pub fn store(&self) -> StoreId {
+    pub(crate) fn store(&self) -> StoreId {
         self.store
     }
 
     /// Returns the store generation of the leased generation.
-    pub fn generation(&self) -> StoreGeneration {
+    pub(crate) fn generation(&self) -> StoreGeneration {
         self.generation
     }
 
-    /// Returns the directory of the sandbox that holds the lease, as an absolute path with its
-    /// links resolved, which may differ from the path through which the sandbox was leased, and
-    /// through which a [release](crate::host::template::Store::release) takes the sandbox's lock.
-    pub fn sandbox(&self) -> &Path {
-        &self.sandbox
-    }
-
-    /// Returns the launch of the clone that the lease reserves: the identity under which the
-    /// caller launches the clone, with [`supervisor::launch`](crate::host::supervisor::launch),
-    /// once, under the lock that acquired the lease, and the only launch of the sandbox that
-    /// [`LockedStore::begin_launch`](super::LockedStore::begin_launch) begins while the sandbox
-    /// holds the lease.
-    pub fn launch(&self) -> &LaunchId {
+    /// Returns the launch of the clone that the lease reserves.
+    pub(crate) fn launch(&self) -> &LaunchId {
         &self.launch
-    }
-
-    /// Returns the reference that the clone's lease and durable records keep of its template:
-    /// the leased generation's store generation and key identity.
-    pub fn template(&self) -> TemplateReference {
-        TemplateReference {
-            generation: self.generation,
-            key: self.key,
-        }
     }
 }
 
@@ -264,10 +195,9 @@ pub(crate) fn clone_socket_name(launch: &LaunchId) -> String {
     format!("{launch}.sock")
 }
 
-/// Returns whether `path` names the control socket of the VMM of the clone that holds `lease`, as
-/// [`template::Store::clone_socket_path`](crate::host::template::Store::clone_socket_path) returns
-/// it: `generations/<generation>/<launch>.sock`, in a template store, which a lease names by its
-/// identity alone.
+/// Returns whether `path` names the control socket of the VMM of the clone that holds `lease`, in
+/// the payload of the leased generation: `generations/<generation>/<launch>.sock`, in a template
+/// store, which a lease names by its identity alone.
 pub(crate) fn is_clone_socket(lease: &Lease, path: &Path) -> bool {
     let name = clone_socket_name(&lease.launch);
     let generation = lease.generation.to_string();
@@ -318,17 +248,10 @@ pub(crate) fn open_payload(
         .map_err(failed())
 }
 
-/// Reads the identity of the store in `dir` from its identity record, or returns `None` if the
-/// directory holds none.
-pub(crate) fn read_identity(dir: &Path) -> Result<Option<StoreId>> {
-    let path = dir.join(STORE_RECORD_NAME);
-    read_identity_with(&path, || open_existing(&path))
-}
-
-/// Reads the identity of the store whose directory `directory` holds open, in `dir`, as
-/// [`read_identity`] reads it at its path, or returns `None` if the directory holds no identity
-/// record, or, on Windows, one whose deletion is pending: through the handle, so that it reads
-/// the identity of the directory that the handle holds, whatever `dir` names meanwhile.
+/// Reads the identity of the store whose directory `directory` holds open, in `dir`, from its
+/// identity record, or returns `None` if the directory holds none, or, on Windows, one whose
+/// deletion is pending: through the handle, so that it reads the identity of the directory that the
+/// handle holds, whatever `dir` names meanwhile.
 pub(crate) fn read_identity_in(
     directory: &platform::Directory,
     dir: &Path,
@@ -373,19 +296,6 @@ pub(crate) struct StoreRecord {
 /// directory does not exist.
 pub(crate) fn read_binding(dir: &Path) -> Result<Option<Lease>> {
     read_lease(&dir.join(CLONE_BINDING_NAME), BINDING_DESCRIPTION)
-}
-
-/// Reads the clone binding of the sandbox whose directory `directory` holds open, in `dir`, as
-/// [`read_binding`] reads it at its path, or returns `None` if the directory holds none, or, on
-/// Windows, one whose deletion is pending, which is removed: through the handle, so that it reads
-/// the binding of the directory that the handle holds, whatever `dir` names meanwhile.
-pub(crate) fn read_binding_in(
-    directory: &platform::Directory,
-    dir: &Path,
-) -> Result<Option<Lease>> {
-    read_lease_with(&dir.join(CLONE_BINDING_NAME), BINDING_DESCRIPTION, || {
-        open_regular_in(directory, CLONE_BINDING_NAME)
-    })
 }
 
 /// Reads the record of a lease at `path`, its `description`, or returns `None` if it does not
@@ -435,19 +345,6 @@ pub(crate) struct LeaseRecord {
 }
 
 impl LeaseRecord {
-    /// Returns the record of `lease`.
-    pub(crate) fn new(lease: &Lease) -> Self {
-        Self {
-            format: STORE_FORMAT,
-            store: lease.store.to_string(),
-            lease: lease.id.to_string(),
-            generation: lease.generation.get().get(),
-            key: lease.key.to_string(),
-            sandbox: lease.sandbox.to_string_lossy().into_owned(),
-            launch: lease.launch.to_string(),
-        }
-    }
-
     /// Checks the record, and returns its lease, or says why it is malformed.
     fn into_lease(self) -> std::result::Result<Lease, String> {
         let field =
@@ -477,7 +374,7 @@ impl LeaseRecord {
 }
 
 /// Parses the text form of the identity of a template's key, 64 hexadecimal digits, as
-/// [`KeyIdentity`](crate::host::template::KeyIdentity) parses it, failing with
+/// [`KeyIdentity`](crate::host::snapshot::KeyIdentity) parses it, failing with
 /// [`ErrorKind::Unsupported`] for anything else.
 fn parse_key(text: &str) -> Result<Identity> {
     parse_hex32(text).map(Identity::from_bytes).ok_or_else(|| {
@@ -500,21 +397,9 @@ pub(crate) fn store_error(context: String) -> impl FnOnce(io::Error) -> Error {
     }
 }
 
-/// Reads the private regular file at `path`, the store's `description`, of at most `limit` bytes,
-/// or returns `None` if it does not exist, or was removed as this opened it, as [`was_removed`]
-/// tells, which a transaction in another process may do.
-///
-/// The file is opened without following a link, or on Windows any other reparse point, at its
-/// own name, and refused unless it is a regular file, before anything is read from it. A file
-/// that is not private to the current user is refused, since others could have written it: on
-/// Windows, a file's own access control list decides who may open it, whatever the store's
-/// directory allows.
-pub(crate) fn read_private(path: &Path, description: &str, limit: u64) -> Result<Option<Vec<u8>>> {
-    read_private_with(path, description, limit, || open_existing(path))
-}
-
 /// Opens the regular file at `path`, as [`open_regular`] does, or returns `None` if it does not
-/// exist, or was removed as this opened it, as [`was_removed`] tells.
+/// exist, or was removed as this opened it, as [`was_removed`] tells, which a transaction in
+/// another process may do.
 fn open_existing(path: &Path) -> io::Result<Option<File>> {
     match open_regular(path) {
         Ok(file) => Ok(Some(file)),
@@ -526,7 +411,13 @@ fn open_existing(path: &Path) -> io::Result<Option<File>> {
 }
 
 /// Reads the private regular file that `open` opens, the store's `description` at `path`, of at
-/// most `limit` bytes, as [`read_private`] reads it, or returns `None` if `open` finds none.
+/// most `limit` bytes, or returns `None` if `open` finds none.
+///
+/// `open` opens the file without following a link, or on Windows any other reparse point, at its
+/// own name, and refuses it unless it is a regular file, before anything is read from it. A file
+/// that is not private to the current user is refused, since others could have written it: on
+/// Windows, a file's own access control list decides who may open it, whatever the store's
+/// directory allows.
 fn read_private_with(
     path: &Path,
     description: &str,
@@ -548,18 +439,9 @@ fn read_private_with(
         .map_err(failed())
 }
 
-/// Reads the store's record at `path`, its `description`, of at most `limit` bytes, in format
-/// [`STORE_FORMAT`], or returns `None` if it does not exist.
-pub(crate) fn read_record<T: DeserializeOwned>(
-    path: &Path,
-    description: &str,
-    limit: u64,
-) -> Result<Option<T>> {
-    read_record_with(path, description, limit, || open_existing(path))
-}
-
-/// Reads the store's record that `open` opens, its `description` at `path`, as [`read_record`]
-/// reads it, or returns `None` if `open` finds none.
+/// Reads the store's record that `open` opens, its `description` at `path`, of at most `limit`
+/// bytes, in format [`STORE_FORMAT`], as [`read_private_with`] reads it, or returns `None` if
+/// `open` finds none.
 fn read_record_with<T: DeserializeOwned>(
     path: &Path,
     description: &str,

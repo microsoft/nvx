@@ -12,24 +12,21 @@ use super::launch::launch_reporting;
 use super::reattach::reattach_with;
 use super::vmm::{Stoppable, stop_process, terminate_process};
 use super::*;
+use crate::ErrorKind;
 use crate::error::{Error, Result};
 use crate::host::launch::MAX_TIMEOUT;
 use crate::host::platform;
 use crate::host::process::{BootId, Process, ProcessRef};
 use crate::host::store::{
-    ArtifactIdentity, CallerFiles, FORMAT, IdentityPart, JOURNAL_NAME, LaunchId, LockedStore,
-    RUNTIME_NAME, Recovery, RuntimeIdentity, SandboxStore,
+    ArtifactIdentity, FORMAT, IdentityPart, JOURNAL_NAME, LaunchId, RUNTIME_NAME, Recovery,
+    RuntimeIdentity, SandboxStore,
 };
-use crate::host::template::{self, Acquired, HostTime, Lease};
 use crate::protocol::CAPABILITY_LEN;
-use crate::{ErrorCode, ErrorKind};
 
 /// A launch capability.
 const CAPABILITY: [u8; CAPABILITY_LEN] = [7; CAPABILITY_LEN];
 /// The launch of the runtime records that [`record`] writes.
 const RECORDED_LAUNCH: &str = "5d41402abc4b2a76b9719d911017c592";
-/// The configuration record of these tests' clones.
-const CONFIG: &str = "config.json";
 
 /// Returns the identity `sha256:` and 64 copies of `digit`.
 fn artifact(digit: char) -> ArtifactIdentity {
@@ -85,52 +82,6 @@ fn record_launch(
         serde_json::to_vec(&record).unwrap(),
     )
     .unwrap();
-}
-
-/// A clone, in a fresh temporary directory, that leases a generation of a template from the
-/// template store that it returns, and whose launch, the one that its lease reserved, committed a
-/// VM whose VMM is `process`; and the lease, with the lock of the clone's sandbox that the
-/// acquisition returned.
-fn committed_clone(
-    process: &ProcessRef,
-) -> (tempfile::TempDir, template::Store, Lease, LockedStore) {
-    let directory = tempfile::tempdir().unwrap();
-    let templates = template::Store::create(directory.path().join("templates")).unwrap();
-    let generation = templates.publish_for_tests();
-    let sandbox = directory.path().join("sandbox");
-    let files = CallerFiles::new(CONFIG).unwrap();
-    let provisioned = SandboxStore::lock_for_provision(&sandbox, &files, None).unwrap();
-    fs::write(sandbox.join(CONFIG), b"{}").unwrap();
-    drop(provisioned);
-    // A second after the capture, on the host that captured the generation.
-    let time = generation.time();
-    let now = HostTime {
-        host_id: time.host_id,
-        boot_id: time.boot_id,
-        clock: time.host_clock,
-        monotonic_ns: time.capture_monotonic_ns + 1_000_000_000,
-        utc_ns: time.capture_utc_ns + 1_000_000_000,
-    };
-    let Acquired { lease, mut locked } = templates
-        .acquire(generation.generation(), &sandbox, &files, &now, None)
-        .unwrap();
-    // The reserved launch begins, and its commit replaces its journal with its runtime record.
-    drop(
-        locked
-            .begin_launch(lease.launch(), &runtime(), &CAPABILITY)
-            .unwrap(),
-    );
-    record_launch(&locked, lease.launch().as_str(), process, &runtime());
-    fs::remove_file(sandbox.join(JOURNAL_NAME)).unwrap();
-    (directory, templates, lease, locked)
-}
-
-/// Checks that `templates` refuses to release the lease of the sandbox of `locked`, whose VM may
-/// still run, and that the sandbox keeps it.
-fn refuses_release(templates: &template::Store, locked: &mut LockedStore, lease: &Lease) {
-    let error = templates.release(locked).unwrap_err();
-    assert_eq!(error.code(), ErrorCode::SandboxRunning, "{error}");
-    assert_eq!(Lease::of(locked).unwrap().as_ref(), Some(lease));
 }
 
 /// A VMM whose state drives a stop's decisions without a process: it exits once the graceful
@@ -618,7 +569,9 @@ fn a_launch_whose_caller_cannot_record_its_failure_keeps_its_journal_for_recover
 
 #[test]
 fn a_reattach_whose_caller_cannot_record_an_exit_keeps_the_record_until_one_can() {
-    let (_directory, templates, lease, mut locked) = committed_clone(&this_process());
+    let (_directory, store) = store();
+    record(&store, &this_process(), &runtime());
+    let mut locked = store.lock(None).unwrap();
     // The recorded VMM exited, but the caller cannot record what ended it.
     let exited = |_: &ProcessRef| -> io::Result<Option<Process>> { Ok(None) };
     let error = reattach_with(&mut locked, &runtime(), exited, |_| {
@@ -626,18 +579,16 @@ fn a_reattach_whose_caller_cannot_record_an_exit_keeps_the_record_until_one_can(
     })
     .unwrap_err();
     assert_eq!(error.message(), "the test cannot record the exit");
-    // The record, and with it the lease, remain for a later reattach.
+    // The record remains for a later reattach.
     assert!(locked.runtime().unwrap().is_some());
-    refuses_release(&templates, &mut locked, &lease);
     let Reattached::Exited { record, recovery } =
         reattach_with(&mut locked, &runtime(), exited, |_| Ok(())).unwrap()
     else {
         panic!("a VMM that exited was not reported as exited");
     };
-    assert_eq!(record.unwrap().launch(), lease.launch());
+    assert_eq!(record.unwrap().launch().as_str(), RECORDED_LAUNCH);
     assert_eq!(recovery, Recovery::Clean);
     assert!(locked.runtime().unwrap().is_none());
-    assert_eq!(templates.release(&mut locked).unwrap(), Some(lease));
 }
 
 #[test]
@@ -671,62 +622,16 @@ fn a_launch_whose_vmm_cannot_start_ends() {
 }
 
 #[test]
-fn a_clone_whose_record_names_a_vmm_that_exited_may_release_its_lease() {
-    let live = this_process();
-    let mut earlier_boot = *live.boot.as_bytes();
-    earlier_boot[0] ^= 1;
-    for exited in [
-        // A record of an earlier boot names a VMM that has exited.
-        ProcessRef {
-            boot: BootId::from_bytes(earlier_boot),
-            ..live.clone()
-        },
-        // The recorded ID now names another process: this one.
-        ProcessRef {
-            start_time: live.start_time + 1,
-            ..live.clone()
-        },
-    ] {
-        let (_directory, templates, lease, mut locked) = committed_clone(&exited);
-        // While the record names the clone's VM, the lease stays.
-        refuses_release(&templates, &mut locked, &lease);
-        let Reattached::Exited { record, recovery } = reattach(&mut locked, &runtime()).unwrap()
-        else {
-            panic!("{exited:?} names a live VMM");
-        };
-        assert_eq!(record.unwrap().launch(), lease.launch());
-        assert_eq!(recovery, Recovery::Clean);
-        // Reattach cleared the record of the VM that exited, so the release ends the lease.
-        assert_eq!(templates.release(&mut locked).unwrap(), Some(lease));
-        assert_eq!(Lease::of(&locked).unwrap(), None);
-    }
-}
-
-#[test]
-fn a_clone_whose_vmm_cannot_be_examined_keeps_its_lease() {
-    let (_directory, templates, lease, mut locked) = committed_clone(&this_process());
-    let hidden = |_: &ProcessRef| -> io::Result<Option<Process>> {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, "hidden"))
-    };
-    let Reattached::Indeterminate(reason) =
-        reattach_with(&mut locked, &runtime(), hidden, |_| Ok(())).unwrap()
-    else {
-        panic!("a VMM that cannot be examined was classified");
-    };
-    assert!(reason.ends_with("cannot be examined: hidden"), "{reason}");
-    assert!(locked.runtime().unwrap().is_some());
-    refuses_release(&templates, &mut locked, &lease);
-}
-
-#[test]
-fn a_clone_whose_forced_teardown_fails_keeps_its_lease_until_one_ends_its_vmm() {
-    let (_directory, templates, lease, mut locked) = committed_clone(&this_process());
+fn a_forced_teardown_that_fails_keeps_the_record_until_one_ends_the_vmm() {
+    let (_directory, store) = store();
+    record(&store, &this_process(), &runtime());
+    let mut locked = store.lock(None).unwrap();
     let Reattached::Live(vmm) = reattach(&mut locked, &runtime()).unwrap() else {
-        panic!("the clone's VMM was not reattached");
+        panic!("the recorded VMM was not reattached");
     };
     // This test process stands for the VMM, which these teardowns reach only through stand-ins.
     let bound = Duration::from_secs(10);
-    // A teardown that cannot terminate the VMM fails, and keeps its record, and so the lease.
+    // A teardown that cannot terminate the VMM fails, and keeps its record.
     let unkillable = Scripted {
         unkillable: true,
         ..Scripted::default()
@@ -738,15 +643,15 @@ fn a_clone_whose_forced_teardown_fails_keeps_its_lease_until_one_ends_its_vmm() 
         error.message(),
         format!("cannot terminate VMM process {}", std::process::id())
     );
-    refuses_release(&templates, &mut locked, &lease);
-    // One that does not end the VMM within its bound keeps them too.
+    assert_eq!(locked.runtime().unwrap().as_ref(), Some(vmm.record()));
+    // One that does not end the VMM within its bound keeps it too.
     let survivor = Scripted::default();
     assert_eq!(
         vmm.terminate_with(&mut locked, bound, &survivor).unwrap(),
         StopOutcome::TimedOut
     );
-    refuses_release(&templates, &mut locked, &lease);
-    // One that ends it clears the record, and the release ends the lease.
+    assert_eq!(locked.runtime().unwrap().as_ref(), Some(vmm.record()));
+    // One that ends it clears the record.
     let dying = Scripted {
         dies_when_killed: true,
         ..Scripted::default()
@@ -756,14 +661,15 @@ fn a_clone_whose_forced_teardown_fails_keeps_its_lease_until_one_ends_its_vmm() 
         StopOutcome::Forced
     );
     assert!(locked.runtime().unwrap().is_none());
-    assert_eq!(templates.release(&mut locked).unwrap(), Some(lease));
 }
 
 #[test]
 fn only_a_stop_unless_exited_keeps_the_record_of_a_vmm_that_had_exited() {
-    let (_directory, templates, lease, mut locked) = committed_clone(&this_process());
+    let (_directory, store) = store();
+    record(&store, &this_process(), &runtime());
+    let mut locked = store.lock(None).unwrap();
     let Reattached::Live(vmm) = reattach(&mut locked, &runtime()).unwrap() else {
-        panic!("the clone's VMM was not reattached");
+        panic!("the recorded VMM was not reattached");
     };
     // This test process stands for the VMM, which these stops reach only through a stand-in,
     // which exited once its holder found it running, before the stops began.
@@ -775,16 +681,14 @@ fn only_a_stop_unless_exited_keeps_the_record_of_a_vmm_that_had_exited() {
     let exited = Scripted::default();
     exited.exited.set(true);
     // The stop takes no step, and keeps the record, which tells a reattach that the VM exited
-    // unheld, and with it the lease.
+    // unheld.
     let stopped = vmm
         .stop_unless_exited_with(&mut locked, deadline, forced, never, &exited)
         .unwrap();
     assert!(stopped.is_none(), "{stopped:?}");
     assert_eq!(exited.operations(), ["check"]);
     assert_eq!(locked.runtime().unwrap().as_ref(), Some(vmm.record()));
-    refuses_release(&templates, &mut locked, &lease);
-    // A stop that ends such a VM as one that it stopped clears the record, so the release ends
-    // the lease.
+    // A stop that ends such a VM as one that it stopped clears the record.
     let stopped = vmm
         .stop_with(&mut locked, deadline, forced, never, &exited)
         .unwrap();
@@ -792,18 +696,19 @@ fn only_a_stop_unless_exited_keeps_the_record_of_a_vmm_that_had_exited() {
     assert!(stopped.graceful_error.is_none());
     assert_eq!(exited.operations(), ["check", "check"]);
     assert!(locked.runtime().unwrap().is_none());
-    assert_eq!(templates.release(&mut locked).unwrap(), Some(lease));
 }
 
 #[test]
 fn a_stop_unless_exited_stops_a_running_vmm_as_a_stop_does() {
-    let (_directory, templates, lease, mut locked) = committed_clone(&this_process());
+    let (_directory, store) = store();
+    record(&store, &this_process(), &runtime());
+    let mut locked = store.lock(None).unwrap();
     let Reattached::Live(vmm) = reattach(&mut locked, &runtime()).unwrap() else {
-        panic!("the clone's VMM was not reattached");
+        panic!("the recorded VMM was not reattached");
     };
     // This test process stands for the VMM, which these stops reach only through stand-ins.
     let deadline = Instant::now() + Duration::from_secs(60);
-    // One that outlives the stop keeps its record, and the lease.
+    // One that outlives the stop keeps its record.
     let survivor = Scripted::default();
     let stopped = vmm
         .stop_unless_exited_with(
@@ -817,7 +722,7 @@ fn a_stop_unless_exited_stops_a_running_vmm_as_a_stop_does() {
         .expect("the stop of a VMM that runs");
     assert_eq!(stopped.outcome, StopOutcome::TimedOut);
     assert_eq!(survivor.operations(), ["check", "wait"]);
-    refuses_release(&templates, &mut locked, &lease);
+    assert_eq!(locked.runtime().unwrap().as_ref(), Some(vmm.record()));
     // One that heeds the graceful step exits through the stop, which clears its record.
     let heeding = Scripted::default();
     let shut_down = |_: &Vmm, _: Instant| {
@@ -831,7 +736,6 @@ fn a_stop_unless_exited_stops_a_running_vmm_as_a_stop_does() {
     assert_eq!(stopped.outcome, StopOutcome::Graceful);
     assert_eq!(heeding.operations(), ["check", "wait"]);
     assert!(locked.runtime().unwrap().is_none());
-    assert_eq!(templates.release(&mut locked).unwrap(), Some(lease));
 }
 
 #[test]

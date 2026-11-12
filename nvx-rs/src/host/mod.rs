@@ -32,9 +32,6 @@
 //! - [`snapshot`] holds the compatibility key, [`SnapshotKey`](snapshot::SnapshotKey), derived
 //!   from a [`CaptureClass`](snapshot::CaptureClass) and [`SnapshotManifest`](snapshot::SnapshotManifest),
 //!   the strict manifest reader, and the capture's public time and eligibility information.
-//! - [`template`] retains the legacy capture and clone plans, the [`Store`](template::Store) of
-//!   published generations and their leases, and aliases of the snapshot metadata. Its
-//!   [`TemplatePlan`](template::TemplatePlan) lowers an adapter's plan for a capture.
 //! - [`session`] speaks NVX's control protocol, `NVXC`, over [`transport`], which verifies a VM's
 //!   endpoint and runs the host's role of the NVXS session for it and for any other application
 //!   protocol, over a platform transport. [`nvxs`] retains compatibility paths. [`platform`] holds
@@ -105,7 +102,6 @@ pub mod supervisor;
 #[cfg(unix)]
 #[allow(unsafe_code)]
 mod sys;
-pub mod template;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod transport;
