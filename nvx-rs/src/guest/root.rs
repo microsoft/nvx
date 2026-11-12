@@ -928,8 +928,8 @@ impl Root {
     /// stay until the VM powers off. A move that fails leaves the root where it was, unswitched.
     ///
     /// Paths resolve in the root from then on, but descriptors opened before the switch stay
-    /// usable: a [`Mapper`] still maps from a [`SourceRoot`](super::mappings::SourceRoot) beneath
-    /// a [`TargetRoot`] opened before it.
+    /// usable: a [`Mapper`] still maps from a [`SourceRoot`] beneath a [`TargetRoot`] opened
+    /// before it.
     pub(crate) fn switch(&mut self) -> Result<(), SwitchError> {
         if self.switched {
             return Err(SwitchError::Switched);
@@ -1452,9 +1452,9 @@ pub(crate) fn bind_file_retained(
 }
 
 /// Binds the file or directory at `path`, which must be of `kind`, read-only at `target` beneath
-/// `root`, with `kernel`, through the walk and attach of a runtime bind,
-/// [`bind_retained_with`](mappings::mapper::bind_retained_with), from a source root at `path`'s
-/// parent directory, and returns the bind, retaining a failed bind that its caller must detach.
+/// `root`, with `kernel`, through the walk and attach of a runtime bind, [`bind_retained_with`],
+/// from a source root at `path`'s parent directory, and returns the bind, retaining a failed bind
+/// that its caller must detach.
 pub(crate) fn bind_runtime_file_retained(
     kernel: &mut dyn mappings::Kernel,
     root: &TargetRoot,
