@@ -398,7 +398,7 @@ fn privileged_layered_runtime_delivers_a_fragment_collected_status_before_driver
             let config =
                 AgentConfig::layered(b"nvx_identity=1000:1000", c"workload".into(), c"/".into())
                     .unwrap();
-            let mut mappings = HostMappings::announced_for(&config, 0);
+            let mut mappings = HostMappings::announced(0);
             assert!(matches!(
                 run(&mut system, &mut session, &config, &mut mappings),
                 Ok(Outcome::Stopped)
@@ -482,7 +482,7 @@ fn privileged_layered_runtime_keeps_helper_policy_and_first_error_during_failed_
             let config =
                 AgentConfig::layered(b"nvx_identity=1000:1000", c"workload".into(), c"/".into())
                     .unwrap();
-            let mut mappings = HostMappings::announced_for(&config, 0);
+            let mut mappings = HostMappings::announced(0);
             assert_eq!(
                 run(&mut system, &mut session, &config, &mut mappings).err(),
                 Some(Errno::ECHILD)
@@ -655,7 +655,7 @@ fn privileged_layered_runtime_stops_before_attach_on_pending_sigterm() {
             let config =
                 AgentConfig::layered(b"nvx_identity=1000:1000", c"workload".into(), c"/".into())
                     .unwrap();
-            let mut mappings = HostMappings::announced_for(&config, 0);
+            let mut mappings = HostMappings::announced(0);
             assert!(matches!(
                 run(&mut system, &mut session, &config, &mut mappings),
                 Ok(Outcome::Stopped)
@@ -770,7 +770,7 @@ fn privileged_layered_runtime_delivers_a_write_collected_status_before_driver_ev
             let config =
                 AgentConfig::layered(b"nvx_identity=1000:1000", c"workload".into(), c"/".into())
                     .unwrap();
-            let mut mappings = HostMappings::announced_for(&config, 0);
+            let mut mappings = HostMappings::announced(0);
             assert!(matches!(
                 run(&mut system, &mut session, &config, &mut mappings),
                 Ok(Outcome::Stopped)
