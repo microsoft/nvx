@@ -1,16 +1,14 @@
-//! The descriptors (Unix) or handles (Windows) of a caller that a VMM inherits when
-//! [`supervisor::spawn`](crate::host::supervisor::spawn) starts it, and the lock that keeps the
-//! caller's other spawns out of the window in which they are inheritable.
+//! The descriptors (Unix) or handles (Windows) of a caller that a VMM inherits when the crate's
+//! spawn of a VMM, which [`vm::spawn`](crate::host::vm::spawn) makes, starts it, and the lock that
+//! keeps the caller's other spawns out of the window in which they are inheritable.
 
 #[cfg(windows)]
 use std::cell::RefCell;
-use std::io;
 use std::marker::PhantomData;
 #[cfg(unix)]
 use std::os::fd::{AsFd, BorrowedFd};
 #[cfg(windows)]
 use std::os::windows::io::{AsHandle, BorrowedHandle};
-use std::process::{Child, Command};
 use std::sync::MutexGuard;
 #[cfg(windows)]
 use std::sync::{Mutex, PoisonError};
@@ -38,7 +36,7 @@ thread_local! {
 /// makes a handle of this process inheritable, so that a process that the holder spawns
 /// meanwhile, through any API, inherits no handle of a VMM.
 ///
-/// On Windows, [`spawn`](crate::host::supervisor::spawn) makes the VMM's standard handles, the
+/// On Windows, a spawn of a VMM makes the VMM's standard handles, the
 /// read end of the pipe that carries its capability and two handles of its log, and the handles
 /// that it allows, inheritable while it creates the VMM. A process that another thread creates in
 /// that window with inheritance but without a list of handles, as `std::process::Command` creates
@@ -47,9 +45,8 @@ thread_local! {
 /// holds the VMM's log, and the handles that the VMM is allowed, such as the claim of a scratch
 /// image, after the VMM has exited. It holds no claim of the VMM's launch on the log, which the
 /// VMM's job then decides, so a recovery that finds the VMM gone still ends the launch. Each spawn
-/// of a VMM holds this lock throughout that window, so a process that the caller spawns under it,
-/// as [`spawn_command`] spawns one, inherits none of those handles, and one that the caller spawns
-/// otherwise still can.
+/// of a VMM holds this lock throughout that window, so a process that the caller spawns under it
+/// inherits none of those handles, and one that the caller spawns otherwise still can.
 ///
 /// On other hosts it holds nothing. On Linux, a process that another thread spawns holds a copy
 /// of a VMM's log only from its fork until it executes its program, which closes the copy, and
@@ -61,11 +58,25 @@ thread_local! {
 /// while spawning.
 #[must_use = "the lock is released when it is dropped"]
 #[derive(Debug)]
+#[cfg_attr(
+    not(windows),
+    allow(
+        dead_code,
+        reason = "outside the tests, which take it on every host, only the spawns of VMMs on Windows take it"
+    )
+)]
 pub(crate) struct SpawnLock(PhantomData<MutexGuard<'static, ()>>);
 
 /// Waits until no spawn of a VMM of this process has handles inheritable for it, and returns a
 /// [`SpawnLock`], which keeps the spawns of VMMs of other threads from making any inheritable
 /// until it is dropped, as it describes.
+#[cfg_attr(
+    not(windows),
+    allow(
+        dead_code,
+        reason = "outside the tests, which take it on every host, only the spawns of VMMs on Windows take it"
+    )
+)]
 pub(crate) fn lock_spawns() -> SpawnLock {
     #[cfg(windows)]
     HELD.with_borrow_mut(|(locks, held)| {
@@ -91,18 +102,6 @@ impl Drop for SpawnLock {
     }
 }
 
-/// Spawns `command`, as [`Command::spawn`] does, under the crate's spawn lock, so that the process
-/// inherits no handle of a VMM that this process spawns meanwhile.
-///
-/// A caller that launches VMMs on Windows should spawn its other processes this way: a process
-/// that it spawns otherwise while a VMM starts can hold the VMM's handles until it exits, its
-/// capability's pipe, its log, and the handles that it allows. The lock lasts only until the
-/// process is created, not until it exits.
-pub fn spawn_command(command: &mut Command) -> io::Result<Child> {
-    let _lock = lock_spawns();
-    command.spawn()
-}
-
 /// The descriptor of the caller that an [`Inherited`] borrows.
 #[cfg(unix)]
 type Borrowed<'a> = BorrowedFd<'a>;
@@ -118,8 +117,8 @@ struct Borrowed<'a>(std::convert::Infallible, PhantomData<&'a ()>);
 /// [`File`](std::fs::File), that a VMM inherits under the number that it has in the caller, which
 /// the caller can therefore name in the VMM's arguments.
 ///
-/// [`spawn`](crate::host::supervisor::spawn) passes the VMM these and its standard streams, and
-/// nothing else of the caller's:
+/// A spawn of a VMM passes the VMM these and its standard streams, and nothing else of the
+/// caller's:
 ///
 /// - On Linux, the descriptor must be close-on-exec in the caller, as Rust opens its files, and
 ///   stays so: only the VMM's own process clears the flag, between its fork and its exec, so no
@@ -130,22 +129,22 @@ struct Borrowed<'a>(std::convert::Infallible, PhantomData<&'a ()>);
 ///   inheritability. Spawns of VMMs take that window one at a time, under the crate's spawn lock,
 ///   so several may allow the same handle. A process that another thread creates in that window
 ///   without such a list, as `std::process::Command` does, can inherit it too, and holds it until
-///   it exits, unless the caller spawns that process with [`spawn_command`].
+///   it exits, unless the caller spawns that process under the crate's spawn lock.
 ///
 /// Other hosts fail a spawn that passes any.
 #[derive(Debug, Clone, Copy)]
-pub struct Inherited<'a>(Borrowed<'a>);
+pub(crate) struct Inherited<'a>(Borrowed<'a>);
 
 impl<'a> Inherited<'a> {
     /// Names the descriptor of `object`, such as a [`File`](std::fs::File).
     #[cfg(unix)]
-    pub fn new(object: &'a impl AsFd) -> Self {
+    pub(crate) fn new(object: &'a impl AsFd) -> Self {
         Self(object.as_fd())
     }
 
     /// Names the handle of `object`, such as a [`File`](std::fs::File).
     #[cfg(windows)]
-    pub fn new(object: &'a impl AsHandle) -> Self {
+    pub(crate) fn new(object: &'a impl AsHandle) -> Self {
         Self(object.as_handle())
     }
 }

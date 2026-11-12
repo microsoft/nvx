@@ -266,7 +266,7 @@ fn children_inherit_only_their_standard_handles() {
         let _ = sender.send(leaked_reader.read_to_end(&mut rest).map(|_| rest));
     });
     let rest = receiver.recv_timeout(Duration::from_secs(5));
-    assert!(child.terminate(Duration::from_secs(10)));
+    child.terminate_and_wait().unwrap();
     assert!(
         rest.expect("the child inherited the caller's pipe")
             .unwrap()
@@ -360,7 +360,7 @@ fn children_inherit_the_allowed_handles_while_they_are_created() {
         holds(&child.process, value(&other), &other),
     );
     let (allowed_inheritable, kept_inheritable) = (inheritable(&allowed), inheritable(&kept));
-    assert!(child.terminate(Duration::from_secs(10)));
+    child.terminate_and_wait().unwrap();
     assert!(
         allowed_held && kept_held,
         "an allowed handle was not inherited"
@@ -445,7 +445,7 @@ fn concurrent_spawns_that_allow_one_handle_all_inherit_it_and_restore_it() {
                     )
                     .unwrap();
                     let held = holds(&child.process, value, &shared);
-                    assert!(child.terminate(Duration::from_secs(10)));
+                    child.terminate_and_wait().unwrap();
                     assert!(held, "a spawn did not inherit the allowed handle");
                 }
             });
@@ -499,7 +499,9 @@ fn a_spawn_that_panics_in_its_window_restores_the_handles_and_lets_other_spawns_
         .recv_timeout(WINDOW_TIMEOUT)
         .expect("a spawn after the panic did not take the lock")
         .unwrap();
-    assert!(other.terminate(WINDOW_TIMEOUT), "the stand-in did not exit");
+    other
+        .terminate_and_wait()
+        .expect("the stand-in did not exit");
 }
 
 /// The longest wait of the tests of a spawn's window.
@@ -534,8 +536,8 @@ fn spawn_locked(command: &mut std::process::Command) -> io::Result<std::process:
     command.spawn()
 }
 
-/// A spawn of a stand-in VMM, with a log as its standard output and error, as
-/// `supervisor::spawn` passes the VMM its launch's log, that another thread runs and holds in
+/// A spawn of a stand-in VMM, with a log as its standard output and error, as the crate's spawn
+/// of a VMM passes the VMM its launch's log, that another thread runs and holds in
 /// its window, with the log's handles inheritable, until it is released.
 #[cfg(feature = "cli")]
 struct HeldSpawn {
@@ -560,7 +562,7 @@ impl HeldSpawn {
     }
 
     /// Starts the spawn of a stand-in that runs for a minute, `ping`, in the job of its log,
-    /// as `supervisor::spawn` starts the VMM, with its log in `directory`, and returns once it
+    /// as the crate's spawn of a VMM starts it, with its log in `directory`, and returns once it
     /// is in its window.
     fn start_in_job(directory: &Path) -> Self {
         let system = std::env::var_os("SystemRoot").unwrap();
@@ -630,10 +632,9 @@ impl HeldSpawn {
     /// log and its identity.
     fn finish(self) -> (std::path::PathBuf, (u64, u64)) {
         let (stand_in, log, identity) = self.stand_in();
-        assert!(
-            stand_in.terminate(WINDOW_TIMEOUT),
-            "the stand-in did not exit"
-        );
+        stand_in
+            .terminate_and_wait()
+            .expect("the stand-in did not exit");
         (log, identity)
     }
 }
@@ -717,10 +718,9 @@ fn a_process_spawned_in_the_window_of_a_vmm_in_its_logs_job_holds_the_log_but_no
     let (stand_in, log, identity) = held.stand_in();
     let mut other = other.unwrap();
     let held_while_running = log_claim_held(&log, identity).unwrap();
-    assert!(
-        stand_in.terminate(WINDOW_TIMEOUT),
-        "the stand-in did not exit"
-    );
+    stand_in
+        .terminate_and_wait()
+        .expect("the stand-in did not exit");
     // Once the stand-in has exited, the job holds no process, and the claim is released, while
     // the process still holds the log.
     let released = claim_released_within(&log, identity, WINDOW_TIMEOUT);
@@ -896,7 +896,7 @@ fn local_link(name: &[u16], target: &[u16]) -> OwnedHandle {
 
 #[test]
 fn vm_spawns_refuse_untrusted_log_job_names_before_creating_a_child() {
-    use crate::host::supervisor::{self, VmmCommand};
+    use crate::host::spawn::{self, VmmCommand};
     use crate::protocol::CAPABILITY_LEN;
 
     let directory = tempfile::tempdir().unwrap();
@@ -904,22 +904,33 @@ fn vm_spawns_refuse_untrusted_log_job_names_before_creating_a_child() {
     let id = log_job_id(&log).unwrap().unwrap();
     let name = log_job_name(id);
     let system = std::env::var_os("SystemRoot").unwrap();
-    let command = VmmCommand::new(
-        Path::new(&system).join("System32").join("cmd.exe"),
-        ["/c", "exit", "0"].map(OsString::from).to_vec(),
-        directory.path(),
-    );
+    let command = VmmCommand {
+        program: Path::new(&system).join("System32").join("cmd.exe"),
+        arguments: ["/c", "exit", "0"].map(OsString::from).to_vec(),
+        working_dir: directory.path().to_path_buf(),
+        breakaway_from_job: false,
+        inherit: Vec::new(),
+    };
     let refused = || {
         let entered = Rc::new(Cell::new(false));
         let observed = Rc::clone(&entered);
         let result = with_spawn_window(
             move || observed.set(true),
-            || supervisor::spawn_vm(&command, &[7; CAPABILITY_LEN], log.try_clone().unwrap()),
+            || {
+                spawn::spawn_vm_with_mode(
+                    &command,
+                    &[7; CAPABILITY_LEN],
+                    log.try_clone().unwrap(),
+                    false,
+                )
+            },
         );
         let error = match result {
             Err(error) => error,
             Ok(child) => {
-                assert!(child.kill_and_wait(), "the unexpected child did not exit");
+                child
+                    .kill_and_confirm_exit()
+                    .expect("the unexpected child did not exit");
                 panic!("an untrusted log-job name started a child");
             }
         };
@@ -959,10 +970,12 @@ fn vm_spawns_refuse_untrusted_log_job_names_before_creating_a_child() {
     let observed = Rc::clone(&entered);
     let child = with_spawn_window(
         move || observed.set(true),
-        || supervisor::spawn_vm(&command, &[7; CAPABILITY_LEN], log),
+        || spawn::spawn_vm_with_mode(&command, &[7; CAPABILITY_LEN], log, false),
     )
     .unwrap();
-    assert!(child.kill_and_wait(), "the trusted child did not exit");
+    child
+        .kill_and_confirm_exit()
+        .expect("the trusted child did not exit");
     assert!(
         entered.get(),
         "the successful spawn bypassed the observation"
@@ -1042,8 +1055,8 @@ fn a_vmm_never_starts_outside_a_job_that_a_claim_check_takes_for_its_logs() {
 }
 
 #[test]
-fn a_vmm_whose_log_is_no_file_of_a_disk_volume_starts_without_a_job() {
-    use crate::host::supervisor::{self, VmmCommand};
+fn a_vmm_whose_log_is_no_file_of_a_disk_volume_is_refused() {
+    use crate::host::spawn::{self, VmmCommand};
     use crate::protocol::CAPABILITY_LEN;
 
     let null = OpenOptions::new().write(true).open("NUL").unwrap();
@@ -1059,23 +1072,24 @@ fn a_vmm_whose_log_is_no_file_of_a_disk_volume_starts_without_a_job() {
     assert_eq!(log_job_id(&pipe).unwrap(), None);
     let system = std::env::var_os("SystemRoot").unwrap();
     let cmd = Path::new(&system).join("System32").join("cmd.exe");
-    let command = VmmCommand::new(
-        cmd,
-        ["/c", "exit", "0"].map(OsString::from).to_vec(),
-        std::env::temp_dir(),
-    );
+    let command = VmmCommand {
+        program: cmd,
+        arguments: ["/c", "exit", "0"].map(OsString::from).to_vec(),
+        working_dir: std::env::temp_dir(),
+        breakaway_from_job: false,
+        inherit: Vec::new(),
+    };
     for log in [null, pipe] {
-        let error =
-            match supervisor::spawn_vm(&command, &[7; CAPABILITY_LEN], log.try_clone().unwrap()) {
-                Err(error) => error,
-                Ok(child) => {
-                    assert!(child.kill_and_wait(), "the unexpected child did not exit");
-                    panic!("a strict spawn accepted a log without a job");
-                }
-            };
+        let error = match spawn::spawn_vm_with_mode(&command, &[7; CAPABILITY_LEN], log, false) {
+            Err(error) => error,
+            Ok(child) => {
+                child
+                    .kill_and_confirm_exit()
+                    .expect("the unexpected child did not exit");
+                panic!("a spawn accepted a log without a job");
+            }
+        };
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
-        let launched = supervisor::spawn(&command, &[7; CAPABILITY_LEN], log).unwrap();
-        assert!(launched.kill_and_wait(), "the stand-in did not exit");
     }
 }
 
@@ -1132,7 +1146,7 @@ fn a_thread_that_holds_the_spawn_lock_spawns_under_it_until_its_last_lock_is_dro
     drop(second);
     let late = acquired.recv_timeout(WINDOW_TIMEOUT).is_ok();
     waiter.join().unwrap();
-    assert!(vmm.terminate(WINDOW_TIMEOUT), "the stand-in did not exit");
+    vmm.terminate_and_wait().expect("the stand-in did not exit");
     drop(other);
     assert!(
         !early,
