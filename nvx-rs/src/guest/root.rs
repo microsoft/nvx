@@ -228,8 +228,8 @@ const HOSTFS_DIRECTORY: &str = "hostfs";
 /// The mount point of the host export, below the runtime directory: `root` in
 /// [`HOSTFS_DIRECTORY`], which exists once a root has mounted an export.
 const EXPORT_DIRECTORY: &str = "hostfs/root";
-/// The mode of the [`HOSTFS_DIRECTORY`] that a root creates, whatever the process's umask, as
-/// NVX's shell init creates it under `umask 077`: only root may enter it.
+/// The mode of the [`HOSTFS_DIRECTORY`] that a root creates, whatever the process's umask: only
+/// root may enter it.
 const HOSTFS_DIRECTORY_MODE: u32 = 0o700;
 /// The mount point of a live share before it moves to its target, below the runtime directory
 /// and outside the root, which exists once a root has mounted a share.

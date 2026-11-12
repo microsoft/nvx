@@ -253,8 +253,7 @@ malformed, repeated, and conflicting tokens, a setting of an upper or a format
 that the layout lacks, and the earlier form without a format, with no fallback
 that probes the devices. It reads the virtio-mmio devices of the command line
 with `nvx::protocol::cmdline`, to refuse a RAM upper beside one at the scratch
-base. `tests/fixtures/root-tokens.json` holds its cases, which the tests of the
-guest's shell init replay too.
+base. `tests/fixtures/root-tokens.json` holds its cases.
 
 ### `nvx::protocol::share`
 

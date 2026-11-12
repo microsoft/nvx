@@ -1,6 +1,5 @@
 //! Tests of the boot tokens of a layered root. `tests/fixtures/root-tokens.json` holds the command
-//! lines that every reader of the tokens must agree on, which the tests of the shell init replay
-//! too.
+//! lines that every reader of the tokens must agree on.
 
 use serde_json::Value;
 

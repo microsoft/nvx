@@ -35,7 +35,7 @@
 //!   status of `nvx::protocol::status` of the failure's class, such as 54, `ACTIVATION_ROOT`, for
 //!   a root that does not assemble over its upper, or 51, `ACTIVATION_PROTOCOL`, for an activate
 //!   request that changes the accepted one, which an `NVX-INIT-ACTIVATION:` line on the console
-//!   names first; or 125, as `nvx-init-agent`'s failures do, after another failure, which an
+//!   names first; or 125 after another failure, which an
 //!   `NVX-INIT-ERROR:` line on the console names first.
 //!
 //! Outside PID 1, `nvx-init` changes nothing: it fails with status 2 and a message.
@@ -68,7 +68,7 @@ pub(crate) use boot::{RestoreHandoff, Restored};
 /// The process ID of the init process.
 const INIT_PROCESS: i32 = 1;
 /// The VM's exit status after a failure of PID 1 or the end of a helper, but for a failed restored
-/// activation's: that of `nvx-init-agent`'s failures.
+/// activation's.
 const FAILURE: u8 = 125;
 /// The out-of-memory score adjustment of PID 1 and its helpers, Linux's `OOM_SCORE_ADJ_MIN`,
 /// which exempts them from the out-of-memory killer.

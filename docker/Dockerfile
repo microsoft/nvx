@@ -131,10 +131,7 @@ install -m 0755 /repo/guest/common/init /rootfs/init
 install -m 0755 /repo/guest/common/nvx-hostmount \
     /repo/guest/common/nvx-identity-probe \
     /repo/guest/common/nvx-snapshot \
-    /repo/guest/common/nvx-virtio-restore-probe \
-    /repo/guest/common/nvx-container-enter-azurelinux /rootfs/sbin/
-install -m 0755 /repo/guest/common/nvx-container-launch-azurelinux \
-    /rootfs/sbin/nvx-container-launch
+    /repo/guest/common/nvx-virtio-restore-probe /rootfs/sbin/
 python3 <<'PY'
 import shutil
 import sys
