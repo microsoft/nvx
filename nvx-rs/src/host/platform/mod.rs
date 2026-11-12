@@ -11,16 +11,17 @@
 //! Its crate-private reads of regular files open a file without following a link, or on Windows
 //! any other reparse point, refuse one that is not a regular file before reading anything from
 //! it, and read it within a bound.
+//!
+//! Its crate-private writes create files that only the current user may read, replace a file
+//! atomically, and make the changes to a directory's entries durable.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
-#[cfg(windows)]
-use crate::error::Error;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 pub(crate) mod inherit;
 #[cfg(target_os = "linux")]
@@ -135,6 +136,92 @@ pub(crate) fn read_at_most(file: File, limit: u64, what: &str) -> io::Result<Vec
         ))));
     }
     Ok(bytes)
+}
+
+/// Mode of a private file on Unix: readable and writable by the current user only.
+#[cfg(unix)]
+pub(crate) const PRIVATE_FILE_MODE: u32 = 0o600;
+
+/// Returns options that create a file readable only by the current user (mode 0600 on Unix)
+/// and that open no link that its path names on Unix.
+pub(crate) fn private_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options
+            .mode(PRIVATE_FILE_MODE)
+            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
+    }
+    options
+}
+
+/// Creates the file at `path`, which must not exist, readable only by the current user.
+///
+/// On Unix, the umask may clear bits of the mode that the file is created with, even the
+/// current user's permission to read it, so the mode is set again through the new file.
+pub(crate) fn create_new(path: &Path) -> io::Result<File> {
+    let file = private_options().create_new(true).open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        file.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+    }
+    Ok(file)
+}
+
+/// Atomically replaces `path` with `contents`, readable only by the current user.
+///
+/// The contents go to a fresh temporary file beside `path`, which is flushed to disk and then
+/// renamed over it, so a reader sees the old contents or the new ones, and a crash leaves at most
+/// the temporary file.
+pub(crate) fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
+    let mut suffix = [0u8; 8];
+    getrandom::fill(&mut suffix)
+        .map_err(|error| Error::other("cannot name a temporary file").with_source(error))?;
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let temporary = path.with_file_name(format!(".{name}.{}.tmp", u64::from_le_bytes(suffix)));
+    let written = (|| -> io::Result<()> {
+        let mut file = create_new(&temporary)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
+        .map_err(|error| Error::io(format!("cannot write {}", path.display())).with_source(error))
+}
+
+/// Makes the changes to the entries of the directory `dir` so far durable, such as files that
+/// were renamed into it or removed from it: a crash that keeps a later change keeps them too, even
+/// one on another filesystem.
+///
+/// On Unix, it syncs the directory. Windows has no portable way to flush a directory, so there a
+/// rename or a removal is as durable as the filesystem makes it, as OpenVMM's publication of a
+/// snapshot assumes.
+pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        File::open(dir)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                Error::io(format!("cannot sync the directory {}", dir.display())).with_source(error)
+            })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
 }
 
 /// Refuses a VMM working directory that exceeds Windows' process-creation limit, without

@@ -130,7 +130,7 @@ fn invalid_or_linked_directories_never_publish_or_open() {
     let store = Store::create(&root.path().join("store")).unwrap();
     let held = store.lock(&name("first"), Deadline::after(0.0)).unwrap();
     let pending = staged(&held);
-    crate::host::store::files::write_private(&pending.dir().join(KEY_FILE), b"bad key").unwrap();
+    crate::host::platform::write_private(&pending.dir().join(KEY_FILE), b"bad key").unwrap();
     assert!(held.publish(pending.clone()).is_err());
     assert!(!held.dir.exists());
     let valid = staged(&held);

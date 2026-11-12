@@ -333,7 +333,7 @@ fn capture(
 /// Reads the geometry through the existing block-device helper on this VM's filesystem.
 fn disk_geometry(dir: &VmDir) -> Result<BlockGeometry> {
     let path = dir.path().join("geometry.raw");
-    let file = crate::host::store::files::create_new(&path)
+    let file = crate::host::platform::create_new(&path)
         .map_err(|error| io_error(ErrorCode::Io, &error, &path))?;
     file.set_len(512)
         .map_err(|error| io_error(ErrorCode::Io, &error, &path))?;

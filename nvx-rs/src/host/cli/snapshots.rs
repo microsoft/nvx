@@ -30,7 +30,7 @@ use crate::host::config::NicConfig;
 use crate::host::sandbox::options::SandboxOperation;
 use crate::host::snapshot::{OPENVMM_DIR, SNAPSHOT_ARTIFACTS, Snapshot};
 use crate::host::vm::VmDir;
-use crate::host::{filesystem, paths, platform, store};
+use crate::host::{filesystem, paths, platform};
 use crate::{Error, ErrorCode};
 
 /// The parser of the snapshot command.
@@ -411,11 +411,11 @@ impl LockedSnapshot<'_> {
             ));
         }
         Snapshot::open(staged.dir())?;
-        store::files::sync_dir(staged.dir())?;
+        platform::sync_dir(staged.dir())?;
         platform::rename_no_replace(staged.dir(), &self.dir)
             .map_err(|error| io_error(ErrorCode::Io, &error, &self.dir))?;
-        store::files::sync_dir(self.store.entries.dir())?;
-        store::files::sync_dir(self.store.staging.dir())?;
+        platform::sync_dir(self.store.entries.dir())?;
+        platform::sync_dir(self.store.staging.dir())?;
         self.open()
     }
 }

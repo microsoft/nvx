@@ -748,8 +748,8 @@ fn key_refusal(bytes: &[u8], code: ErrorCode) -> String {
 #[cfg(any(target_os = "linux", windows))]
 #[test]
 fn snapshot_open_refuses_other_key_contracts_and_filesystem_tags() {
+    use crate::host::platform::write_private;
     use crate::host::snapshot::{KEY_FILE, Snapshot};
-    use crate::host::store::files::write_private;
 
     let changes: [fn(&mut SnapshotKey); 2] = [
         |key| key.contracts.snapshot += 1,

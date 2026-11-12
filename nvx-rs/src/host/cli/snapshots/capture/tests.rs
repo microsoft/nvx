@@ -739,23 +739,19 @@ fn capture_helper() {
     })).unwrap()).unwrap();
     vm::create_private_dir(Path::new(OPENVMM_DIR)).unwrap();
     let manifest: Vec<u8> = serde_json::from_value(recipe["manifest"].clone()).unwrap();
-    crate::host::store::files::write_private(
-        &Path::new(OPENVMM_DIR).join(MANIFEST_NAME),
-        &manifest,
-    )
-    .unwrap();
+    crate::host::platform::write_private(&Path::new(OPENVMM_DIR).join(MANIFEST_NAME), &manifest)
+        .unwrap();
     if refused {
         thread::sleep(Duration::from_secs(120));
         return;
     }
     for (entry, field) in [("memory.bin", "memory"), ("state.bin", "state")] {
-        let file =
-            crate::host::store::files::create_new(&Path::new(OPENVMM_DIR).join(entry)).unwrap();
+        let file = crate::host::platform::create_new(&Path::new(OPENVMM_DIR).join(entry)).unwrap();
         platform::make_sparse(&file).unwrap();
         file.set_len(recipe[field].as_u64().unwrap()).unwrap();
     }
     let failed = recipe["behavior"] == "fail";
-    crate::host::store::files::write_private(Path::new("outcome.json"), &serde_json::to_vec(&json!({
+    crate::host::platform::write_private(Path::new("outcome.json"), &serde_json::to_vec(&json!({
         "outcome": { "operation": "capture", "category": if failed { "failure" } else { "success" },
             "status_code": if failed { 1 } else { 0 } },
     })).unwrap()).unwrap();
