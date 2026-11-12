@@ -20,9 +20,8 @@
 //! system's read calls, and [`own_bytes_read`] how many the calling process has, so that a caller
 //! can tell how much of its files a VMM, or the caller itself, read.
 //!
-//! The [`supervisor`](super::supervisor) launches OpenVMM, and its
-//! [`Launched::process`](super::supervisor::Launched::process) holds the child that it started
-//! through a handle of its own.
+//! [`vm::spawn`](super::vm::spawn) launches OpenVMM, and the [`Launched`](super::vm::Launched)
+//! that it returns holds the child that it started through a handle of its own.
 
 use std::fmt;
 use std::io;
@@ -37,10 +36,17 @@ use super::platform;
 use crate::error::Error;
 
 /// Longest wait for a terminated OpenVMM process to exit.
+#[cfg_attr(
+    not(feature = "cli"),
+    allow(
+        dead_code,
+        reason = "only the CLI waits for the OpenVMM processes that it terminates"
+    )
+)]
 pub(crate) const KILL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Interval at which the exit of a process is polled where no exit event serves: the exit of any
-/// process on Linux hosts without pidfds, and the exit of a child that a
-/// [`Launched`](super::supervisor::Launched) waits for with a timeout on Linux, since
+/// process on Linux hosts without pidfds, and the exit of a child that the crate's spawn of a VMM
+/// waits for with a timeout on Linux, since
 /// [`std::process::Child`] can wait only without one. An exit is noticed at most this late, for
 /// about 40 checks a second.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(25);

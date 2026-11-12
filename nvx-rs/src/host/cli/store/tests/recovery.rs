@@ -143,18 +143,21 @@ mod process {
             &prepared.outputs().endpoint,
         )
         .unwrap();
-        let command = VmmCommand::new(
-            std::env::current_exe().unwrap(),
-            ["--exact", HELPER, "--ignored", "--nocapture"]
+        let command = VmmCommand {
+            program: std::env::current_exe().unwrap(),
+            arguments: ["--exact", HELPER, "--ignored", "--nocapture"]
                 .map(Into::into)
                 .to_vec(),
-            state.dir(),
-        );
+            working_dir: state.dir().to_path_buf(),
+            breakaway_from_job: false,
+            inherit: Vec::new(),
+        };
         let child = Running(Some(
-            spawn::spawn_vm(
+            spawn::spawn_vm_with_mode(
                 &command,
                 prepared.capability().as_bytes(),
                 prepared.log().try_clone().unwrap(),
+                false,
             )
             .unwrap(),
         ));

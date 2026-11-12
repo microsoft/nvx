@@ -502,7 +502,7 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/guest/time/mod.rs - guest::time (line 9)` | kept | SL6.11c removed its capture and restore finish, which became crate-private: `guest::snapshot::capture` runs them |
 | `nvx-rs/src/host/sandbox/prepared.rs - host::sandbox::prepared::PreparedLaunch (line 92)` | retired | `PreparedLaunch` leaves with the checked-file handoff (SL6.3, #1122) |
 | `nvx-rs/src/host/store/mod.rs - host::store (line 72)` | retired | The sandbox store leaves (SL6.1, #1121) |
-| `nvx-rs/src/host/supervisor/mod.rs - host::supervisor (line 32)` | retired | The store-coupled supervisor leaves with the sandbox store (SL6.1, #1121); `host::supervisor` stays only as the transitional public path of the low-level spawn, until SL6.3 (#1122), with no doc test |
+| `nvx-rs/src/host/supervisor/mod.rs - host::supervisor (line 32)` | retired | The store-coupled supervisor leaves with the sandbox store (SL6.1, #1121), and `host::supervisor`, the transitional public path of the low-level spawn, with SL6.3 (#1122): `host::vm` spawns VMMs, and the tests of the spawn moved to `nvx-rs/src/host/spawn/tests.rs` and `nvx-rs/tests/process.rs` |
 | `nvx-rs/src/host/template/clone.rs - host::template::clone::ClonePlan (line 247)` | retired | `ClonePlan` and `CloneRequest` leave with the old clone path (SL6.2b, #1121) |
 | `nvx-rs/src/host/template/plan.rs - host::template::plan::TemplatePlan (line 137)` | retired | `TemplatePlan` leaves with the template store (SL6.2a, #1121) |
 | `nvx-rs/src/host/template/store.rs - host::template::store::Store (line 473)` | retired | The template store leaves (SL6.2a, #1121) |
