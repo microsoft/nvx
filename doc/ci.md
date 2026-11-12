@@ -2169,12 +2169,14 @@ changes to the crate publishes nothing, and neither does a run of a commit
 that the newest version's commit already contains, such as a rerun of an
 older nightly run. Such a run skips `Publish nvx crate`.
 
-The versions are pre-releases, such as `0.1.0-alpha.4`. A run takes the
-number after the highest that crates.io has in the series that
-`nvx-rs/Cargo.toml` declares, yanked versions included, since crates.io never
-reuses a version, and at least the declared number, so the declared version is
-the floor: a pull request changes it only to start another series, as
-[The nvx crate](distribution.md#the-nvx-crate) describes. `Package nvx crate`
+The versions are pre-releases of the `0.2.0-alpha` series, such as
+`0.2.0-alpha.2`, since the breaking release `0.2.0-alpha.1` that the
+[changelog](../CHANGELOG.md) records, and of the `0.1.0-alpha` series before
+it. A run takes the number after the highest that crates.io has in the series
+that `nvx-rs/Cargo.toml` declares, yanked versions included, since crates.io
+never reuses a version, and at least the declared number, so the declared
+version is the floor: a pull request changes it only to start another series,
+as [The nvx crate](distribution.md#the-nvx-crate) describes. `Package nvx crate`
 fails rather than publish a version that would sort below the newest one on
 crates.io. When the number differs from the declared one, each job gives only
 its own checkout the new version, in `nvx-rs/Cargo.toml` and in `nvx`'s entry
