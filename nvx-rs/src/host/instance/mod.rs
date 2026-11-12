@@ -82,13 +82,7 @@ use self::locked::check_timeout;
 
 /// Returns a fresh launch capability, which is never all zero.
 pub fn generate_capability() -> Result<[u8; CAPABILITY_LEN]> {
-    let mut capability = [0u8; CAPABILITY_LEN];
-    while capability == [0; CAPABILITY_LEN] {
-        getrandom::fill(&mut capability).map_err(|error| {
-            Error::other("cannot generate a control capability").with_source(error)
-        })?;
-    }
-    Ok(capability)
+    crate::host::vm::generate_capability()
 }
 
 /// Returns a control endpoint of an instance whose Linux control socket is `socket`: the socket
