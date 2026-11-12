@@ -1,21 +1,16 @@
 use std::os::unix::process::ExitStatusExt;
 use std::time::{Duration, Instant};
 
-use crate::guest::entry;
-use crate::guest::exec::{self as sandbox_exec, Execution, Options, Pipes};
 use crate::guest::init::{self, Stream};
-use crate::guest::process::Child;
-use crate::guest::spawn::{self as sandbox_spawn, Barrier};
-use crate::guest::sys::{self, Errno, FileDescriptor, ProcessId, c_string};
+use crate::guest::sys::{self, Errno, FileDescriptor, c_string};
 use crate::protocol::{
     self, APP_ACTIVATE, APP_CANCEL, APP_CAPTURE, APP_EXIT, APP_STDERR, APP_STDOUT, BUSY,
     CWD_FAILED, GuestExecPayload, LAUNCH_FAILED, OUTER_DATA,
 };
 
 use super::AgentConfig;
-use super::cgroup;
 use super::diagnostics::with_description;
-use super::launch::{self, LaunchRequest};
+use super::launch;
 use super::seam::System;
 use super::session::{DataFailureKind, Event as SessionEvent, ReceiveFailure, Session};
 
@@ -28,12 +23,11 @@ const ENVIRONMENT_DIAGNOSTIC: &[u8] = b"nvx-managed-agent: cannot configure work
 
 /// Executes one validated workload request and streams its terminal outcome.
 ///
-/// The agent drives its native plain-process workload, or its legacy sandbox [`Execution`],
-/// in the C agent's loop: each turn polls the workload and
-/// the control session, serves a control record, forwards the workload's output, collects the
-/// statuses of the agent's children, and checks the workload's timeout. The agent keeps the C
-/// agent's policy: the output cap, checked for each read of up to 32 KiB, and the precedence of
-/// a cancellation, a timeout, and the cap over the workload's own status.
+/// The agent drives its native plain-process workload in the C agent's loop: each turn polls the
+/// workload and the control session, serves a control record, forwards the workload's output,
+/// collects the statuses of the agent's children, and checks the workload's timeout. The agent
+/// keeps the C agent's policy: the output cap, checked for each read of up to 32 KiB, and the
+/// precedence of a cancellation, a timeout, and the cap over the workload's own status.
 pub(crate) fn run(
     system: &mut impl System,
     session: &mut Session,
@@ -54,17 +48,9 @@ pub(crate) fn run(
             }
         }
     }
-    if config.direct {
-        session.collect(|_, _| {})?;
-    }
+    session.collect(|_, _| {})?;
     let mut workload = match launch(system, session, config, execution) {
         Ok(launched) => launched,
-        Err(LaunchError::Entry(error)) => {
-            let diagnostic =
-                format!("nvx-managed-agent: cannot prepare the workload's execution: {error}\n");
-            session.send_app(APP_STDERR, request_id, 0, diagnostic.as_bytes())?;
-            return session.send_error(request_id, 125, LAUNCH_FAILED);
-        }
         Err(LaunchError::Start(failure)) => {
             settle_start(system, session, &failure)?;
             return session.send_error(request_id, 125, LAUNCH_FAILED);
@@ -74,9 +60,7 @@ pub(crate) fn run(
     let started = Instant::now();
     let mut state = RunState::default();
     let mut buffer = [0u8; OUTPUT_CHUNK_BYTES];
-    while state.running(&workload)
-        || (workload.has_open_output() && !(config.direct && state.ending()))
-    {
+    while state.running(&workload) || (workload.has_open_output() && !state.ending()) {
         let session_ready = match poll(
             &workload,
             (!state.session_lost).then_some(session.descriptor()),
@@ -111,7 +95,7 @@ pub(crate) fn run(
                     if session.stopping() {
                         return Err(error);
                     }
-                    if !(config.direct && state.status_lost)
+                    if !state.status_lost
                         && let Err(failure) = workload.wait(session)
                     {
                         report_wait_failure(system, &failure);
@@ -121,7 +105,7 @@ pub(crate) fn run(
                 }
             }
         }
-        let output = if config.direct && (state.session_lost || state.output_limited) {
+        let output = if state.session_lost || state.output_limited {
             &mut [][..]
         } else {
             &mut buffer[..]
@@ -135,17 +119,8 @@ pub(crate) fn run(
             state.timed_out = true;
             workload.terminate();
         }
-        // The outcome is the cause for which the agent ended the workload, so a status that it
-        // cannot collect only ends the loop, once the output has closed.
-        if state.ending()
-            && state.running(&workload)
-            && !config.direct
-            && let Err(error) = workload.wait(session)
-        {
-            state.lose_status(system, &error);
-        }
     }
-    let outcome = if config.direct && state.ending() {
+    let outcome = if state.ending() {
         if !state.session_lost && !state.output_limited {
             state.forward(system, session, request_id, &mut workload, &mut buffer)?;
         }
@@ -162,21 +137,8 @@ pub(crate) fn run(
     }
     match launch_report {
         Ok(Some(failure)) => match failure.kind() {
-            LaunchKind::WorkingDirectory if config.direct => {
+            LaunchKind::WorkingDirectory => {
                 return refuse_cwd(session, request_id, execution, failure.raw_os_error());
-            }
-            LaunchKind::WorkingDirectory | LaunchKind::Exec if !config.direct => {
-                return refuse_sandbox_workload(session, request_id, execution, &failure);
-            }
-            // The sandbox agent's own stages, its entry's among them, fail its launch, which
-            // names the stage on standard error, as a refused preparation names its reason.
-            _ if !config.direct => {
-                super::diagnostics::error(system, "exec-launch", failure.raw_os_error());
-                let diagnostic = format!(
-                    "nvx-managed-agent: cannot enter the workload's execution: {failure}\n"
-                );
-                session.send_app(APP_STDERR, request_id, 0, diagnostic.as_bytes())?;
-                return session.send_error(request_id, 125, LAUNCH_FAILED);
             }
             LaunchKind::Credentials => {
                 super::diagnostics::error(system, "exec-launch", failure.raw_os_error());
@@ -223,26 +185,23 @@ pub(crate) fn run(
     }
 }
 
-/// The direct core and the unchanged sandbox driver, behind the same NVXC outcome policy.
+/// The direct core, behind the NVXC outcome policy.
 enum Workload {
     Direct(init::Exec),
-    Sandbox(Execution),
 }
 
-/// Events needed by the unchanged NVXC policy; only the sandbox translates legacy values.
+/// Events needed by the unchanged NVXC policy.
 enum Event<'a> {
     Output(Stream, &'a [u8]),
     Launch(std::io::Result<Option<LaunchFailure>>),
     ReadFailed,
     DirectKillFailed(std::io::Error),
-    CgroupKillFailed(std::io::Error),
     Ended(std::process::ExitStatus),
     Other,
 }
 
 enum LaunchFailure {
     Direct(init::LaunchFailure),
-    Sandbox(sandbox_spawn::LaunchFailure),
 }
 
 enum LaunchKind {
@@ -256,7 +215,6 @@ impl LaunchFailure {
     fn kind(&self) -> LaunchKind {
         let stage = match self {
             Self::Direct(failure) => failure.stage,
-            Self::Sandbox(failure) => failure.stage().code(),
         };
         // The syscall boundary's stable child-report stage numbers.
         match stage {
@@ -270,16 +228,6 @@ impl LaunchFailure {
     fn raw_os_error(&self) -> i32 {
         match self {
             Self::Direct(failure) => failure.error,
-            Self::Sandbox(failure) => failure.raw_os_error(),
-        }
-    }
-}
-
-impl std::fmt::Display for LaunchFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Direct(failure) => failure.fmt(formatter),
-            Self::Sandbox(failure) => failure.fmt(formatter),
         }
     }
 }
@@ -288,21 +236,18 @@ impl Workload {
     fn status(&self) -> Option<std::process::ExitStatus> {
         match self {
             Self::Direct(workload) => workload.status(),
-            Self::Sandbox(workload) => workload.status(),
         }
     }
 
     fn has_open_output(&self) -> bool {
         match self {
             Self::Direct(workload) => workload.has_open_output(),
-            Self::Sandbox(workload) => workload.has_open_output(),
         }
     }
 
     fn descriptors(&self) -> Vec<std::os::fd::BorrowedFd<'_>> {
         match self {
             Self::Direct(workload) => workload.descriptors().map(|(_, fd)| fd).collect(),
-            Self::Sandbox(workload) => workload.descriptors().map(|(_, fd)| fd).collect(),
         }
     }
 
@@ -322,33 +267,12 @@ impl Workload {
                     _ => Event::Other,
                 })
             }),
-            Self::Sandbox(workload) => workload.next_event(buffer).map(|event| {
-                event.map(|event| match event {
-                    sandbox_exec::Event::Output(stream, bytes) => Event::Output(
-                        match stream {
-                            sandbox_exec::Stream::Stdout => Stream::Stdout,
-                            sandbox_exec::Stream::Stderr => Stream::Stderr,
-                        },
-                        bytes,
-                    ),
-                    sandbox_exec::Event::Launch(report) => {
-                        Event::Launch(report.map(|failure| failure.map(LaunchFailure::Sandbox)))
-                    }
-                    sandbox_exec::Event::ReadFailed(..) => Event::ReadFailed,
-                    sandbox_exec::Event::KillFailed(sandbox_exec::KillTarget::Cgroup, error) => {
-                        Event::CgroupKillFailed(error)
-                    }
-                    sandbox_exec::Event::Ended(outcome) => Event::Ended(outcome.status()),
-                    _ => Event::Other,
-                })
-            }),
         }
     }
 
     fn observe(&mut self, id: u32, status: std::process::ExitStatus) {
         match self {
             Self::Direct(workload) => workload.observe(id, status),
-            Self::Sandbox(workload) => workload.observe(id, status),
         };
     }
 
@@ -359,42 +283,28 @@ impl Workload {
     fn terminate(&mut self) {
         match self {
             Self::Direct(workload) => workload.end(),
-            Self::Sandbox(workload) => {
-                workload.terminate();
-            }
         }
     }
 
     fn cancel(&mut self) {
         match self {
             Self::Direct(workload) => workload.cancel(),
-            Self::Sandbox(workload) => {
-                workload.cancel();
-            }
         }
     }
 
     fn disconnect(&mut self) {
         match self {
             Self::Direct(workload) => workload.reset(),
-            Self::Sandbox(workload) => workload.disconnect(),
         }
     }
 
     fn discard(&mut self, stream: Stream) {
         match self {
             Self::Direct(workload) => workload.discard(stream),
-            Self::Sandbox(workload) => workload.discard(match stream {
-                Stream::Stdout => sandbox_exec::Stream::Stdout,
-                Stream::Stderr => sandbox_exec::Stream::Stderr,
-            }),
         }
     }
 
     fn wait(&mut self, session: &Session) -> std::io::Result<std::process::ExitStatus> {
-        if let Self::Sandbox(workload) = self {
-            return workload.wait();
-        }
         loop {
             self.collect(session)?;
             if let Some(status) = self.status() {
@@ -415,12 +325,6 @@ impl Workload {
             Self::Direct(workload) => workload.kill_failure().map(|event| match event {
                 init::Event::KillFailed(init::KillTarget::ProcessGroup, error) => {
                     Event::DirectKillFailed(error)
-                }
-                _ => Event::Other,
-            }),
-            Self::Sandbox(workload) => workload.kill_failure().map(|event| match event {
-                sandbox_exec::Event::KillFailed(sandbox_exec::KillTarget::Cgroup, error) => {
-                    Event::CgroupKillFailed(error)
                 }
                 _ => Event::Other,
             }),
@@ -565,7 +469,6 @@ impl RunState {
                     super::diagnostics::error(system, "exec-kill", sys::errno_of(&error) as i32);
                     return Err(sys::errno_of(&error));
                 }
-                Event::CgroupKillFailed(error) => report_kill_failure(system, &error),
                 Event::Ended(outcome) => self.outcome = Some(outcome),
                 Event::Other => {}
             }
@@ -615,21 +518,11 @@ fn poll(workload: &Workload, session: Option<&FileDescriptor>) -> Result<bool, E
     Ok(session.is_some() && ready.last().copied().unwrap_or(false))
 }
 
-/// Reports a failure to kill the workload's cgroup, as the C agent did; it signalled the
-/// workload's process group without checking the result.
-fn report_kill_failure(system: &mut impl System, error: &std::io::Error) {
-    super::diagnostics::error(system, "exec-cgroup-kill", sys::errno_of(error) as i32);
-}
-
 /// Reports the kill failures that the workload's execution has yet to report.
 fn report_kill_failures(system: &mut impl System, workload: &mut Workload) {
     while let Some(event) = workload.kill_failure() {
-        match event {
-            Event::CgroupKillFailed(error) => report_kill_failure(system, &error),
-            Event::DirectKillFailed(error) => {
-                super::diagnostics::error(system, "exec-kill", sys::errno_of(&error) as i32);
-            }
-            _ => {}
+        if let Event::DirectKillFailed(error) = event {
+            super::diagnostics::error(system, "exec-kill", sys::errno_of(&error) as i32);
         }
     }
 }
@@ -641,8 +534,6 @@ fn report_wait_failure(system: &mut impl System, error: &std::io::Error) {
 
 /// Why a workload did not launch.
 enum LaunchError {
-    /// The sandbox agent's entry refused to prepare the workload's execution.
-    Entry(entry::Error),
     /// A native failure that may still own a child until the agent collects it.
     Start(init::StartFailure),
     /// Any other failure, which the agent reports as a failed launch alone, as the C agent did.
@@ -655,66 +546,18 @@ impl From<Errno> for LaunchError {
     }
 }
 
-/// Starts a native direct workload, or the unchanged sandbox entry and placement sequence.
+/// Starts a native direct workload.
 fn launch(
     system: &mut impl System,
     session: &Session,
     config: &AgentConfig,
     execution: &GuestExecPayload,
 ) -> Result<Workload, LaunchError> {
-    if config.direct {
-        let workload = system
-            .start_direct(launch::direct_request(config, execution)?)
-            .map_err(LaunchError::Start)?;
-        session.watch(workload.id());
-        return Ok(Workload::Direct(workload));
-    }
-    let (pipes, ends) = Pipes::new(false).map_err(|error| sys::errno_of(&error))?;
-    let request = LaunchRequest {
-        config,
-        execution,
-        stdout: FileDescriptor::from_owned(ends.stdout),
-        stderr: FileDescriptor::from_owned(ends.stderr),
-    };
-    let entry = config.entry.as_ref().ok_or(Errno::EINVAL)?;
-    let prepared = system.prepare_entry(entry).map_err(LaunchError::Entry)?;
-    let command = launch::sandbox_command(system.paths(), request, prepared)?;
-    let mut spawned = system.spawn(command)?;
-    let process = spawned.process();
-    let barrier = spawned.take_barrier();
-    let mut workload = match Execution::new(spawned, pipes, Options::new().process_group()) {
-        Ok(mut workload) => {
-            workload.grant(sandbox_exec::Stream::Stdout, usize::MAX);
-            workload.grant(sandbox_exec::Stream::Stderr, usize::MAX);
-            Workload::Sandbox(workload)
-        }
-        Err(error) => {
-            drop(barrier);
-            super::diagnostics::error(system, "exec-launch", sys::errno_of(&error) as i32);
-            if let Err(error) = Child::from_process(process).wait() {
-                report_wait_failure(system, &error);
-            }
-            return Err(LaunchError::Other);
-        }
-    };
-    if let Some(barrier) = barrier
-        && let Err(error) = place(system, process, barrier)
-    {
-        super::diagnostics::error(system, "exec-launch", error as i32);
-        workload.terminate();
-        if let Err(error) = workload.wait(session) {
-            report_wait_failure(system, &error);
-        }
-        return Err(LaunchError::Other);
-    }
-    Ok(workload)
-}
-
-/// Places a sandbox workload, which waits at its `barrier`, in the `container` cgroup, and then
-/// releases it. A failure drops the barrier unreleased, which cancels the workload's launch.
-fn place(system: &impl System, process: ProcessId, barrier: Barrier) -> Result<(), Errno> {
-    cgroup::write_container_pid(system, process)?;
-    barrier.release().map_err(|error| sys::errno_of(&error))
+    let workload = system
+        .start_direct(launch::direct_request(config, execution)?)
+        .map_err(LaunchError::Start)?;
+    session.watch(workload.id());
+    Ok(Workload::Direct(workload))
 }
 
 /// Failure discovered before the fork boundary.
@@ -763,30 +606,6 @@ fn validate_launch_environment(
         }
     }
     Ok(())
-}
-
-/// Reports a sandbox workload that could not enter its working directory, or whose program could
-/// not run, as the sandbox agent's helper did: with its diagnostic on standard error, and with
-/// status 125 as the workload's exit status.
-fn refuse_sandbox_workload(
-    session: &mut Session,
-    request_id: u64,
-    execution: &GuestExecPayload,
-    failure: &LaunchFailure,
-) -> Result<(), Errno> {
-    let prefix = if matches!(failure.kind(), LaunchKind::WorkingDirectory) {
-        [
-            b"nvx-managed-agent: cannot use working directory ".as_slice(),
-            execution.cwd.as_deref().unwrap_or(b"/"),
-            b": ",
-        ]
-        .concat()
-    } else {
-        b"nvx-managed-agent: cannot execute workload: ".to_vec()
-    };
-    let diagnostic = with_description(&prefix, Errno::from_raw(failure.raw_os_error()));
-    session.send_app(APP_STDERR, request_id, 0, &diagnostic)?;
-    session.send_app(APP_EXIT, request_id, 125, b"exit")
 }
 
 /// Sends the C-compatible stderr and application error for a cwd failure.

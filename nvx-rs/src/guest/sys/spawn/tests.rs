@@ -54,49 +54,6 @@ impl ChildSpec {
     }
 }
 
-impl PreparedChild {
-    /// Returns the prepared executable path for focused launch tests.
-    pub(crate) fn program(&self) -> &CString {
-        &self.program
-    }
-
-    /// Returns the prepared arguments for focused launch tests.
-    pub(crate) fn arguments(&self) -> &[CString] {
-        &self.arguments
-    }
-
-    /// Returns the prepared exact environment, without the physical `PWD` entry, for focused
-    /// launch tests.
-    pub(crate) fn environment(&self) -> &[CString] {
-        self.environment.as_deref().unwrap_or_default()
-    }
-
-    /// Returns the preallocated physical `PWD` entry for focused launch tests.
-    pub(crate) fn physical_pwd(&self) -> Option<&[u8]> {
-        self.physical_pwd
-            .as_ref()
-            .map(|physical_pwd| physical_pwd.entry.as_ref())
-    }
-
-    /// Returns the environment position of the physical `PWD` entry for focused launch tests.
-    pub(crate) fn physical_pwd_index(&self) -> Option<usize> {
-        self.physical_pwd
-            .as_ref()
-            .map(|physical_pwd| physical_pwd.index)
-    }
-
-    /// Returns whether the child joins a cgroup, for focused launch tests.
-    pub(crate) fn has_cgroup(&self) -> bool {
-        self.cgroup.is_some()
-    }
-
-    /// Returns whether the child waits at a barrier, enters an execution, and leads a new
-    /// session, for focused launch tests.
-    pub(crate) fn barrier_entry_and_session(&self) -> (bool, bool, bool) {
-        (self.barrier.is_some(), self.entry.is_some(), self.session)
-    }
-}
-
 /// Closes standard streams of an isolated test process, and restores them when dropped, so
 /// that the test harness can report the outcome.
 struct ClosedStreams(Vec<(RawFd, OwnedFd)>);
