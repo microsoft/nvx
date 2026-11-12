@@ -16,8 +16,9 @@ platform job also checks that its runner is still the host that the series'
 history comes from (see
 [Expected benchmark hosts](benchmarks.md#expected-benchmark-hosts)). CI runs
 none of OpenVMM's own tests: OpenVMM's checkin gates test the pinned revision
-of `feature/microvm/dev`, on each pull request into the branch and on each push
-to it, on OpenVMM's own runners, and the GitHub-hosted `openvmm-ci` job checks
+of `feature/microvm/dev`, on the pull requests into the branch that are ready
+for review and on the pushes to it, on OpenVMM's own runners, and the
+GitHub-hosted `openvmm-ci` job checks
 that they passed the jobs that cover NVX's use of OpenVMM; see
 [OpenVMM CI](#openvmm-ci).
 Two jobs per backend exercise Linux, SMP, virtio, sandbox, and snapshot
@@ -733,14 +734,16 @@ of those jobs.
 `smp-lapic` repeats `smp` with the counting-LAPIC facts asserted, for explicit
 local use only; no CI job runs it. [Benchmarks](benchmarks.md#ci-collection)
 lists the jobs that consume, gate, publish, or persist the results. The workflow uses the read-only OpenVMM deploy key stored in the
-`OPENVMM_DEPLOY_KEY` Actions secret to fetch the private submodule at its pinned
+`OPENVMM_DEPLOY_KEY` Actions secret to fetch the OpenVMM submodule at its pinned
 commit. Shared guest binaries and development release packages move through
 short-lived workflow artifacts alongside the OpenVMM handoff and benchmark
 results. Caches only accelerate reproducible build inputs and outputs; consumers
 do not depend on them as a handoff.
 Pull requests and merge groups gate regressions against recent matching-platform
-history, and successful pushes to `dev` append their p50 values under `data/`. A
-pull request or merge group that changes no input of the platform or package
+history, and successful pushes to `dev` record their p50 values, which a full
+run of `dev` then appends under `data/` (see
+[Development releases and performance history](#development-releases-and-performance-history)).
+A pull request or merge group that changes no input of the platform or package
 jobs skips those jobs and the gate (see
 [Change classification](#change-classification)). Metadata-only
 performance jobs use GitHub-hosted Ubuntu runners. Provisioning instructions
@@ -780,8 +783,9 @@ Beside each platform job, a package job on a GitHub-hosted runner of the
 platform's operating system, `package-kvm`, `package-mshv`, or `package-whp`,
 packages the platform's release once `artifacts`, `distro-artifacts`, the
 platform's OpenVMM producer, and the `nvx-rs` build of its operating system
-end. The microVM guest and sandbox jobs also wait for `distro-artifacts`, and
-the debug-kernel jobs for `debug-kernel`. `Performance regression gate`,
+end (see [Release packages](#release-packages)). The microVM guest and sandbox
+jobs also wait for `distro-artifacts`, and the debug-kernel jobs for
+`debug-kernel`. `Performance regression gate`,
 `Publish development release`, `Record performance results`, and `Required
 status check` wait for the jobs whose results they check, and in a full run of
 `dev`, `Package nvx crate` waits for `Required status check` and
@@ -1641,7 +1645,8 @@ NVX pins a revision of `feature/microvm/dev` in `microsoft/openvmm` (see the
 [OpenVMM upstream roadmap](openvmm-upstream-roadmap.md)), whose own checkin
 gates test it: since OpenVMM's `c2722fbcd` of October 21, 2026, the OpenVMM PR
 workflow runs them on each pull request into the branch that is ready for
-review, and the OpenVMM CI workflow on each push to it. On OpenVMM's own
+review, and the OpenVMM CI workflow on each push to it but those that change
+only its `Guide/` and `petri/logview/`. On OpenVMM's own
 runners, they run OpenVMM's unit and documentation tests on x86-64 and AArch64
 Linux, Linux musl, and Windows, and its VMM tests on Windows Intel and AMD
 hosts, where the WHP tests run, on Linux KVM and MSHV hosts, and on TDX,
@@ -1893,6 +1898,36 @@ expired, seven days after the run uploaded them, as lost. Until a full run
 persists them, the performance regression gate compares a pull request or a
 merge group with a history that lacks up to a day of merges.
 
+## Release packages
+
+Each package job, `package-kvm`, `package-mshv`, or `package-whp`, calls the
+reusable [`package-platform.yml`](../.github/workflows/package-platform.yml)
+workflow, which packages one platform's release on the runner that the job
+names, `ubuntu-latest` or `windows-latest`. The job passes it the platform's
+suffix, `linux-kvm`, `linux-mshv`, or `windows-whp`, the base name of the
+platform's OpenVMM artifacts, and that of the `nvx-rs` artifacts of its
+operating system, and, like the other jobs that need the OpenVMM deploy key,
+runs only for pushes, merge groups, full runs, and same-repository pull
+requests. The workflow checks out NVX and OpenVMM, whose license the package
+ships, checks the source pins with [`verify`](usage.md#verify), and downloads
+the guest kernel, every guest image, the sandbox scratch template, and the
+OpenVMM executable and its provenance (see
+[Guest artifact handoff](#guest-artifact-handoff)). Its
+[`package-release`](../.github/actions/package-release/action.yml) action then
+downloads `nvx-rs` and its provenance, stages the binary package with
+[`package --binary-only`](usage.md#package), on Windows after it recreates the
+kernel's provenance inputs with
+[`materialize-kernel-provenance-inputs`](usage.md#materialize-kernel-provenance-inputs),
+and archives it with [`archive-release`](usage.md#archive-release) as
+`nvx-<VERSION>-<platform>.tar.gz`, or `.zip` on Windows.
+
+Every run that runs the package jobs packages and archives the releases, which
+proves that they build, but only a `dev` push uploads them, as the one-day
+`release-<platform>` artifacts that `Publish development release` publishes
+(see [Development release publication](#development-release-publication)).
+Pull requests, merge groups, full runs, and pushes to `feature/nvx-refactor`
+upload no package.
+
 ## Development release publication
 
 `Publish development release` runs
@@ -2089,13 +2124,19 @@ flagging script shares to read Rust.
 ## crates.io releases
 
 A scheduled or manually dispatched full run of `dev` publishes the
-[`nvx` crate](../nvx-rs/README.md) to crates.io once every job of the run has
-passed, which `Required status check` confirms. Two jobs on GitHub-hosted
+[`nvx` crate](../nvx-rs/README.md) to crates.io once every job of the run but
+`Persist performance baselines`, which runs apart, has passed, which
+`Required status check` confirms. Two jobs on GitHub-hosted
 Ubuntu runners, whose checkouts have the LF line endings of the commit, run
 [`publish_nvx_crate.py`](../scripts/publish_nvx_crate.py): `crate-package`,
 `Package nvx crate`, waits for that check, and `crate-release`,
 `Publish nvx crate`, waits for `crate-package`. Pushes, pull requests, and
-merge groups never publish the crate. A run publishes a new version only when `nvx-rs/`
+merge groups never publish the crate; a `dev` push publishes its development
+release instead (see
+[Development release publication](#development-release-publication)). `nvx` is
+the only crate that NVX publishes: NVX's own programs, such as the `nvx-rs`
+CLI, nvx-init, and the other guest binaries, are binaries of that package, not
+crates of their own. A run publishes a new version only when `nvx-rs/`
 changed since the commit from which the newest version on crates.io was
 packed, which that version's `.cargo_vcs_info.json` records. A night without
 changes to the crate publishes nothing, and neither does a run of a commit
