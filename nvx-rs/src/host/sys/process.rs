@@ -1,6 +1,5 @@
 //! Process descriptors, and the hook that detaches a spawned process from its caller.
 
-use std::fs::File;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
@@ -24,23 +23,6 @@ use super::Errno;
 /// caller's at or below this one therefore cannot reach the new process under its number, and
 /// the descriptors that a detached spawn marks close-on-exec are the ones above it.
 pub(crate) const LAST_STANDARD_STREAM: RawFd = libc::STDERR_FILENO;
-
-/// Moves `file` to a descriptor above [`LAST_STANDARD_STREAM`], under which a spawn can pass it to
-/// its process, if it is not there already: as when the caller had closed a standard stream, whose
-/// descriptor an open then took.
-///
-/// The new descriptor is a close-on-exec copy of the old one, which is then closed. It shares the
-/// file's open file description, and with it the file's offset and `flock` locks.
-pub(crate) fn move_above_standard_streams(file: &mut File) -> io::Result<()> {
-    if file.as_raw_fd() > LAST_STANDARD_STREAM {
-        return Ok(());
-    }
-    let copy = fcntl(&*file, FcntlArg::F_DUPFD_CLOEXEC(LAST_STANDARD_STREAM + 1))?;
-    // SAFETY: fcntl returned a fresh descriptor, which nothing else owns. Replacing the file
-    // closes the old descriptor.
-    *file = File::from(unsafe { OwnedFd::from_raw_fd(copy) });
-    Ok(())
-}
 
 /// A pidfd: an owned descriptor that refers to one process. Signals sent through it reach that
 /// process or fail, even once another process reuses its ID.

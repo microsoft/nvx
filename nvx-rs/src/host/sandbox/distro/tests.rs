@@ -756,11 +756,10 @@ fn gpt_disks_bind_by_their_disk_guid() {
         binding
     );
 
-    // The check returns the disk, with the format and disk GUID that the binding names.
+    // The check returns the disk that the binding seals.
     let checked = binding
         .check_with(&gpt, DISTRO_POLICY_REVISION, METADATA_ONLY)
         .unwrap();
-    assert_eq!(checked.bound(), (DistroFormat::Gpt, UUID));
     assert_eq!(&FileSeal::of(checked.file()).unwrap(), binding.image());
 
     // A binding of one format checks no image of the other, even at its path and identity.

@@ -26,8 +26,6 @@
 
 use std::fmt;
 use std::io;
-#[cfg(windows)]
-use std::os::windows::io::BorrowedHandle;
 use std::str::FromStr;
 use std::sync::OnceLock;
 use std::thread;
@@ -318,21 +316,6 @@ impl Process {
     pub fn bytes_read(&self) -> io::Result<u64> {
         self.handle
             .bytes_read(self.reference.pid, self.reference.start_time)
-    }
-
-    /// Closes the process's handle that has the value of this process's handle `ours`, which the
-    /// process inherited from this one, and never uses, as a VMM never uses the guards of the
-    /// checked files that it inherits on Windows.
-    ///
-    /// The process loses no other handle: a process that did not inherit `ours` keeps every handle
-    /// that it has, and the close fails. A process that has exited has closed its handles, so the
-    /// close succeeds. Fails with [`io::ErrorKind::PermissionDenied`] for a process that
-    /// [`open`](Self::open) found: only the `Process` of a launch, which
-    /// [`Launched::process`](super::supervisor::Launched::process) returns, may close the
-    /// process's handles.
-    #[cfg(windows)]
-    pub(crate) fn close_inherited(&self, ours: BorrowedHandle<'_>) -> io::Result<()> {
-        self.handle.close_inherited(self.reference.pid, ours)
     }
 }
 

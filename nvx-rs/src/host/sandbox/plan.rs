@@ -37,9 +37,7 @@
 //! [`kernel_command_line`](SandboxPlan::kernel_command_line) says, and
 //! [`check_adapter_launch`](SandboxPlan::check_adapter_launch) checks, as the adapter plans its
 //! launch, that what the plan renders leaves the rest of the launch room on a Windows command
-//! line. The plan's arguments name the block devices by their paths; a launch renders them
-//! through a [`PreparedLaunch`](super::PreparedLaunch), which names the files that the checks of
-//! the images opened instead.
+//! line. The plan's arguments name the block devices by their paths.
 //!
 //! A plan is persistable. Its serde form, of version [`PLAN_VERSION`], requires every field and
 //! refuses unknown ones and other versions, and reading it checks the plan as
@@ -658,9 +656,8 @@ impl SandboxPlan {
     /// Checks, as an adapter plans its launch, that the part of OpenVMM's command line that it
     /// knows then leaves [`VmmLaunch::RESERVE`] of
     /// [`PROCESS_COMMAND_LINE_LIMIT`](crate::host::launch::PROCESS_COMMAND_LINE_LIMIT) to the rest
-    /// of the launch, which
-    /// [`PreparedLaunch::adapter_arguments`](super::PreparedLaunch::adapter_arguments) renders:
-    /// the plan's [arguments](Self::openvmm_arguments), with the paths of its block devices, those
+    /// of the launch: the plan's [arguments](Self::openvmm_arguments), with the paths of its block
+    /// devices, those
     /// that export `export`, the export of the host paths that the adapter shares with its guest's
     /// root, if any, and the plan's [kernel command line](Self::kernel_command_line) with
     /// `user_command_line`. So planning refuses a plan whose network rules, or mapped, hidden, or

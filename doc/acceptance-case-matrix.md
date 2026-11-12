@@ -30,11 +30,11 @@ its own in turn.
 
 | Section | Tests | Kept | Rewritten | Retired |
 | --- | ---: | ---: | ---: | ---: |
-| [The adapter's scenarios](#the-adapters-scenarios) | 157 | 0 | 114 | 43 |
+| [The adapter's scenarios](#the-adapters-scenarios) | 157 | 0 | 113 | 44 |
 | [The adapter's other tests](#the-adapters-other-tests) | 169 | 0 | 9 | 160 |
 | [MicroVM scenarios](#microvm-scenarios) | 54 | 50 | 3 | 1 |
 | [CI](#ci) | 69 | 43 | 3 | 23 |
-| [Docs](#docs) | 36 | 26 | 3 | 7 |
+| [Docs](#docs) | 36 | 25 | 3 | 8 |
 
 ## The adapter's scenarios
 
@@ -129,7 +129,7 @@ The adapter's README said what each proved.
 | `a_launch_refuses_shares_that_it_cannot_export` | rewritten | `nvx-rs/src/host/filesystem/tests.rs::policy_paths_hide_show_and_narrow_writes`; `nvx-rs/tests/security_checklist.rs::an_export_refuses_a_read_only_path_inside_a_writable_directory` |
 | `a_launch_renders_each_element_of_its_network_through_the_plan` | rewritten | `nvx-rs/src/host/config/tests.rs::cold_boot_arguments_lower_layered_roots_networks_and_exports_by_path`; `nvx-rs/src/host/network/tests.rs::proxy_urls_name_the_gateway_as_the_guest_sees_it` |
 | `a_launch_shares_host_paths_inside_the_authorized_directories` | rewritten | `nvx-rs/src/host/filesystem/tests.rs::policy_paths_hide_show_and_narrow_writes`; `nvx-rs/src/host/config/tests.rs::cold_boot_arguments_lower_layered_roots_networks_and_exports_by_path` |
-| `a_layered_launch_hands_openvmm_the_checked_images` | rewritten | `nvx-rs/tests/checked_handoff.rs::a_prepared_launch_hands_the_vmm_its_checked_images_alone`; `nvx-rs/src/host/config/tests.rs::cold_boot_arguments_lower_layered_roots_networks_and_exports_by_path` |
+| `a_layered_launch_hands_openvmm_the_checked_images` | rewritten | `nvx-rs/src/host/config/tests.rs::cold_boot_arguments_lower_layered_roots_networks_and_exports_by_path`. A launch names its images by path: the checked-file handoff leaves (SL6.3, #1122), as `images_replaced_after_the_checks_never_reach_the_vm` says |
 | `a_layered_launch_passes_what_the_guest_checks_as_it_is` | rewritten | `nvx-rs/src/guest/init/boot/tests.rs::cold_boot_reads_the_actual_root_view_export_maps_and_cli_contracts` |
 | `a_layered_launch_plans_its_blocks_and_boot_tokens_with_the_adapters_plan` | rewritten | `nvx-rs/src/host/config/tests.rs::cold_command_lines_keep_the_old_root_view_and_mapping_values`; `nvx-rs/src/host/config/tests.rs::cold_boot_arguments_lower_layered_roots_networks_and_exports_by_path` |
 | `an_execution_finds_the_url_of_its_network_s_proxy_in_its_environment` | rewritten | `nvx-rs/src/guest/managed_agent/launch/tests.rs::restored_proxy_defaults_replace_template_values_before_exec_overrides`; `test-microvm --scenario sandbox-proxy-only` |
@@ -152,7 +152,7 @@ The adapter's README said what each proved.
 | Scenario | Fate | Coverage, or why it retires |
 | --- | --- | --- |
 | `a_launch_that_the_hook_ends_after_its_checks_leaves_no_launch` | rewritten | A launch that fails after its checks leaves nothing of its own: `nvx-rs/src/host/vm/tests.rs::creation_rolls_back_its_log_and_never_removes_preexisting_outputs_or_inputs`; `nvx-rs/tests/security_checklist.rs::a_scratch_image_is_claimed_by_one_launch_and_checked_again_after_a_release`. The step hook retires |
-| `images_replaced_after_the_checks_never_reach_the_vm` | rewritten | `nvx-rs/tests/checked_handoff.rs::a_vmm_finds_the_checked_images_past_replaced_links_from_another_directory` |
+| `images_replaced_after_the_checks_never_reach_the_vm` | retired | The checked-file handoff leaves (SL6.3, #1122): a launch names its images by path, so what takes an image's path after its check is what OpenVMM opens. Callers stage their images in a directory that only their own account can write, as the docs of `host::sandbox::distro`, `host::sandbox::scratch` and `host::seal` require, so that no other account can replace a checked image |
 | `the_hook_pauses_a_launch_at_each_of_its_steps` | retired | The adapter's step hook |
 
 ### `vm_layered` (43)
@@ -500,7 +500,7 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/guest/spawn.rs - guest::spawn::LaunchStage::from_code (line 201)` | rewritten | `nvx-rs/src/guest/spawn/tests.rs::launch_stages_keep_their_numbers`. The exec engine's launch failure and outcome, which the example read, leave with the engine (SL6.11a) |
 | `nvx-rs/src/guest/terminal.rs - guest::terminal (line 10)` | kept |  |
 | `nvx-rs/src/guest/time/mod.rs - guest::time (line 9)` | kept | SL6.11c removed its capture and restore finish, which became crate-private: `guest::snapshot::capture` runs them |
-| `nvx-rs/src/host/sandbox/prepared.rs - host::sandbox::prepared::PreparedLaunch (line 92)` | kept | Its launch type leaves with the old launch paths (#1087), whose PR retires it |
+| `nvx-rs/src/host/sandbox/prepared.rs - host::sandbox::prepared::PreparedLaunch (line 92)` | retired | `PreparedLaunch` leaves with the checked-file handoff (SL6.3, #1122) |
 | `nvx-rs/src/host/store/mod.rs - host::store (line 72)` | retired | The sandbox store leaves (SL6.1, #1121) |
 | `nvx-rs/src/host/supervisor/mod.rs - host::supervisor (line 32)` | retired | The store-coupled supervisor leaves with the sandbox store (SL6.1, #1121); `host::supervisor` stays only as the transitional public path of the low-level spawn, until SL6.3 (#1122), with no doc test |
 | `nvx-rs/src/host/template/clone.rs - host::template::clone::ClonePlan (line 247)` | retired | `ClonePlan` and `CloneRequest` leave with the old clone path (SL6.2b, #1121) |

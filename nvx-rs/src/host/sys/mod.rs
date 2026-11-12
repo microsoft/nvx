@@ -30,9 +30,7 @@ pub(crate) use interrupt::{interrupted, watch_interrupts, write_interruptibly};
 #[cfg(all(feature = "cli", target_os = "linux"))]
 pub(crate) use process::inherit_only;
 #[cfg(target_os = "linux")]
-pub(crate) use process::{
-    LAST_STANDARD_STREAM, PidFd, detach, move_above_standard_streams, process_exists,
-};
+pub(crate) use process::{LAST_STANDARD_STREAM, PidFd, detach, process_exists};
 #[cfg(target_os = "linux")]
 pub(crate) use socket::{
     connect_nonblocking, peer_pid, send_nonblocking, unread_by_peer, wait_readable, wait_writable,

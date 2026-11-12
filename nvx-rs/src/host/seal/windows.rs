@@ -1,20 +1,18 @@
 //! The Windows seal, from the file information of the open handle, and the opens of sealed files.
 
-use std::ffi::{OsString, c_void};
+use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem;
-use std::os::windows::ffi::OsStringExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use windows_sys::Win32::Foundation::{FILETIME, GetLastError, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_INFO,
-    FILE_SHARE_READ, FILE_TYPE_DISK, FILE_TYPE_UNKNOWN, FileIdInfo, GETFINALPATHNAMEBYHANDLE_FLAGS,
-    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType,
-    GetFinalPathNameByHandleW, VOLUME_NAME_DOS,
+    FILE_SHARE_READ, FILE_TYPE_DISK, FILE_TYPE_UNKNOWN, FileIdInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFileType,
 };
 
 use super::{FileId, FileKind, FileSeal, SEAL_VERSION, SealScheme, SealTime};
@@ -107,34 +105,6 @@ pub(super) fn open_guarded(path: &Path) -> io::Result<File> {
 /// See [`super::open_read`].
 pub(super) fn open_read(path: &Path) -> io::Result<File> {
     File::open(path)
-}
-
-/// See [`super::final_path`].
-pub(super) fn final_path(file: &File) -> io::Result<PathBuf> {
-    final_path_by(file, VOLUME_NAME_DOS)
-}
-
-/// Returns the final path of the open `file`, which names its volume as `volume` asks.
-fn final_path_by(file: &File, volume: GETFINALPATHNAMEBYHANDLE_FLAGS) -> io::Result<PathBuf> {
-    let handle = file.as_raw_handle() as HANDLE;
-    let mut buffer = vec![0u16; 260];
-    loop {
-        // SAFETY: the handle is open for as long as `file` is borrowed, and the buffer holds
-        // `buffer.len()` units.
-        let length = unsafe {
-            GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, volume)
-        } as usize;
-        if length == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // The path fits, and the length leaves out the NUL that follows it; or the buffer is too
-        // small, and the length is what the path needs, with its NUL.
-        if length < buffer.len() {
-            buffer.truncate(length);
-            return Ok(PathBuf::from(OsString::from_wide(&buffer)));
-        }
-        buffer.resize(length, 0);
-    }
 }
 
 #[cfg(test)]
