@@ -11563,7 +11563,11 @@ def run(args: argparse.Namespace) -> int:
                 "select maintained cold scenarios explicitly and use --cold-only "
                 "for mixed scenarios"
             )
-    managed_processors = tuple(dict.fromkeys(args.processors or (1,)))
+    managed_processors = (
+        tuple(dict.fromkeys(args.processors or (1,)))
+        if architecture == "aarch64"
+        else (1,)
+    )
     args.processors = args.processors or list(MICROVM_PROCESSOR_COUNTS)
     managed_root = getattr(args, "managed_root", "initramfs")
     start_stop_cycles = getattr(args, "start_stop_cycles", None)

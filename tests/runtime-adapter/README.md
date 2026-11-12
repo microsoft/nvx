@@ -40,10 +40,11 @@ Each configuration enables one side of `nvx`:
 | Host-only | `--features host` | `host` | `frame`, `root`, `probe`, `exec`, `template`, `host`, `runtime`, `initramfs`, `staged`, `sharing`, `layered`, `capture`, `generations`, `hook` | `runtime-adapter-host` |
 | Guest-only | `--features guest --target x86_64-unknown-linux-musl` (or `aarch64-unknown-linux-musl`) | `guest` | `frame`, `root`, `probe`, `exec`, `template`, `guest`, `worker` | `runtime-adapter-guest`, a static executable |
 
-The consolidated runner's `--architecture` selects and checks the guest
-agent's static ELF ISA and requires a matching native host. Its default remains
-x86_64. ARM64 runtime runs require Windows/WHP and explicit `--cold-only`;
-the runner uses the native ARM64 MSVC target for the host tests.
+The consolidated runner's `--architecture` selects the guest agent ISA. Its
+default x86_64 path retains the existing guest-agent file admission. ARM64
+additionally checks the agent's static ELF ISA and requires a matching native
+Windows/WHP host and explicit `--cold-only` for runtime runs; the runner uses
+the native ARM64 MSVC target for the host tests.
 
 Cold selection reuses the same registry, Cargo targets and assertions. Its
 explicit target inventory classifies `template_capture`, `template_operations`,

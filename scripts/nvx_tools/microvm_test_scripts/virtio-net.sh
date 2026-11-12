@@ -20,7 +20,14 @@ while [ -z "$device" ] && [ "$tries" -lt 200 ]; do
     tries=$((tries + 1))
 done
 [ -n "$device" ] || fail 20
-fixed_virtio_present d0000000 16 || fail 21
+case "$(uname -m)" in
+    x86_64)
+        grep -q 'virtio_mmio.device=0x1000@0xd0000000:' /proc/cmdline
+        ;;
+    *)
+        fixed_virtio_present d0000000 16
+        ;;
+esac || fail 21
 grep -q 'virtnet_ip=10.0.0.2' /proc/cmdline || fail 22
 grep -q 'virtnet_mask=255.255.255.0' /proc/cmdline || fail 23
 grep -q 'virtnet_gw=10.0.0.1' /proc/cmdline || fail 24

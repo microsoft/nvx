@@ -21964,6 +21964,8 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
         architecture: str = "x86_64",
         cold_only: bool = False,
         scopes: Mapping[str, str] | None = None,
+        guest_data: bytes | None = None,
+        native_architecture: str | None = None,
     ) -> tuple[int, list[tuple[list[str], dict[str, str]]], str, str]:
         """Runs the handler on the scenarios at `path`, for an adapter whose Cargo
         metadata holds the test targets `targets`, by name with their sources, and
@@ -22015,7 +22017,7 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
         header[18:20] = (183 if architecture == "aarch64" else 62).to_bytes(2, "little")
         header[20:24] = (1).to_bytes(4, "little")
         header[52:54] = (64).to_bytes(2, "little")
-        guest.write_bytes(header)
+        guest.write_bytes(header if guest_data is None else guest_data)
         args = argparse.Namespace(
             backend="whp" if architecture == "aarch64" else "kvm",
             cargo="cargo",
@@ -22031,7 +22033,9 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
             ),
             patch.object(runtime_adapter_tests, "ADAPTER_DIRECTORY", path.parent),
             patch.object(
-                runtime_adapter_tests, "host_architecture", return_value=architecture
+                runtime_adapter_tests,
+                "host_architecture",
+                return_value=native_architecture or architecture,
             ),
             patch.object(
                 runtime_adapter_tests.sys,
@@ -22331,6 +22335,45 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
                 status, runs, _, stderr = self._run(path, listings, artifacts=artifacts)
                 self.assertEqual(status, 0, stderr)
                 self.assertEqual(Path(runs[0][1]["NVX_ARTIFACTS_DIR"]), expected)
+
+    def test_arm_admission_does_not_change_the_x86_handler(self):
+        path = self._scenarios("vm_a a\n")
+        listings = {
+            ("vm_a", "--list"): "a: test\n",
+            ("unit", "--ignored"): "",
+            ("lib", "--ignored"): "",
+            ("other", "--ignored"): "",
+        }
+        for native_architecture in ("x86_64", "aarch64"):
+            with self.subTest(native_architecture=native_architecture):
+                status, runs, _, stderr = self._run(
+                    path,
+                    listings,
+                    guest_data=b"legacy x86 fixture",
+                    native_architecture=native_architecture,
+                )
+                self.assertEqual(status, 0, stderr)
+                self.assertEqual(len(runs), 1)
+                self.assertNotIn("--target", runs[0][0])
+        with self.assertRaisesRegex(common.ScriptError, "native host ISA"):
+            self._run(
+                path,
+                listings,
+                architecture="aarch64",
+                cold_only=True,
+                native_architecture="x86_64",
+            )
+        with self.assertRaisesRegex(
+            common.ScriptError, "invalid runtime adapter guest agent"
+        ):
+            self._run(
+                path,
+                listings,
+                architecture="aarch64",
+                cold_only=True,
+                scopes={"vm_a": "cold"},
+                guest_data=b"not an ELF",
+            )
 
     def test_the_handler_runs_nothing_once_the_names_are_not_the_tests(self):
         path = self._scenarios("vm_a a\nvm_a gone\ngone x\n")

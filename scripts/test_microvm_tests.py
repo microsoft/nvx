@@ -9262,6 +9262,59 @@ class MicrovmTests(unittest.TestCase):
             microvm_tests.VIRTIO_NET_COMPLETION_MARKER,
         )
 
+    def test_virtio_net_preserves_the_x86_binding_assertion(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        script = microvm_tests._read_script("virtio-net.sh")
+        check = script[
+            script.index('[ -n "$device" ] || fail 20\n') : script.index(
+                "grep -q 'virtnet_ip=10.0.0.2'"
+            )
+        ].replace("/proc/cmdline", "cmdline")
+        prelude = microvm_tests._read_script("virtio-mmio.sh").replace(
+            "/proc/cmdline", "cmdline"
+        )
+        for architecture, cmdline, binding, expected in (
+            ("x86_64", "virtio_mmio.device=0x1000@0xd0000000:16", "present", 0),
+            ("x86_64", "virtio_mmio.device=0x1000@0xd0000000:99", "present", 0),
+            ("x86_64", "virtio_mmio.device=0x1000@0xd0001000:16", "present", 21),
+            ("aarch64", "", "present", 0),
+            ("aarch64", "virtio_mmio.device=0x1000@0xd0000000:16", "absent", 21),
+        ):
+            with (
+                self.subTest(architecture=architecture, cmdline=cmdline),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                (root / "cmdline").write_text(cmdline, encoding="ascii")
+                stubs = (
+                    f'uname() {{ echo "{architecture}"; }}\n'
+                    'fail() { exit "$1"; }\ndevice=eth0\n'
+                )
+                if architecture == "aarch64":
+                    stubs += (
+                        "fixed_virtio_present() {\n"
+                        '    echo "$*"\n'
+                        '    [ "$*" = "d0000000 16" ] && '
+                        f'[ "{binding}" = present ]\n'
+                        "}\n"
+                    )
+                result = subprocess.run(
+                    [shell],
+                    cwd=root,
+                    input=prelude + stubs + check,
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(
+                    result.returncode, expected, result.stdout + result.stderr
+                )
+                if architecture == "aarch64":
+                    self.assertEqual(result.stdout, "d0000000 16\n")
+
     def test_command_line_limit_fills_the_guest_kernel_buffer(self):
         self.assertIn("command-line-limit", microvm_tests.MICROVM_TEST_SCENARIOS)
         # The tokens that OpenVMM reports around the caller's, ending with its
@@ -12259,7 +12312,9 @@ class MicrovmTests(unittest.TestCase):
             len(microvm_tests.INTERRUPT_MAP_SNAPSHOT_DEVICES),
         ):
             script = microvm_tests._interrupt_map_script(devices, capture="")
-            self.assertNotRegex(script, r"@[A-Z][A-Z_]*@")
+            prelude = microvm_tests._read_script("virtio-mmio.sh")
+            self.assertTrue(script.startswith(prelude))
+            self.assertNotIn("@", script.removeprefix(prelude))
             # The control console's step writes the record, once, to the
             # console held open, raw, and silent until its interrupt.
             steps = re.findall(
@@ -16667,9 +16722,10 @@ class MicrovmTests(unittest.TestCase):
                 self.assertEqual(microvm_tests.run(args), 0)
 
         run_lifecycle.assert_not_called()
+        run_guest_boot.assert_called_once()
+        self.assertNotIn("processors", run_guest_boot.call_args.kwargs)
         self.assertEqual(
-            [entry.kwargs["processors"] for entry in run_guest_boot.call_args_list],
-            [2, 8],
+            run_guest_boot.call_args.kwargs["log_path"].name, "alpine-guest-boot.log"
         )
         self.assertEqual(
             [entry.args[4] for entry in run_smp.call_args_list],
@@ -16683,6 +16739,73 @@ class MicrovmTests(unittest.TestCase):
             [entry.kwargs["counting_lapic"] for entry in run_smp.call_args_list],
             [False, False, True, True],
         )
+
+    def test_only_arm_expands_boot_and_managed_processor_selection(self):
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        for architecture, selected, expected in (
+            ("x86_64", [], [1]),
+            ("x86_64", ["2", "2", "8"], [1]),
+            ("aarch64", [], [1]),
+            ("aarch64", ["2", "2", "8"], [2, 8]),
+        ):
+            with (
+                self.subTest(architecture=architecture, selected=selected),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                args = nvx.parse_args(
+                    [
+                        "test-microvm",
+                        "--backend",
+                        "whp",
+                        "--architecture",
+                        architecture,
+                        "--scenario",
+                        "guest-boot",
+                        "--scenario",
+                        "managed-lifecycle",
+                        "--output-dir",
+                        temporary,
+                        *(["--processors", *selected] if selected else []),
+                    ]
+                )
+                with (
+                    patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                    patch.object(
+                        microvm_tests,
+                        "require_file",
+                        side_effect=require,
+                    ),
+                    patch.object(microvm_tests, "run_guest_boot") as boot,
+                    patch.object(microvm_tests, "run_managed_lifecycle") as managed,
+                    redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(microvm_tests.run(args), 0)
+                for scenario in (boot, managed):
+                    self.assertEqual(
+                        [
+                            entry.kwargs.get("processors", 1)
+                            for entry in scenario.call_args_list
+                        ],
+                        expected,
+                    )
+                executions = [
+                    record
+                    for record in _read_report(
+                        Path(temporary) / microvm_durations.REPORT_NAME
+                    )
+                    if record["record"] == "scenario"
+                ]
+                for scenario in ("guest-boot", "managed-lifecycle"):
+                    self.assertEqual(
+                        [
+                            entry["processors"]
+                            for entry in executions
+                            if entry["scenario"] == scenario
+                        ],
+                        [[processors] for processors in expected],
+                    )
 
     def test_runner_dispatches_public_managed_exec_configuration(self):
         with tempfile.TemporaryDirectory() as temporary:
