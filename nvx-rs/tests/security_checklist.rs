@@ -1,15 +1,16 @@
 //! The checklist of the security requirements that the host's documentation states, through the
-//! public API alone: the guest paths of an export, the checks of a staged image and of a scratch
-//! image's claim, the stability of exported objects, the privacy of a VM's directory and outputs,
-//! and the proofs of a VM's liveness, of its endpoint's owner and of its recovery from saved
-//! values, and the strictness of a snapshot's directory.
+//! public API alone: the guest paths of an export, the stability of exported objects, the privacy
+//! of a VM's directory and outputs, and the proofs of a VM's liveness, of its endpoint's owner and
+//! of its recovery from saved values, and the strictness of a snapshot's directory. The checks of
+//! a staged image and of a scratch image's claim, which only NVX's CLI makes, are unit tests of
+//! `host::sandbox::distro` and `host::sandbox::scratch`.
 //!
 //! Each check is short and runs no VM: a process of the test's own, an idle copy of the test
 //! binary, stands in for a VM's process where one is needed.
 #![cfg(all(feature = "host", any(target_os = "linux", windows)))]
 
 use std::error::Error as _;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -22,12 +23,8 @@ use nvx::host::filesystem::Owner;
 use nvx::host::filesystem::{self, ExportRequest, Mapping, ReservedTargets, Target};
 use nvx::host::process::{BootId, ProcessRef};
 use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
-use nvx::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding};
-use nvx::host::sandbox::layer::{LayerRole, SandboxLayer};
-use nvx::host::sandbox::scratch::{CLAIM_RELEASE_WAIT, ScratchBinding};
-use nvx::host::seal::FileSeal;
 use nvx::host::{platform, snapshot, transport, vm};
-use nvx::{ErrorCode, ErrorKind, Hypervisor};
+use nvx::{ErrorKind, Hypervisor};
 
 /// Plans the export of `mappings` into the blockless root.
 fn plan(mappings: &[Mapping<'_>]) -> nvx::Result<Option<filesystem::ExportPlan>> {
@@ -145,65 +142,6 @@ fn private_directory() -> (tempfile::TempDir, vm::VmDir) {
 }
 
 #[test]
-fn a_staged_image_that_was_replaced_fails_its_check() {
-    // Callers stage images in a directory that only their own account can write.
-    let (_directory, images) = private_directory();
-    let path = images.path().join("distro.erofs");
-    fs::write(&path, b"layer").unwrap();
-    let layer = SandboxLayer::new(
-        LayerRole::Distro,
-        path.to_str().unwrap(),
-        "01234567-89ab-cdef-0123-456789abcdef",
-    );
-    let binding = DistroBinding::verify(&layer).unwrap();
-    drop(binding.check(&layer, DISTRO_POLICY_REVISION).unwrap());
-    fs::rename(&path, images.path().join("original.erofs")).unwrap();
-    fs::write(&path, b"layer").unwrap();
-    assert_eq!(
-        binding
-            .check(&layer, DISTRO_POLICY_REVISION)
-            .unwrap_err()
-            .kind(),
-        ErrorKind::Unavailable
-    );
-}
-
-#[test]
-fn a_scratch_image_is_claimed_by_one_launch_and_checked_again_after_a_release() {
-    let (_directory, images) = private_directory();
-    let path = images.path().join("scratch.ext4");
-    File::create(&path).unwrap().set_len(4096).unwrap();
-    let binding = ScratchBinding::bind(&path).unwrap();
-    let held = binding
-        .check(&path, Instant::now() + CLAIM_RELEASE_WAIT)
-        .unwrap();
-    let error = binding
-        .check(&path, Instant::now() + Duration::from_millis(50))
-        .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::TimedOut);
-    assert_eq!(error.code(), ErrorCode::ScratchClaimed);
-    drop(held);
-    drop(
-        binding
-            .check(&path, Instant::now() + CLAIM_RELEASE_WAIT)
-            .unwrap(),
-    );
-    OpenOptions::new()
-        .write(true)
-        .open(&path)
-        .unwrap()
-        .set_len(8192)
-        .unwrap();
-    assert_eq!(
-        binding
-            .check(&path, Instant::now() + CLAIM_RELEASE_WAIT)
-            .unwrap_err()
-            .kind(),
-        ErrorKind::Unavailable,
-    );
-}
-
-#[test]
 fn a_vm_directory_is_private_and_never_restricted_in_place() {
     let (_directory, dir) = private_directory();
     vm::VmDir::open(dir.path()).unwrap();
@@ -256,6 +194,55 @@ fn a_vm_directory_is_private_and_never_restricted_in_place() {
     assert_eq!(acl(), shared);
 }
 
+/// Returns the identity of the file that `file` holds open: its device and inode on Linux.
+#[cfg(target_os = "linux")]
+fn file_id(file: &File) -> (u64, u128) {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file.metadata().unwrap();
+    (metadata.dev(), u128::from(metadata.ino()))
+}
+
+/// Returns the identity of the file that `file` holds open: on Windows, the volume serial number
+/// and the 128-bit file ID of its `FILE_ID_INFO`, or, on a volume that has no file ID information
+/// or that reports a zero ID, those of its `BY_HANDLE_FILE_INFORMATION`.
+#[cfg(windows)]
+fn file_id(file: &File) -> (u64, u128) {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandle,
+        GetFileInformationByHandleEx,
+    };
+
+    let handle = file.as_raw_handle() as HANDLE;
+    let mut id = FILE_ID_INFO::default();
+    // SAFETY: the handle is open for as long as `file` is borrowed, and the buffer is a
+    // FILE_ID_INFO of the size that is passed.
+    let has_id = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&raw mut id).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    } != 0;
+    let file_id = u128::from_le_bytes(id.FileId.Identifier);
+    if has_id && file_id != 0 {
+        return (id.VolumeSerialNumber, file_id);
+    }
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle is open for as long as `file` is borrowed, and the output pointer is
+    // valid.
+    let read = unsafe { GetFileInformationByHandle(handle, &mut information) };
+    assert_ne!(read, 0, "{}", io::Error::last_os_error());
+    (
+        u64::from(information.dwVolumeSerialNumber),
+        (u128::from(information.nFileIndexHigh) << 32) | u128::from(information.nFileIndexLow),
+    )
+}
+
 /// A cold configuration that creation checks without reading the host.
 fn cold() -> VmConfig {
     VmConfig {
@@ -294,12 +281,7 @@ fn a_launch_takes_a_new_private_log_and_keeps_every_entry_that_it_did_not_create
 
     let prepared = vm::create(&runtime(), &cold(), None, &dir).unwrap();
     let log = prepared.outputs().log.clone();
-    let opened = FileSeal::of(prepared.log()).unwrap();
-    let named = FileSeal::of(&File::open(&log).unwrap()).unwrap();
-    assert_eq!(
-        (opened.device(), opened.file_id()),
-        (named.device(), named.file_id())
-    );
+    assert_eq!(file_id(prepared.log()), file_id(&File::open(&log).unwrap()));
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::PermissionsExt;

@@ -12,9 +12,6 @@ use nvx::contract::{
     BOOT_CONTRACT_VERSION, CONTROL_CONTRACT_REVISION, CONTROL_SESSION_PROTOCOL_VERSION,
 };
 use nvx::host::process::{Opened, Process, ProcessRef};
-use nvx::host::sandbox::distro::DistroBinding;
-use nvx::host::sandbox::scratch::ScratchBinding;
-use nvx::host::sandbox::{LayerRole, SandboxLayer};
 use serde_json::{Value, json};
 
 #[cfg(unix)]
@@ -114,28 +111,56 @@ pub(crate) fn child(root: &str, writable: bool) -> Value {
     })
 }
 
+/// The platform scheme of the seals that bindings hold on this host.
+const SEAL_SCHEME: &str = if cfg!(windows) { "windows" } else { "linux" };
+
+/// Asserts that `seal`, the seal of a file in a binding that provision recorded, seals the file at
+/// `path` as it is: a regular file of its length, sealed on this host.
+fn assert_seal(seal: &Value, path: &Path) {
+    assert_eq!(seal["version"], 1, "{seal}");
+    assert_eq!(seal["scheme"], SEAL_SCHEME, "{seal}");
+    assert_eq!(seal["kind"], "regular", "{seal}");
+    assert_eq!(seal["length"], fs::metadata(path).unwrap().len(), "{seal}");
+}
+
+/// Asserts that `binding`, the distro binding that provision recorded, binds the distro layer of
+/// the root as it is, as explicit verification of the layer, which has no manifest, binds it.
+fn assert_distro_binding(root: &Root, binding: &Value) {
+    assert_eq!(binding["version"], 1, "{binding}");
+    assert_eq!(binding["format"], "erofs", "{binding}");
+    assert_eq!(binding["identity"], UUID, "{binding}");
+    assert_seal(&binding["image"], &root.below("distro.erofs"));
+    assert_eq!(binding["manifest"], Value::Null, "{binding}");
+    assert_eq!(
+        binding["policy"],
+        json!({"revision": 1, "result": "accepted"}),
+        "{binding}"
+    );
+}
+
 /// Asserts that `config`, a configuration that provision recorded, holds the bindings of the
-/// distro layer and the scratch image of the root as they are, as explicit verification of the
-/// layer and the binding of the image make them, and returns it without them.
+/// distro layer and the scratch image of the root as they are, and returns it without them.
+///
+/// The test reads what it can tell of the images from outside: their formats, identities, kinds
+/// and lengths, the distro policy's verdict and the manifest's absence. Each start checks the
+/// rest of the seals, the files' identities and times, against the images, and the unit tests of
+/// `nvx-rs sandbox` check that provision records the very bindings that explicit verification of
+/// the layer and the binding of the image make.
 pub(crate) fn assert_bindings(root: &Root, mut config: Value) -> Value {
     let members = config.as_object_mut().unwrap();
     let distro = members.remove("distro_binding").expect("a distro binding");
     let scratch = members
         .remove("scratch_binding")
         .expect("a scratch binding");
-    let layer = SandboxLayer::new(
-        LayerRole::Distro,
-        root.below("distro.erofs").to_str().unwrap(),
-        UUID,
-    );
+    assert_distro_binding(root, &distro);
+    let mut fields: Vec<&String> = scratch.as_object().unwrap().keys().collect();
+    fields.sort();
     assert_eq!(
-        distro,
-        serde_json::to_value(DistroBinding::verify(&layer).unwrap()).unwrap()
+        fields,
+        ["device", "fileId", "kind", "length", "scheme", "version"],
+        "{scratch}"
     );
-    assert_eq!(
-        scratch,
-        serde_json::to_value(ScratchBinding::bind(&root.below("scratch.ext4")).unwrap()).unwrap()
-    );
+    assert_seal(&scratch, &root.below("scratch.ext4"));
     config
 }
 
@@ -645,15 +670,7 @@ fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
         .unwrap()
         .remove("distro_binding")
         .expect("a distro binding");
-    let layer = SandboxLayer::new(
-        LayerRole::Distro,
-        root.below("distro.erofs").to_str().unwrap(),
-        UUID,
-    );
-    assert_eq!(
-        distro,
-        serde_json::to_value(DistroBinding::verify(&layer).unwrap()).unwrap()
-    );
+    assert_distro_binding(&root, &distro);
     let mut expected = minimal_config();
     for (name, value) in [
         ("upper", json!({"kind": "ram", "max_memory_percent": 50})),

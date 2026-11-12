@@ -93,6 +93,57 @@ fn image_options_are_only_valid_for_run_and_provision() {
     assert!(parse(&["--layer-format".to_owned(), "ext4".to_owned()]).is_err());
 }
 
+/// Provision records the bindings that explicit verification of the distro layer and the binding
+/// of the scratch image make, which each start checks, and records no binding of a scratch image
+/// for an upper in RAM.
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn provision_records_the_bindings_that_verification_and_the_scratch_binding_make() {
+    use crate::host::sandbox::layer::LayerRole;
+    use crate::host::sandbox::scratch::ScratchBinding;
+
+    const UUID: &str = "11111111-1111-1111-1111-111111111111";
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let text = |path: &Path| path.to_str().unwrap().to_owned();
+    let image = root.join("distro.erofs");
+    std::fs::write(&image, b"distro\n").unwrap();
+    let scratch = root.join("scratch.ext4");
+    std::fs::write(&scratch, b"scratch\n").unwrap();
+    let layer = SandboxLayer::new(LayerRole::Distro, &text(&image), UUID);
+    for (name, upper) in [
+        ("scratch", ["--scratch".to_owned(), text(&scratch)]),
+        ("ram", ["--upper".to_owned(), "ram".to_owned()]),
+    ] {
+        let state = root.join(name);
+        let mut arguments = vec![
+            "provision".to_owned(),
+            "--state-dir".to_owned(),
+            text(&state),
+            "--layer".to_owned(),
+            format!("distro,{},{UUID}", text(&image)),
+        ];
+        arguments.extend(upper);
+        let (options, unknown) = parse(&arguments).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        run(Some(&text(root)), options).unwrap();
+        let config: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(state.join(lifecycle::CONFIG_NAME)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            config["distro_binding"],
+            serde_json::to_value(DistroBinding::verify(&layer).unwrap()).unwrap(),
+            "{name}"
+        );
+        let scratch_binding = match name {
+            "scratch" => serde_json::to_value(ScratchBinding::bind(&scratch).unwrap()).unwrap(),
+            _ => serde_json::Value::Null,
+        };
+        assert_eq!(config["scratch_binding"], scratch_binding, "{name}");
+    }
+}
+
 proptest! {
     #[test]
     fn policy_option_sequences_record_the_preceding_mount(

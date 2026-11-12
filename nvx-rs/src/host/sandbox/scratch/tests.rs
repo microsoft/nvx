@@ -585,3 +585,41 @@ fn checks_pass_after_writes_that_keep_the_length() {
     drop(file);
     drop(staged.check(&binding, Instant::now()).unwrap());
 }
+
+#[test]
+fn a_scratch_image_is_claimed_by_one_launch_and_checked_again_after_a_release() {
+    // Callers stage images in a directory that only their own account can write.
+    let directory = tempfile::tempdir().unwrap();
+    let images = directory.path().join("images");
+    crate::host::vm::create_private_dir(&images).unwrap();
+    let path = images.join("scratch.ext4");
+    File::create(&path).unwrap().set_len(4096).unwrap();
+    let binding = ScratchBinding::bind(&path).unwrap();
+    let held = binding
+        .check(&path, Instant::now() + CLAIM_RELEASE_WAIT)
+        .unwrap();
+    let error = binding
+        .check(&path, Instant::now() + Duration::from_millis(50))
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::TimedOut);
+    assert_eq!(error.code(), ErrorCode::ScratchClaimed);
+    drop(held);
+    drop(
+        binding
+            .check(&path, Instant::now() + CLAIM_RELEASE_WAIT)
+            .unwrap(),
+    );
+    OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(8192)
+        .unwrap();
+    assert_eq!(
+        binding
+            .check(&path, Instant::now() + CLAIM_RELEASE_WAIT)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unavailable,
+    );
+}
