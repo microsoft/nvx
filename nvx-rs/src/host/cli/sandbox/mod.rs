@@ -28,7 +28,7 @@ use super::session::ExecRequest;
 use super::{Exit, Result, io_error, output};
 use crate::ErrorCode;
 use crate::host::artifacts::{Guest, KERNEL_NAME, require_artifact};
-use crate::host::filesystem::{ExportPlan, ReservedTargets};
+use crate::host::filesystem::{ExportPlan, PlannedExport, ReservedTargets};
 use crate::host::paths;
 use crate::host::runtime::RuntimeIdentity;
 use crate::host::sandbox::DEFAULT_ENTRYPOINT;
@@ -306,7 +306,7 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
         validate_mounts(&mounts)?;
         check_images(&layer, scratch.as_deref(), None)?;
         // The shares are planned once, from their resolved host paths, and `provision` records
-        // the plan, whose identities each `start` checks again.
+        // the plan with its pins, which each `start` checks again.
         let export = plan_mounts(&mounts)?;
         if let Some(export) = &export {
             export.check(ReservedTargets::CONTAINER_ROOT)?;
@@ -352,7 +352,7 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
                 Some(("state directory", Path::new(state_dir))),
                 layer.path(),
                 scratch.as_deref(),
-                export.as_ref(),
+                export.as_ref().map(|export| &export.description),
                 located.as_ref(),
             )?;
             lifecycle::provision(
@@ -426,11 +426,11 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
 }
 
 /// Returns the options of `options` that `provision` records beside the images of its launch, with
-/// `export`, the export plan of its shares, and `network`, the record of its network options,
-/// which a run records and reads back too.
+/// `export`, the export plan of its shares with its pins, and `network`, the record of its network
+/// options, which a run records and reads back too.
 fn recorded<'a>(
     options: &'a Options,
-    export: Option<&'a ExportPlan>,
+    export: Option<&'a PlannedExport>,
     network: Option<&'a NetworkRecord>,
 ) -> ProvisionConfig<'a> {
     ProvisionConfig {

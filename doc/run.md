@@ -1300,13 +1300,15 @@ inside a writable part of a share. On Windows, it refuses a path that only a
 verbatim `\\?\` path names, such as that of a directory whose name ends in a
 period or a space, which the path without the prefix would not name. The
 shares' children follow their resolved host paths. A managed sandbox stores
-the plan in its typed configuration, in format 10. Each `start` checks it again,
-as `run` does once it has verified the distro layer: it refuses a host path
-that no longer holds a directory or regular file as recorded, a recorded path
-whose file identity changed, and shares whose host paths came to overlap, such
-as through a hard link or a bind mount. NVX no longer reads earlier
-configuration formats, including those that recorded the shares as requested;
-deprovision such a sandbox and provision it again.
+the plan, with those identities beside it, in its typed configuration, in
+format 10. Each `start` checks it again, as `run` does once it has verified the
+distro layer: it refuses a host path that no longer holds a directory or
+regular file as recorded, a recorded path whose file identity changed, and
+shares whose host paths came to overlap, such as through a hard link or a bind
+mount. NVX no longer reads earlier configuration formats, including those that
+recorded the shares as requested, nor a configuration that earlier builds wrote
+without those identities beside the plan; deprovision such a sandbox and
+provision it again.
 
 A share must not reach the sandbox's own files, which the workload could
 otherwise read or change: `provision` refuses a share whose resolved host path

@@ -1,6 +1,6 @@
 //! The CLI's typed `config.json`, in format 10 only: one EROFS or GPT image by path,
 //! a scratch upper by path or a RAM upper with its explicit cap, the image bindings,
-//! and the workload's view, network and export.
+//! and the workload's view, network and export, with the export's pins.
 //!
 //! Provision checks the same [`VmConfig`] that start reconstructs. Older records, those of format
 //! 9 among them, are refused, not migrated, with the advice to deprovision the sandbox and
@@ -10,6 +10,10 @@
 //! Provision checks the images, the workload and the export plan of its options with
 //! [`check_images`] and [`check_workload`], and each start checks them again in the record, with
 //! [`Config::check`].
+//!
+//! The export is the [`ExportPlan`] of the shares, its paths only, which each start passes to the
+//! VM's configuration once it has checked the [`Pins`] that the record holds beside it under
+//! `export_pins`: the identities of the objects in it that a workload could move.
 //!
 //! The network is the [`NetworkRecord`] of the sandbox's network options, from which each start
 //! builds the network's policy again, as provision built it.
@@ -40,7 +44,7 @@ use crate::host::config::{
     Boot, ConsoleAttachment, LayeredRoot, NetworkConfig, RootConfig, UpperConfig, VmConfig,
     reject_container_path, reject_disk_path,
 };
-use crate::host::filesystem::{ExportPlan, ReservedTargets};
+use crate::host::filesystem::{ExportPlan, Pins, PlannedExport, ReservedTargets};
 use crate::host::paths;
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding, DistroFormat};
 use crate::host::sandbox::layer::{LayerRole, SandboxLayer};
@@ -156,14 +160,14 @@ pub(crate) fn check_workload(
 /// regular file whose path, and the path to which it resolves, has no comma, semicolon, or
 /// unbalanced bracket, and does not end in an extension with which OpenVMM would not attach it as
 /// a raw image. It also refuses `export`, if any, once its directories and files overlap, by path
-/// or through a hard link or a bind mount, or once [`ExportPlan::verify`] refuses it.
+/// or through a hard link or a bind mount, or once [`PlannedExport::verify`] refuses it.
 ///
 /// A missing image fails with [`ErrorCode::Unavailable`], as `distro EROFS layer not found:
 /// PATH`, `distro GPT image not found: PATH`, or `ext4 scratch image not found: PATH`.
 pub(crate) fn check_images(
     distro: &SandboxLayer,
     scratch: Option<&Path>,
-    export: Option<&ExportPlan>,
+    export: Option<&PlannedExport>,
 ) -> Result {
     let image = match distro.format() {
         DistroFormat::Erofs => "distro EROFS layer",
@@ -191,7 +195,7 @@ pub(crate) fn check_images(
         }
     }
     if let Some(export) = export {
-        check_distinct_export_roots(export, &HostQueries::native())?;
+        check_distinct_export_roots(&export.description, &HostQueries::native())?;
         export.verify()?;
     }
     Ok(())
@@ -416,7 +420,8 @@ pub(crate) fn serialize_launch(
         cmdline: config.cmdline.to_owned(),
         distro_binding: distro.binding.clone(),
         scratch_binding: scratch.map(|scratch| scratch.binding.clone()),
-        export: config.export.cloned(),
+        export: config.export.map(|export| export.description.clone()),
+        export_pins: config.export.map(|export| export.pins.clone()),
         source_snapshot: source.map(|source| source.snapshot.clone()),
         source_store: source
             .map(|source| path_string(&source.store))
@@ -469,6 +474,9 @@ pub(crate) struct Config {
     cmdline: String,
     #[serde(deserialize_with = "Option::deserialize")]
     export: Option<ExportPlan>,
+    /// The pins of the export, which a record holds exactly when it holds an export.
+    #[serde(deserialize_with = "Option::deserialize")]
+    export_pins: Option<Pins>,
     distro_binding: DistroBinding,
     #[serde(deserialize_with = "Option::deserialize")]
     scratch_binding: Option<ScratchBinding>,
@@ -509,7 +517,11 @@ impl Config {
 
     /// Returns the fields of `object`, a configuration that [`read_config`] read, which fails as
     /// `sandbox configuration is malformed` without a field that it requires, with a value of
-    /// another type, or with a network that its record cannot build again.
+    /// another type, with a network that its record cannot build again, or with an export without
+    /// its pins or pins without an export. A configuration without the field of a binding, of the
+    /// network, of the export, or of the export's pins, such as one that `nvx-rs` wrote before it
+    /// recorded the pins beside the export, fails as `sandbox configuration has no ...`, with the
+    /// advice to deprovision the sandbox and provision it again.
     ///
     /// Guest RAM that is a number, but not an integer from 1 to [`MAX_MEMORY_MIB`], the range of
     /// `--memory-mib`, fails as `sandbox configuration records N MiB of guest RAM`, which names
@@ -523,6 +535,7 @@ impl Config {
             ("scratch_binding", "scratch binding"),
             ("network", "network policy"),
             ("export", "export plan"),
+            ("export_pins", "export pins"),
         ] {
             if !object.contains_key(name) {
                 return Err(Exit::error(
@@ -555,6 +568,9 @@ impl Config {
         if let Some(network) = &config.network {
             network.config()?;
         }
+        if config.export.is_some() != config.export_pins.is_some() {
+            return Err(malformed());
+        }
         Ok(config)
     }
 
@@ -571,8 +587,9 @@ impl Config {
     /// Checks the recorded image, upper, workload and export at each start, as the plan of the
     /// sandbox profile checked them: a RAM upper's cap from 1 to 90 percent, or the configuration
     /// is malformed; the image's identity, a UUID in its canonical text; the workload, as
-    /// [`check_workload`] checks it with the default entrypoint; the export plan, for the
-    /// container root; and the images and the export plan, as [`check_images`] checks them.
+    /// [`check_workload`] checks it with the default entrypoint; the export plan and its pins, for
+    /// the container root; and the images and the export plan with its pins, as [`check_images`]
+    /// checks them, before [`vm_config`](Self::vm_config) passes the plan to the VM.
     pub(crate) fn check(&self) -> Result {
         if let Upper::Ram { max_memory_percent } = &self.upper
             && !RAM_UPPER_CAPS.contains(max_memory_percent)
@@ -589,10 +606,11 @@ impl Config {
             return Err(Exit::error(ErrorCode::Unsupported, message));
         }
         check_workload(DEFAULT_ENTRYPOINT, &[], &self.hostname, identity)?;
-        if let Some(export) = &self.export {
+        let export = self.planned_export();
+        if let Some(export) = &export {
             export.check(ReservedTargets::CONTAINER_ROOT)?;
         }
-        check_images(&distro, self.scratch().as_deref(), self.export.as_ref())
+        check_images(&distro, self.scratch().as_deref(), export.as_ref())
     }
 
     /// Returns the recorded image, as the distro layer that `start` checks.
@@ -617,6 +635,14 @@ impl Config {
     /// Returns the export plan of the shares, if any.
     pub(crate) fn export(&self) -> Option<&ExportPlan> {
         self.export.as_ref()
+    }
+
+    /// Returns the export plan of the shares with its pins, if any.
+    fn planned_export(&self) -> Option<PlannedExport> {
+        Some(PlannedExport {
+            description: self.export.clone()?,
+            pins: self.export_pins.clone()?,
+        })
     }
 
     /// The binding that start checks against the recorded image.
