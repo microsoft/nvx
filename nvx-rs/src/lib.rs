@@ -5,10 +5,11 @@
 //! starts a managed agent, which runs workloads that the host sends it over an authenticated
 //! control console. This crate holds everything it takes to drive one:
 //!
-//! - [`protocol`]: the codec of the control console, the `NVXS` session that OpenVMM brokers and
-//!   the `NVXC` frames of the guest agent, the guest targets that a sandbox's live shares may not
-//!   take, and the exit statuses with which a clone's guest fails fast. It has no dependencies,
-//!   so the host, the guest, and test doubles share it.
+//! - [`protocol`]: the codec of the control console and the `NVXS` session that OpenVMM brokers,
+//!   which carries any application protocol, the guest targets that a sandbox's live shares may
+//!   not take, and the exit statuses with which a clone's guest fails fast. NVX's own control
+//!   protocol, `NVXC`, is private to the crate. It has no dependencies, so the host, the guest,
+//!   and test doubles share it.
 //! - [`activation`]: the activation record of a layered root, the bounded, versioned, non-secret
 //!   record of the settings that its activation applies, which a clone restored from a template
 //!   reads in place of its captured configuration, and what Ready reports about the activation.

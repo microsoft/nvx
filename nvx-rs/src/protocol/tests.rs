@@ -5,14 +5,120 @@
 //! encoders, and the decoders that the guest agent and the fake OpenVMM share with it, must all
 //! match them, so a change to the codec that every side would agree on still fails here.
 
+#[cfg(all(
+    feature = "testing",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 use proptest::prelude::*;
 
 use super::nvxs::{RecordParser, RecordType, encode_record};
 use super::*;
+#[cfg(all(
+    feature = "cli",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 use crate::activation::ActivationRecord;
-use crate::tests::{ACTIVATION_V2, NVXC_V1, Values, of_kind, vector, vectors};
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+use crate::tests::ACTIVATION_V2;
+#[cfg(all(
+    feature = "cli",
+    feature = "testing",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+use crate::tests::Values;
+#[cfg(all(
+    feature = "testing",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+use crate::tests::vectors;
+use crate::tests::{NVXC_V1, of_kind, vector};
+
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+use super::app::{APP_HEADER_LEN, APP_VERSION, AppFrame};
+#[cfg(all(
+    feature = "cli",
+    feature = "testing",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+use super::exec::ExecPayload;
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+use super::exec::MAX_GUEST_CWD_BYTES;
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+use super::exec::{
+    EXEC_CWD_PRESENT, EXEC_ENVIRONMENT_PRESENT, EXEC_EXTENDED, EXEC_INHERIT_DEFAULT_ENV,
+    MAX_ARGUMENTS,
+};
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+use super::exec::{MAX_ARGUMENT_BYTES, MAX_ENVIRONMENT};
+
+/// Largest working directory that hosts send: Linux's `PATH_MAX` without the terminating NUL, one
+/// byte below the agent's bound. Only these tests read it.
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+const MAX_CWD_BYTES: usize = 4095;
+/// Largest workload timeout the guest agent accepts: any value of the exec request's 32-bit
+/// timeout field, which is also the largest `process.timeout` that MXC's schema allows. Only these
+/// tests read it.
+#[cfg(feature = "cli")]
+const MAX_TIMEOUT_MS: u32 = u32::MAX;
+
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+impl GuestFeatures {
+    /// The features that the host once required, which the direct-mode managed agent announces.
+    /// Only tests read them.
+    #[cfg(all(
+        feature = "cli",
+        feature = "guest",
+        target_os = "linux",
+        target_arch = "x86_64"
+    ))]
+    pub(crate) const REQUIRED: Self = Self::DIRECT_AGENT;
+
+    /// Returns whether this set holds every feature of `other`.
+    #[cfg(any(
+        all(feature = "cli", feature = "testing"),
+        all(
+            any(feature = "cli", feature = "testing"),
+            feature = "guest",
+            target_os = "linux",
+            target_arch = "x86_64"
+        )
+    ))]
+    pub(crate) fn contains(self, other: Self) -> bool {
+        (self | other) == self
+    }
+}
 
 /// A workload that runs `argv` without a timeout in `/` with the default environment.
+#[cfg(feature = "cli")]
 fn program<'a>(argv: &[&str]) -> Workload<'a> {
     Workload {
         argv: argv.iter().map(|argument| (*argument).to_owned()).collect(),
@@ -22,6 +128,7 @@ fn program<'a>(argv: &[&str]) -> Workload<'a> {
     }
 }
 
+#[cfg(feature = "cli")]
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
 }
@@ -35,6 +142,11 @@ fn record_type(name: &str) -> RecordType {
 }
 
 /// Returns the frame kind that a vector names.
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 fn frame_kind(name: &str) -> u8 {
     match name {
         "PING" => APP_PING,
@@ -135,6 +247,11 @@ fn records_match_their_vectors() {
 }
 
 /// Each `FRAME` vector decodes to its values, which encode to its bytes.
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 #[test]
 fn frames_match_their_vectors() {
     let names = ["PING", "STDOUT", "EXIT", "ERROR_CWD_FAILED"];
@@ -158,6 +275,12 @@ fn frames_match_their_vectors() {
     }
 }
 
+#[cfg(all(
+    feature = "cli",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 #[test]
 fn capture_requests_round_trip_both_kill_flags() {
     for (payload, kill_executions) in [([0], false), ([1], true)] {
@@ -172,6 +295,7 @@ fn capture_requests_round_trip_both_kill_flags() {
     }
 }
 
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn capture_requests_refuse_unknown_or_mis_sized_flags() {
     for payload in [&[][..], &[2], &[1, 0]] {
@@ -179,6 +303,12 @@ fn capture_requests_refuse_unknown_or_mis_sized_flags() {
     }
 }
 
+#[cfg(all(
+    feature = "cli",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 #[test]
 fn activate_requests_round_trip_records_and_workload_identity() {
     let names = [
@@ -210,6 +340,7 @@ fn activate_requests_round_trip_records_and_workload_identity() {
     }
 }
 
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn activate_requests_refuse_truncated_or_malformed_payloads() {
     let record = vector(ACTIVATION_V2, "RECORD", "GPT_DIRECTORY").bytes;
@@ -233,6 +364,12 @@ fn activate_requests_refuse_truncated_or_malformed_payloads() {
     assert!(app::decode_activate_payload(&trailing).is_err());
 }
 
+#[cfg(all(
+    feature = "cli",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 #[test]
 fn activate_workload_ids_match_guest_credential_bounds() {
     let record = ActivationRecord::decode(&vector(ACTIVATION_V2, "RECORD", "CLONE").bytes).unwrap();
@@ -268,6 +405,13 @@ fn activate_workload_ids_match_guest_credential_bounds() {
 /// the host encodes to its bytes. Without an explicit environment, the host's
 /// `inherit_default_env` is true, and the guest's, which follows the layering flag alone, false
 /// (microsoft/nvx#581).
+#[cfg(all(
+    feature = "cli",
+    feature = "testing",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 #[test]
 fn exec_payloads_match_their_vectors() {
     let names = [
@@ -382,6 +526,7 @@ fn maps_payloads_match_their_vectors() {
 }
 
 /// Each `FEATURES` vector decodes to its bits, which encode to its bytes.
+#[cfg(all(feature = "cli", feature = "testing"))]
 #[test]
 fn features_match_their_vectors() {
     for vector in of_kind(NVXC_V1, "FEATURES", &["ALL"]) {
@@ -394,6 +539,12 @@ fn features_match_their_vectors() {
     }
 }
 
+#[cfg(all(
+    feature = "cli",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 #[test]
 fn the_host_requires_every_feature() {
     assert_eq!(
@@ -408,6 +559,7 @@ fn the_host_requires_every_feature() {
     assert!(!GuestFeatures::REQUIRED.contains(GuestFeatures::EXEC_CGROUP));
 }
 
+#[cfg(all(feature = "cli", feature = "testing"))]
 #[test]
 fn exec_payload_carries_every_32_bit_timeout() {
     for timeout_ms in [0, 3_600_001, 86_400_000, MAX_TIMEOUT_MS] {
@@ -425,6 +577,7 @@ fn exec_payload_carries_every_32_bit_timeout() {
     }
 }
 
+#[cfg(all(feature = "cli", feature = "testing"))]
 #[test]
 fn exec_payload_carries_the_working_directory_natively() {
     for cwd in ["", "tmp", &format!("/{}", "a".repeat(4096)), "/t\0mp"] {
@@ -443,6 +596,7 @@ fn exec_payload_carries_the_working_directory_natively() {
     assert_eq!(decode_exec_payload(&payload).unwrap().cwd, Some(longest));
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn exec_payload_distinguishes_explicit_environments() {
     let environment = strings(&["FOO=a b", "EMPTY="]);
@@ -462,6 +616,7 @@ fn exec_payload_distinguishes_explicit_environments() {
     assert_eq!(&default[6..8], &[0, 0]);
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn exec_payload_enforces_agent_limits() {
     let encode = |argv: Vec<String>, timeout_ms| {
@@ -514,6 +669,7 @@ fn exec_payload_enforces_agent_limits() {
 }
 
 /// Encodes an extended exec request with an explicit environment, without the host's checks.
+#[cfg(all(feature = "cli", feature = "testing"))]
 fn extended(argv: &[&str], cwd: Option<&str>, environment: &[&str]) -> Vec<u8> {
     let length = |text: &str| u32::try_from(text.len()).unwrap().to_le_bytes();
     let mut flags = EXEC_ENVIRONMENT_PRESENT;
@@ -538,6 +694,7 @@ fn extended(argv: &[&str], cwd: Option<&str>, environment: &[&str]) -> Vec<u8> {
     payload
 }
 
+#[cfg(all(feature = "cli", feature = "testing"))]
 #[test]
 fn exec_requests_are_refused_where_the_guest_agent_refuses_them() {
     let exec = decode_exec_payload(&extended(
@@ -599,6 +756,11 @@ fn exec_requests_are_refused_where_the_guest_agent_refuses_them() {
     assert_eq!(most.argv.len(), MAX_ARGUMENTS);
 }
 
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 #[test]
 fn decoders_reject_malformed_input() {
     let mut header = [0u8; OUTER_HEADER_LEN];
@@ -615,6 +777,7 @@ fn decoders_reject_malformed_input() {
     assert!(decode_app(&frame[..10]).is_err());
 }
 
+#[cfg(all(feature = "cli", feature = "testing"))]
 #[test]
 fn exit_categories_match_the_guest_agent() {
     for category in [
@@ -654,6 +817,13 @@ fn exit_categories_match_the_guest_agent() {
     assert!(ExitCategory::parse(b"canceled").is_err());
 }
 
+#[cfg(all(
+    feature = "cli",
+    feature = "testing",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 #[test]
 fn guest_features_report_what_a_guest_lacks() {
     let required = GuestFeatures::REQUIRED;
@@ -688,6 +858,7 @@ fn guest_features_report_what_a_guest_lacks() {
     );
 }
 
+#[cfg(all(feature = "cli", feature = "testing"))]
 #[test]
 fn guest_features_use_distinct_bits() {
     let mut seen = 1u32 << 1;
@@ -706,6 +877,11 @@ fn map(source: &str, target: &str, read_only: bool) -> HostMap {
     }
 }
 
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 #[test]
 fn maps_payloads_are_split_to_fit_the_limit() {
     let maps: Vec<HostMap> = (0..10)
@@ -777,6 +953,11 @@ fn maps_payloads_are_split_to_fit_the_limit() {
     );
 }
 
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 #[test]
 fn maps_payloads_enforce_agent_limits() {
     let limit = OUTER_MAX_PAYLOAD - APP_HEADER_LEN;
@@ -864,6 +1045,11 @@ fn maps_decoders_refuse_the_invalid_vectors() {
 // Hosts and guests share the wire constants, so changing one passes every round trip between
 // them yet breaks compatibility with released peers. These tests pin each value literally.
 
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 #[test]
 fn record_definitions_keep_their_wire_values() {
     assert_eq!(OUTER_HEADER_LEN, 44);
@@ -889,6 +1075,7 @@ fn record_definitions_keep_their_wire_values() {
     assert_eq!(APP_ERROR, 0xff);
 }
 
+#[cfg(all(feature = "cli", feature = "testing"))]
 #[test]
 fn feature_definitions_keep_their_wire_values() {
     assert_eq!(APP_FEATURES, 5);
@@ -902,6 +1089,10 @@ fn feature_definitions_keep_their_wire_values() {
     assert_eq!(GuestFeatures::HOST_MAPPING_TABLE.bits(), 0x40);
 }
 
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 #[test]
 fn host_mapping_table_keeps_its_wire_values() {
     assert_eq!(MAX_HOST_MAPPINGS, 4096);
@@ -914,6 +1105,10 @@ fn host_mapping_table_keeps_its_wire_values() {
     assert_eq!(MAPPING_FAILED, "mapping-failed");
 }
 
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 #[test]
 fn exec_extension_keeps_its_wire_values() {
     assert_eq!(EXEC_EXTENDED, 1);
@@ -931,6 +1126,11 @@ fn exec_extension_keeps_its_wire_values() {
     assert_eq!(UNSUPPORTED_OPERATION, b"unsupported-operation");
 }
 
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 #[test]
 fn exec_limits_support_linux_paths() {
     // A working directory may be as long as one argument, and Linux cannot
@@ -1038,6 +1238,12 @@ fn host_mapping_count_splits_the_command_line_as_the_guest_init_does() {
     }
 }
 
+#[cfg(all(
+    feature = "testing",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 #[test]
 fn both_agent_modes_announce_the_host_mapping_table() {
     assert_eq!(GuestFeatures::DIRECT_AGENT.bits(), 0x75);
@@ -1055,6 +1261,7 @@ fn both_agent_modes_announce_the_host_mapping_table() {
     );
 }
 
+#[cfg(all(feature = "cli", feature = "testing"))]
 #[test]
 fn layered_sandboxes_need_per_execution_environments_and_mapping_tables() {
     // The CLI's exec sends working directories and environments, and its start sends the
@@ -1074,6 +1281,12 @@ fn layered_sandboxes_need_per_execution_environments_and_mapping_tables() {
     );
 }
 
+#[cfg(all(
+    feature = "cli",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 #[test]
 fn host_exec_encoding_round_trips_through_the_guest_decoder() {
     let environment = strings(&["FOO=a b", "EMPTY="]);
@@ -1098,6 +1311,12 @@ fn host_exec_encoding_round_trips_through_the_guest_decoder() {
     assert!(decoded.inherit_default_env);
 }
 
+#[cfg(all(
+    feature = "testing",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 #[test]
 fn guest_exec_decoder_accepts_linux_bytes_and_the_c_cwd_boundary() {
     let mut payload = Vec::new();
@@ -1123,6 +1342,7 @@ fn guest_exec_decoder_accepts_linux_bytes_and_the_c_cwd_boundary() {
 
 /// Encodes an extended exec request field by field, so that its flags, environment count, and
 /// working-directory length may contradict what follows them.
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 fn raw_extended(
     flags: u16,
     environment_count: u16,
@@ -1149,6 +1369,7 @@ fn raw_extended(
     payload
 }
 
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn guest_exec_decoder_accepts_what_the_c_agent_accepted() {
     fn with_environment(flags: u16, entries: &[&[u8]]) -> GuestExecPayload {
@@ -1186,6 +1407,7 @@ fn guest_exec_decoder_accepts_what_the_c_agent_accepted() {
     }
 }
 
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn guest_exec_decoder_refuses_what_the_c_agent_refused() {
     // The agent decodes with its own byte-oriented decoder, so each refusal that the host
@@ -1271,6 +1493,12 @@ fn guest_exec_decoder_refuses_what_the_c_agent_refused() {
 /// same message, except where they differ by design: the host's requires each string to be UTF-8
 /// as soon as it reads it, and they word the refusals of an entry's name differently, the host's
 /// naming the variable that repeats.
+#[cfg(all(
+    feature = "testing",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 #[test]
 fn exec_decoders_refuse_strings_with_the_same_messages() {
     const PROGRAM: &[u8] = b"/bin/true";
@@ -1426,6 +1654,11 @@ fn exec_decoders_refuse_strings_with_the_same_messages() {
     }
 }
 
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 #[test]
 fn host_maps_encoding_round_trips_through_the_guest_decoder() {
     let maps = [
@@ -1458,6 +1691,11 @@ fn host_maps_encoding_round_trips_through_the_guest_decoder() {
     );
 }
 
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 #[test]
 fn guest_maps_decoder_accepts_non_utf8_linux_paths() {
     let mut payload = encode_maps_payloads(
@@ -1527,6 +1765,12 @@ fn maps_decoders_refuse_entries_with_the_same_messages() {
 
 /// Returns bytes near the vectors of `kinds`: the bytes of one of them, with up to four bytes
 /// overwritten, perhaps truncated, and with up to eight bytes appended.
+#[cfg(all(
+    feature = "testing",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 fn near_vectors(kinds: &'static [&'static str]) -> impl Strategy<Value = Vec<u8>> {
     let encodings: Vec<_> = vectors(NVXC_V1)
         .into_iter()
@@ -1554,6 +1798,12 @@ fn near_vectors(kinds: &'static [&'static str]) -> impl Strategy<Value = Vec<u8>
         })
 }
 
+#[cfg(all(
+    feature = "testing",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 proptest! {
     /// The host's and the guest's `EXEC` and `MAPS` decoders return, never panic, on arbitrary
     /// bytes and on bytes near their vectors, which reach past the checks of the headers.

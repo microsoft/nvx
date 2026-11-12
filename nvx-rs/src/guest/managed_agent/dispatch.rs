@@ -315,5 +315,5 @@ fn handle_data(
     Ok(None)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cli"))]
 mod tests;

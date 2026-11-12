@@ -20,6 +20,12 @@ fn shells_raise_shlvl_like_busybox() {
     assert_eq!(fresh[0], ("SHLVL".to_owned(), "1".to_owned()));
 }
 
+#[cfg(all(
+    feature = "cli",
+    feature = "guest",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 #[test]
 fn the_current_guest_advertises_every_required_feature() {
     assert_eq!(GUEST_FEATURES, GuestFeatures::REQUIRED);

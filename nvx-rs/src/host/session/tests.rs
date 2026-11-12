@@ -354,6 +354,10 @@ fn exec_streams_events_in_order() {
     );
 }
 
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 #[test]
 fn exec_sends_the_working_directory_and_reports_its_refusal() {
     let (mut session, wire) = ready();
@@ -662,6 +666,7 @@ fn activate_refuses_a_reply_other_than_a_valid_ready() {
     }
 }
 
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn features_report_what_the_guest_provides() {
     let mut session = attached(|kind, id| {

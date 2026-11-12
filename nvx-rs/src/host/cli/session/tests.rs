@@ -9,8 +9,10 @@ use std::time::Instant;
 
 use super::*;
 use crate::host::transport::HostConnection;
-use crate::protocol::{
+use crate::protocol::exec::{
     EXEC_CWD_PRESENT, EXEC_ENVIRONMENT_PRESENT, EXEC_EXTENDED, EXEC_INHERIT_DEFAULT_ENV,
+};
+use crate::protocol::{
     OUTER_DATA, OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_READY, OUTER_RESET, decode_app,
     decode_outer_header, encode_app, encode_outer,
 };
@@ -1062,6 +1064,10 @@ fn output_beyond_the_guest_limit_breaks_the_protocol() {
     worker.join().unwrap();
 }
 
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 #[test]
 fn features_of_a_guest_that_predates_them_are_none() {
     let (mut session, worker) = session_with(|guest| {
@@ -1087,6 +1093,10 @@ fn features_of_a_guest_that_predates_them_are_none() {
     worker.join().unwrap();
 }
 
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 #[test]
 fn protocol_violations_keep_the_messages_of_python() {
     let (mut session, worker) = session_with(|guest| {

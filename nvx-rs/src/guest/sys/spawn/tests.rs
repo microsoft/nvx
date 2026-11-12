@@ -5,15 +5,19 @@ use super::*;
 use crate::guest::sys::{self, ChildStatus};
 
 /// Capability to bypass file read, write, and execute permission checks.
+#[cfg(feature = "cli")]
 pub(crate) const CAP_DAC_OVERRIDE: u32 = 1;
 
 /// Capability to bypass file read permission and directory read and search permission checks.
+#[cfg(feature = "cli")]
 pub(crate) const CAP_DAC_READ_SEARCH: u32 = 2;
 
 /// Capability to change group IDs and supplementary groups.
+#[cfg(feature = "cli")]
 pub(crate) const CAP_SETGID: u32 = 6;
 
 /// Capability to change user IDs.
+#[cfg(feature = "cli")]
 pub(crate) const CAP_SETUID: u32 = 7;
 
 /// Capability to change the root directory.

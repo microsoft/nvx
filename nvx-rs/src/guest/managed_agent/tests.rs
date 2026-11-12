@@ -8,6 +8,7 @@ pub(crate) use crate::guest::sys::tests::isolate_process_test;
 mod loopback;
 
 /// Serializes tests that temporarily alter process-global state.
+#[cfg(feature = "cli")]
 pub(crate) static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl AgentConfig {
