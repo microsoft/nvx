@@ -157,5 +157,5 @@ mod tests;
 
 pub use error::{Error, ErrorCode, ErrorKind, Result};
 #[cfg(feature = "host")]
-pub use host::filesystem::{guest_path, resolve_guest_path};
+pub use host::filesystem::guest_path;
 pub use hypervisor::Hypervisor;

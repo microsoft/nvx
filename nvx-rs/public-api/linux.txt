@@ -962,7 +962,6 @@ struct nvx::host::filesystem::ExportRequest
 field nvx::host::filesystem::ExportRequest::allowed
 field nvx::host::filesystem::ExportRequest::denied
 field nvx::host::filesystem::ExportRequest::mappings
-method nvx::host::filesystem::ExportRequest::new
 field nvx::host::filesystem::ExportRequest::owner
 field nvx::host::filesystem::ExportRequest::reserved
 field nvx::host::filesystem::ExportRequest::write
@@ -972,7 +971,6 @@ field nvx::host::filesystem::FileIdentity::index
 const nvx::host::filesystem::GUEST_EXPORT
 const nvx::host::filesystem::MAX_CHILDREN
 struct nvx::host::filesystem::Mapping
-method nvx::host::filesystem::Mapping::convention
 field nvx::host::filesystem::Mapping::name
 field nvx::host::filesystem::Mapping::path
 field nvx::host::filesystem::Mapping::read_only
@@ -981,7 +979,6 @@ enum nvx::host::filesystem::Owner
 variant nvx::host::filesystem::Owner::Caller
 variant nvx::host::filesystem::Owner::Vmm
 struct nvx::host::filesystem::PathList
-const nvx::host::filesystem::PathList::EMPTY
 field nvx::host::filesystem::PathList::name
 field nvx::host::filesystem::PathList::paths
 const nvx::host::filesystem::RESERVED_TARGETS
@@ -992,12 +989,10 @@ field nvx::host::filesystem::ReservedTargets::exact
 method nvx::host::filesystem::ReservedTargets::reservation
 field nvx::host::filesystem::ReservedTargets::trees
 enum nvx::host::filesystem::Target
-variant nvx::host::filesystem::Target::Convention
 variant nvx::host::filesystem::Target::Guest
 field nvx::host::filesystem::Target::Guest::0
 fn nvx::host::filesystem::guest_path
 fn nvx::host::filesystem::plan
-fn nvx::host::filesystem::resolve_guest_path
 mod nvx::host::network
 enum nvx::host::network::Access
 variant nvx::host::network::Access::Allow
@@ -1793,7 +1788,6 @@ const nvx::protocol::view::HOSTNAME_TOKEN
 const nvx::protocol::view::MACHINE_ID_TOKEN
 fn nvx::protocol::view::parse
 fn nvx::protocol::view::tokens
-fn nvx::resolve_guest_path
 mod nvx::testing (hidden)
 mod nvx::testing::fake_openvmm (hidden)
 fn nvx::testing::fake_openvmm::main (hidden)

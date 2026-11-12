@@ -12,29 +12,67 @@ struct FilesystemPolicy {
     denied_paths: Vec<PathBuf>,
 }
 
+/// Plans `policy` into the blockless root, each path at the guest path at which MXC's convention
+/// for Linux guests places it, [`convention`].
 fn plan(policy: &FilesystemPolicy) -> Result<Option<ExportPlan>> {
-    let mappings: Vec<Mapping<'_>> = Mapping::convention(
-        PathList {
-            name: "filesystem.readonlyPaths",
-            paths: &policy.readonly_paths,
-        },
-        true,
-    )
-    .chain(Mapping::convention(
-        PathList {
-            name: "filesystem.readwritePaths",
-            paths: &policy.readwrite_paths,
-        },
-        false,
-    ))
+    let entries: Vec<(&str, &Path, String, bool)> = [
+        ("filesystem.readonlyPaths", &policy.readonly_paths, true),
+        ("filesystem.readwritePaths", &policy.readwrite_paths, false),
+    ]
+    .into_iter()
+    .flat_map(|(name, paths, read_only)| {
+        paths
+            .iter()
+            .map(move |path| (name, path.as_path(), convention(path), read_only))
+    })
     .collect();
+    let mappings: Vec<Mapping<'_>> = entries
+        .iter()
+        .map(|(name, path, target, read_only)| Mapping {
+            name,
+            path,
+            target: Target::Guest(target),
+            read_only: *read_only,
+        })
+        .collect();
     super::plan(&ExportRequest {
         denied: PathList {
             name: "filesystem.deniedPaths",
             paths: &policy.denied_paths,
         },
-        ..ExportRequest::new(&mappings, ReservedTargets::BLOCKLESS_ROOT)
+        ..plain_request(&mappings, ReservedTargets::BLOCKLESS_ROOT)
     })
+}
+
+/// Returns the guest path at which MXC's convention for Linux guests places `path`: the one that
+/// [`guest_path`] derives from the resolved host path, so that every spelling of one object
+/// (links, letter case, or short names) takes one target. A path that does not resolve takes an
+/// empty target, which the planner never reads, since it refuses the path first.
+fn convention(path: &Path) -> String {
+    canonicalize(path)
+        .ok()
+        .and_then(|resolved| guest_path(&resolved))
+        .unwrap_or_default()
+}
+
+/// Returns the request that maps `mappings` into a root that reserves `reserved`, as the VMM,
+/// without denied, allowed, or write paths.
+fn plain_request<'a>(
+    mappings: &'a [Mapping<'a>],
+    reserved: ReservedTargets<'a>,
+) -> ExportRequest<'a> {
+    let none = PathList {
+        name: "",
+        paths: &[],
+    };
+    ExportRequest {
+        mappings,
+        denied: none,
+        allowed: none,
+        write: none,
+        owner: Owner::Vmm,
+        reserved,
+    }
 }
 
 fn root() -> tempfile::TempDir {
@@ -687,35 +725,32 @@ fn whole_volumes_are_refused() {
 fn spellings_of_one_object_share_its_guest_path() {
     let directory = root();
     let base = directory.path();
-    let upper = if cfg!(windows) {
-        base.join("WORK").join("SRC")
+    let src = base.join("work").join("src");
+    // On Windows, its names in other letter case, below the temporary directory and throughout
+    // its path, that of the temporary directory included, whose guest path as spelled is not the
+    // resolved path's; elsewhere, its path with a `.` component.
+    let spellings = if cfg!(windows) {
+        let whole = PathBuf::from(src.to_str().unwrap().to_uppercase());
+        assert_ne!(guest_path(&whole), guest_path(&canonical(&src)));
+        vec![base.join("WORK").join("SRC"), whole]
     } else {
-        base.join("work").join(".").join("src")
+        vec![base.join("work").join(".").join("src")]
     };
     let policy = FilesystemPolicy {
-        readonly_paths: vec![upper],
-        readwrite_paths: vec![base.join("work").join("src")],
+        readonly_paths: spellings,
+        readwrite_paths: vec![src.clone()],
         ..FilesystemPolicy::default()
     };
     let mapping = plan(&policy).unwrap().unwrap();
     assert_eq!(mapping.binds.len(), 1);
     assert!(mapping.binds[0].read_only);
+    assert_eq!(mapping.children.len(), 1);
+    assert_eq!(mapping.children[0].root, canonical(&src));
     assert!(!mapping.children[0].writable);
     assert_eq!(
         mapping.binds[0].target,
-        guest_path(&canonical(&base.join("work").join("src"))).unwrap()
+        guest_path(&canonical(&src)).unwrap()
     );
-}
-
-#[cfg(windows)]
-#[test]
-fn resolved_guest_paths_canonicalize_temp_directory_case_aliases() {
-    let directory = root();
-    let path = directory.path().join("work").join("out");
-    let upper = PathBuf::from(path.to_str().unwrap().to_uppercase());
-    let expected = guest_path(&canonical(&path)).unwrap();
-    assert_ne!(guest_path(&upper), Some(expected.clone()));
-    assert_eq!(resolve_guest_path(&upper), Some(expected));
 }
 
 #[cfg(windows)]
@@ -1100,7 +1135,7 @@ fn explicit_targets_place_mappings_at_any_free_guest_path() {
         // One object may appear at several targets.
         at(&work, "/mirror", false),
     ];
-    let request = ExportRequest::new(&mappings, ReservedTargets::CONTAINER_ROOT);
+    let request = plain_request(&mappings, ReservedTargets::CONTAINER_ROOT);
     let mapping = super::plan(&request).unwrap().unwrap();
     let roots: Vec<&Path> = mapping
         .children
@@ -1129,7 +1164,7 @@ fn explicit_targets_place_mappings_at_any_free_guest_path() {
         exact: &[],
     };
     for error in [
-        super::plan(&ExportRequest::new(&mappings, everything)).unwrap_err(),
+        super::plan(&plain_request(&mappings, everything)).unwrap_err(),
         mapping.check(everything).unwrap_err(),
     ] {
         assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
@@ -1149,7 +1184,7 @@ fn explicit_targets_place_mappings_at_any_free_guest_path() {
     convention.check(ReservedTargets::BLOCKLESS_ROOT).unwrap();
 
     let refused = |mappings: &[Mapping<'_>], expected: &str| {
-        let request = ExportRequest::new(mappings, ReservedTargets::CONTAINER_ROOT);
+        let request = plain_request(mappings, ReservedTargets::CONTAINER_ROOT);
         let error = super::plan(&request).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
         assert!(
@@ -1314,7 +1349,7 @@ fn policy_paths_hide_show_and_narrow_writes() {
                     name: "write",
                     paths: write,
                 },
-                ..ExportRequest::new(mappings, ReservedTargets::CONTAINER_ROOT)
+                ..plain_request(mappings, ReservedTargets::CONTAINER_ROOT)
             };
             super::plan(&request)
         };
@@ -1477,7 +1512,7 @@ fn narrowed_writes_pin_only_what_lies_in_writable_paths() {
             name: "write",
             paths: &write,
         },
-        ..ExportRequest::new(&mappings, ReservedTargets::CONTAINER_ROOT)
+        ..plain_request(&mappings, ReservedTargets::CONTAINER_ROOT)
     };
     let mapping = super::plan(&request).unwrap().unwrap();
     let child = &mapping.children[0];
@@ -1537,7 +1572,7 @@ fn the_caller_owner_reaches_openvmm_on_linux_hosts() {
     let mappings = [at(&work, "/workspace", false)];
     let request = ExportRequest {
         owner: Owner::Caller,
-        ..ExportRequest::new(&mappings, ReservedTargets::CONTAINER_ROOT)
+        ..plain_request(&mappings, ReservedTargets::CONTAINER_ROOT)
     };
     if cfg!(windows) {
         let error = super::plan(&request).unwrap_err();
@@ -1571,7 +1606,7 @@ fn the_caller_owner_reaches_openvmm_on_linux_hosts() {
             let mappings = [at(system, "/srv/system", true)];
             let request = ExportRequest {
                 owner: Owner::Caller,
-                ..ExportRequest::new(&mappings, ReservedTargets::CONTAINER_ROOT)
+                ..plain_request(&mappings, ReservedTargets::CONTAINER_ROOT)
             };
             let error = super::plan(&request).unwrap_err();
             assert!(
@@ -1583,12 +1618,9 @@ fn the_caller_owner_reaches_openvmm_on_linux_hosts() {
         }
     }
     // The default owner is left out of the record.
-    let vmm = super::plan(&ExportRequest::new(
-        &mappings,
-        ReservedTargets::CONTAINER_ROOT,
-    ))
-    .unwrap()
-    .unwrap();
+    let vmm = super::plan(&plain_request(&mappings, ReservedTargets::CONTAINER_ROOT))
+        .unwrap()
+        .unwrap();
     assert!(serde_json::to_value(&vmm).unwrap().get("owner").is_none());
 }
 
@@ -1615,7 +1647,7 @@ fn read_write_mappings_to_which_writes_are_narrowed_stay_visible() {
                 name: "write",
                 paths: write,
             },
-            ..ExportRequest::new(mappings, ReservedTargets::CONTAINER_ROOT)
+            ..plain_request(mappings, ReservedTargets::CONTAINER_ROOT)
         })
     };
     // OpenVMM narrows the writes of the tree to the read-write private, which it cannot hide:
@@ -1671,7 +1703,7 @@ fn denied_mapped_directories_inside_denied_ones_show_their_allowed_paths() {
                 name: "allowed",
                 paths: allowed,
             },
-            ..ExportRequest::new(mappings, ReservedTargets::CONTAINER_ROOT)
+            ..plain_request(mappings, ReservedTargets::CONTAINER_ROOT)
         })
     };
     let both = [at(&tree, "/tree", false), at(&private, "/private", false)];
@@ -1767,11 +1799,8 @@ fn mapped_paths_resolve_to_utf8_paths() {
     std::os::unix::fs::symlink(&share, &link).unwrap();
     for path in [&share, &link] {
         let mappings = [at(path, "/workspace", false)];
-        let error = super::plan(&ExportRequest::new(
-            &mappings,
-            ReservedTargets::CONTAINER_ROOT,
-        ))
-        .unwrap_err();
+        let error =
+            super::plan(&plain_request(&mappings, ReservedTargets::CONTAINER_ROOT)).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
         assert!(
             error
