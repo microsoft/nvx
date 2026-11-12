@@ -152,18 +152,21 @@ released first-parent ancestor.
 ## The nvx crate
 
 [`nvx-rs/`](../nvx-rs/README.md) is also published on crates.io as the `nvx`
-crate, a preview whose versions are pre-releases, `0.1.0-alpha.N`, which Cargo
-selects only for a requirement that names a pre-release. The nightly CI run
-publishes a new version from `dev` whenever the crate changed, with the next
-number, as [crates.io releases](ci.md#cratesio-releases) describes, so a
-change reaches crates.io within a day of its merge. The crate holds the files
-that Git tracks in `nvx-rs/`, among them the package's license, `LICENSE`, its
-README, and its lockfile, `Cargo.lock`; its features, profiles, and binaries
-are those that [The nvx package](build.md#the-nvx-package) lists.
+crate, a preview whose versions are pre-releases, which Cargo selects only for
+a requirement that names a pre-release: `0.2.0-alpha.N` since the breaking
+release that the [changelog](../CHANGELOG.md) records, and `0.1.0-alpha.N`
+before it. The nightly CI run publishes a new version from `dev` whenever the
+crate changed, with the next number, as
+[crates.io releases](ci.md#cratesio-releases) describes, so a change reaches
+crates.io within a day of its merge. The crate holds the files that Git tracks
+in `nvx-rs/`, among them the package's license, `LICENSE`, its README, and its
+lockfile, `Cargo.lock`; its features, profiles, and binaries are those that
+[The nvx package](build.md#the-nvx-package) lists.
 
 The version that `nvx-rs/Cargo.toml` declares is the lowest that CI
-publishes. A pull request changes it to start another series, such as
-`0.2.0-alpha.1`. Only `nvx`'s version changes in `nvx-rs/Cargo.lock`.
+publishes. A pull request changes it to start another series, as the breaking
+release started `0.2.0-alpha.1`. Only `nvx`'s version changes in
+`nvx-rs/Cargo.lock`.
 
 When CI cannot publish, as when the newest version on crates.io records no
 commit that `dev` holds, a pull request declares the next version as above,
@@ -206,9 +209,10 @@ cargo install nvx --version VERSION --locked \
   --target x86_64-unknown-linux-musl --bin nvx-ingress
 ```
 
-- `--version VERSION` names a version that crates.io publishes,
-  `0.1.0-alpha.N`. Every version is a pre-release, which Cargo selects only for
-  a requirement that names one, so `cargo install nvx` without it finds none.
+- `--version VERSION` names a version that crates.io publishes, such as
+  `0.2.0-alpha.1`, the breaking release, or a later `0.2.0-alpha.N`. Every
+  version is a pre-release, which Cargo selects only for a requirement that
+  names one, so `cargo install nvx` without it finds none.
 - `--no-default-features --features guest` builds the guest programs without
   the default `host` feature, which no guest program uses.
 - `--profile guest` builds them with the crate's `guest` profile, where
