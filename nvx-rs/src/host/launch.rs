@@ -11,10 +11,8 @@
 //! [`fit_process_command_line`] checks it, and any other caller may check a command line with
 //! them.
 //!
-//! An adapter's [`PreparedLaunch`](super::sandbox::PreparedLaunch) names the inputs of its launch
-//! as a [`LaunchSpec`] does, whatever its devices: [`VmmLaunch`] renders them for both, and
-//! [`PreparedLaunch::adapter_arguments`](super::sandbox::PreparedLaunch::adapter_arguments) holds
-//! an adapter's command line to the limit too.
+//! An adapter's launch names the inputs of its launch as a [`LaunchSpec`] does, whatever its
+//! devices: [`VmmLaunch`] renders them for both.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -259,9 +257,6 @@ impl LaunchSpec {
     /// Returns the inputs of the launch of a VM of the specification whose control console listens
     /// on `endpoint` and whose outcome report goes to `report`: its OpenVMM executable,
     /// hypervisor, memory, kernel, and initramfs, the endpoint, and the report.
-    ///
-    /// An adapter that launches its own guest with the specification's artifacts gives them to
-    /// [`PreparedLaunch::adapter_arguments`](super::sandbox::PreparedLaunch::adapter_arguments).
     pub fn vmm_launch<'a>(&'a self, endpoint: &'a str, report: &'a Path) -> VmmLaunch<'a> {
         VmmLaunch {
             openvmm: &self.openvmm,
@@ -300,8 +295,7 @@ impl LaunchSpec {
 /// path of OpenVMM's outcome report.
 ///
 /// [`arguments`](Self::arguments) renders them for a [`LaunchSpec`]'s launch, after the managed
-/// lifecycle, and for an adapter's, after the devices of its plan, with
-/// [`PreparedLaunch::adapter_arguments`](super::sandbox::PreparedLaunch::adapter_arguments).
+/// lifecycle, and for an adapter's, after the devices of its plan.
 /// Paths are used as given, and OpenVMM runs in the directory that its launch chooses, so make
 /// them absolute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -331,9 +325,8 @@ impl VmmLaunch<'_> {
     /// It holds the rest of a launch whose OpenVMM executable, kernel, initramfs, endpoint, and
     /// outcome report take up to 260 code units each, Windows' `MAX_PATH`: the executable and the
     /// arguments that [`arguments`](Self::arguments) renders besides the kernel command line, the
-    /// longest memory and hypervisor included, and the names by which a
-    /// [`PreparedLaunch`](super::sandbox::PreparedLaunch) gives OpenVMM the checked files of the
-    /// plan's two block devices, which take up to 262 code units more each than the paths of the
+    /// longest memory and hypervisor included, and the final paths of the plan's two block devices,
+    /// which take up to 262 code units more each than the paths of the
     /// plan: a quoted final path of up to `MAX_PATH` behind `\\?\` in place of a path of at least
     /// 4. A launch whose inputs are longer may still not fit, which its complete check refuses
     /// before OpenVMM starts.

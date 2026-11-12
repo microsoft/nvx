@@ -35,10 +35,6 @@
 //!   and physical block sizes, which [`CheckedDistro::geometry`](distro::CheckedDistro::geometry)
 //!   and [`CheckedScratch::geometry`](scratch::CheckedScratch::geometry) read through the file,
 //!   as OpenVMM reads it.
-//! - [`PreparedLaunch`]: the launch of a plan with the files that the checks of its block devices
-//!   returned, which hands the VMM those objects rather than paths that something could replace
-//!   meanwhile: the OpenVMM arguments that name them, and the descriptors that the VMM inherits;
-//!   [`prepared`] explains the handoff on each host.
 //!
 //! Workload IDs and resource limits are ASCII decimal integers in their documented ranges.
 //! Layer UUIDs use their canonical lowercase hyphenated text, and resource limits use native
@@ -58,7 +54,6 @@ pub mod layer;
 pub mod mount;
 pub mod options;
 pub mod plan;
-pub mod prepared;
 pub mod scratch;
 
 use std::fs::File;
@@ -72,7 +67,6 @@ pub use self::mount::{MountAccess, MountKind, MountOwner, MountPolicy, PolicyKin
 pub use self::plan::{
     BlockRole, PLAN_VERSION, SandboxDistro, SandboxNetwork, SandboxPlan, SandboxUpper,
 };
-pub use self::prepared::PreparedLaunch;
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::artifacts::require_existing;
 pub(crate) use crate::host::config::{reject_container_path, reject_disk_path};

@@ -47,8 +47,8 @@ nvx-rs/
 │   │                directories and configurations, artifacts, launch, network and egress policy
 │   │                files, filesystem, NVXS connection, session, process, platform, templates'
 │   │                manifests and compatibility keys, outcome reports, file seals, and the
-│   │                sandbox launch profile of `nvx-rs sandbox`, its distro and scratch bindings,
-│   │                and its prepared launches; with feature `cli`, the `nvx-rs` CLI
+│   │                sandbox launch profile of `nvx-rs sandbox` and its distro and scratch
+│   │                bindings; with feature `cli`, the `nvx-rs` CLI
 │   ├── testing/     feature `testing`: the fake OpenVMM
 │   ├── guest/       feature `guest`: the programs that run in Linux guests, the guest's NVXS
 │   │                connection, the libraries through which a guest init or agent opens the
@@ -129,7 +129,7 @@ changes only when the module's purpose does.
 | [`nvx::host::supervisor`](#nvxhostsupervisor) | The transitional public path of the low-level spawn of a VMM, which code that stays uses until SL6.3 (#1122) |
 | [`nvx::host::seal`](#nvxhostseal) | `FileSeal`: what the host reports about an open file from its metadata alone, without reading it |
 | [`nvx::host::platform`, `report`](#nvxhostplatform-report) | Linux and Windows primitives, and OpenVMM's outcome report |
-| [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its plans, live shares, option checks, bindings, and prepared launches |
+| [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its plans, live shares, option checks, and bindings |
 | [`nvx::guest`](#nvxguest) | The programs that run in Linux guests; see [Guest binaries](#guest-binaries) |
 | [`nvx::guest::mappings`](#nvxguestmappings) | `Mapping` and `MappingTable`: host mappings, and the account of a host's mapping table, for any guest init or agent |
 | [`nvx::guest::nvxs`](#nvxguestnvxs) | `GuestConnection`: the guest's role of the NVXS session over a byte stream, such as the control console |
@@ -962,7 +962,7 @@ VM's devices and its kernel command line: the OpenVMM executable, the
 hypervisor, the memory, the kernel, the initramfs, the endpoint of the control
 console, and the outcome report. `VmmLaunch::arguments` renders them for a
 `LaunchSpec`'s launch, after its managed lifecycle, and for an adapter's
-prepared launch, after its devices, and `LaunchSpec::vmm_launch` gives a
+launch, after its devices, and `LaunchSpec::vmm_launch` gives a
 specification's.
 
 `process_command_line_units` counts the Windows command line that runs a program
@@ -977,8 +977,8 @@ starts.
 `VmmLaunch::RESERVE`, 2048 code units, is what the planning of an adapter's
 launch keeps for the rest of the launch: the executable and the arguments that
 `VmmLaunch::arguments` renders besides the kernel command line, with paths of up
-to 260 code units, Windows' `MAX_PATH`, and the longer names by which a
-prepared launch gives OpenVMM the checked files of the plan's block devices.
+to 260 code units, Windows' `MAX_PATH`, and the longer final paths of the plan's
+block devices.
 
 `kernel_parameters_problem` checks the extra kernel parameters as the guest's
 kernel reads them, with `nvx::protocol::cmdline`: trimmed, split at every byte
@@ -1110,9 +1110,8 @@ they start and the `Launched` VMM that they return, `Inherited`, and
 `spawn_command`. The module re-exports them and has no code of its own: it
 supervises nothing. [`nvx::host::vm`](#nvxhostvm) creates, spawns, reattaches
 to, and stops a VM in a private directory that its caller owns. SL6.3 deletes
-`spawn_command` and the checked-file handoff of `PreparedLaunch`, and settles
-the launcher of the `external-launch` example: the last users of this path,
-besides the tests of the spawn in `tests/supervisor.rs`.
+the module, with `spawn_command`: its last users are the tests of the spawn in
+`tests/supervisor.rs` and `tests/checked_handoff.rs`.
 
 `spawn_vm` starts a caller-owned command without a store, with the same strict
 Windows log-job requirement as `vm::spawn`: an untrusted job name or a log that
@@ -1262,17 +1261,6 @@ checked files, the `BlockGeometry` that OpenVMM presents for them: their length,
 a nonzero multiple of 512 bytes, logical blocks of 512 bytes, and physical
 blocks of the I/O block size of their filesystem on Linux, and of 4096 bytes on
 Windows.
-
-`prepared`: `PreparedLaunch`, the launch of a plan with the checked files of its
-block devices, which renders the plan's OpenVMM arguments and kernel command
-line, naming the checked files as `/proc/self/fd/N` on Linux and by their final
-paths on Windows, lists the descriptors or handles that the VMM inherits through
-`VmmCommand::inherit`, and releases the checked files, and on Windows the VMM's
-copies of them, at authenticated Ready; see [Checked handoff](#checked-handoff).
-For an adapter's plan, `PreparedLaunch::adapter_arguments` renders the complete
-arguments of the launch: the plan's, those that export the adapter's shares,
-and those of the launch's `VmmLaunch`, and refuses a command line that Windows
-would not start OpenVMM with.
 
 ### `nvx::guest`
 
@@ -1884,9 +1872,9 @@ path, as it records every path, with the binding of the layer there, under
 `distro_binding` in `config.json`. When the path given is a link to a layer of
 another name, `start` checks the manifest beside the link's target, so
 `provision` verifies the layer there as well, and it records only a binding
-that the check accepts there. `start` checks the binding before it launches
-OpenVMM, and hands OpenVMM the checked layer; see
-[Checked handoff](#checked-handoff). `run` and `start`
+that the check accepts there. `start` checks the binding just before it
+launches OpenVMM, which opens the layer at its path; see
+[Images by path](#images-by-path). `run` and `start`
 launch the image of the format and the identity that the binding records, an
 EROFS layer or a GPT disk, over a scratch or a RAM upper, the layered root that
 nvx-init assembles. A configuration
@@ -1896,10 +1884,21 @@ after its distro binding was made: its length differs`; both add `deprovision
 the sandbox and provision it again`, since a new provision verifies the layer
 again.
 
-## Checked handoff
+## Images by path
 
-A launch hands the VMM exactly the objects that its checks found, never a path
-that something could replace between the check and the VMM's open of it.
+A launch names its images by path: OpenVMM opens the distro layer and the
+scratch image at the paths that the VM's configuration holds. Their checks,
+`DistroBinding::check` and `ScratchBinding::check`, find a staged image
+unchanged from its metadata alone and return it open, but what takes an image's
+path after its check is what OpenVMM opens. Callers therefore stage their
+images in a directory that only their own account can write, as
+[Distro bindings](#distro-bindings) and the docs of `nvx::host::sandbox::distro`,
+`nvx::host::sandbox::scratch`, and `nvx::host::seal` require, so that no other
+account can replace a checked image. On Windows, a checked distro layer also
+denies other opens for writing or deleting the layer while it is held, and the
+scratch image's guard denies deleting and renaming the image. `nvx-rs sandbox
+start` and `run` check the images just before they create the VM, and hold the
+checked files until the guest is ready, or, for `run`, until its VM has exited.
 
 `SandboxPlan::validated` rejects disk image paths containing commas, semicolons,
 or improperly nested square brackets with `ErrorKind::Unsupported`, including
@@ -1929,77 +1928,28 @@ handle is a guard that holds no access to the image's content, shares reading
 and writing, and denies deleting and renaming the image, and the check makes
 sure that no other process has the image open for writing, as another sandbox's
 VMM does, then opens the image for writing, sharing every access, as the claim's
-handle. The VMM inherits the claim's handle and the guard: so it holds the
-claim, and the guard the image's path, from its start, even if the launcher ends
-before the VMM has opened the image. Claims exclude the launches of NVX, not a
-process that writes the image on its own.
+handle. The VMM inherits the claim's handle, or for a restore, whose scratch
+image OpenVMM opens only while no other handle may write it, the guard, which
+then holds the claim: so it holds the claim from its start, even if the
+launcher ends before the VMM has opened the image. Claims exclude the launches
+of NVX, not a process that writes the image on its own.
 
-`PreparedLaunch::new` takes a `SandboxPlan`, the `CheckedDistro` that
-`DistroBinding::check` returned for its image, and, for an upper on scratch,
-the `CheckedScratch` that `ScratchBinding::check` returned, and refuses files
-that are not those of the plan. It renders the plan's OpenVMM arguments and
-kernel command line, holds the checked files, and lists the descriptors that
-the VMM inherits:
-
-- On Linux, the VMM inherits the checked descriptors through
-  `VmmCommand::inherit`, `PreparedLaunch::inherited`, and the arguments name
-  each `/proc/self/fd/N`, `distro:file:/proc/self/fd/N,ro` and
-  `scratch:file:/proc/self/fd/M`, which OpenVMM opens: the link reaches the
-  checked file whatever later takes its path. Every other descriptor stays
-  close-on-exec, as the supervisor guarantees. A checked descriptor that took a
-  standard stream's number, as when the caller had closed that stream, first
-  moves above the standard streams, with its open file description and its
-  claim.
-- On Windows, the arguments name each checked file by its final path, the
-  absolute `\\?\` path that its handle gives, which resolves every link that
-  the plan's path went through, and does not depend on the VMM's directory.
-  The checked files hold that path in place: the distro layer's file denies
-  writing and deleting the layer, the scratch image's guard denies deleting and
-  renaming it, and NTFS renames no directory while a file below it is open;
-  OpenVMM's opens share them. The VMM also inherits the handles of the checked
-  files and the scratch image's claim, though no argument names a handle,
-  through `VmmCommand::inherit` and `PreparedLaunch::inherited`, so that its
-  copies hold the paths and the claim from its start: a launcher that ends
-  before OpenVMM has opened the images, as when it crashes, closes only its own
-  checked files, and a replacement at their paths still fails until OpenVMM
-  exits; `start` never commits such a launch, and the sandbox's next transition
-  ends its VMM. At authenticated Ready, `PreparedLaunch::release` closes
-  OpenVMM's copies of the checked files with `DuplicateHandle` and
-  `DUPLICATE_CLOSE_SOURCE`, through the VMM's process handle that its launch
-  holds, once a copy of each is found to hold the checked file's object, and
-  then the checked files themselves, so that the guards are released while
-  OpenVMM keeps the claim. A final path that OpenVMM could not take as the
-  path of a raw image, with a comma, semicolon, or unbalanced brackets, or
-  ending in `.vhd`, `.vhdx`, `.vmgs`, or `.iso`, which a link, the directory of
-  a relative path, or the case of a name on disk can bring, fails the preparation
-  with `ErrorKind::Unsupported`.
-
-Images are raw: OpenVMM attaches a file's bytes as they are, and chooses a
-container format by the file's extension, which `/proc/self/fd/N` lacks, so a
-caller whose images use a container format, such as a fixed VHD, stages a raw
-file. The paths in the arguments hold for the launch alone: the plan, which
-callers persist, keeps the real paths. The caller adds its own arguments, or,
-for an adapter's plan, has `PreparedLaunch::adapter_arguments` render the
-complete arguments of its launch, starts the VMM, and releases the prepared
-launch with `PreparedLaunch::release` once the guest reports authenticated
-Ready, or drops it once it has torn down a launch that failed; the VMM's own
-opens then keep the images, and what it inherited keeps the scratch image's
-claim. Staging, the checks, and the preparation of a launch read no content of
-the images.
+Images are raw: OpenVMM attaches a file's bytes as they are, and would choose a
+container format by a file's extension, which the checks of a launch refuse, so
+a caller whose images use a container format, such as a fixed VHD, stages a raw
+file. Staging and the checks read no content of the images.
 
 `nvx-rs sandbox provision` records the scratch image's binding under
 `scratch_binding` in `config.json`, at the image's resolved path, and `start`
-checks it after the distro binding, and launches OpenVMM through a prepared
-launch, which it releases once the guest is ready, or drops once OpenVMM has
-exited. A scratch image that changed fails as a distro layer does, such as with
-`IMAGE changed after its scratch binding was made: its length differs;
+checks it after the distro binding, and launches OpenVMM, which inherits the
+image's claim. A scratch image that changed fails as a distro layer does, such
+as with `IMAGE changed after its scratch binding was made: its length differs;
 deprovision the sandbox and provision it again`, and one that another sandbox
 claims with `another sandbox claims the ext4 scratch image IMAGE`. `run` binds
 the scratch image itself, checks the binding and claims the image as `start`
 does, and holds the claim until its VM exits. A sandbox whose upper is in RAM,
 `--upper ram`, has no scratch image: `provision` records `null` for the image
 and its binding, and neither `start` nor `run` binds or claims one.
-
 ## Sandbox input contract
 
 The sandbox launch profile specifies its own inputs rather than emulating Python.
@@ -2401,7 +2351,7 @@ The state directory is the CLI's own [store](src/host/cli/store/mod.rs) of the
 sandbox, which keeps the runtime records of its VM, and `config.json` is the
 CLI's record of the sandbox beside them. It also
 records the [distro binding](#distro-bindings) and the
-[scratch binding](#checked-handoff) of the sandbox, and its network as the
+[scratch binding](#images-by-path) of the sandbox, and its network as the
 network options from which each `start` builds the policy again, as `provision`
 built it. The typed configuration names one EROFS or GPT image by path and
 identity, and a scratch upper by path or a RAM upper with its cap from 1 through
@@ -2509,7 +2459,7 @@ fails with
 `the guest image lacks control features that layered sandboxes need (...)`,
 which names the missing features. `nvx.py` does not ask; this, the checks of
 the [distro binding](#distro-bindings) and of the
-[scratch binding](#checked-handoff), and the claim of the scratch image are the
+[scratch binding](#images-by-path), and the claim of the scratch image are the
 intended changes of behavior. The
 guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
 
@@ -2620,7 +2570,7 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
   [Sandbox networking](../doc/run.md#sandbox-networking).
 - A sandbox's scratch image is claimed while its VM runs, so a second
   sandbox, or a `run`, on the same image fails; see
-  [Checked handoff](#checked-handoff).
+  [Images by path](#images-by-path).
 - On Linux, OpenVMM starts with the caller's umask without the owner's bits,
   where `nvx.py` passed the umask unchanged, so that a umask that clears the
   owner's own permissions, such as 0400, no longer keeps the caller, or `start`
