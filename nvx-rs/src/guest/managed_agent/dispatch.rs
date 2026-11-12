@@ -12,7 +12,7 @@ use crate::protocol::{
 use super::diagnostics;
 use super::mappings::{HostMappings, MappingError};
 use super::seam::{Paths, RealSystem, System};
-use super::session::{Event, ReceiveFailure, Session};
+use super::session::{Event, ReceiveFailure, Request, Session};
 use super::{AgentConfig, exec, launch, tty};
 
 impl AgentConfig {
@@ -108,6 +108,9 @@ pub(crate) enum Outcome {
 }
 
 /// Serves control requests until STOP or a fatal session error.
+///
+/// The control descriptor is nonblocking, so that the session's send queue never waits for the
+/// console while an execution of NVXC version 2 runs.
 pub(crate) fn run(
     system: &mut impl System,
     session: &mut Session,
@@ -117,6 +120,7 @@ pub(crate) fn run(
     if session.stopping() {
         return Ok(Outcome::Stopped);
     }
+    session.descriptor().set_nonblocking()?;
     if let Err(error) = session.send_attach() {
         return if session.stopping() {
             Ok(Outcome::Stopped)
@@ -193,7 +197,9 @@ fn handle_data(
     payload: &[u8],
 ) -> Result<Option<Outcome>, Errno> {
     let request = match session.accept_request(payload) {
-        Ok(request) => request,
+        Ok(Request::App(request)) => request,
+        // The input of an execution that ended takes no more bytes.
+        Ok(Request::Stdin(..)) => return Ok(None),
         Err(failure) => {
             diagnostics::error(system, failure.kind.stage(), failure.status);
             return Err(failure.into_error());
@@ -259,7 +265,18 @@ fn handle_data(
                 }
             };
             session.start_activation()?;
-            exec::run(system, session, config, request.request_id, &execution)?;
+            let mut stop = None;
+            exec::run(
+                system,
+                session,
+                config,
+                request.request_id,
+                &execution,
+                &mut stop,
+            )?;
+            if let Some(request_id) = stop {
+                return stopped(system, session, request_id);
+            }
             if session.capture_pending() {
                 return session.finish_capture();
             }
@@ -293,9 +310,7 @@ fn handle_data(
             if !request.payload.is_empty() {
                 return Err(Errno::EPROTO);
             }
-            session.send_app(APP_STOPPED, request.request_id, 0, &[])?;
-            tty::drain(system, session.descriptor());
-            return Ok(Some(Outcome::Stopped));
+            return stopped(system, session, request.request_id);
         }
         _ => session.send_error(
             request.request_id,
@@ -304,6 +319,18 @@ fn handle_data(
         )?,
     }
     Ok(None)
+}
+
+/// Acknowledges the `STOP` of `request_id`, and drains the control terminal before the session
+/// ends.
+fn stopped(
+    system: &mut impl System,
+    session: &mut Session,
+    request_id: u64,
+) -> Result<Option<Outcome>, Errno> {
+    session.send_app(APP_STOPPED, request_id, 0, &[])?;
+    tty::drain(system, session.descriptor());
+    Ok(Some(Outcome::Stopped))
 }
 
 #[cfg(all(test, feature = "cli"))]
