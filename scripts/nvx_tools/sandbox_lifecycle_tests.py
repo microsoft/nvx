@@ -315,9 +315,10 @@ def check_managed_report(
     """Checks the report of a managed sandbox that stopped cleanly.
 
     These are the report checks of the direct-mode managed lifecycle
-    (nvx-rs/tests/managed_lifecycle.rs) that hold for the layered root too: the
-    report names the backend, reports `network_policy`, or that no network
-    policy was requested when that is None, and every teardown step completed.
+    (nvx-rs/src/host/session/tests/managed_lifecycle.rs) that hold for the
+    layered root too: the report names the backend, reports `network_policy`,
+    or that no network policy was requested when that is None, and every
+    teardown step completed.
     """
     outcome = report.get("outcome")
     if outcome != MANAGED_SUCCESS:

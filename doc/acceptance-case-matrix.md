@@ -324,7 +324,7 @@ suite in its shards, and the public sandbox scenarios in its guest and sandbox j
 | `l3-l4-egress-protocols` | kept |  |
 | `lifecycle` | kept |  |
 | `managed-exec-config` | kept | A [cold cell](#cold-boots): the EROFS layer over a scratch upper, through `provision` and `start` |
-| `managed-lifecycle` | kept |  |
+| `managed-lifecycle` | kept | It runs the ignored unit test of the host's private control session in `nvx-rs/src/host/session/tests/managed_lifecycle.rs`, with the `cli` feature, which SL6.12 (#1127) moved there from the crate's integration tests |
 | `network-snapshot` | kept |  |
 | `platform-aggregate-export` | kept |  |
 | `platform-filesystem` | kept |  |

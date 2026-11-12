@@ -157,7 +157,8 @@ metadata and summary record the absolute target artifact root.
 Besides the guest and OpenVMM artifacts, a target needs nvx-rs, the Rust
 command-line interface that runs NVX's sandboxes and microVMs
 ([Usage](usage.md#nvx-rs)). Of the catalogued scenarios, `managed-lifecycle`
-runs the nvx-rs test `managed_lifecycle` with Cargo, and
+runs the nvx-rs unit test of its host control session,
+`host::session::tests::managed_lifecycle`, with Cargo, and
 `l3-l4-egress-policy` compiles its egress policy with nvx-rs and runs
 `nvx-rs run`. They find nvx-rs at `NVX_RS`, then at
 `nvx-rs/target/release/nvx-rs[.exe]`, and otherwise they build it there with
@@ -177,7 +178,7 @@ of the nvx-rs build:
 
 ```bash
 cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml --target-dir nvx-rs/target
-cargo test --no-run --locked --manifest-path nvx-rs/Cargo.toml --test managed_lifecycle
+cargo test --no-run --locked --manifest-path nvx-rs/Cargo.toml --features cli --lib
 python3 scripts/nvx.py record-nvx-rs-provenance
 ```
 

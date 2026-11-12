@@ -3,7 +3,7 @@ use super::*;
 use crate::guest::entry::AccountMode;
 pub(crate) use crate::guest::sys::tests::isolate_process_test;
 
-#[cfg(feature = "host")]
+#[cfg(feature = "cli")]
 /// In-process host/broker/agent integration harness.
 mod loopback;
 

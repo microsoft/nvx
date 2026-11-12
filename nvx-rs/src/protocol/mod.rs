@@ -62,13 +62,13 @@ pub mod view;
 ))]
 pub(crate) use app::APP_ACTIVATE;
 #[cfg(any(
-    feature = "host",
+    feature = "cli",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) use app::APP_CAPTURE;
 #[cfg(feature = "cli")]
 pub(crate) use app::encode_activate_payload;
-#[cfg(feature = "host")]
+#[cfg(feature = "cli")]
 pub(crate) use app::encode_capture_payload;
 #[cfg(any(
     feature = "host",

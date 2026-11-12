@@ -32,8 +32,8 @@
 //!   the host and the guest share it.
 //! - [`Hypervisor`]: the hypervisors that run the VMs.
 //! - [`host`] (feature `host`): artifact discovery, the OpenVMM command line, the lowering of
-//!   network and filesystem policies, the host's NVXS connection, control sessions, process and
-//!   platform primitives, VMs that a caller creates, starts, reattaches to, and stops in private
+//!   network and filesystem policies, the host's NVXS connection, process and platform
+//!   primitives, VMs that a caller creates, starts, reattaches to, and stops in private
 //!   directories that it owns, and the manifests and compatibility keys of templates.
 //! - `guest` (feature `guest`, Linux): the programs that run in NVX guests, such as
 //!   `nvx-console-pending`, the guest's NVXS connection, the libraries through which any guest

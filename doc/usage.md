@@ -1310,8 +1310,9 @@ the hooked rate of host UTC, then restores a snapshot with another rate, and
 with one beyond Linux's 500 ppm limit, which the guest must hold at the limit
 and report. The
 `managed-lifecycle` scenario boots a guest whose init hands
-the boot to the managed agent, and runs the ignored `nvx-rs` test
-`tests/managed_lifecycle.rs` with Cargo, which starts OpenVMM with the
+the boot to the managed agent, and runs the ignored `nvx-rs` unit test of the
+host's control session, in `src/host/session/tests/managed_lifecycle.rs`, with
+Cargo, which starts OpenVMM with the
 scenario's command line and drives the guest's control session; the scenario
 then checks OpenVMM's outcome report and the guest console. The
 `vm-lifecycle` scenario runs the ignored `nvx-rs` test

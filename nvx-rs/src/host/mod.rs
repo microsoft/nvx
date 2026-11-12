@@ -24,10 +24,11 @@
 //! - [`snapshot`] holds the compatibility key, [`SnapshotKey`](snapshot::SnapshotKey), derived
 //!   from a [`CaptureClass`](snapshot::CaptureClass) and [`SnapshotManifest`](snapshot::SnapshotManifest),
 //!   the strict manifest reader, and the capture's public time and eligibility information.
-//! - [`session`] speaks NVX's control protocol, `NVXC`, over [`transport`], which verifies a VM's
-//!   endpoint and runs the host's role of the NVXS session for it and for any other application
-//!   protocol, over a platform transport. [`nvxs`] retains compatibility paths. [`platform`] holds
-//!   the primitives of Linux and Windows hosts. Other hosts compile but report NVX as unavailable.
+//! - [`transport`] verifies a VM's endpoint and runs the host's role of the NVXS session for it,
+//!   for any application protocol, over a platform transport. The private `session` (feature
+//!   `cli`) speaks NVX's own control protocol, `NVXC`, over it for NVX's programs. [`nvxs`]
+//!   retains compatibility paths. [`platform`] holds the primitives of Linux and Windows hosts.
+//!   Other hosts compile but report NVX as unavailable.
 //! - [`process`] names processes by verified references: their ID, start time, and host boot,
 //!   through which a pidfd or a process handle holds them, so that waits sleep until a process
 //!   exits and termination reaches only it, whether or not the caller started it.
@@ -45,8 +46,8 @@
 //!   the VM directory and binds its restore-ready listener before any spawn.
 //! - [`restore`] orders caller-driven activation to Ready without I/O or a clock, and listens for
 //!   OpenVMM's restore-ready event from the held VM process. The private `restore_driver` (feature
-//!   `cli`) drives it over the [`session`] for NVX's blocking callers, through Ready, the mapping
-//!   table and the workload's start.
+//!   `cli`) drives it over the private `session` for NVX's blocking callers, through Ready, the
+//!   mapping table and the workload's start.
 //! - `cli` (feature `cli`) is the `nvx-rs` command-line interface, which runs microVMs and
 //!   sandboxes, looks up and downloads artifacts, and compiles egress policies.
 //!
@@ -85,7 +86,8 @@ mod restore_driver;
 pub mod runtime;
 pub mod sandbox;
 pub mod seal;
-pub mod session;
+#[cfg(feature = "cli")]
+pub(crate) mod session;
 pub mod snapshot;
 mod spawn;
 pub mod supervisor;
