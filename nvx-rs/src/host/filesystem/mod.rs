@@ -14,9 +14,9 @@
 //! visible; the paths to which the writes of a read-write directory are narrowed; the host
 //! identity of the file operations; and the guest targets that the guest's root keeps for itself.
 //!
-//! - A caller gives each target, or lets MXC's convention for Linux guests derive it from the
-//!   resolved host path: a Windows path `C:\work\src` appears at `/mnt/c/work/src`, and a Linux
-//!   path at the same path ([`fn@guest_path`]).
+//! - A caller gives each target, such as the guest path that MXC's convention for Linux guests
+//!   derives from a resolved host path ([`fn@guest_path`]): a Windows path `C:\work\src` appears
+//!   at `/mnt/c/work/src`, and a Linux path at the same path.
 //! - The reserved targets depend on the root, and the caller supplies them ([`ReservedTargets`]):
 //!   the blockless root keeps the guest's system trees, and the container root of a layered
 //!   sandbox keeps the trees of its runtime.
@@ -51,9 +51,9 @@ use crate::protocol::MAX_HOST_MAPPINGS;
 use crate::protocol::export::EXPORT_DIRECTORY;
 use crate::protocol::share::{RESERVED_EXACT_MOUNT_TARGETS, RESERVED_MOUNT_TARGETS};
 
+pub use self::guest_path::guest_path;
 pub(crate) use self::guest_path::within;
 use self::guest_path::{depth, guest_source};
-pub use self::guest_path::{guest_path, resolve_guest_path};
 pub(crate) use self::host_path::{canonicalize, is_reparse_point};
 use self::host_path::{identity, relative_text};
 use self::limits::{check_policy_paths, check_root};
@@ -240,8 +240,6 @@ impl Bind {
 /// Where the guest sees a mapped host path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target<'a> {
-    /// At the guest path that [`fn@guest_path`] derives from the resolved host path.
-    Convention,
     /// At this absolute guest path: a path other than the root, of at most 4,095 bytes, without
     /// NUL characters or empty, `.`, or `..` components.
     Guest(&'a str),
@@ -261,19 +259,6 @@ pub struct Mapping<'a> {
     pub read_only: bool,
 }
 
-impl<'a> Mapping<'a> {
-    /// Returns the mappings of the paths of `list`, under its name, at the guest paths of the
-    /// convention, read-only or read-write.
-    pub fn convention(list: PathList<'a>, read_only: bool) -> impl Iterator<Item = Self> + 'a {
-        list.paths.iter().map(move |path| Self {
-            name: list.name,
-            path,
-            target: Target::Convention,
-            read_only,
-        })
-    }
-}
-
 /// A list of host paths, and the name by which messages refer to its entries, such as
 /// `readOnly`.
 #[derive(Debug, Clone, Copy)]
@@ -282,14 +267,6 @@ pub struct PathList<'a> {
     pub name: &'a str,
     /// The host paths.
     pub paths: &'a [PathBuf],
-}
-
-impl PathList<'static> {
-    /// A list without paths.
-    pub const EMPTY: Self = Self {
-        name: "",
-        paths: &[],
-    };
 }
 
 /// The host paths that a sandbox maps, those that it hides inside them and shows again inside
@@ -315,27 +292,11 @@ pub struct ExportRequest<'a> {
     pub reserved: ReservedTargets<'a>,
 }
 
-impl<'a> ExportRequest<'a> {
-    /// Returns the request that maps `mappings` into a root that reserves `reserved`, without
-    /// denied, allowed, or write paths, as the VMM.
-    pub fn new(mappings: &'a [Mapping<'a>], reserved: ReservedTargets<'a>) -> Self {
-        Self {
-            mappings,
-            denied: PathList::EMPTY,
-            allowed: PathList::EMPTY,
-            write: PathList::EMPTY,
-            owner: Owner::Vmm,
-            reserved,
-        }
-    }
-}
-
 /// Plans the export of `request`, or returns `None` if it maps nothing.
 ///
-/// Mapped paths must exist, and resolve to paths that are valid UTF-8. A mapping's target is the
-/// one that the request gives, or the guest path that the convention derives from the resolved
-/// host path, so two spellings of one object (links, letter case, or short names) map to one guest
-/// path; either must be free in the request's [`ReservedTargets`]. An object mapped twice at one
+/// Mapped paths must exist, and resolve to paths that are valid UTF-8, so two spellings of one
+/// object (links, letter case, or short names) name one object. A mapping's target, which the
+/// request gives, must be free in the request's [`ReservedTargets`]. An object mapped twice at one
 /// target is mapped once, read-only if either mapping is. Two objects never share a target, and a
 /// target inside another mapping's must show the very object that the other mapping shows there.
 /// A whole volume cannot be mapped, and a policy that would need more children than OpenVMM
@@ -556,7 +517,7 @@ fn resolve_mapping<'a>(mapping: &Mapping<'a>, reserved: ReservedTargets<'_>) -> 
     let Mapping {
         name,
         path,
-        target,
+        target: Target::Guest(target),
         read_only,
     } = *mapping;
     let canonical = canonicalize(path).map_err(|error| {
@@ -584,44 +545,24 @@ fn resolve_mapping<'a>(mapping: &Mapping<'a>, reserved: ReservedTargets<'_>) -> 
     {
         return unsupported(format!("{name} entry {} {reason}", path.display()));
     }
-    let target = match target {
-        Target::Convention => {
-            let Some(target) = guest_path(&canonical) else {
-                return unsupported(format!(
-                    "{name} entry {} has no guest path; use an absolute local path",
-                    path.display()
-                ));
-            };
-            if let Some(reserved) = reserved.reservation(&target) {
-                return unsupported(format!(
-                    "{name} entry {} would cover the guest's {reserved}",
-                    path.display()
-                ));
-            }
-            target
-        }
-        Target::Guest(target) => {
-            if let Some(problem) = target_problem(target) {
-                return unsupported(format!(
-                    "{name} entry {} has the guest target {target:?}, which {problem}",
-                    path.display()
-                ));
-            }
-            if let Some(reserved) = reserved.reservation(target) {
-                return unsupported(format!(
-                    "{name} entry {} has the guest target {target}, which would cover the \
-                     guest's {reserved}",
-                    path.display()
-                ));
-            }
-            target.to_owned()
-        }
-    };
+    if let Some(problem) = target_problem(target) {
+        return unsupported(format!(
+            "{name} entry {} has the guest target {target:?}, which {problem}",
+            path.display()
+        ));
+    }
+    if let Some(reserved) = reserved.reservation(target) {
+        return unsupported(format!(
+            "{name} entry {} has the guest target {target}, which would cover the guest's \
+             {reserved}",
+            path.display()
+        ));
+    }
     Ok(Mapped {
         name,
         given: path.to_path_buf(),
         canonical,
-        target,
+        target: target.to_owned(),
         read_only,
         directory: metadata.is_dir(),
     })

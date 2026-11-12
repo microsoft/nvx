@@ -1,5 +1,5 @@
 use super::*;
-use crate::host::filesystem::{ExportRequest, Mapping, ReservedTargets, Target};
+use crate::host::filesystem::{ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target};
 
 #[test]
 fn blockless_modes_and_workloads_use_cli_owned_names() {
@@ -64,10 +64,15 @@ fn planned_boot_shares_keep_table_sources_targets_access_and_file_kind() {
             read_only: true,
         },
     ];
-    let plan = crate::host::filesystem::plan(&ExportRequest::new(
-        &mappings,
-        ReservedTargets::BLOCKLESS_ROOT,
-    ))
+    let none = |name| PathList { name, paths: &[] };
+    let plan = crate::host::filesystem::plan(&ExportRequest {
+        mappings: &mappings,
+        denied: none("--mount-deny"),
+        allowed: none("--mount-allow"),
+        write: none("--mount-write"),
+        owner: Owner::Vmm,
+        reserved: ReservedTargets::BLOCKLESS_ROOT,
+    })
     .unwrap()
     .unwrap();
     let table = plan.guest_table();
