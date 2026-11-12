@@ -33,10 +33,7 @@
 //! scratch upper, the cap a RAM upper, and the bound a GPT disk.
 //!
 //! Guests read the tokens with [`RootLayout::parse`], which accepts exactly these forms and
-//! refuses every other, with no fallback that probes the image or the devices. NVX's shell init
-//! reads them with the same rules, and refuses the GPT image, the untrusted lowers, and a
-//! forbidden journal, which it cannot assemble. It finds a scratch block device beside a RAM upper
-//! among the devices that the kernel added, rather than on the command line.
+//! refuses every other, with no fallback that probes the image or the devices.
 //!
 //! The tokens belong to the boot contract that
 //! [`BOOT_CONTRACT_VERSION`](crate::contract::BOOT_CONTRACT_VERSION) versions, so a change to
