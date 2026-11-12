@@ -43,16 +43,13 @@ fn mount_value(value: &str) -> (String, String, bool) {
 /// alone, as `nvx::host::filesystem` documents an export, independently of the CLI's planner: each
 /// share is a child of its own at its resolved host path, in the order of those paths, with the
 /// resolved policy paths inside it, sorted, and writable if its share is, whole or only below its
-/// write paths; each denied path that a workload could move, strictly inside a part that the guest
-/// may write, carries an identity, which `ExportPlan::check` requires there but no command line
-/// carries, so a zero one serves; and each share binds its child's root at its target, the
-/// shallower targets first.
+/// write paths; and each share binds its child's root at its target, the shallower targets first.
 fn fixture_export(
     shares: &[(String, PathBuf, bool)],
     policies: &[Vec<PathBuf>; 3],
     owner: nvx::host::filesystem::Owner,
 ) -> Option<nvx::host::filesystem::ExportPlan> {
-    use nvx::host::filesystem::{Bind, ExportChild, ExportPlan, FileIdentity};
+    use nvx::host::filesystem::{Bind, ExportChild, ExportPlan};
 
     if shares.is_empty() {
         return None;
@@ -94,28 +91,9 @@ fn fixture_export(
             } else {
                 Vec::new()
             };
-            let denied = inside(&denied, &root);
-            let moves = |path: &Path| {
-                writable
-                    && path != root.as_path()
-                    && (write.is_empty()
-                        || write
-                            .iter()
-                            .any(|part| path != part.as_path() && path.starts_with(part)))
-            };
-            let denied_identities = denied
-                .iter()
-                .map(|path| {
-                    moves(path).then_some(FileIdentity {
-                        device: 0,
-                        index: 0,
-                    })
-                })
-                .collect();
             ExportChild {
                 allowed: inside(&allowed, &root),
-                denied,
-                denied_identities,
+                denied: inside(&denied, &root),
                 write,
                 root,
                 file,
@@ -135,7 +113,6 @@ fn fixture_export(
                 source: String::new(),
                 target: target.clone(),
                 read_only: *read_only,
-                identity: None,
             }
         })
         .collect();

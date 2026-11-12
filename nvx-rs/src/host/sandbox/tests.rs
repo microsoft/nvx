@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use super::mount::{MountAccess, MountKind, MountOwner, MountPolicy, SandboxMount};
 use super::*;
 use crate::ErrorKind;
-use crate::host::filesystem::ExportPlan;
+use crate::host::filesystem::PlannedExport;
 use crate::host::paths;
 
 mod specification;
@@ -223,21 +223,22 @@ impl Fixture {
         path.to_str().unwrap().to_owned()
     }
 
-    /// Returns the export plan of `mounts`, which [`mount::plan_mounts`] checks against the host.
-    fn planned(&self, mounts: Vec<SandboxMount>) -> Result<ExportPlan> {
+    /// Returns the export plan of `mounts`, with its pins, which [`mount::plan_mounts`] checks
+    /// against the host.
+    fn planned(&self, mounts: Vec<SandboxMount>) -> Result<PlannedExport> {
         Ok(mount::plan_mounts(&mounts)?.expect("shares have an export plan"))
     }
 }
 
 /// Checks `export` against the host again, as a start of a provisioned sandbox does: its
-/// directories and files must still not overlap, and it must pass [`ExportPlan::verify`].
-fn validated(export: &ExportPlan) -> Result<()> {
+/// directories and files must still not overlap, and it must pass [`PlannedExport::verify`].
+fn validated(export: &PlannedExport) -> Result<()> {
     validated_with(export, &mount::HostQueries::native())
 }
 
 /// Implements [`validated`] with the given host queries.
-fn validated_with(export: &ExportPlan, host: &mount::HostQueries<'_>) -> Result<()> {
-    mount::check_distinct_export_roots(export, host)?;
+fn validated_with(export: &PlannedExport, host: &mount::HostQueries<'_>) -> Result<()> {
+    mount::check_distinct_export_roots(&export.description, host)?;
     export.verify()
 }
 
@@ -336,7 +337,7 @@ fn launch_validation_rejects_overlapping_or_foreign_host_paths() {
         ])
         .unwrap();
     validated(&export).unwrap();
-    assert_eq!(export.children.len(), 2);
+    assert_eq!(export.description.children.len(), 2);
     // One share's policy paths must lie in it too.
     let error = fixture
         .planned(vec![parse(
@@ -462,6 +463,7 @@ fn launch_validation_rejects_shares_that_came_to_overlap() {
         .unwrap();
     validated(&export).unwrap();
     let roots: Vec<PathBuf> = export
+        .description
         .children
         .iter()
         .map(|child| child.root.clone())
@@ -518,7 +520,7 @@ fn launch_validation_requires_plain_mount_directory() {
         .to_str()
         .and_then(|text| text.strip_prefix(r"\\?\"))
         .map_or(canonical.clone(), PathBuf::from);
-    assert_eq!(export.children[0].root, canonical);
+    assert_eq!(export.description.children[0].root, canonical);
 }
 
 #[test]

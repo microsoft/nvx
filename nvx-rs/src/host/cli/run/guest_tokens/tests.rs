@@ -74,7 +74,8 @@ fn planned_boot_shares_keep_table_sources_targets_access_and_file_kind() {
         reserved: ReservedTargets::BLOCKLESS_ROOT,
     })
     .unwrap()
-    .unwrap();
+    .unwrap()
+    .description;
     let table = plan.guest_table();
     assert_eq!(table[1].source, "0/single.txt");
     let line = render("", Some(&plan)).unwrap();
