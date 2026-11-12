@@ -40,9 +40,8 @@ use crate::protocol::{self, GuestHostMap, MAX_HOST_MAPPINGS, ProtocolError};
 /// The table unmounts nothing: the caller keeps the mappings that it applied, and unmounts them
 /// itself, in reverse order, if it ever does.
 ///
-/// NVX's managed agent applies its table through one, beneath its own root, `/`, in direct mode,
-/// with a mapper that it opens at the first part that the table hands it, so that a table of zero
-/// mappings opens nothing.
+/// A caller can open its mapper at the first part that the table hands it, so that a table of
+/// zero mappings opens nothing.
 ///
 /// ```no_run
 /// use nvx::guest::mappings::{Mapping, MappingTable, TableError};
