@@ -7,10 +7,10 @@
 //! They cover what the fake kernel cannot: the runtime's file systems and their options, the
 //! device nodes, with their mode whatever the umask, and the links, the time status's read-only
 //! bind, the undo of a call that fails part of the way, a second call's refusal, the teardown's
-//! unmounts, and the order of the runtime and the mappings beneath `/run`: a call after a mapping
-//! is refused and leaves it reachable, and a mapping after the runtime is on the `/run` tmpfs.
-//! They also cover a switch into the root, in a thread with root and working directories of its
-//! own, after which the root's mounts stay and descriptors opened before it still map.
+//! unmounts, and mappings beneath `/run` after the runtime, which a mapper of the root and of its
+//! `/run` tmpfs, as nvx-init makes one, puts on that tmpfs. They also cover a switch into the
+//! root, in a thread with root and working directories of its own, after which the root's mounts
+//! stay and descriptors opened before it still map.
 
 use std::os::unix::fs::FileTypeExt;
 
@@ -296,48 +296,6 @@ fn a_call_that_fails_part_of_the_way_unmounts_what_it_mounted() {
 
 #[test]
 #[ignore = "needs root and Linux 6.8 or later"]
-fn a_call_after_a_mapping_is_refused_and_leaves_it_reachable() {
-    let Some(scene) = Scene::new() else {
-        return;
-    };
-    let base = scene.path("root");
-    let app = base.join("run/app");
-    let mut root = scene.root();
-    let mapping = Mapping::new("app", "/run/app", Access::ReadOnly).unwrap();
-    root.map(&sources(&scene), &[mapping]).unwrap();
-    // The `/run` tmpfs would hide the mapping, which the teardown could then not unmount. Every
-    // step runs before the one check, and the scene detaches what a failed one leaves.
-    let first = root.mount_runtime(Some(&scene.path("time")));
-    let read = fs::read(app.join("data")).map_err(|error| error.kind());
-    let mounts = mounts_below(&base);
-    let second = root.mount_runtime(None);
-    let torn = root.teardown().map_err(|error| error.to_string());
-    let refused = Err(format!(
-        "a file system is mounted at {} already",
-        app.display()
-    ));
-    assert_eq!(
-        (
-            first.map_err(|error| error.to_string()),
-            read,
-            mounts,
-            second.map_err(|error| error.to_string()),
-            torn,
-            mounts_below(&base),
-        ),
-        (
-            refused.clone(),
-            Ok(b"mapped".to_vec()),
-            vec![app.clone()],
-            refused,
-            Ok(()),
-            Vec::new(),
-        )
-    );
-}
-
-#[test]
-#[ignore = "needs root and Linux 6.8 or later"]
 fn mappings_beneath_run_after_the_runtime_are_on_its_tmpfs_and_go_with_it() {
     let Some(scene) = Scene::new() else {
         return;
@@ -346,12 +304,16 @@ fn mappings_beneath_run_after_the_runtime_are_on_its_tmpfs_and_go_with_it() {
     let path = |relative: &str| base.join(relative);
     let mut root = scene.root();
     root.mount_runtime(Some(&scene.path("time"))).unwrap();
+    // A mapper beneath the root, whose own mounts include the `/run` tmpfs, as nvx-init makes it.
+    let mut target = TargetRoot::open(&base).unwrap();
+    target.add_mount(&path("run")).unwrap();
+    let mut mapper = Mapper::new(target, Reserved::container_root());
     let mappings = [
         Mapping::new("app", "/run/app", Access::ReadOnly).unwrap(),
         Mapping::new("state", "/run/nvx/state", Access::ReadOnly).unwrap(),
     ];
     // Every step runs before the one check, and the scene detaches what a failed one leaves.
-    let mapped = root.map(&sources(&scene), &mappings);
+    let mapped = mapper.apply_with(&mut SystemKernel, &sources(&scene), &mappings);
     let options = ["run/app", "run/nvx/state"]
         .map(|relative| shown(&path(relative)).map(|(_, options)| options));
     let read = ["run/app/data", "run/nvx/state/data", "run/nvx/time/state"]
@@ -359,6 +321,9 @@ fn mappings_beneath_run_after_the_runtime_are_on_its_tmpfs_and_go_with_it() {
     let mounts = mounts_below(&base);
     let second = root.mount_runtime(None);
     let kept = mounts_below(&base) == mounts;
+    // The mapper's mappings go before the runtime's mounts.
+    let unmapped = mapper.unmount_with(&mut SystemKernel);
+    drop(mapper);
     let torn = root.teardown().map_err(|error| error.to_string());
     // The mount points that the mapper created went with the `/run` tmpfs.
     let created = path("run/app").exists();
@@ -370,6 +335,7 @@ fn mappings_beneath_run_after_the_runtime_are_on_its_tmpfs_and_go_with_it() {
             read,
             second.map_err(|error| error.to_string()),
             kept,
+            unmapped,
             torn,
             mounts_below(&base),
             created,
@@ -387,6 +353,7 @@ fn mappings_beneath_run_after_the_runtime_are_on_its_tmpfs_and_go_with_it() {
                 path("proc").display()
             )),
             true,
+            Vec::new(),
             Ok(()),
             Vec::new(),
             false,
@@ -409,11 +376,14 @@ fn a_switched_root_keeps_its_mounts_and_maps_through_earlier_descriptors() {
     fs::write(source.join("late"), b"late").unwrap();
     let mut root = scene.root();
     root.mount_runtime(None).unwrap();
-    // The root's own mapper, a target root, and a source root are opened before the switch.
+    // A mapper's target root and a source root are opened before the switch, and the mapper maps
+    // before it too.
     let sources = SourceRoot::open(&source).unwrap();
+    let mut mapper = Mapper::new(TargetRoot::open(&base).unwrap(), Reserved::container_root());
     let early = Mapping::new("early", "/srv/early", Access::ReadOnly).unwrap();
-    root.map(&sources, &[early]).unwrap();
-    let target = TargetRoot::open(&base).unwrap();
+    mapper
+        .apply_with(&mut SystemKernel, &sources, &[early])
+        .unwrap();
 
     // The thread that switches has root and working directories of its own, so the test's
     // thread still reaches the temporary directory afterwards.
@@ -426,15 +396,16 @@ fn a_switched_root_keeps_its_mounts_and_maps_through_earlier_descriptors() {
             assert!(!source.exists());
             assert_eq!(fs::read("/srv/early/data").unwrap(), b"early");
 
-            // A mapper maps beneath the target root, from the source root, which no path
+            // The mapper maps beneath the target root, from the source root, which no path
             // reaches any more.
-            let mut mapper = Mapper::new(target, Reserved::container_root());
             let late = Mapping::new("late", "/srv/late", Access::ReadOnly).unwrap();
-            mapper.apply(&sources, &[late]).unwrap();
+            mapper
+                .apply_with(&mut SystemKernel, &sources, &[late])
+                .unwrap();
             assert_eq!(fs::read("/srv/late").unwrap(), b"late");
 
             // A second switch and the teardown are refused, and the drop that follows unmounts
-            // nothing: the runtime's mounts and the root's mapping stay.
+            // nothing: the runtime's mounts and the mappings stay.
             let mounts = mounts_below(Path::new("/"));
             for point in ["/proc", "/dev/pts", "/run", "/srv/early", "/srv/late"] {
                 assert!(
@@ -573,7 +544,7 @@ fn view_failure_after_the_machine_id_bind_leaves_it_owned_for_teardown() {
         crate::guest::view::apply(&mut root, &view, Some("10.0.0.1".parse().unwrap())).unwrap_err();
     assert_eq!(error.kind(), crate::ErrorKind::Io);
     assert!(shown(&base.join("etc/machine-id")).is_some());
-    assert!(root.is_latched());
+    assert!(root.latched);
     root.teardown().unwrap();
     assert!(mounts_below(&base).is_empty());
     assert_eq!(

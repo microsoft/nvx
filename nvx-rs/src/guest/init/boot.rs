@@ -534,9 +534,7 @@ fn class_status(failure: &ActivationFailure) -> u8 {
                     Some(ApplyError::Gpt(_) | ApplyError::Assembly(_)) => {
                         Some(status::ACTIVATION_ROOT)
                     }
-                    Some(ApplyError::MachineId { .. } | ApplyError::View { .. }) => {
-                        Some(status::ACTIVATION_WORKLOAD)
-                    }
+                    Some(ApplyError::View { .. }) => Some(status::ACTIVATION_WORKLOAD),
                     Some(ApplyError::Export { .. }) => Some(status::ACTIVATION_EXPORT),
                     Some(ApplyError::Network { .. }) => Some(status::ACTIVATION_NETWORK),
                     None => error

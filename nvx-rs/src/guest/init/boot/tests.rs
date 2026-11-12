@@ -1,6 +1,7 @@
 use super::*;
 use crate::ErrorKind;
 use crate::activation::MachineIdMode;
+use crate::guest::mappings::SystemKernel;
 use crate::guest::{account as accounts, sys};
 
 const ROOT: &str = "nvx_layer=distro,0xd0003000,erofs nvx_overlay_upper=ramfs";
@@ -413,14 +414,6 @@ fn a_failed_activation_ends_the_vm_with_the_status_of_its_class() {
             "a GPT disk",
             applying(ApplyError::Gpt(missing())),
             ACTIVATION_ROOT,
-        ),
-        (
-            "a machine ID",
-            applying(ApplyError::MachineId {
-                error: std::io::Error::other("no machine ID"),
-                teardown: None,
-            }),
-            ACTIVATION_WORKLOAD,
         ),
         (
             "a view",
@@ -845,7 +838,7 @@ fn layered_cold_boot_maps_through_handles_opened_before_its_only_switch() {
         boot.table
             .apply(part, |batch| {
                 boot.mapper
-                    .apply(export, batch)
+                    .apply_with(&mut SystemKernel, export, batch)
                     .map_err(|error| (error.entry(), error))
             })
             .unwrap();
