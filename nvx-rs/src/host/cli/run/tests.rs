@@ -66,11 +66,12 @@ fn cold_share_command_lines_fit_the_kernel_budget_to_the_byte() {
     };
     let rules = options.network.egress_rules().unwrap();
     let base = cold_config(&options, &rules).unwrap();
-    let fragment = export_command_line_fragment(base.filesystem.as_ref().unwrap());
-    let room = SANDBOX_COMMAND_LINE_MAX_SIZE
-        - base.kernel_command_line().unwrap().len()
-        - fragment.len()
-        - 2;
+    let fragment = export_tokens(base.filesystem.as_ref().unwrap());
+    assert_eq!(
+        fragment,
+        " virtfs_dir=/run/nvx/hostfs/root virtfs_tag=microvm virtfs_mode=rw virtfs_aggregate=1"
+    );
+    let room = COMMAND_LINE_BUDGET - base.kernel_command_line().unwrap().len() - fragment.len() - 2;
     for unicode in [false, true] {
         options.cmdline = if unicode {
             "\u{e9}".repeat(room / 2) + &"x".repeat(room % 2)
@@ -80,7 +81,7 @@ fn cold_share_command_lines_fit_the_kernel_budget_to_the_byte() {
         let fitting = cold_config(&options, &rules).unwrap();
         assert_eq!(
             fitting.kernel_command_line().unwrap().len() + fragment.len() + 1,
-            SANDBOX_COMMAND_LINE_MAX_SIZE
+            COMMAND_LINE_BUDGET
         );
         options.cmdline.push('x');
         assert!(cold_config(&options, &rules).is_err());

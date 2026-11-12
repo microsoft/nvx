@@ -34,8 +34,9 @@ use crate::host::runtime::RuntimeIdentity;
 use crate::host::sandbox::DEFAULT_ENTRYPOINT;
 use crate::host::sandbox::distro::{DistroBinding, DistroFormat};
 use crate::host::sandbox::layer::SandboxLayer;
-use crate::host::sandbox::mount::{plan_mounts, validate_mounts};
+use crate::host::sandbox::mount::{MOUNT_TAG, plan_mounts, validate_mounts};
 use crate::host::sandbox::options::{SandboxOperation, SandboxOptions, sandbox_mounts};
+use crate::protocol::export::{EXPORT_DIRECTORY, ExportMode};
 use crate::protocol::root::RootUpper;
 
 pub(crate) use self::lifecycle::ProvisionConfig;
@@ -128,6 +129,21 @@ pub(crate) fn error_with_cause(error: crate::Error) -> Exit {
         Some(cause) => Exit::error(error.code(), format!("{}: {cause}", error.message())),
         None => Exit::from(error),
     }
+}
+
+/// Returns the bootstrap tokens that OpenVMM appends to a VM's kernel command line for `plan`,
+/// its export at [`EXPORT_DIRECTORY`], as [`HostExport`](crate::protocol::export::HostExport)
+/// reads them: they take part of the line's budget.
+pub(crate) fn export_tokens(plan: &ExportPlan) -> String {
+    let mode = if plan.children.iter().any(|child| child.writable) {
+        ExportMode::ReadWrite
+    } else {
+        ExportMode::ReadOnly
+    };
+    format!(
+        " virtfs_dir={EXPORT_DIRECTORY} virtfs_tag={MOUNT_TAG} virtfs_mode={mode} \
+         virtfs_aggregate=1"
+    )
 }
 
 /// Runs the operation of `options`, as `command_sandbox` did.

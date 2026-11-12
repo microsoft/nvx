@@ -1384,9 +1384,10 @@ fn unusable_guest_ram(root: &Root) {
 }
 
 /// A start refuses a configuration whose kernel command line holds a token of the sandbox profile,
-/// `nvx_*`, or of `--mount`, `virtfs_*`, as Linux or the guest's init reads the line, before it
-/// launches OpenVMM. `provision` records the profile's tokens that the configuration of the VM
-/// leaves to the caller, such as `nvx_entrypoint`, and the start refuses those too.
+/// `nvx_*`, or of `--mount`, `virtfs_*`, as Linux or the guest's init reads the line, or a `--`,
+/// which would hide from Linux the tokens that OpenVMM appends, before it launches OpenVMM.
+/// `provision` records the profile's tokens that the configuration of the VM leaves to the caller,
+/// such as `nvx_entrypoint`, and the start refuses those too.
 #[test]
 fn starts_refuse_the_kernel_tokens_of_the_sandbox_profile_and_of_its_mounts() {
     let root = Root::new();
@@ -1411,6 +1412,10 @@ fn starts_refuse_the_kernel_tokens_of_the_sandbox_profile_and_of_its_mounts() {
         (
             Some("virtfs_tag=microvm"),
             "virtfs_tag is owned by the sandbox --mount option",
+        ),
+        (
+            Some("quiet -- debug"),
+            "sandbox kernel command line hides the tokens that OpenVMM appends to it",
         ),
     ] {
         if let Some(cmdline) = cmdline {
