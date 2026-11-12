@@ -2,10 +2,10 @@
 //! their owners and modes, and the sparse files and the renames without replacement of the
 //! stores.
 
-use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
+use std::fs::{self, DirBuilder, File, Permissions};
 use std::io;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 
 use nix::sys::stat::Mode;
@@ -167,10 +167,7 @@ pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
 pub(crate) fn restore_private_file_mode(path: &Path, mode: Mode) -> io::Result<()> {
     use nix::fcntl::OFlag;
 
-    let opened = OpenOptions::new()
-        .read(true)
-        .custom_flags((OFlag::O_PATH | OFlag::O_NOFOLLOW).bits())
-        .open(path);
+    let opened = open_to_locate(path, OFlag::O_NOFOLLOW);
     let file = match opened {
         Ok(file) => file,
         Err(error)
@@ -198,10 +195,7 @@ pub(crate) fn restore_private_file_mode(path: &Path, mode: Mode) -> io::Result<(
 fn open_plain_dir(path: &Path) -> io::Result<Option<File>> {
     use nix::fcntl::OFlag;
 
-    let opened = OpenOptions::new()
-        .read(true)
-        .custom_flags((OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW).bits())
-        .open(path);
+    let opened = open_to_locate(path, OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW);
     match opened {
         Ok(directory) => Ok(Some(directory)),
         Err(error)
@@ -212,4 +206,20 @@ fn open_plain_dir(path: &Path) -> io::Result<Option<File>> {
         }
         Err(error) => Err(error),
     }
+}
+
+/// Opens `path` with `O_PATH` and the flags `flags`, only to locate it, which needs no permission
+/// on the file itself, and never waits for a writer, as an open of a FIFO for reading would.
+///
+/// `nix` passes the flags on as they are, where `OpenOptionsExt::custom_flags` masks out the bits
+/// of `O_ACCMODE`, which on musl include `O_PATH`: a musl build would open the file for reading.
+fn open_to_locate(path: &Path, flags: nix::fcntl::OFlag) -> io::Result<File> {
+    use nix::fcntl::OFlag;
+
+    let file = nix::fcntl::open(
+        path,
+        OFlag::O_PATH | OFlag::O_CLOEXEC | flags,
+        Mode::empty(),
+    )?;
+    Ok(File::from(file))
 }
