@@ -121,6 +121,9 @@ TREE = re.compile(
     r"^(?P<indent>(?:│   |    )*)[├└]── mod (?P<name>[\w#]+): (?P<rest>.*)$"
 )
 CONDITION = re.compile(r"#\[cfg\((?P<condition>.+?)\)\](?=, #\[cfg\(|$)")
+# A condition that holds outside tests too once the export enables its feature,
+# as any(test, feature = "cli") does.
+TEST_OR_FEATURE = re.compile(r'any\(test, feature = "(?P<feature>[^"]+)"\)')
 
 
 class DiagramError(Exception):
@@ -379,7 +382,9 @@ def restore(
     build outside tests are those of the analysis with cfg(test) but the test
     modules, so this restores the modules that the plain analysis lacks among
     them. It refuses conditions that depend on test otherwise, such as
-    any(test, unix) or not(test), whose modules it cannot tell apart.
+    any(test, unix) or not(test), whose modules it cannot tell apart, but for
+    any(test, feature = "cli") and its like, whose feature the export enables, and
+    which therefore holds outside tests too.
 
     The plain analysis moves the uses of a module that it drops, and those of the
     modules that use it, to the nearest module that contains it and that it
@@ -399,6 +404,9 @@ def restore(
         raise fail("its structure and its dependencies name different modules")
     for path, listed in found.items():
         for condition in listed:
+            enabled = TEST_OR_FEATURE.fullmatch(condition)
+            if enabled is not None and enabled["feature"] in FEATURES:
+                continue
             # A string, such as the name of a feature, holds no condition.
             unquoted = re.sub(r'"[^"]*"', '""', condition)
             if condition != "test" and re.search(r"\btest\b", unquoted):
