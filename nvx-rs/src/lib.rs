@@ -33,13 +33,9 @@
 //!   manifests and compatibility keys of templates.
 //! - `guest` (feature `guest`, Linux): the programs that run in NVX guests, such as
 //!   `nvx-console-pending`, the guest's NVXS connection, the libraries through which any guest
-//!   init or agent opens the terminal on which it serves its session (`guest::terminal`), starts
-//!   a program in a new process (`guest::spawn`), has the program enter an execution's
-//!   namespaces, view, root, and identity (`guest::entry`), collects the status of each child
-//!   that it names (`guest::process`), places, kills, and settles the processes of its
-//!   executions in cgroups (`guest::cgroup`), describes host mappings and keeps the account of a
-//!   host's mapping table (`guest::mappings`), and drives each program as one execution, with its
-//!   launch, bounded output, input, ending, and outcome (`guest::exec`), the typed calls through
+//!   init or agent opens the terminal on which it serves its session (`guest::terminal`), and
+//!   describes host mappings and keeps the account of a host's mapping table
+//!   (`guest::mappings`), the typed calls through
 //!   which it runs the time ABI's steps (`guest::time`) and reseeds after a restore
 //!   (`guest::reseed`) in its own process,
 //!   and the capture of a template's guest, which repairs its clones (`guest::snapshot`), and

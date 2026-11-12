@@ -134,8 +134,8 @@
 //! directory exists and is not empty, since a clone's root starts as its image alone, while a cold
 //! sandbox's scratch keeps its upper across boots; the check reads at most one entry of each, and
 //! no file. The record holds no execution identity: the adapter gives each execution the identity
-//! that the execution names, which [`Entry::check`](super::entry::Entry::check) checks, as for a sandbox
-//! without a workload identity at a cold boot. If the record has an export, it mounts the host
+//! that the execution names, as for a sandbox without a workload identity at a cold boot. If the
+//! record has an export, it mounts the host
 //! export through the template's
 //! filesystem device, with `Root::mount_export`, read-write, at
 //! `hostfs/root` in the runtime directory, outside the root, where only the guest's root user

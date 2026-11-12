@@ -1,14 +1,10 @@
-//! Operations that bootstrap a guest for a layered root, assemble the root, mount live shares and
-//! mappings in it, and the host export from which mappings come, and tear it down, for a guest
-//! init or agent, whether or not it is PID 1.
+//! Operations that assemble a layered root, mount live shares and mappings in it, and the host
+//! export from which mappings come, and tear it down, for a guest init or agent, whether or not
+//! it is PID 1.
 //!
 //! This module is NVX's internal reference code of the guest's space, hidden from the
 //! documentation and unstable: it becomes crate-private once nothing outside NVX uses it.
 //!
-//! - [`bootstrap`](fn@bootstrap) prepares the guest once: it creates the agent's and the
-//!   workload's sibling cgroups of a [`Layout`](super::cgroup::Layout), moves every process of
-//!   their parent into the agent's, applies the agent's and the workload's resource values, and
-//!   keeps user namespaces unavailable.
 //! - [`assemble`] finds the block devices of an [`Assembly`] by their MMIO windows, checks and
 //!   flushes them, and mounts the root: an overlay, mounted `nosuid,nodev` with the option set of
 //!   the caller's [`OverlayMode`], which it checks the kernel applied, of the read-only layers of
@@ -39,7 +35,7 @@
 //!   failures.
 //!
 //! A failure is an [`Error`] that names what failed. The operations need the guest's root user,
-//! in the guest's initial mount and cgroup namespaces. They never collect a child's status,
+//! in the guest's initial mount namespace. They never collect a child's status,
 //! change the caller's credentials, start an async runtime, or power the VM off, and only
 //! `Root::switch` changes the caller's root directory, so a caller that is not PID 1 keeps its own
 //! reaping, transport, and shutdown.
@@ -132,19 +128,12 @@
 //! use std::time::Duration;
 //!
 //! use nvx::gpt::Expected;
-//! use nvx::guest::cgroup::Layout;
 //! use nvx::guest::mappings::{Access, Mapping};
-//! use nvx::guest::root::{self, Assembly, Device, Image, OverlayMode, Resources, Upper};
+//! use nvx::guest::root::{self, Assembly, Device, Image, OverlayMode, Upper};
 //! use nvx::protocol::export::HostExport;
 //! use nvx::protocol::root::DISTRO_MMIO_BASE;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let layout = Layout::new("/sys/fs/cgroup/agent", "/sys/fs/cgroup/container")?;
-//! let resources = Resources {
-//!     agent_memory_low: Some(16 << 20),
-//!     ..Resources::default()
-//! };
-//! let bootstrap = root::bootstrap(&layout, &resources)?;
 //! let mut root = root::assemble(&Assembly {
 //!     runtime: "/run/nvx".into(),
 //!     distro: Device { mmio: DISTRO_MMIO_BASE, sectors: None },
@@ -166,14 +155,13 @@
 //!     root.map(&source, &[Mapping::new("0/src", "/src", Access::ReadOnly)?])?;
 //!     // Dropping the export's root here lets the teardown unmount the export.
 //! }
-//! // Run the workload in `bootstrap.workload()`, in the root at `root.path()`; then:
+//! // Run the workload in the root at `root.path()`; then:
 //! root.teardown()?;
 //! # Ok(())
 //! # }
 //! ```
 
 mod block;
-mod bootstrap;
 mod kernel;
 mod share;
 #[cfg(test)]
@@ -202,7 +190,6 @@ use crate::protocol::root::RAM_UPPER_CAPS;
 use crate::uuid::Uuid;
 
 pub(crate) use self::block::window_directories;
-pub use self::bootstrap::{Bootstrap, BootstrapStep, Resources, bootstrap};
 pub(crate) use self::kernel::Paths;
 pub use self::share::{ShareChild, ShareKind, ShareRefusal};
 
@@ -267,7 +254,7 @@ const RUNTIME_FILE_SYSTEMS: [(RuntimeMounts, &CStr, &FileSystem); 6] = [
     (RuntimeMounts::Run, c"run", &sys::RUN),
 ];
 /// The mode of a directory that [`Root::mount_runtime`] creates for a mount, but for what the
-/// umask withholds, as an execution's entry creates it.
+/// umask withholds.
 const RUNTIME_DIRECTORY_MODE: u32 = 0o755;
 
 /// The most bytes of options that `mount(2)` passes a file system whole: one 4 KiB page, the
@@ -881,7 +868,7 @@ impl Root {
 
     /// Mounts the runtime's file systems in the root, as an init does once for its VM before it
     /// switches into the root. It first makes every mount of the root's tree `nosuid` and `nodev`,
-    /// then mounts, in order, an execution's file systems, with an execution's options:
+    /// then mounts, in order, these file systems, with these options:
     ///
     /// - procfs at `/proc`, `nosuid`, `nodev`, and `noexec`;
     /// - sysfs at `/sys`, read-only, `nosuid`, `nodev`, and `noexec`;
@@ -894,9 +881,7 @@ impl Root {
     ///
     /// With a `time_status`, the directory that holds the guest's time status, it then binds that
     /// directory read-only, `nosuid`, and `nodev` at `/run/nvx/time`, creating `/run/nvx` and
-    /// `/run/nvx/time` on the `/run` tmpfs with mode 0755, as an execution's
-    /// [`Entry::bind_runtime`](super::entry::Entry::bind_runtime) binds it. Without one, it binds
-    /// nothing there.
+    /// `/run/nvx/time` on the `/run` tmpfs with mode 0755. Without one, it binds nothing there.
     ///
     /// It opens each mount point beneath the root, through no symbolic link, and creates one that
     /// is missing with mode 0755, but for what the umask withholds. A mount point where something
@@ -1032,11 +1017,10 @@ impl Root {
     }
 
     /// Switches into the root, as an init does once for its VM, after the mounts and the
-    /// descriptors that it needs: it moves the root's mount onto `/`, as an execution's child
-    /// moves its root in its own mount namespace, then makes the root the calling process's root
-    /// directory, with `chroot`, and its working directory, with `chdir`. The move is in the
-    /// caller's mount namespace, and the root and working directories are those that the caller's
-    /// threads share, but for a thread that unshared them.
+    /// descriptors that it needs: it moves the root's mount onto `/`, then makes the root the
+    /// calling process's root directory, with `chroot`, and its working directory, with `chdir`.
+    /// The move is in the caller's mount namespace, and the root and working directories are
+    /// those that the caller's threads share, but for a thread that unshared them.
     ///
     /// A root switches once, for good: a second switch is refused as [`SwitchError::Switched`].
     /// Once its mount is on `/`, the root has switched, even if entering it then fails: from then
@@ -1575,19 +1559,8 @@ pub(crate) fn bind_file_retained(
 
 /// Binds the file or directory at `path`, which must be of `kind`, read-only at `target` beneath
 /// `root`, with `kernel`, through the walk and attach of [`mappings::bind`] from a source root at
-/// `path`'s parent directory, and returns the bind.
-pub(crate) fn bind_runtime_file(
-    kernel: &mut dyn mappings::Kernel,
-    root: &TargetRoot,
-    path: &Path,
-    target: &str,
-    kind: Kind,
-) -> Result<Mapped, MappingError> {
-    let (source, mapping) = runtime_mapping(path, target, kind)?;
-    mappings::bind_with(kernel, root, &source, &mapping)
-}
-
-/// Binds as [`bind_runtime_file`] does, retaining a failed bind that its caller must detach.
+/// `path`'s parent directory, and returns the bind, retaining a failed bind that its caller must
+/// detach.
 pub(crate) fn bind_runtime_file_retained(
     kernel: &mut dyn mappings::Kernel,
     root: &TargetRoot,
@@ -2045,13 +2018,6 @@ impl RuntimeMounts {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// A step of [`bootstrap`](fn@bootstrap) failed.
-    Bootstrap {
-        /// The step that failed.
-        step: BootstrapStep,
-        /// The step's error.
-        error: io::Error,
-    },
     /// The runtime directory's path is not absolute and canonical, holds a reserved character,
     /// or leads through a symbolic link.
     Runtime {
@@ -2253,7 +2219,6 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Bootstrap { step, error } => write!(formatter, "failed to {step}: {error}"),
             Self::Runtime { path } => write!(
                 formatter,
                 "the runtime directory is not a canonical absolute path without `,`, `:`, `\\`, \
