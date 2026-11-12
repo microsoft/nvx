@@ -6,7 +6,7 @@ use super::{DISTRO_MANIFEST_SUFFIX, PACKAGE_MANIFEST_SUFFIX};
 
 /// A Linux guest that `nvx.py` builds and runs, as `scripts/nvx_tools/guests.py` describes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Guest {
+pub(crate) enum Guest {
     /// Alpine Linux: the default guest of `nvx-rs run`, and the one that runs sandboxes.
     Alpine,
     /// Ubuntu Base, which also provides the distro layer of sandbox workloads.
@@ -17,10 +17,10 @@ pub enum Guest {
 
 impl Guest {
     /// Every guest, in the order in which `nvx.py` lists them.
-    pub const ALL: [Self; 3] = [Self::Alpine, Self::Ubuntu, Self::AzureLinux];
+    pub(crate) const ALL: [Self; 3] = [Self::Alpine, Self::Ubuntu, Self::AzureLinux];
 
     /// Returns the guest's name in `nvx.py` options: `alpine`, `ubuntu`, or `azurelinux`.
-    pub const fn name(self) -> &'static str {
+    pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Alpine => "alpine",
             Self::Ubuntu => "ubuntu",
@@ -30,7 +30,7 @@ impl Guest {
 
     /// Returns the name of the guest's distribution, as messages show it: `Alpine Linux`,
     /// `Ubuntu Base`, or `Azure Linux`.
-    pub const fn distribution(self) -> &'static str {
+    pub(crate) const fn distribution(self) -> &'static str {
         match self {
             Self::Alpine => "Alpine Linux",
             Self::Ubuntu => "Ubuntu Base",
@@ -39,7 +39,7 @@ impl Guest {
     }
 
     /// Returns the file name of the guest's initramfs.
-    pub const fn initramfs_name(self) -> &'static str {
+    pub(crate) const fn initramfs_name(self) -> &'static str {
         match self {
             Self::Alpine => "initramfs.cpio.gz",
             Self::Ubuntu => "initramfs-ubuntu.cpio.gz",
@@ -51,7 +51,7 @@ impl Guest {
     /// the `default_memory_mib` of its descriptor in `scripts/nvx_tools/guests.py`, which
     /// `nvx.py test-microvm` also uses, and which a test of `nvx.py` checks against the help of
     /// `nvx-rs run`.
-    pub const fn default_memory_mib(self) -> u32 {
+    pub(crate) const fn default_memory_mib(self) -> u32 {
         match self {
             Self::Alpine => 128,
             Self::Ubuntu | Self::AzureLinux => 512,
@@ -59,13 +59,13 @@ impl Guest {
     }
 
     /// Returns the file name of the package manifest of the guest's initramfs.
-    pub fn package_manifest_name(self) -> String {
+    pub(crate) fn package_manifest_name(self) -> String {
         format!("{}{PACKAGE_MANIFEST_SUFFIX}", self.initramfs_name())
     }
 
     /// Returns the file name of the guest's EROFS distro layer, `GUEST-distro.erofs`, if the
     /// guest provides one: only Ubuntu does.
-    pub const fn distro_layer_name(self) -> Option<&'static str> {
+    pub(crate) const fn distro_layer_name(self) -> Option<&'static str> {
         match self {
             Self::Ubuntu => Some("ubuntu-distro.erofs"),
             Self::Alpine | Self::AzureLinux => None,
@@ -73,7 +73,7 @@ impl Guest {
     }
 
     /// Returns the file name of the manifest of the guest's distro layer, if it has one.
-    pub fn distro_manifest_name(self) -> Option<String> {
+    pub(crate) fn distro_manifest_name(self) -> Option<String> {
         self.distro_layer_name()
             .map(|name| format!("{name}{DISTRO_MANIFEST_SUFFIX}"))
     }

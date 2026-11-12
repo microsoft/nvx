@@ -61,12 +61,12 @@ use crate::host::paths;
 use crate::host::seal::{FileId, FileKind, FileSeal, SealScheme};
 
 /// The version of the serde form of [`ScratchBinding`] that this build writes and checks.
-pub const SCRATCH_BINDING_VERSION: u32 = 1;
+pub(crate) const SCRATCH_BINDING_VERSION: u32 = 1;
 
 /// How long a check of a scratch image that should be free waits for its claim to be released:
 /// long enough for a process that another thread of the caller spawned to execute its program,
 /// and so to close its copy of a claim, as [Claims](self#claims) explains.
-pub const CLAIM_RELEASE_WAIT: Duration = Duration::from_secs(1);
+pub(crate) const CLAIM_RELEASE_WAIT: Duration = Duration::from_secs(1);
 
 /// How often a check tries a claim that is held again.
 const CLAIM_RETRY_INTERVAL: Duration = Duration::from_millis(25);
@@ -105,7 +105,7 @@ impl Access<'static> {
 /// with the fields of a [`FileSeal`] of the same names, and no times, which the VMM changes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ScratchBinding {
+pub(crate) struct ScratchBinding {
     /// [`SCRATCH_BINDING_VERSION`].
     version: u32,
     /// The host that took the binding.
@@ -130,7 +130,7 @@ pub struct ScratchBinding {
 /// which releases the claim, and on Windows the guard, unless a VMM that inherited them still
 /// holds them; see [Claims](self#claims).
 #[derive(Debug)]
-pub struct CheckedScratch {
+pub(crate) struct CheckedScratch {
     /// The checked image, or on Windows its guard.
     file: File,
     /// The claim's handle on Windows: the image, open for writing and sharing every access,
@@ -150,14 +150,14 @@ impl CheckedScratch {
     /// Returns the checked image, open for reading and writing, whose open file description holds
     /// the claim on Linux, which a VMM that inherits a copy of it keeps.
     #[cfg(not(windows))]
-    pub fn file(&self) -> &File {
+    pub(crate) fn file(&self) -> &File {
         &self.file
     }
 
     /// Returns the image's guard, an owned handle, which the caller then holds with the claim
     /// alone, since this closes the claim's handle.
     #[cfg(windows)]
-    pub fn into_file(self) -> File {
+    pub(crate) fn into_file(self) -> File {
         self.file
     }
 
@@ -178,7 +178,7 @@ impl ScratchBinding {
     /// with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) for an image that is missing
     /// or not a regular file, and with [`ErrorKind::Io`](crate::ErrorKind::Io) if the image cannot
     /// be opened or sealed, as on hosts other than Linux and Windows.
-    pub fn bind(path: &Path) -> Result<Self> {
+    pub(crate) fn bind(path: &Path) -> Result<Self> {
         bind_with(&normalized(path)?, Access::WRITABLE)
     }
 
@@ -199,7 +199,7 @@ impl ScratchBinding {
     /// [`ErrorCode::ScratchClaimed`], for an image that another launch still claims at
     /// `deadline`; and with [`ErrorKind::Io`](crate::ErrorKind::Io) if the image cannot be opened,
     /// sealed, or claimed.
-    pub fn check(&self, path: &Path, deadline: Instant) -> Result<CheckedScratch> {
+    pub(crate) fn check(&self, path: &Path, deadline: Instant) -> Result<CheckedScratch> {
         self.check_with(&normalized(path)?, deadline, Access::WRITABLE)
     }
 

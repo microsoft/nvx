@@ -14,11 +14,11 @@ use crate::host::network::{
 };
 use crate::host::paths;
 use crate::host::sandbox::distro::DistroFormat;
+use crate::host::sandbox::layer::SandboxLayer;
 use crate::host::sandbox::mount::{MountOwner, PolicyKind};
 use crate::host::sandbox::options::{PolicyPathOption, SandboxOperation};
 use crate::host::sandbox::{
-    DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, SandboxLayer,
-    parse_workload_identity,
+    DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, parse_workload_identity,
 };
 use crate::net::{Ipv4Cidr, guest_gateway};
 use crate::protocol::root::RootUpper;
