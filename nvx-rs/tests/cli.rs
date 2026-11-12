@@ -2332,7 +2332,15 @@ fn a_run_passes_openvmm_no_handle_of_its_caller() {
 fn batch_openvmm(root: &Root) -> (BTreeMap<String, String>, PathBuf, String) {
     let marker = root.path.join("ran");
     let wrapper = root.path.join("openvmm.cmd");
-    fs::write(&wrapper, format!("@echo ran>\"{}\"\r\n", marker.display())).unwrap();
+    fs::write(
+        &wrapper,
+        format!(
+            "@echo ran>\"{}\"\r\n@rem {}\r\n",
+            marker.display(),
+            "x".repeat(64)
+        ),
+    )
+    .unwrap();
     let environment = BTreeMap::from([(
         "NVX_OPENVMM".to_owned(),
         wrapper.to_str().unwrap().to_owned(),

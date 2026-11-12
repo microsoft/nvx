@@ -96,6 +96,38 @@ fn arm_managed_artifacts_require_matching_native_kernel_and_manifest() {
     let artifacts = arm.sandbox_artifacts().unwrap();
     assert_eq!(artifacts.kernel, arm.kernel());
     assert_eq!(artifacts.initrd, arm.initramfs(Guest::Alpine));
+    #[cfg(any(target_os = "linux", windows))]
+    {
+        artifacts.probe().unwrap();
+        assert!(artifacts.runtime_identity().is_err());
+        let replacement = root.path().join("foreign-artifact");
+        fs::write(&replacement, b"foreign artifact").unwrap();
+        for description in ["OpenVMM executable", "guest kernel", "guest initramfs"] {
+            let mut replaced = artifacts.clone();
+            let path = match description {
+                "OpenVMM executable" => &mut replaced.openvmm,
+                "guest kernel" => &mut replaced.kernel,
+                _ => &mut replaced.initrd,
+            };
+            *path = replacement.clone();
+            let error = replaced.probe().unwrap_err();
+            assert_eq!(error.code(), crate::ErrorCode::Unavailable);
+            assert_eq!(
+                error.message(),
+                format!(
+                    "the {description} {} is not the one of {}, whose install metadata \
+                     identifies the artifacts",
+                    replacement.display(),
+                    arm.root().display()
+                )
+            );
+        }
+        fs::remove_file(arm.kernel()).unwrap();
+        assert_eq!(
+            artifacts.probe().unwrap_err().code(),
+            crate::ErrorCode::ArtifactMissing
+        );
+    }
     fs::write(arm.kernel(), b"foreign kernel").unwrap();
     assert!(arm.sandbox_artifacts().is_err());
 }

@@ -754,6 +754,27 @@ fn located_artifacts_have_the_identity_of_their_directory() {
     );
 }
 
+#[test]
+#[cfg(any(target_os = "linux", windows))]
+fn probing_explicit_and_x86_artifacts_keeps_path_override_support() {
+    let directory = tempfile::tempdir().unwrap();
+    release(directory.path());
+    let replacement = directory.path().join("replacement");
+    fs::write(&replacement, b"explicit artifact").unwrap();
+    let mut located = Artifacts::from_dir(directory.path()).unwrap();
+    located.openvmm = replacement.clone();
+    located.kernel = replacement.clone();
+    located.initrd = replacement.clone();
+    located.probe().unwrap();
+    let named = Artifacts::new(&replacement, &replacement, &replacement);
+    named.probe().unwrap();
+    fs::remove_file(&replacement).unwrap();
+    assert_eq!(
+        named.probe().unwrap_err().code(),
+        ErrorCode::ArtifactMissing
+    );
+}
+
 #[cfg(feature = "bundled")]
 #[test]
 fn the_bundle_is_a_compatible_release() {
@@ -764,6 +785,7 @@ fn the_bundle_is_a_compatible_release() {
     if requested && (cfg!(target_os = "linux") || cfg!(windows)) {
         assert!(bundled.is_some(), "NVX_BUNDLE_DIR was not staged");
     }
+
     if let Some(artifacts) = bundled {
         for path in [&artifacts.openvmm, &artifacts.kernel, &artifacts.initrd] {
             assert!(path.is_file(), "{} is missing", path.display());
