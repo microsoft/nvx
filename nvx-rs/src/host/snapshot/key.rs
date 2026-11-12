@@ -272,7 +272,7 @@ fn guest_network_of(nic: &Nic) -> String {
 ///
 /// A key holds, and nothing else:
 ///
-/// - **Bundle and contracts:** the identities of OpenVMM, the guest kernel, and the guest
+/// - **Runtime and contracts:** the identities of OpenVMM, the guest kernel, and the guest
 ///   initramfs; and the versions
 ///   of the key's encoding and of the boot, snapshot, device-state, time, restore-packet,
 ///   control, and activation contracts.
@@ -302,8 +302,8 @@ fn guest_network_of(nic: &Nic) -> String {
 ///
 /// The key comes from metadata alone: the artifacts' identities that their install metadata
 /// records, the capture's inputs, and its manifest. It never reads or digests a binary,
-/// an image, the RAM, or the saved state. A bundle that changes any of its artifacts therefore
-/// makes templates of a new key: the templates of the old one are not recertified.
+/// an image, the RAM, or the saved state. A runtime that changes any of its artifacts therefore
+/// makes templates of a new key, and restores none of the old key's: they are captured again.
 ///
 /// Its [`identity`](Self::identity) is the SHA-256 digest of its
 /// canonical compatibility prefix, after a domain that no other digest of this crate shares.
@@ -608,7 +608,7 @@ impl SnapshotKey {
     /// Version 1 holds, in order, each value encoded as the [module](super) describes:
     ///
     /// 1. [`VERSION`](Self::VERSION), a `u16`.
-    /// 2. The bundle and contracts: the OpenVMM, kernel, and initramfs identities, texts; the boot
+    /// 2. The runtime and contracts: the OpenVMM, kernel, and initramfs identities, texts; the boot
     ///    contract version, a `u64`; the control contract revision, a text; the control session
     ///    version, a `u64`; and the snapshot format, device-state schema,
     ///    time ABI, restore packet, and activation contract versions, `u64`s.

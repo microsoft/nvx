@@ -1,11 +1,11 @@
 //! Versions of the contracts that this crate speaks with OpenVMM and the NVX guest, and the
 //! compatibility of NVX releases with them.
 //!
-//! The store records the boot contract, control contract, and control session versions of the
-//! build that started a VM in the VM's runtime identity, `nvx::host::runtime::RuntimeIdentity`,
-//! and a build drives only the VMs whose runtime identity is its own. So each version changes
-//! whenever a guest that a build of the earlier version started could not be driven as one that a
-//! build of the later version starts:
+//! A VM's runtime identity, `nvx::host::runtime::RuntimeIdentity`, which its caller saves with
+//! it, holds the boot contract, control contract, and control session versions of the build that
+//! started the VM, and a build drives only the VMs whose runtime identity is its own. So each
+//! version changes whenever a guest that a build of the earlier version started could not be
+//! driven as one that a build of the later version starts:
 //!
 //! - [`MICROVM_ABI_VERSION`] is the microVM ABI of the pinned OpenVMM: the machine, its devices,
 //!   and their addresses, through which OpenVMM boots the guest and saves its state. It changes
@@ -22,13 +22,14 @@
 //!   host reaches the guest agent over OpenVMM's control console. It changes with the session's
 //!   framing, records, credits, or authentication.
 //! - [`CONTROL_CONTRACT_REVISION`] is the revision of the control contract that the session
-//!   carries: the requests, responses, and features of the guest agent. It changes with them.
+//!   carries: the requests and responses of NVX's own control protocol, which NVX's guest agents
+//!   serve. It changes with them.
 //!
 //! A release declares the microVM ABI, time ABI, restore-packet, control-session, and control
 //! contract versions of its artifacts in its `SOURCE-MANIFEST.json`.
 //!
-//! The compatibility key of a template, `nvx::host::snapshot::SnapshotKey`, holds the boot and
-//! control versions, and the versions of the contracts through which a template's clones are
+//! The compatibility key of a snapshot, `nvx::host::snapshot::SnapshotKey`, holds the boot and
+//! control versions, and the versions of the contracts through which the snapshot's clones are
 //! restored, which no runtime identity records:
 //!
 //! - [`SNAPSHOT_FORMAT_VERSION`] is the version of OpenVMM's snapshot format: the manifest of a
@@ -51,7 +52,7 @@
 ///
 /// Version 1 of OpenVMM's v4 microVM offers no device `VIRTIO_F_ACCESS_PLATFORM` and no console
 /// `VIRTIO_CONSOLE_F_SIZE`, and gives each virtio device an IOAPIC input of its own past the ISA
-/// IRQs. OpenVMM and this crate refuse the template of an earlier OpenVMM by its
+/// IRQs. OpenVMM and this crate refuse the snapshot of an earlier OpenVMM by its
 /// [snapshot format](SNAPSHOT_FORMAT_VERSION).
 pub const MICROVM_ABI_VERSION: u64 = 1;
 /// Version of the boot contract this crate speaks; see the [module](self) for when it changes.

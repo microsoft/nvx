@@ -24,8 +24,8 @@ pub enum ErrorKind {
     /// A host I/O operation failed, or state that NVX recorded on the host is unreadable or
     /// malformed.
     Io,
-    /// The state that an operation names does not exist on the host, such as the store of a
-    /// sandbox that was never created or that a removal deleted.
+    /// The state that an operation names does not exist on the host, such as the manifest of a
+    /// capture that OpenVMM never wrote.
     NotFound,
     /// The control session failed: the peer violated the protocol, closed or reset the session,
     /// or refused a request.

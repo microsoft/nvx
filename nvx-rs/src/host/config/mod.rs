@@ -225,7 +225,7 @@ pub struct Capacity {
     pub capacity: u64,
 }
 
-/// The length and block sizes of a sandbox block device.
+/// The length and block sizes of a VM's block device, such as its image or its scratch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BlockGeometry {
     /// The length that the device presents, in bytes: nonzero, and a multiple of the logical

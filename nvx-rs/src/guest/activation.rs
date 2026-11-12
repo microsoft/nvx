@@ -216,7 +216,8 @@ const BLOCK_DEVICES: &str = "dev/block";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum CaptureStage {
-    /// Closing the caller's fence of workload admission, which fails while it is closed already.
+    /// Closing a fence of workload admission, a stage that no capture has: the capture holds no
+    /// fence, and its caller keeps its own executions still.
     Fence,
     /// Checking that nothing is mounted from the template's devices or an overlay.
     Mounts,
