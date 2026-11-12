@@ -12,14 +12,13 @@ use crate::activation::{
     ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image, MachineIdMode,
     Network, OverlayMode, Publication, ReadyActivation, RestoreSection, TransactionId, Upper, View,
 };
-use crate::host::instance::generate_capability;
 use crate::host::nvxs::HostConnection;
 use crate::host::session;
 use crate::host::snapshot::SnapshotManifest;
 use crate::host::supervisor::{Launched, VmmCommand, spawn};
 use crate::protocol::{
     APP_ERROR, APP_EXEC, APP_EXIT, APP_MAPS, APP_READY, APP_STDERR, APP_STDOUT, APP_STOP,
-    APP_STOPPED, HostMap, Workload, WorkloadEnvironment, decode_app, encode_app,
+    APP_STOPPED, CAPABILITY_LEN, HostMap, Workload, WorkloadEnvironment, decode_app, encode_app,
     encode_exec_payload, encode_maps_payloads,
 };
 
@@ -295,7 +294,8 @@ fn run() -> Result<(), AnyError> {
         "--microvm-report".into(),
         report.as_os_str().to_owned(),
     ];
-    let capability = generate_capability()?;
+    let mut capability = [0; CAPABILITY_LEN];
+    getrandom::fill(&mut capability)?;
     let command = VmmCommand::new(vmm, options, &root);
     let mut owned = OwnedVm(Some(spawn(&command, &capability, log)?));
     let running = owned.0.as_ref().ok_or("missing owned VM")?;

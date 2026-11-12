@@ -17,8 +17,19 @@ use crate::host::cli::{Exit, Result, check_interrupt, output};
 use crate::host::process::Process;
 use crate::host::runtime::IdentityPart;
 use crate::host::snapshot::OPENVMM_DIR;
-use crate::host::supervisor::StopOutcome;
 use crate::host::vm::{self, SavedVm, VmDir, VmOutputs};
+
+/// How the stop of a sandbox's OpenVMM ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StopOutcome {
+    /// OpenVMM exited without a forced termination: by the end of its graceful stop, or before
+    /// a termination began.
+    Graceful,
+    /// A forced termination through OpenVMM's verified process ended it within its bound.
+    Forced,
+    /// OpenVMM still runs: it did not exit within the bound of its stop or termination.
+    TimedOut,
+}
 
 /// Stops a running sandbox, and checks the outcome report that its OpenVMM wrote, unless another
 /// runtime identity than the artifacts' started the VM.
