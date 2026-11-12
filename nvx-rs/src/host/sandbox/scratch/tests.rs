@@ -8,6 +8,8 @@ use std::time::SystemTime;
 
 use super::*;
 use crate::ErrorKind;
+use crate::host::config::BlockGeometry;
+use crate::host::sandbox::block_geometry;
 
 /// The content of the staged scratch images.
 const CONTENT: &[u8] = b"scratch image\n";
@@ -151,13 +153,13 @@ fn binds_record_the_image_without_reading_it() {
     let staged = Staged::new();
     let binding = staged.bind();
     let seal = FileSeal::of(&File::open(staged.image()).unwrap()).unwrap();
-    assert_eq!(binding.scheme(), seal.scheme());
+    assert_eq!(binding.scheme, seal.scheme());
     assert_eq!(
-        (binding.device(), binding.file_id()),
+        (binding.device, binding.file_id.0),
         (seal.device(), seal.file_id())
     );
-    assert_eq!(binding.kind(), FileKind::Regular);
-    assert_eq!(binding.length(), CONTENT.len() as u64);
+    assert_eq!(binding.kind, FileKind::Regular);
+    assert_eq!(binding.length, CONTENT.len() as u64);
     assert_eq!(ScratchBinding::bind(&staged.image()).unwrap(), binding);
     // The positive control: what the access of the test opens refuses every read.
     let mut byte = [0];
@@ -181,7 +183,7 @@ fn bindings_round_trip_through_their_serde_form() {
         value["scheme"],
         if cfg!(windows) { "windows" } else { "linux" }
     );
-    assert_eq!(value["fileId"], format!("{:032x}", binding.file_id()));
+    assert_eq!(value["fileId"], format!("{:032x}", binding.file_id.0));
     assert_eq!(value["kind"], "regular");
     assert_eq!(value["length"], CONTENT.len());
     assert_eq!(
@@ -246,17 +248,16 @@ fn checks_claim_the_image_without_reading_it() {
     let staged = Staged::new();
     let binding = staged.bind();
     let checked = staged.check(&binding, Instant::now()).unwrap();
-    assert_eq!(checked.path().to_str().unwrap(), shown(&staged.image()));
-    let seal = FileSeal::of(checked.file()).unwrap();
+    let seal = FileSeal::of(&checked.file).unwrap();
     assert_eq!(
         (seal.device(), seal.file_id()),
-        (binding.device(), binding.file_id())
+        (binding.device, binding.file_id.0)
     );
     // What the check holds reads nothing, and processes that this one launches do not inherit
     // it.
     let mut byte = [0];
-    assert!(checked.file().read(&mut byte).is_err());
-    assert!(!inheritable(checked.file()));
+    assert!((&checked.file).read(&mut byte).is_err());
+    assert!(!inheritable(&checked.file));
     #[cfg(windows)]
     {
         assert!((&checked.claim).read(&mut byte).is_err());
@@ -324,12 +325,15 @@ fn checked_images_present_the_geometry_that_openvmm_reads_through_them() {
             .set_len(length)
             .unwrap();
     };
+    // The geometry that OpenVMM presents for the image, read through what the check holds.
+    let geometry =
+        |checked: &CheckedScratch| block_geometry(&checked.file, &staged.normalized(), DESCRIPTION);
     resize(1 << 20);
     let binding = staged.bind();
     let checked = staged.claim(&binding);
     // It reads the metadata of what the check holds, which reads nothing, while the claim lasts.
     assert_eq!(
-        checked.geometry().unwrap(),
+        geometry(&checked).unwrap(),
         BlockGeometry {
             length: 1 << 20,
             logical_block_size: 512,
@@ -346,7 +350,7 @@ fn checked_images_present_the_geometry_that_openvmm_reads_through_them() {
         resize(length);
         let binding = staged.bind();
         assert_eq!(
-            failure(staged.claim(&binding).geometry()),
+            failure(geometry(&staged.claim(&binding))),
             (
                 ErrorKind::Unsupported,
                 format!(
@@ -417,7 +421,7 @@ fn a_check_that_waited_for_a_claim_compares_the_image_again() {
     let staged = Staged::new();
     let binding = staged.bind();
     #[cfg(target_os = "linux")]
-    let holder = staged.check(&binding, Instant::now()).unwrap().into_file();
+    let holder = staged.check(&binding, Instant::now()).unwrap().file;
     #[cfg(windows)]
     let holder = OpenOptions::new()
         .read(true)
@@ -472,12 +476,15 @@ fn the_checked_image_is_the_object_that_the_check_compared() {
 
     // What the caller holds is still the object that the check compared, whatever has its path
     // now.
-    let seal = FileSeal::of(checked.file()).unwrap();
+    let seal = FileSeal::of(&checked.file).unwrap();
     assert_eq!(
         (seal.device(), seal.file_id(), seal.kind()),
-        (binding.device(), binding.file_id(), FileKind::Regular)
+        (binding.device, binding.file_id.0, FileKind::Regular)
     );
+    #[cfg(windows)]
     let file = checked.into_file();
+    #[cfg(not(windows))]
+    let file = checked.file;
     assert!(!inheritable(&file));
     drop(file);
 

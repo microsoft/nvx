@@ -22,7 +22,7 @@ use nvx::host::filesystem::Owner;
 use nvx::host::filesystem::{self, ExportRequest, Mapping, ReservedTargets, Target};
 use nvx::host::process::{BootId, ProcessRef};
 use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
-use nvx::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding, PolicyVerdict};
+use nvx::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding};
 use nvx::host::sandbox::layer::{LayerRole, SandboxLayer};
 use nvx::host::sandbox::scratch::{CLAIM_RELEASE_WAIT, ScratchBinding};
 use nvx::host::seal::FileSeal;
@@ -155,7 +155,7 @@ fn a_staged_image_that_was_replaced_fails_its_check() {
         path.to_str().unwrap(),
         "01234567-89ab-cdef-0123-456789abcdef",
     );
-    let binding = DistroBinding::import(&layer, PolicyVerdict::ACCEPTED).unwrap();
+    let binding = DistroBinding::verify(&layer).unwrap();
     drop(binding.check(&layer, DISTRO_POLICY_REVISION).unwrap());
     fs::rename(&path, images.path().join("original.erofs")).unwrap();
     fs::write(&path, b"layer").unwrap();
