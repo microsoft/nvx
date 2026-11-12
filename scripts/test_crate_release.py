@@ -1434,6 +1434,21 @@ class ReleaseTests(unittest.TestCase):
             self.publish()
 
 
+class ChangelogTests(unittest.TestCase):
+    def test_the_newest_entry_is_the_series_that_the_crate_declares(self):
+        # CHANGELOG.md lists the breaking releases, each the first version of
+        # the series whose floor nvx-rs/Cargo.toml then declares, so a pull
+        # request that starts another series adds its entry.
+        root = BuildConstants.REPO_ROOT
+        manifest = crate_release.read_manifest(
+            (root / "nvx-rs" / "Cargo.toml").read_bytes(), "nvx-rs/Cargo.toml"
+        )
+        entries = re.findall(
+            r"(?m)^## (\S+)$", (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        )
+        self.assertEqual(entries[:1], [str(manifest.version)])
+
+
 class CommandLineTests(unittest.TestCase):
     def test_runs_the_step_on_the_crate(self):
         with (

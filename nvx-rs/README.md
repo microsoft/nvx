@@ -25,11 +25,11 @@ the public API against its snapshots, as [Testing](#testing) describes.
 The package and the library are both called `nvx`; the package was called
 `nvx-rs`, like the directory that holds it. The crate is published on crates.io
 as a preview, whose API can change in any release: the nightly CI run publishes
-`dev` as the next pre-release, such as `0.1.0-alpha.4`, whenever the crate
+`dev` as the next pre-release, such as `0.2.0-alpha.2`, whenever the crate
 changed; see [crates.io releases](../doc/ci.md#cratesio-releases). Cargo
-resolves a requirement such as `nvx = "0.1.0-alpha.4"` to the newest
-pre-release of `0.1.0`, so require an exact version, such as
-`nvx = "=0.1.0-alpha.4"`, to keep one. It has a `Cargo.lock` of its own; a
+resolves a requirement such as `nvx = "0.2.0-alpha.1"` to the newest
+pre-release of `0.2.0`, so require an exact version, such as
+`nvx = "=0.2.0-alpha.1"`, to keep one. It has a `Cargo.lock` of its own; a
 workspace at the repository root would interact with the nested `openvmm/`
 workspace.
 
