@@ -262,10 +262,13 @@ profiling, or the interactive shell. On an interactive boot, `init` prints a
 stable distribution boot marker for Alpine and Azure Linux, and
 `guest/ubuntu/nvx-bashrc` prints Ubuntu's.
 
-The remaining common helpers handle shutdown, virtio-fs mounting, snapshot
-preparation, and the guest side of the time ABI. The Rust guest binaries
-provide shutdown, managed control, restore repair, device access, ingress
-announcements, and diagnostic probes.
+The other common scripts mount the live host share (`nvx-hostmount`) and
+prepare the guest for a snapshot and repair its restores (`nvx-snapshot`); the
+microVM tests and benchmarks run the rest as probes (`nvx-identity-probe`,
+`nvx-sandbox-smoke`, and `nvx-virtio-restore-probe`). The Rust guest binaries
+provide a layered root's PID 1, managed control, the guest side of the time
+ABI, restore repair, shutdown, device access, ingress announcements, and
+diagnostic probes.
 
 `ubuntu/packages.lock.json` pins the complete
 supplemental `.deb` closure installed without maintainer-script execution.
