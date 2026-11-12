@@ -1069,6 +1069,9 @@ ISA, scenarios, processors, memory, root and cycles, downloads only the guest
 components those selections read, and retains recursive per-cycle durations
 and distinct ISA/root/cell failure artifacts. No ARM duration partition has
 been measured; ARM cold reports cannot rebalance the existing full x86 shards.
+The shared argument binder runs directly with the native Python custom shell
+(`python` on Windows, `python3` on Linux), so self-hosted Windows runners need
+no Bash to validate the same inputs and emit the same JSON and step outputs.
 
 ARM producer, CLI, VMM, cold and adapter results feed `Required status check`;
 the repetition result is required for full runs and explicitly skipped for
