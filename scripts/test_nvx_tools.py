@@ -11082,16 +11082,18 @@ python3() {
         self.assertIn("\nname=openvmm\n", script)
         if sys.platform != "linux":
             return
-        sleep = shutil.which("sleep")
-        if sleep is None:
-            self.skipTest("needs sleep")
 
         with tempfile.TemporaryDirectory() as temporary:
             # A uniquely named stand-in, so that the test never ends a real
-            # OpenVMM of the account that runs it.
+            # OpenVMM of the account that runs it: Python, through a link
+            # with the stand-in's name, since the kernel names a process after
+            # the file that it runs. A copy of sleep would not do: a
+            # multi-call coreutils, such as Ubuntu 26.04's, knows no program
+            # by that name.
             stand_in = f"nvx-leak-{os.getpid() % 100000}"
             executable = Path(temporary) / stand_in
-            shutil.copy(sleep, executable)
+            executable.symlink_to(sys.executable)
+            sleeper = [str(executable), "-c", "import time; time.sleep(300)"]
             check = script.replace("\nname=openvmm\n", f"\nname={stand_in}\n", 1)
 
             def run(
@@ -11108,13 +11110,9 @@ python3() {
 
             # The second stand-in ignores SIGTERM, which leaves SIGKILL.
             for command, status in (
-                ([str(executable), "300"], -signal.SIGTERM),
+                (sleeper, -signal.SIGTERM),
                 (
-                    [
-                        "bash",
-                        "-c",
-                        f"trap '' TERM; exec {shlex.quote(str(executable))} 300",
-                    ],
+                    ["bash", "-c", f"trap '' TERM; exec {shlex.join(sleeper)}"],
                     -signal.SIGKILL,
                 ),
             ):
@@ -11142,7 +11140,9 @@ python3() {
                         self.assertIn(
                             ", which an earlier job left running\n", result.stdout
                         )
-                        self.assertIn(f"  command: {executable} 300\n", result.stdout)
+                        self.assertIn(
+                            f"  command: {' '.join(sleeper)}\n", result.stdout
+                        )
                         self.assertEqual(leaked.returncode, status)
                     finally:
                         if leaked.poll() is None:
@@ -11150,7 +11150,7 @@ python3() {
                             leaked.wait()
             # A zombie has already exited and its parent reaps it, and without
             # a leftover process, the step says nothing.
-            zombie = subprocess.Popen([executable, "300"])
+            zombie = subprocess.Popen(sleeper)
             try:
                 zombie.kill()
                 stat = Path(f"/proc/{zombie.pid}/stat")
