@@ -567,17 +567,6 @@ field nvx::host::nvxs::HostConnectionError::Rejected::0
 variant nvx::host::nvxs::HostConnectionError::Reset
 field nvx::host::nvxs::HostConnectionError::Reset::0
 variant nvx::host::nvxs::HostConnectionError::TimedOut
-mod nvx::host::platform
-const nvx::host::platform::SUPPORTED
-trait nvx::host::platform::Transport
-method nvx::host::platform::Transport::read
-method nvx::host::platform::Transport::try_clone_handle
-method nvx::host::platform::Transport::unread
-method nvx::host::platform::Transport::write_all
-type nvx::host::platform::TransportHandle
-fn nvx::host::platform::create_private_dir
-fn nvx::host::platform::file_identity
-fn nvx::host::platform::process_start_time
 mod nvx::host::process
 struct nvx::host::process::BootId
 method nvx::host::process::BootId::as_bytes

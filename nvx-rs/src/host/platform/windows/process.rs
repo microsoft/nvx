@@ -115,6 +115,7 @@ pub(super) fn wait_step(left: Duration) -> (u32, Duration) {
 ///
 /// OpenVMM always runs as the calling user, so a process that denies access cannot be the
 /// sandbox's VM, even if it reuses the recorded process ID.
+#[cfg(any(test, feature = "cli"))]
 fn open_existing_process(pid: u32, access: u32) -> io::Result<Option<OwnedHandle>> {
     if let Some(process) = open_handle(pid, access) {
         return Ok(Some(process));
@@ -127,7 +128,8 @@ fn open_existing_process(pid: u32, access: u32) -> io::Result<Option<OwnedHandle
 
 /// Returns the creation time of a live process, `None` if the process no longer exists or
 /// belongs to another user, or an error if its state cannot be determined.
-pub fn process_start_time(pid: u32) -> io::Result<Option<u64>> {
+#[cfg(any(test, feature = "cli"))]
+pub(crate) fn process_start_time(pid: u32) -> io::Result<Option<u64>> {
     let Some(process) =
         open_existing_process(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE)?
     else {

@@ -33,24 +33,6 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 use super::identity::handle_information;
 use super::{last_error, owned, raw, refuse_nul, wide_path};
 
-/// Creates `path` if needed. The directory inherits the ACL of its parent, which is private to
-/// the user under the default state root.
-pub fn create_private_dir(path: &Path) -> io::Result<()> {
-    match fs::create_dir(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
-    }
-    if fs::symlink_metadata(path)?.is_dir() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "{} is not a plain directory",
-            path.display()
-        )))
-    }
-}
-
 /// The `AceType` of an entry that allows access, which `winnt.h` defines.
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 /// The `AceType` of an entry that denies access, which `winnt.h` defines.

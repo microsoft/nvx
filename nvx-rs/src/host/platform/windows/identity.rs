@@ -30,7 +30,7 @@ use super::{owned, raw};
 /// system such as ReFS does not keep unique.
 ///
 /// The object is opened without access rights, which succeeds even while OpenVMM holds it open.
-pub fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
+pub(crate) fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
     let file = OpenOptions::new()
         .access_mode(0)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
