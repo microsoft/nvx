@@ -55,6 +55,7 @@ impl TestSystem {
     }
 
     /// Returns a direct agent with no cgroup hierarchy in its temporary directory.
+    #[cfg(feature = "cli")]
     pub(crate) fn with_direct() -> (tempfile::TempDir, Self) {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("cgroup");
@@ -200,6 +201,7 @@ impl System for TestSystem {
 /// Starts a native direct workload as the privileged agent does, without privileges: the child's
 /// credential calls are replaced and succeed, and it enters the working directory with the test's
 /// own credentials.
+#[cfg(feature = "cli")]
 pub(crate) fn start_as_privileged(
     request: init::ExecRequest,
 ) -> Result<init::Exec, init::StartFailure> {
@@ -207,6 +209,7 @@ pub(crate) fn start_as_privileged(
 }
 
 /// Starts a native direct workload whose simulated identity stage fails with `EPERM`.
+#[cfg(feature = "cli")]
 pub(crate) fn start_with_failing_credentials(
     request: init::ExecRequest,
 ) -> Result<init::Exec, init::StartFailure> {

@@ -75,7 +75,7 @@
 //! and holds them until it exits; it reads them whole, and records what each held, with its role
 //! and path, in `fake-openvmm-<token>-blocks.json` next to the kernel. The
 //! `fake_block_delay_ms=MS` token delays the opens. Its guest advertises the features of the
-//! sandbox agent, [`GuestFeatures::SANDBOX_AGENT`]. With `--microvm-lifecycle managed`, it serves
+//! sandbox agent, `GuestFeatures::SANDBOX_AGENT`. With `--microvm-lifecycle managed`, it serves
 //! the control console as above, and maps the sandbox's shares as above too: from the children of
 //! the aggregate export at `/run/nvx/hostfs/root`, as many as `nvx_maps=` announces, which `MAPS`
 //! requests deliver; it refuses a `--mount` share and `nvx_share=` tokens. With
