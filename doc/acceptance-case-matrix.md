@@ -341,7 +341,7 @@ suite in its shards, and the public sandbox scenarios in its guest and sandbox j
 | `run-console-restore` | retired | SL3.8b removes `nvx-rs run`'s restore of a raw OpenVMM snapshot and the boot console that it reattached on the terminal: `run --restore-snapshot` restores a named snapshot through `snapshot restore`'s path |
 | `sandbox-blocks` | kept |  |
 | `sandbox-gpt-layer` | kept | The [cold cells](#cold-boots) of a GPT disk, over a scratch upper and over a RAM upper, through `run`, and `provision` and `start` |
-| `sandbox-lifecycle` | kept | A [cold cell](#cold-boots): the EROFS layer over a scratch upper, through `provision` and `start`, which also reattach to the VM from a new process for each command |
+| `sandbox-lifecycle` | kept | A [cold cell](#cold-boots): the EROFS layer over a scratch upper, through `provision` and `start`, which also reattach to the VM from a new process for each command. Since SL4.4c, its request that writes 2 MiB checks that `exec` streams all of it, where it checked NVXC version 1's 1 MiB bound |
 | `sandbox-proxy-only` | kept | Its proxy-only network, over the EROFS layer and a scratch upper; it is no [cold cell](#cold-boots) of its own |
 | `sandbox-ram-upper` | kept | A [cold cell](#cold-boots): the EROFS layer over a RAM upper, through `run`, and `provision` and `start`. Since SL3.10c, it checks that `provision` records the configuration's format 10 |
 | `scratch-snapshot` | kept |  |
