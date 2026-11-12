@@ -1,8 +1,9 @@
 //! Host paths exposed to the guest through OpenVMM's aggregate virtio-fs export, for the blockless
 //! root and for the container root of a layered sandbox alike: the [`ExportPlan`] that a caller
-//! records, checks, and lowers into OpenVMM's options and the guest's mapping table. The planner
-//! that makes a plan of host paths, with its path rules, and the checks of a plan's host objects
-//! before each start belong to NVX's CLI, private to the crate (feature `cli`).
+//! records and checks, and that a VM's configuration lowers into OpenVMM's options and the guest's
+//! mapping table. The planner that makes a plan of host paths, with its path rules, the pins of
+//! the objects that a workload could move, and the checks of a plan's host objects before each
+//! start belong to NVX's CLI, private to the crate (feature `cli`).
 //!
 //! OpenVMM offers one virtio-fs device, which a plan attaches as an aggregate: a synthetic,
 //! read-only root that lists one child per exported host directory or file, named by its index,
@@ -14,7 +15,7 @@
 //! A plan names the mapped host paths, each read-only or read-write at its guest target; the host
 //! paths that OpenVMM hides inside them, and the paths inside those that stay visible; the paths to
 //! which the writes of a read-write directory are narrowed; and the host identity of the file
-//! operations.
+//! operations. It names paths only, never the objects at them.
 //!
 //! - A caller gives each target, such as the guest path that MXC's convention for Linux guests
 //!   derives from a resolved host path ([`fn@guest_path`]): a Windows path `C:\work\src` appears
@@ -31,11 +32,32 @@
 //! cannot keep a path read-only inside a writable part, so a read-only path there is refused on
 //! every host, while a read-write path inside a read-only directory is not. OpenVMM also hides the
 //! denied paths, except for the allowed paths inside them.
-//!
-//! The plan records the identities of the mapped and denied paths that a workload could move,
-//! those inside a writable part, and the CLI checks them again before each start.
 //! A policy that would need more children than OpenVMM offers is refused rather than served
 //! through the directories of its files, which would grant more than the files.
+//!
+//! # What the caller keeps stable
+//!
+//! `nvx` reads nothing on the host when it checks or lowers a plan, and OpenVMM resolves the
+//! plan's paths only when it starts, so the caller keeps them naming the objects that it means:
+//!
+//! - **The launch race.** From its own last check of the host until OpenVMM has opened the paths,
+//!   the caller keeps each path naming the object that it checked: an object that is renamed in
+//!   between, with another put at its path, leaves OpenVMM to export, hide, or show the other.
+//!   NVX's CLI checks a recorded plan just before it starts the VM, while no workload of the plan
+//!   runs. OpenVMM checks each child's kind again when it opens it.
+//! - **The writable-part recheck.** A workload that may write a part of a child, all of a writable
+//!   child without write paths or one of its write paths, can rename a mapped or denied object
+//!   strictly inside that part and put a decoy at its path, which a later launch of the same plan
+//!   would bind or hide instead. Before each launch of a plan with which a workload has run, the
+//!   caller checks that each such path still names the object that it named when the caller made
+//!   the plan. NVX's CLI pins the identities of those objects when it plans an export, and checks
+//!   them before each start; it pins no other object, since host edits often replace files.
+//! - **Durable denial.** A denial holds only while its path names the object that it hides: once
+//!   the object moves, a later launch hides whatever lies at the path then, and shows the object
+//!   wherever the export reaches it, and a denied path that names no object hides nothing that a
+//!   workload creates at it later. The caller keeps each denied object at its path for as long as
+//!   its denial is to hold, out of the reach of workloads or rechecked as above. NVX's CLI refuses
+//!   a denied path inside a mapped path that does not exist.
 
 mod guest_path;
 mod host_path;
@@ -172,7 +194,9 @@ impl Owner {
 }
 
 /// The host paths of one sandbox, as OpenVMM's aggregate export exports them: the children of the
-/// export, the bind mounts of the guest, and the host identity of the file operations.
+/// export, the bind mounts of the guest, and the host identity of the file operations. It names
+/// paths only, which the caller keeps stable, as [`host::filesystem`](crate::host::filesystem)
+/// describes.
 ///
 /// Callers record the plan, so its serde form is part of their state: a caller versions its
 /// records, and a record of another version is not read.
@@ -203,9 +227,6 @@ pub struct ExportChild {
     /// Canonical host paths inside the child that OpenVMM hides; the root itself, when it shows
     /// only its allowed paths.
     pub denied: Vec<PathBuf>,
-    /// Identities, at provision, of the denied paths that a workload could move: those inside a
-    /// writable part.
-    pub denied_identities: Vec<Option<FileIdentity>>,
     /// Canonical paths inside denied paths that stay visible.
     pub allowed: Vec<PathBuf>,
     /// Canonical paths to which OpenVMM limits the guest's writes; empty if the guest may modify
@@ -214,13 +235,40 @@ pub struct ExportChild {
 }
 
 /// Device and file index of a host object, which survive renames.
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct FileIdentity {
+pub(crate) struct FileIdentity {
     /// Device, or the volume serial number on Windows.
-    pub device: u64,
+    pub(crate) device: u64,
     /// Inode, or the file index on Windows.
-    pub index: u64,
+    pub(crate) index: u64,
+}
+
+/// An export that the CLI's planner made: the description of its paths, which the CLI passes to a
+/// VM's configuration, and the pins of the objects in it that a workload could move, which the CLI
+/// records beside the description and checks before each start.
+#[cfg(feature = "cli")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlannedExport {
+    /// The paths of the export.
+    pub(crate) description: ExportPlan,
+    /// The identities of the objects in it that a workload could move.
+    pub(crate) pins: Pins,
+}
+
+/// The identities, when the CLI planned an export, of the denied and mapped objects that a
+/// workload could move: those strictly inside a part of a child that the guest may write.
+#[cfg(feature = "cli")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Pins {
+    /// For each child of the export, in order, the identity of each of its denied paths, in order,
+    /// that a workload could move, and `None` for each other.
+    pub(crate) denied: Vec<Vec<Option<FileIdentity>>>,
+    /// For each bind of the export, in order, the identity of the object that it maps, if a
+    /// workload could move it.
+    pub(crate) binds: Vec<Option<FileIdentity>>,
 }
 
 /// One mapped host path.
@@ -235,10 +283,6 @@ pub struct Bind {
     pub target: String,
     /// Whether the guest mounts it read-only.
     pub read_only: bool,
-    /// Identity of the host object at provision, when it lies inside a writable part and a
-    /// workload could therefore move it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub identity: Option<FileIdentity>,
 }
 
 impl Bind {
@@ -307,7 +351,8 @@ pub(crate) struct ExportRequest<'a> {
     pub(crate) reserved: ReservedTargets<'a>,
 }
 
-/// Plans the export of `request`, or returns `None` if it maps nothing.
+/// Plans the export of `request`, with the pins of the objects in it that a workload could move,
+/// or returns `None` if it maps nothing.
 ///
 /// Mapped paths must exist, and resolve to paths that are valid UTF-8, so two spellings of one
 /// object (links, letter case, or short names) name one object. A mapping's target, which the
@@ -331,10 +376,13 @@ pub(crate) struct ExportRequest<'a> {
 /// path between them, and a write path must not be hidden. The caller owner needs a Linux host,
 /// on which no exported directory or file may belong to UID 0 or GID 0.
 ///
+/// The pins hold the identity of each denied and mapped object strictly inside a part of a child
+/// that the guest may write, which [`PlannedExport::verify`] checks before each start.
+///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when the request breaks
 /// these rules or exceeds a limit of OpenVMM or the guest agent.
 #[cfg(feature = "cli")]
-pub(crate) fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
+pub(crate) fn plan(request: &ExportRequest<'_>) -> Result<Option<PlannedExport>> {
     let unsupported = |message: String| Err(Error::unsupported(message));
     if request.owner == Owner::Caller && cfg!(windows) {
         return unsupported(CALLER_OWNER_ON_WINDOWS.to_owned());
@@ -428,6 +476,7 @@ pub(crate) fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
             .any(|(root, part)| path.starts_with(root) && part.moves(root, path))
     };
     let mut children = Vec::with_capacity(roots.len());
+    let mut denied_pins = Vec::with_capacity(roots.len());
     let mut policy_bytes = 0;
     for (root, part) in roots.iter().zip(&parts) {
         // Every root is a mapping itself, so the guest reaches all of it.
@@ -454,12 +503,12 @@ pub(crate) fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
             .iter()
             .map(|path| movable(path).then(|| identity(path)).transpose())
             .collect::<Result<Vec<_>>>()?;
+        denied_pins.push(denied_identities);
         children.push(ExportChild {
             root: root.clone(),
             file: !own.directory,
             writable: part.writable,
             denied: child_denied,
-            denied_identities,
             allowed: child_allowed,
             write: part.write.clone(),
         });
@@ -493,37 +542,47 @@ pub(crate) fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
                 entry.given.display()
             ));
         }
-        binds.push(Bind {
-            child,
-            source,
-            target: entry.target.clone(),
-            read_only: entry.read_only,
-            identity: movable(&entry.canonical)
+        binds.push((
+            Bind {
+                child,
+                source,
+                target: entry.target.clone(),
+                read_only: entry.read_only,
+            },
+            movable(&entry.canonical)
                 .then(|| identity(&entry.canonical))
                 .transpose()?,
-        });
+        ));
     }
-    binds.sort_by(|left, right| {
+    // The pins follow the binds into their order.
+    binds.sort_by(|(left, _), (right, _)| {
         depth(&left.target)
             .cmp(&depth(&right.target))
             .then_with(|| left.target.cmp(&right.target))
     });
+    let (binds, bind_pins) = binds.into_iter().unzip();
     if request.owner == Owner::Caller {
         check_caller_roots(&children, unsupported_inspection)?;
     }
-    let plan = ExportPlan {
-        children,
-        binds,
-        owner: request.owner,
+    let planned = PlannedExport {
+        description: ExportPlan {
+            children,
+            binds,
+            owner: request.owner,
+        },
+        pins: Pins {
+            denied: denied_pins,
+            binds: bind_pins,
+        },
     };
-    // Callers read a record of the plan back through `check`, which accepts every plan that this
-    // function makes.
+    // The CLI reads a record of the plan and its pins back through `check`, which accepts every
+    // plan that this function makes.
     debug_assert!(
-        plan.check(request.reserved).is_ok(),
+        planned.check(request.reserved).is_ok(),
         "the planner made a plan that its check refuses: {:?}",
-        plan.check(request.reserved)
+        planned.check(request.reserved)
     );
-    Ok(Some(plan))
+    Ok(Some(planned))
 }
 
 /// Resolves one requested mapping: its host path must exist as a directory or regular file that
@@ -704,8 +763,8 @@ fn unsupported_inspection(path: &Path, error: std::io::Error) -> Error {
     Error::unsupported(format!("cannot inspect {}", path.display())).with_source(error)
 }
 
-/// Returns the failure of [`ExportPlan::verify`] for `path`, which no longer names the host object
-/// that the plan found there.
+/// Returns the failure of [`PlannedExport::verify`] for `path`, which no longer names the host
+/// object that the plan found there.
 #[cfg(feature = "cli")]
 fn changed_object(path: &Path) -> Error {
     Error::other(format!(
@@ -715,7 +774,7 @@ fn changed_object(path: &Path) -> Error {
     ))
 }
 
-/// Returns the failure of [`ExportPlan::verify`] that cannot inspect `path`, an object that the
+/// Returns the failure of [`PlannedExport::verify`] that cannot inspect `path`, an object that the
 /// plan found, with `error`: a path that no longer reaches the object, as the host sees it, whose
 /// object went, a component of which is no longer a directory or is a link that [`loops`], or
 /// that the host may no longer search or open, names it no longer, [`changed_object`], and any

@@ -74,6 +74,7 @@ pub(crate) fn minimal_config() -> Value {
     json!({
         "cmdline": "",
         "export": null,
+        "export_pins": null,
         "format": 10,
         "hostname": "nvx-sandbox",
         "hypervisor": HYPERVISOR,
@@ -86,11 +87,29 @@ pub(crate) fn minimal_config() -> Value {
     })
 }
 
-/// Returns the configuration of a sandbox with shares, whose export plan is `export`.
+/// Returns the configuration of a sandbox with shares, whose export plan is `export`, and whose
+/// pins pin nothing, as for shares that each bind their child's root, which no workload can move,
+/// and that deny no path inside a part that the guest may write.
 pub(crate) fn shared_config(export: Value) -> Value {
     let mut config = minimal_config();
+    config["export_pins"] = unpinned(&export);
     config["export"] = export;
     config
+}
+
+/// Returns the pins of `export` that pin nothing: a `null` for each denied path of each child, and
+/// for each bind.
+pub(crate) fn unpinned(export: &Value) -> Value {
+    let nulls = |items: &Value| vec![Value::Null; items.as_array().unwrap().len()];
+    json!({
+        "binds": nulls(&export["binds"]),
+        "denied": export["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|child| nulls(&child["denied"]))
+            .collect::<Vec<_>>(),
+    })
 }
 
 /// Returns the bind of an export plan that binds its child `child` at `target`.
@@ -104,7 +123,6 @@ pub(crate) fn child(root: &str, writable: bool) -> Value {
     json!({
         "allowed": [],
         "denied": [],
-        "deniedIdentities": [],
         "root": root,
         "writable": writable,
         "write": [],
@@ -362,7 +380,6 @@ fn configurations() -> Vec<Configuration> {
             "children": [{
                 "allowed": ["{root/share/hidden/shown}"],
                 "denied": ["{root/share/hidden}"],
-                "deniedIdentities": [null],
                 "root": "{root/share}",
                 "writable": true,
                 "write": ["{root/share/writable}"],
@@ -386,7 +403,6 @@ fn configurations() -> Vec<Configuration> {
             "children": [{
                 "allowed": [],
                 "denied": [],
-                "deniedIdentities": [],
                 "file": true,
                 "root": "{root/single.txt}",
                 "writable": false,
@@ -1281,8 +1297,9 @@ fn start_without_openvmm(root: &Root) {
 
 /// A start refuses a configuration of a format that it does not read, one that is not an object,
 /// one that is not strict JSON, one without the fields of its format or with fields of other
-/// types or ranges, one whose format is not that of its shares, and one whose upper is not as its
-/// format records it, before it launches OpenVMM.
+/// types or ranges, one whose format is not that of its shares, one whose upper is not as its
+/// format records it, and one that holds an export without its pins or pins without an export,
+/// before it launches OpenVMM.
 fn malformed_configuration(root: &Root) {
     root.nvx_rs(&provision("{root/state}", &[]))
         .assert_silent_success();
@@ -1290,6 +1307,19 @@ fn malformed_configuration(root: &Root) {
     let config = json(&root.below("state/config.json"));
     let mut without_export = config.clone();
     without_export.as_object_mut().unwrap().remove("export");
+    // It records the export's pins beside the export, which a configuration that `nvx-rs` wrote
+    // before it pinned exported objects there lacks, and an export without its pins, or pins
+    // without an export, are malformed.
+    let mut without_export_pins = config.clone();
+    without_export_pins
+        .as_object_mut()
+        .unwrap()
+        .remove("export_pins");
+    let mut export_without_pins = config.clone();
+    export_without_pins["export"] =
+        json!({"binds": [bind(0, "/data", true)], "children": [child("/share", false)]});
+    let mut pins_without_export = config.clone();
+    pins_without_export["export_pins"] = json!({"binds": [], "denied": []});
     let mut memory_text = config.clone();
     memory_text["memory_mib"] = json!("256");
     let mut uid_beyond_32_bits = config.clone();
@@ -1336,6 +1366,10 @@ fn malformed_configuration(root: &Root) {
     network_with_a_broken_rule["network"]["egress_allow"] = json!(["192.0.2.0/33"]);
     let unsupported = &["unsupported format", "{root/state/config.json}"][..];
     let missing_export = &["sandbox configuration has no export plan"][..];
+    let missing_export_pins = &[
+        "sandbox configuration has no export pins",
+        "deprovision the sandbox and provision it again",
+    ][..];
     let malformed = &["sandbox configuration is malformed"][..];
     for (text, code, fragments) in [
         (
@@ -1395,6 +1429,13 @@ fn malformed_configuration(root: &Root) {
             "format-unsupported",
             missing_export,
         ),
+        (
+            without_export_pins.to_string(),
+            "format-unsupported",
+            missing_export_pins,
+        ),
+        (export_without_pins.to_string(), "io", malformed),
+        (pins_without_export.to_string(), "io", malformed),
         (
             format_1_with_export.to_string(),
             "format-unsupported",
@@ -1814,6 +1855,7 @@ fn start_refuses_recorded_shares_of_its_own_files() {
         shared["file"] = json!(Path::new(&host).is_file());
         let mut config = json(&root.below("control/state/config.json"));
         config["export"] = json!({"binds": [bind(0, "/data", true)], "children": [shared]});
+        config["export_pins"] = unpinned(&config["export"]);
         root.write("control/state/config.json", config.to_string());
         let before = root.snapshot();
         root.nvx_rs(&sandbox::<&str>("start", "{root/control/state}", &[]))

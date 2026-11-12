@@ -16,9 +16,10 @@ struct FilesystemPolicy {
 }
 
 /// Plans `policy` into the blockless root, each path at the guest path at which MXC's convention
-/// for Linux guests places it, [`convention`].
+/// for Linux guests places it, [`convention`], with the pins of the objects that a workload could
+/// move.
 #[cfg(feature = "cli")]
-fn plan(policy: &FilesystemPolicy) -> Result<Option<ExportPlan>> {
+fn planned(policy: &FilesystemPolicy) -> Result<Option<PlannedExport>> {
     let entries: Vec<(&str, &Path, String, bool)> = [
         ("filesystem.readonlyPaths", &policy.readonly_paths, true),
         ("filesystem.readwritePaths", &policy.readwrite_paths, false),
@@ -46,6 +47,12 @@ fn plan(policy: &FilesystemPolicy) -> Result<Option<ExportPlan>> {
         },
         ..plain_request(&mappings, ReservedTargets::BLOCKLESS_ROOT)
     })
+}
+
+/// Plans `policy` as [`planned`] does, and returns the description of the export alone.
+#[cfg(feature = "cli")]
+fn plan(policy: &FilesystemPolicy) -> Result<Option<ExportPlan>> {
+    Ok(planned(policy)?.map(|planned| planned.description))
 }
 
 /// Returns the guest path at which MXC's convention for Linux guests places `path`: the one that
@@ -630,7 +637,10 @@ fn denied_paths_belong_to_the_directory_that_contains_them() {
             base.join("elsewhere"),
         ],
     };
-    let mapping = plan(&policy).unwrap().unwrap();
+    let PlannedExport {
+        description: mapping,
+        pins,
+    } = planned(&policy).unwrap().unwrap();
     let denied: Vec<Vec<PathBuf>> = mapping
         .children
         .iter()
@@ -645,13 +655,7 @@ fn denied_paths_belong_to_the_directory_that_contains_them() {
         ]
     );
     // Nothing a workload could move is pinned without a read-write parent.
-    assert!(
-        mapping
-            .children
-            .iter()
-            .flat_map(|child| &child.denied_identities)
-            .all(Option::is_none)
-    );
+    assert!(pins.denied.iter().flatten().all(Option::is_none));
     assert_eq!(
         option_values(&mapping.openvmm_arguments(), "--mount-deny").len(),
         2
@@ -908,13 +912,8 @@ fn swapped_objects_fail_verification() {
         denied_paths: vec![base.join("work/src/secret")],
         ..FilesystemPolicy::default()
     };
-    let mapping = plan(&policy).unwrap().unwrap();
-    assert!(
-        mapping.children[0]
-            .denied_identities
-            .iter()
-            .all(Option::is_some)
-    );
+    let mapping = planned(&policy).unwrap().unwrap();
+    assert!(mapping.pins.denied[0].iter().all(Option::is_some));
     mapping.verify().unwrap();
     fs::rename(base.join("work/src/secret"), base.join("work/src/moved")).unwrap();
     fs::create_dir(base.join("work/src/secret")).unwrap();
@@ -932,7 +931,7 @@ fn swapped_objects_fail_verification() {
         readonly_paths: vec![base.join("tools")],
         ..FilesystemPolicy::default()
     };
-    let mapping = plan(&read_only).unwrap().unwrap();
+    let mapping = planned(&read_only).unwrap().unwrap();
     fs::remove_dir_all(base.join("tools")).unwrap();
     fs::create_dir(base.join("tools")).unwrap();
     mapping.verify().unwrap();
@@ -945,7 +944,7 @@ fn swapped_objects_fail_verification() {
         readonly_paths: vec![settings.clone(), base.join("tools")],
         ..FilesystemPolicy::default()
     };
-    let mapping = plan(&with_file).unwrap().unwrap();
+    let mapping = planned(&with_file).unwrap().unwrap();
     mapping.verify().unwrap();
     fs::remove_file(&settings).unwrap();
     fs::create_dir(&settings).unwrap();
@@ -970,18 +969,16 @@ fn objects_that_cannot_be_inspected_fail_verification_by_what_the_failure_shows(
         denied_paths: vec![base.join("work/src/secret")],
         ..FilesystemPolicy::default()
     };
-    let mapping = plan(&policy).unwrap().unwrap();
+    let mapping = planned(&policy).unwrap().unwrap();
     mapping.verify().unwrap();
     // A pinned object at a name that the host's file system cannot hold.
     let mut unnamed = mapping.clone();
-    let pinned = unnamed
-        .binds
-        .iter()
-        .position(|bind| bind.identity.is_some())
-        .unwrap();
-    unnamed.binds[pinned].source = "n".repeat(300);
-    let bind = &unnamed.binds[pinned];
-    let path = unnamed.children[bind.child].root.join(&bind.source);
+    let pinned = unnamed.pins.binds.iter().position(Option::is_some).unwrap();
+    unnamed.description.binds[pinned].source = "n".repeat(300);
+    let bind = &unnamed.description.binds[pinned];
+    let path = unnamed.description.children[bind.child]
+        .root
+        .join(&bind.source);
     let error = unnamed.verify().unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Io, "{error}");
     assert_eq!(
@@ -1062,8 +1059,9 @@ fn read_only_binds_that_the_host_cannot_enforce_fail_verification() {
     let directory = root();
     let base = directory.path();
     fs::create_dir_all(base.join("work/out/cache")).unwrap();
-    let refused = |mut mapping: ExportPlan, source: &str| {
+    let refused = |mut mapping: PlannedExport, source: &str| {
         let bind = mapping
+            .description
             .binds
             .iter_mut()
             .find(|bind| bind.source == source)
@@ -1077,7 +1075,7 @@ fn read_only_binds_that_the_host_cannot_enforce_fail_verification() {
         );
     };
     // A read-only path inside a read-write root, all of which the guest may write.
-    let writable_root = plan(&FilesystemPolicy {
+    let writable_root = planned(&FilesystemPolicy {
         readwrite_paths: vec![base.join("work"), base.join("work/src")],
         ..FilesystemPolicy::default()
     })
@@ -1087,7 +1085,7 @@ fn read_only_binds_that_the_host_cannot_enforce_fail_verification() {
     refused(writable_root, "src");
     // A read-only path inside a writable path of a read-only root, whose other read-only
     // paths stay read-only on the host.
-    let writable_path = plan(&FilesystemPolicy {
+    let writable_path = planned(&FilesystemPolicy {
         readonly_paths: vec![base.join("work"), base.join("work/src")],
         readwrite_paths: vec![base.join("work/out"), base.join("work/out/cache")],
         ..FilesystemPolicy::default()
@@ -1164,7 +1162,7 @@ fn explicit_targets_place_mappings_at_any_free_guest_path() {
         at(&work, "/mirror", false),
     ];
     let request = plain_request(&mappings, ReservedTargets::CONTAINER_ROOT);
-    let mapping = super::plan(&request).unwrap().unwrap();
+    let mapping = super::plan(&request).unwrap().unwrap().description;
     let roots: Vec<&Path> = mapping
         .children
         .iter()
@@ -1388,7 +1386,8 @@ fn policy_paths_hide_show_and_narrow_writes() {
         paths(&["src/secret/public"]),
         paths(&["out"]),
     );
-    let mapping = request(&whole, &denied, &allowed, &write).unwrap().unwrap();
+    let planned = request(&whole, &denied, &allowed, &write).unwrap().unwrap();
+    let mapping = &planned.description;
     let child = &mapping.children[0];
     let resolved = canonical(&work);
     assert!(child.writable);
@@ -1399,7 +1398,7 @@ fn policy_paths_hide_show_and_narrow_writes() {
     );
     assert_eq!(child.write, [resolved.join("out")]);
     // Writes are narrowed to `out`, so nothing outside it can move.
-    assert_eq!(child.denied_identities, [None]);
+    assert_eq!(planned.pins.denied[0], [None]);
     let arguments = mapping.openvmm_arguments();
     let text = |path: PathBuf| vec![display_path(&path)];
     assert_eq!(
@@ -1415,12 +1414,13 @@ fn policy_paths_hide_show_and_narrow_writes() {
         text(resolved.join("out"))
     );
     assert!(!arguments.contains(&"--mount-owner".to_owned()));
-    mapping.check(ReservedTargets::CONTAINER_ROOT).unwrap();
+    planned.check(ReservedTargets::CONTAINER_ROOT).unwrap();
 
     // A denied root shows only its allowed paths.
     let mapping = request(&whole, std::slice::from_ref(&work), &paths(&["src"]), &[])
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .description;
     assert_eq!(mapping.children[0].denied, std::slice::from_ref(&resolved));
     assert_eq!(mapping.children[0].allowed, [resolved.join("src")]);
     let error = request(&whole, std::slice::from_ref(&work), &[], &[]).unwrap_err();
@@ -1545,27 +1545,25 @@ fn narrowed_writes_pin_only_what_lies_in_writable_paths() {
         ..plain_request(&mappings, ReservedTargets::CONTAINER_ROOT)
     };
     let mapping = super::plan(&request).unwrap().unwrap();
-    let child = &mapping.children[0];
+    let child = &mapping.description.children[0];
     assert_eq!(child.write, [canonical(&work).join("out")]);
-    let pinned: Vec<bool> = child
-        .denied_identities
-        .iter()
-        .map(Option::is_some)
-        .collect();
+    let pinned: Vec<bool> = mapping.pins.denied[0].iter().map(Option::is_some).collect();
     assert_eq!(pinned, [true, false]);
     let pinned: Vec<(&str, bool)> = mapping
+        .description
         .binds
         .iter()
-        .map(|bind| (bind.target.as_str(), bind.identity.is_some()))
+        .zip(&mapping.pins.binds)
+        .map(|(bind, pin)| (bind.target.as_str(), pin.is_some()))
         .collect();
     assert_eq!(
         pinned,
         [("/cache", true), ("/src", false), ("/workspace", false)]
     );
-    // A record keeps every pin of the plan, and narrows writes only to paths that keep its
-    // read-write mappings writable.
+    // A record keeps a slot for each denied path and bind, and every pin of the plan, and
+    // narrows writes only to paths that keep its read-write mappings writable.
     mapping.check(ReservedTargets::CONTAINER_ROOT).unwrap();
-    let refused = |change: fn(&mut ExportPlan), expected: &str| {
+    let refused = |change: fn(&mut PlannedExport), expected: &str| {
         let mut changed = mapping.clone();
         change(&mut changed);
         let error = changed.check(ReservedTargets::CONTAINER_ROOT).unwrap_err();
@@ -1573,20 +1571,39 @@ fn narrowed_writes_pin_only_what_lies_in_writable_paths() {
         assert!(error.message().contains(expected), "{error}");
     };
     refused(
-        |changed| changed.children[0].denied_identities[0] = None,
+        |changed| changed.pins.denied[0][0] = None,
         "does not pin the denied path",
     );
     refused(
-        |changed| changed.binds[0].identity = None,
+        |changed| changed.pins.binds[0] = None,
         "does not pin the object that it maps at /cache",
     );
     refused(
-        |changed| changed.children[0].write = vec![changed.children[0].root.join("other")],
+        |changed| {
+            changed.pins.denied[0].pop();
+        },
+        "child 0 has 2 denied paths but 1 identities",
+    );
+    refused(
+        |changed| {
+            changed.pins.binds.pop();
+        },
+        "it pins 1 children and 2 binds, but it has 1 children and 3 binds",
+    );
+    refused(
+        |changed| changed.pins.denied.push(Vec::new()),
+        "it pins 2 children and 3 binds, but it has 1 children and 3 binds",
+    );
+    refused(
+        |changed| {
+            let child = &mut changed.description.children[0];
+            child.write = vec![child.root.join("other")];
+        },
         "which it maps read-write, stays read-only",
     );
     // Without write paths, the guest could move `src/secret` too.
     refused(
-        |changed| changed.children[0].write.clear(),
+        |changed| changed.description.children[0].write.clear(),
         "does not pin the denied path",
     );
     mapping.verify().unwrap();
@@ -1616,18 +1633,19 @@ fn the_caller_owner_reaches_openvmm_on_linux_hosts() {
 
         let owned = fs::metadata(&work).unwrap();
         if owned.uid() != 0 && owned.gid() != 0 {
-            let mapping = super::plan(&request).unwrap().unwrap();
+            let planned = super::plan(&request).unwrap().unwrap();
+            let mapping = &planned.description;
             assert_eq!(mapping.owner, Owner::Caller);
             let arguments = mapping.openvmm_arguments();
             assert_eq!(
                 arguments[arguments.len() - 2..],
                 ["--mount-owner", "caller"]
             );
-            mapping.verify().unwrap();
-            let record = serde_json::to_value(&mapping).unwrap();
+            planned.verify().unwrap();
+            let record = serde_json::to_value(mapping).unwrap();
             assert_eq!(record["owner"], "caller");
             assert_eq!(
-                serde_json::from_value::<ExportPlan>(record).unwrap(),
+                &serde_json::from_value::<ExportPlan>(record).unwrap(),
                 mapping
             );
         }
@@ -1651,7 +1669,8 @@ fn the_caller_owner_reaches_openvmm_on_linux_hosts() {
     // The default owner is left out of the record.
     let vmm = super::plan(&plain_request(&mappings, ReservedTargets::CONTAINER_ROOT))
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .description;
     assert!(serde_json::to_value(&vmm).unwrap().get("owner").is_none());
 }
 
@@ -1710,7 +1729,8 @@ fn read_write_mappings_to_which_writes_are_narrowed_stay_visible() {
         &[],
     )
     .unwrap()
-    .unwrap();
+    .unwrap()
+    .description;
     let child = &mapping.children[0];
     assert!(child.writable && child.write.is_empty());
     assert_eq!(child.denied, [canonical(&private)]);
@@ -1742,7 +1762,10 @@ fn denied_mapped_directories_inside_denied_ones_show_their_allowed_paths() {
     let both = [at(&tree, "/tree", false), at(&private, "/private", false)];
     // Each mapped directory is denied itself and shows the allowed path inside it; OpenVMM
     // needs only the outer denial, which hides the inner one already.
-    let mapping = request(&both, &[private.join("public")]).unwrap().unwrap();
+    let mapping = request(&both, &[private.join("public")])
+        .unwrap()
+        .unwrap()
+        .description;
     let child = &mapping.children[0];
     assert_eq!(child.denied, [canonical(&tree)]);
     assert_eq!(child.allowed, [canonical(&private).join("public")]);
@@ -1754,7 +1777,8 @@ fn denied_mapped_directories_inside_denied_ones_show_their_allowed_paths() {
         &[private.join("public")],
     )
     .unwrap()
-    .unwrap();
+    .unwrap()
+    .description;
     let child = &mapping.children[0];
     assert_eq!(child.root, canonical(&private));
     assert_eq!(child.denied, [canonical(&private)]);
@@ -1785,7 +1809,6 @@ fn recorded_plans_hold_no_more_policy_than_one_aggregate_accepts() {
             file: false,
             writable: true,
             denied: paths("denied"),
-            denied_identities: vec![None; 4],
             allowed: (0..4)
                 .map(|path| hidden.join(format!("allowed-{path}")))
                 .collect(),
@@ -1800,7 +1823,6 @@ fn recorded_plans_hold_no_more_policy_than_one_aggregate_accepts() {
                 source: String::new(),
                 target: format!("/c{index}"),
                 read_only: false,
-                identity: None,
             })
             .collect(),
         owner: Owner::Vmm,
@@ -1846,7 +1868,7 @@ fn mapped_paths_resolve_to_utf8_paths() {
 
 /// Plans the export of `mappings` into the blockless root.
 #[cfg(feature = "cli")]
-fn plan_blockless(mappings: &[Mapping<'_>]) -> Result<Option<ExportPlan>> {
+fn plan_blockless(mappings: &[Mapping<'_>]) -> Result<Option<PlannedExport>> {
     super::plan(&plain_request(mappings, ReservedTargets::BLOCKLESS_ROOT))
 }
 

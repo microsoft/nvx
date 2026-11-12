@@ -89,7 +89,6 @@ fn export(target: &str) -> ExportPlan {
             file: false,
             writable: false,
             denied: Vec::new(),
-            denied_identities: Vec::new(),
             allowed: Vec::new(),
             write: Vec::new(),
         }],
@@ -98,7 +97,6 @@ fn export(target: &str) -> ExportPlan {
             source: String::new(),
             target: target.to_owned(),
             read_only: true,
-            identity: None,
         }],
         owner: Owner::Vmm,
     }
@@ -1043,7 +1041,6 @@ fn mapping_table_is_the_exact_export_projection_counted_by_the_boot_token() {
         source: String::new(),
         target: "/zother".to_owned(),
         read_only: false,
-        identity: None,
     });
     plan.binds.push(Bind {
         source: "nested/file".to_owned(),
@@ -2078,7 +2075,6 @@ fn configuration_command_lines_keep_the_same_reserve_on_every_host() {
                     .join(format!("{index:03}-{}", "x".repeat(120)))
             })
             .collect();
-        plan.children[0].denied_identities = vec![None; 128];
         cold(VmConfig {
             filesystem: Some(plan),
             ..blockless()

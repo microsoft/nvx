@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use super::guest_path::depth;
 use super::host_path::{display_path, relative_text};
 use super::limits::policy_limits;
-use super::policy::{Writable, nearest_rule, policy_rule_problem};
+#[cfg(feature = "cli")]
+use super::policy::Writable;
+use super::policy::{nearest_rule, policy_rule_problem};
 use super::{
     Bind, ExportChild, ExportPlan, GUEST_EXPORT, MAX_AGGREGATE_POLICY_BYTES, MAX_CHILDREN,
     MAX_GUEST_PATH, Owner, ReservedTargets, outermost, resolved_path_problem, target_problem,
@@ -15,7 +17,8 @@ use super::{
 };
 #[cfg(feature = "cli")]
 use super::{
-    CALLER_OWNER_ON_WINDOWS, FileIdentity, changed_object, check_caller_roots, uninspected,
+    CALLER_OWNER_ON_WINDOWS, FileIdentity, PlannedExport, changed_object, check_caller_roots,
+    uninspected,
 };
 use crate::error::{Error, Result};
 #[cfg(feature = "cli")]
@@ -27,17 +30,16 @@ impl ExportPlan {
     /// that reserves `reserved`: at least one and at most [`MAX_CHILDREN`] children, none inside
     /// another, each an absolute host path below a volume's root, with its host paths in the form
     /// in which `plan` resolves them, whose policy paths lie inside it within OpenVMM's limits and
-    /// keep its rules, with an identity slot for each denied path, and writable exactly when a bind
-    /// maps a path of it read-write; and at least one and at most [`MAX_HOST_MAPPINGS`] binds,
-    /// each of a known child, from a relative source that holds the host's names joined with `/`,
-    /// that a guest path can hold, and that the child does not hide, unless it shows paths inside
-    /// it again, to a free guest target, parents before children, with a bind of every child's
-    /// root. A target inside another's must show what the other shows there. A child's write
-    /// paths must be the outermost paths of its read-write binds, unless one maps the whole child,
-    /// when they may narrow its writes only to paths that keep its other read-write binds
-    /// writable; and each denied or mapped object that a workload could move, strictly inside a
-    /// part of the child that the guest may write, must carry its identity. It reads nothing from
-    /// the host, which the CLI checks before each start.
+    /// keep its rules, and writable exactly when a bind maps a path of it read-write; and at least
+    /// one and at most [`MAX_HOST_MAPPINGS`] binds, each of a known child, from a relative source
+    /// that holds the host's names joined with `/`, that a guest path can hold, and that the child
+    /// does not hide, unless it shows paths inside it again, to a free guest target, parents before
+    /// children, with a bind of every child's root. A target inside another's must show what the
+    /// other shows there. A child's write paths must be the outermost paths of its read-write
+    /// binds, unless one maps the whole child, when they may narrow its writes only to paths that
+    /// keep its other read-write binds writable. It reads nothing from the host: the caller keeps
+    /// the paths naming the objects that it means, as [`host::filesystem`](crate::host::filesystem)
+    /// describes.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
     pub fn check(&self, reserved: ReservedTargets<'_>) -> Result<()> {
@@ -75,13 +77,6 @@ impl ExportPlan {
             {
                 return invalid(format!(
                     "child {index} has the host path {path:?}, which {problem}"
-                ));
-            }
-            if child.denied_identities.len() != child.denied.len() {
-                return invalid(format!(
-                    "child {index} has {} denied paths but {} identities",
-                    child.denied.len(),
-                    child.denied_identities.len()
                 ));
             }
             if let Some(path) = [&child.denied, &child.allowed, &child.write]
@@ -291,114 +286,6 @@ impl ExportPlan {
                     ));
                 }
             }
-            // A workload that may write a part of the child could move an object there and put a
-            // decoy at its path, so the plan pins each denied and mapped object in such a part, as
-            // `plan` does, for `verify` to check it at the next start.
-            let part = Writable {
-                writable: child.writable,
-                write: child.write.clone(),
-            };
-            if let Some((path, _)) = child
-                .denied
-                .iter()
-                .zip(&child.denied_identities)
-                .find(|(path, identity)| identity.is_none() && part.moves(&child.root, path))
-            {
-                return invalid(format!(
-                    "child {index} does not pin the denied path {}, which a workload could move",
-                    path.display()
-                ));
-            }
-            if let Some(bind) = self.binds.iter().find(|bind| {
-                bind.child == index
-                    && bind.identity.is_none()
-                    && part.moves(&child.root, &bound(bind))
-            }) {
-                return invalid(format!(
-                    "it does not pin the object that it maps at {}, which a workload could move",
-                    bind.target
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// Checks that the host keeps every read-only mapping read-only, that every child's root is
-    /// still the kind of object that [`crate::host::filesystem::plan`] exported, that every mapped and denied path inside a
-    /// writable part still names the object it named then, and that the host still supports the
-    /// owner.
-    ///
-    /// [`crate::host::filesystem::plan`] refuses a read-only path inside a part that the guest may write, which only the
-    /// guest's bind mount would keep read-only; a recorded plan that holds one fails with
-    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported). A file that a directory replaced
-    /// would otherwise grant the whole directory, and a workload that may write a directory could
-    /// rename a denied or mapped object inside it and put a decoy at its path, so the next start
-    /// would hide or bind the decoy instead; these fail with
-    /// [`ErrorKind::Other`](crate::ErrorKind::Other), as does a path that no longer reaches its
-    /// object, as the host sees it: one whose object went, one a component of which is no longer a
-    /// directory or is a link that loops, as a link that names itself does, and one that the host
-    /// may no longer search or open. With the caller owner, the
-    /// host must be a Linux host, and no exported directory or file may belong to UID 0 or GID 0;
-    /// these fail with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported). Any other
-    /// failure to inspect an object, which shows nothing of the object, fails with
-    /// [`ErrorKind::Io`](crate::ErrorKind::Io), with its cause. Run it while the VM is stopped, so
-    /// that no workload can race with it; OpenVMM checks each child's kind again when it opens it.
-    #[cfg(feature = "cli")]
-    pub(crate) fn verify(&self) -> Result<()> {
-        for bind in self.binds.iter().filter(|bind| bind.read_only) {
-            let (child, path) = self.bound(bind)?;
-            // Without writable paths, the guest may write all of a writable child.
-            if child.writable
-                && (child.write.is_empty()
-                    || child.write.iter().any(|write| path.starts_with(write)))
-            {
-                return Err(Error::unsupported(format!(
-                    "the sandbox maps {} read-only inside a part of {} that the guest may write, \
-                     where the host cannot keep it read-only; deprovision the sandbox, and \
-                     provision it again without read-only paths inside read-write directories",
-                    path.display(),
-                    child.root.display()
-                )));
-            }
-        }
-        for child in &self.children {
-            let kind_matches = match fs::symlink_metadata(&child.root) {
-                Ok(metadata) if child.file => metadata.is_file(),
-                Ok(metadata) => metadata.is_dir(),
-                Err(error) => return Err(uninspected(&child.root, error)),
-            };
-            if !kind_matches {
-                return Err(changed_object(&child.root));
-            }
-        }
-        for bind in &self.binds {
-            let Some(expected) = bind.identity else {
-                continue;
-            };
-            let (_, path) = self.bound(bind)?;
-            match platform::file_identity(&path) {
-                Ok((device, index)) if (FileIdentity { device, index }) == expected => {}
-                Ok(_) => return Err(changed_object(&path)),
-                Err(error) => return Err(uninspected(&path, error)),
-            }
-        }
-        for child in &self.children {
-            for (path, expected) in child.denied.iter().zip(&child.denied_identities) {
-                let Some(expected) = expected else {
-                    continue;
-                };
-                match platform::file_identity(path) {
-                    Ok((device, index)) if (FileIdentity { device, index }) == *expected => {}
-                    Ok(_) => return Err(changed_object(path)),
-                    Err(error) => return Err(uninspected(path, error)),
-                }
-            }
-        }
-        if self.owner == Owner::Caller {
-            if cfg!(windows) {
-                return Err(Error::unsupported(CALLER_OWNER_ON_WINDOWS));
-            }
-            check_caller_roots(&self.children, uninspected)?;
         }
         Ok(())
     }
@@ -421,7 +308,7 @@ impl ExportPlan {
 
     /// Kernel command-line token that tells the guest agent how many bind mounts to expect over
     /// the control channel.
-    pub fn kernel_token(&self) -> String {
+    pub(crate) fn kernel_token(&self) -> String {
         format!("{MAPS_TOKEN}{}", self.binds.len())
     }
 
@@ -440,7 +327,7 @@ impl ExportPlan {
     /// OpenVMM options that export the plan's directories and files at [`GUEST_EXPORT`], with
     /// their access policies and the owner. A file child carries the `file` flag, so OpenVMM
     /// refuses a directory that replaced the file.
-    pub fn openvmm_arguments(&self) -> Vec<String> {
+    pub(crate) fn openvmm_arguments(&self) -> Vec<String> {
         let mut arguments = vec!["--mount-aggregate".to_owned(), GUEST_EXPORT.to_owned()];
         for (index, child) in self.children.iter().enumerate() {
             let mode = if child.writable { "rw" } else { "ro" };
@@ -485,5 +372,163 @@ impl ExportChild {
     /// Returns the paths to which OpenVMM limits the guest's writes.
     fn write_paths(&self) -> &[PathBuf] {
         &self.write
+    }
+}
+
+#[cfg(feature = "cli")]
+impl PlannedExport {
+    /// Checks that an export read from the CLI's record is one that `plan` could make for a root
+    /// that reserves `reserved`: its description passes [`ExportPlan::check`], and its pins hold a
+    /// slot for each child, with one for each of its denied paths, and one for each bind, and pin
+    /// each denied or mapped object that a workload could move, strictly inside a part of its
+    /// child that the guest may write. It reads nothing from the host, which
+    /// [`verify`](Self::verify) checks before each start.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
+    pub(crate) fn check(&self, reserved: ReservedTargets<'_>) -> Result<()> {
+        let Self { description, pins } = self;
+        description.check(reserved)?;
+        let invalid = |reason: String| {
+            Err(Error::unsupported(format!(
+                "the recorded export plan is invalid: {reason}"
+            )))
+        };
+        if pins.denied.len() != description.children.len()
+            || pins.binds.len() != description.binds.len()
+        {
+            return invalid(format!(
+                "it pins {} children and {} binds, but it has {} children and {} binds",
+                pins.denied.len(),
+                pins.binds.len(),
+                description.children.len(),
+                description.binds.len()
+            ));
+        }
+        for (index, (child, denied)) in description.children.iter().zip(&pins.denied).enumerate() {
+            if denied.len() != child.denied.len() {
+                return invalid(format!(
+                    "child {index} has {} denied paths but {} identities",
+                    child.denied.len(),
+                    denied.len()
+                ));
+            }
+            // A workload that may write a part of the child could move an object there and put a
+            // decoy at its path, so the plan pins each denied and mapped object in such a part, as
+            // `plan` does, for `verify` to check it at the next start.
+            let part = Writable {
+                writable: child.writable,
+                write: child.write.clone(),
+            };
+            if let Some((path, _)) = child
+                .denied
+                .iter()
+                .zip(denied)
+                .find(|(path, identity)| identity.is_none() && part.moves(&child.root, path))
+            {
+                return invalid(format!(
+                    "child {index} does not pin the denied path {}, which a workload could move",
+                    path.display()
+                ));
+            }
+            if let Some((bind, _)) =
+                description
+                    .binds
+                    .iter()
+                    .zip(&pins.binds)
+                    .find(|(bind, identity)| {
+                        bind.child == index
+                            && identity.is_none()
+                            && description
+                                .bound(bind)
+                                .is_ok_and(|(_, path)| part.moves(&child.root, &path))
+                    })
+            {
+                return invalid(format!(
+                    "it does not pin the object that it maps at {}, which a workload could move",
+                    bind.target
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks that the host keeps every read-only mapping read-only, that every child's root is
+    /// still the kind of object that `plan` exported, that every pinned object is still the one
+    /// that its path named then, and that the host still supports the owner, before the CLI
+    /// passes the description to a VM's configuration.
+    ///
+    /// `plan` refuses a read-only path inside a part that the guest may write, which only the
+    /// guest's bind mount would keep read-only; a recorded plan that holds one fails with
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported). A file that a directory replaced
+    /// would otherwise grant the whole directory, and a workload that may write a directory could
+    /// rename a denied or mapped object inside it and put a decoy at its path, so the next start
+    /// would hide or bind the decoy instead; these fail with
+    /// [`ErrorKind::Other`](crate::ErrorKind::Other), as does a path that no longer reaches its
+    /// object, as the host sees it: one whose object went, one a component of which is no longer a
+    /// directory or is a link that loops, as a link that names itself does, and one that the host
+    /// may no longer search or open. With the caller owner, the host must be a Linux host, and no
+    /// exported directory or file may belong to UID 0 or GID 0; these fail with
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported). Any other failure to inspect an
+    /// object, which shows nothing of the object, fails with [`ErrorKind::Io`](crate::ErrorKind::Io),
+    /// with its cause. Run it after [`check`](Self::check), while the VM is stopped, so that no
+    /// workload can race with it; OpenVMM checks each child's kind again when it opens it.
+    pub(crate) fn verify(&self) -> Result<()> {
+        let Self { description, pins } = self;
+        for bind in description.binds.iter().filter(|bind| bind.read_only) {
+            let (child, path) = description.bound(bind)?;
+            // Without writable paths, the guest may write all of a writable child.
+            if child.writable
+                && (child.write.is_empty()
+                    || child.write.iter().any(|write| path.starts_with(write)))
+            {
+                return Err(Error::unsupported(format!(
+                    "the sandbox maps {} read-only inside a part of {} that the guest may write, \
+                     where the host cannot keep it read-only; deprovision the sandbox, and \
+                     provision it again without read-only paths inside read-write directories",
+                    path.display(),
+                    child.root.display()
+                )));
+            }
+        }
+        for child in &description.children {
+            let kind_matches = match fs::symlink_metadata(&child.root) {
+                Ok(metadata) if child.file => metadata.is_file(),
+                Ok(metadata) => metadata.is_dir(),
+                Err(error) => return Err(uninspected(&child.root, error)),
+            };
+            if !kind_matches {
+                return Err(changed_object(&child.root));
+            }
+        }
+        for (bind, expected) in description.binds.iter().zip(&pins.binds) {
+            let Some(expected) = expected else {
+                continue;
+            };
+            let (_, path) = description.bound(bind)?;
+            match platform::file_identity(&path) {
+                Ok((device, index)) if (FileIdentity { device, index }) == *expected => {}
+                Ok(_) => return Err(changed_object(&path)),
+                Err(error) => return Err(uninspected(&path, error)),
+            }
+        }
+        for (child, identities) in description.children.iter().zip(&pins.denied) {
+            for (path, expected) in child.denied.iter().zip(identities) {
+                let Some(expected) = expected else {
+                    continue;
+                };
+                match platform::file_identity(path) {
+                    Ok((device, index)) if (FileIdentity { device, index }) == *expected => {}
+                    Ok(_) => return Err(changed_object(path)),
+                    Err(error) => return Err(uninspected(path, error)),
+                }
+            }
+        }
+        if description.owner == Owner::Caller {
+            if cfg!(windows) {
+                return Err(Error::unsupported(CALLER_OWNER_ON_WINDOWS));
+            }
+            check_caller_roots(&description.children, uninspected)?;
+        }
+        Ok(())
     }
 }

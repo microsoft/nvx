@@ -937,14 +937,12 @@ mod nvx::host::filesystem
 struct nvx::host::filesystem::Bind
 field nvx::host::filesystem::Bind::child
 method nvx::host::filesystem::Bind::guest_source
-field nvx::host::filesystem::Bind::identity
 field nvx::host::filesystem::Bind::read_only
 field nvx::host::filesystem::Bind::source
 field nvx::host::filesystem::Bind::target
 struct nvx::host::filesystem::ExportChild
 field nvx::host::filesystem::ExportChild::allowed
 field nvx::host::filesystem::ExportChild::denied
-field nvx::host::filesystem::ExportChild::denied_identities
 field nvx::host::filesystem::ExportChild::file
 field nvx::host::filesystem::ExportChild::root
 field nvx::host::filesystem::ExportChild::writable
@@ -954,12 +952,7 @@ field nvx::host::filesystem::ExportPlan::binds
 method nvx::host::filesystem::ExportPlan::check
 field nvx::host::filesystem::ExportPlan::children
 method nvx::host::filesystem::ExportPlan::guest_table
-method nvx::host::filesystem::ExportPlan::kernel_token
-method nvx::host::filesystem::ExportPlan::openvmm_arguments
 field nvx::host::filesystem::ExportPlan::owner
-struct nvx::host::filesystem::FileIdentity
-field nvx::host::filesystem::FileIdentity::device
-field nvx::host::filesystem::FileIdentity::index
 const nvx::host::filesystem::GUEST_EXPORT
 const nvx::host::filesystem::MAX_CHILDREN
 enum nvx::host::filesystem::Owner

@@ -616,6 +616,7 @@ fn cold_config(options: &Options, rules: &NativeRules) -> Result<VmConfig> {
             read_only: *access == MountAccess::ReadOnly,
         })
         .collect();
+    // A run launches its export right after it plans it, and never again, so it checks no pins.
     let filesystem = filesystem::plan(&ExportRequest {
         mappings: &mappings,
         denied: PathList {
@@ -637,7 +638,8 @@ fn cold_config(options: &Options, rules: &NativeRules) -> Result<VmConfig> {
         },
         reserved: ReservedTargets::BLOCKLESS_ROOT,
     })
-    .map_err(error_with_cause)?;
+    .map_err(error_with_cause)?
+    .map(|planned| planned.description);
     cold_vm_config(options, rules, filesystem)
 }
 
