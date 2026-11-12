@@ -100,19 +100,19 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
         rationale=(
             "A microVM has 1, 2, 4, or 8 virtual processors, whose CPU "
             "profiles serve Intel and AMD hosts alone, so the other vendors' "
-            "support stays off. Clone repair and the snapshot helper bring "
-            "processors online after a restore. The local APIC driver keeps "
-            "its x2APIC support, and PAT, on MTRRs, gives mappings their "
-            "memory types, as on every x86 kernel."
+            "support stays off. nvx-init's restore repair and the snapshot "
+            "helper bring processors online after a restore. The local APIC "
+            "driver keeps its x2APIC support, and PAT, on MTRRs, gives "
+            "mappings their memory types, as on every x86 kernel."
         ),
         consumers=(
             "every multiprocessor microVM",
-            "nvx::guest::clone::repair",
+            "nvx::guest::snapshot::capture",
             "guest/common/nvx-snapshot",
         ),
         validation=(
             "the --processors runs of the microVM scenarios",
-            "the runtime adapter's clone tests",
+            "the restore-processors and platform-restore-processors scenarios",
         ),
         settings=(
             "CONFIG_SMP=y",
@@ -255,7 +255,7 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
         ),
         consumers=(
             "nvx-managed-agent",
-            "nvx-init-agent",
+            "nvx-init",
             "nvx-rs run",
             "nvx-rs sandbox",
             "the test-microvm and benchmark harnesses",
@@ -340,17 +340,14 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
     ),
     KernelFeature(
         name="memory-hotplug",
-        summary="Memory blocks that clone repair adds through the probe interface",
+        summary="Memory blocks that restore repair adds through the probe interface",
         rationale=(
-            "After a restore, clone repair and the snapshot helper add the "
-            "memory blocks of the restored RAM through "
+            "After a restore, nvx-init's restore repair and the snapshot "
+            "helper add the memory blocks of the restored RAM through "
             "/sys/devices/system/memory/probe and online them themselves."
         ),
-        consumers=("nvx::guest::clone::repair", "guest/common/nvx-snapshot"),
-        validation=(
-            "the runtime adapter's clone tests",
-            "the snapshot scenarios with a RAM target",
-        ),
+        consumers=("nvx::guest::snapshot::capture", "guest/common/nvx-snapshot"),
+        validation=("the restore-memory scenario",),
         settings=(
             "CONFIG_MEMORY_HOTPLUG=y",
             "CONFIG_ARCH_MEMORY_PROBE=y",
@@ -384,11 +381,14 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
             "(nvx::guest::gpt); no NVX image has an MBR partition table."
         ),
         consumers=(
-            "nvx-init-agent",
+            "nvx-init",
             "nvx::guest::root",
-            "nvx::guest::clone",
+            "nvx::guest::activation",
         ),
-        validation=("the sandbox scenarios", "the runtime adapter's GPT tests"),
+        validation=(
+            "the sandbox scenarios",
+            "the sandbox-gpt-layer and snapshot-tiers scenarios",
+        ),
         settings=(
             "CONFIG_BLOCK=y",
             "CONFIG_BLK_DEV=y",
@@ -401,7 +401,7 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
         name="sandbox-filesystems",
         summary="EROFS layers under overlayfs, on an ext4 or tmpfs upper",
         rationale=(
-            "The layered sandbox root mounts EROFS layers, compressed with "
+            "nvx-init's layered root mounts EROFS layers, compressed with "
             "LZ4 or Zstandard, under overlayfs, whose upper is the ext4 "
             "scratch or a tmpfs (doc/design/4.1-guest-filesystem-and-image-model.md). "
             "Every layer keeps extended attributes, POSIX ACLs, and security "
@@ -409,7 +409,7 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
             "never follows a redirect that it did not create, and the scratch "
             "template's metadata checksums use the optimized CRCs."
         ),
-        consumers=("nvx-init-agent", "nvx::guest::root", "generic sandbox workloads"),
+        consumers=("nvx-init", "nvx::guest::root", "generic sandbox workloads"),
         validation=("the sandbox scenarios", "the RAM-upper scenarios"),
         settings=(
             "CONFIG_EXT4_FS=y",
@@ -431,27 +431,28 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
     ),
     KernelFeature(
         name="sandbox-isolation",
-        summary="The namespaces, cgroups, seccomp, and BPF of the sandbox",
+        summary="The namespaces, cgroups, seccomp, and BPF of programs in a guest",
         rationale=(
-            "The workload gets private mount, PID, and UTS namespaces, and "
-            "sibling memory and process-count cgroups whose freezing captures "
-            "it; cgroup writeback charges its dirty scratch pages to its "
-            "memory cgroup (doc/design/4.3-isolation-and-resource-model.md). "
-            "Generic sandbox workloads filter system calls with seccomp and "
-            "control devices with cgroup BPF programs, and unprivileged BPF "
-            "stays off. Without capabilities or user namespaces, workloads "
-            "create no namespaces of their own, so the other namespace and "
-            "cgroup controller types stay off."
+            "Since SL7.8b, SL7.8c, and SL6.11b (#1123) deleted the old layered "
+            "sandbox root, no NVX component creates a cgroup, or a namespace "
+            "other than a mount namespace: nvx-init and the managed agent run "
+            "their workloads in the namespaces that they run in, without "
+            "cgroups (doc/design/4.3-isolation-and-resource-model.md). Only "
+            "root programs in a guest, such as an nvx-rs run shell, can use "
+            "the PID and UTS namespaces, the memory, process-count, and block "
+            "cgroups with their writeback, and the cgroup BPF programs that "
+            "this feature keeps, and NAMESPACES also stays for NET_NS "
+            "(guest-internal-networking). Workloads, which hold no "
+            "capabilities, can filter their system calls with seccomp, and "
+            "unprivileged BPF stays off. Without capabilities or user "
+            "namespaces, workloads create no namespaces of their own, so the "
+            "other namespace and cgroup controller types stay off."
         ),
         consumers=(
-            "nvx-init-agent",
-            "nvx-container-launch",
-            "nvx::guest::cgroup",
-            "nvx::guest::entry",
-            "guest/common/nvx-snapshot",
+            "root programs in a guest, such as an nvx-rs run shell",
             "generic sandbox workloads",
         ),
-        validation=("the sandbox and managed scenarios", "the runtime adapter"),
+        validation=("build-kernel's sandbox group",),
         settings=(
             "CONFIG_NAMESPACES=y",
             "CONFIG_UTS_NS=y",
@@ -526,7 +527,7 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
             "Live host shares and a managed sandbox's host export are "
             "virtio-fs mounts (doc/design/3.6-host-filesystem.md)."
         ),
-        consumers=("nvx-hostmount", "nvx-init-agent"),
+        consumers=("nvx-hostmount", "nvx-init", "nvx::guest::root"),
         validation=("the virtio-fs scenarios",),
         settings=("CONFIG_FUSE_FS=y", "CONFIG_VIRTIO_FS=y"),
     ),
@@ -639,7 +640,7 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
             "and sgetmask calls and 16-bit segments, stay off."
         ),
         consumers=("generic sandbox workloads", "the guest agents"),
-        validation=("every microVM scenario", "the runtime adapter"),
+        validation=("every microVM scenario",),
         settings=(
             "CONFIG_MULTIUSER=y",
             "CONFIG_SYSVIPC=y",
@@ -676,21 +677,15 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
     ),
     KernelFeature(
         name="diagnostics",
-        summary="Readable oopses and the sysrq trigger of the entry contract",
-        rationale=(
-            "Oopses and BUGs carry symbol and error names, which CI logs "
-            "need. The layered sandbox entry makes /proc/sysrq-trigger "
-            "read-only for user ID 0, which the runtime adapter's "
-            "vm_layered test checks."
-        ),
-        consumers=("CI logs", "nvx::guest::sys::entry"),
-        validation=("the runtime adapter's vm_layered test",),
+        summary="Readable oopses and BUGs",
+        rationale=("Oopses and BUGs carry symbol and error names, which CI logs need."),
+        consumers=("CI logs",),
+        validation=("build-kernel's kernel configuration checks",),
         settings=(
             "CONFIG_BUG=y",
             "CONFIG_DEBUG_BUGVERBOSE=y",
             "CONFIG_KALLSYMS=y",
             "CONFIG_SYMBOLIC_ERRNAME=y",
-            "CONFIG_MAGIC_SYSRQ=y",
         ),
     ),
 )
