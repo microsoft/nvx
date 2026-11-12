@@ -1311,12 +1311,14 @@ class _FakeSandboxCli:
                     + b"NVX-UBUNTU-SANDBOX-OK uid=65534 gid=65534\n"
                 )
         elif entrypoint == "/usr/bin/head":
-            size = sandbox_lifecycle_tests.OUTPUT_LIMIT_BYTES
-            if "unbounded-output" in self.faults:
-                size = int(arguments[1])
+            size = int(arguments[1])
+            if "capped-output" in self.faults:
+                # The guest killed the workload at version 1's bound.
+                returncode, category = 125, "output-limit"
+                size = 1024 * 1024
             elif "short-output" in self.faults:
-                size -= sandbox_lifecycle_tests.OUTPUT_CHUNK_BYTES
-            returncode, category, stdout = 125, "output-limit", bytes(size)
+                size -= 32 * 1024
+            stdout = bytes(size)
         elif entrypoint != "/bin/true":
             raise AssertionError(f"unexpected workload {entrypoint}")
         if report is not None:
@@ -1640,7 +1642,7 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
                 "sandbox-lifecycle-identity-outcome.json",
                 "sandbox-lifecycle-runtime.json",
                 "sandbox-lifecycle-probe.log",
-                "sandbox-lifecycle-output-limit-outcome.json",
+                "sandbox-lifecycle-streamed-output-outcome.json",
                 "sandbox-lifecycle-outcome.json",
                 "sandbox-lifecycle-openvmm.log",
             },
@@ -1713,8 +1715,8 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
             "duplicate-start": "start returned 0, expected 1",
             "exec-loses-state": "the state-reading request returned status 1",
             "probe-fails": "exec returned 1, expected 0",
-            "unbounded-output": "the output limit forwarded 2097152 stdout",
-            "short-output": "the output limit forwarded 1015808 stdout",
+            "capped-output": "exec returned 125, expected 0",
+            "short-output": "the streamed output forwarded 2064384 stdout",
             "overwrite-report": "exec returned 0, expected 1",
             "stop-leaks-capability": "after stop: the state directory holds",
             "stop-leaks-process": "OpenVMM still runs after stop",
