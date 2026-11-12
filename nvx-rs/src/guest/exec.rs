@@ -10,8 +10,7 @@
 //!
 //! It needs neither NVX's control protocol nor an async runtime, and it keeps no policy: the
 //! caller decides which programs run and how many at once, where their output goes, how much of
-//! it to take, and what each outcome means. NVX's managed agent is one caller, which runs one
-//! execution at a time and forwards its output and outcome as NVXC frames.
+//! it to take, and what each outcome means.
 //!
 //! # Driving
 //!
@@ -691,13 +690,6 @@ impl Execution {
         self.child.status()
     }
 
-    /// Returns whether either output stream is still open, for a caller that, as NVX's managed
-    /// agent does, drives the execution until the program's status is known and its output
-    /// closed, and then takes its last events.
-    pub(crate) fn has_open_output(&self) -> bool {
-        self.outputs.iter().any(Output::is_open)
-    }
-
     /// Lets the execution read `bytes` more of `stream`: its flow-control seam. It reads a
     /// stream only while the stream has an allowance, and each output event uses up as much of
     /// it. An allowance that reaches `usize::MAX` never runs out.
@@ -855,26 +847,6 @@ impl Execution {
             self.exited();
         }
         observed
-    }
-
-    /// Waits until the program ends, collects its status, and returns it, for a caller that
-    /// leaves the status to the execution, and must stop at once once it has ended the program.
-    /// A collector of the caller's that took the status first makes it fail with `ECHILD`, as
-    /// [`next_event`](Self::next_event) does, after which the execution leaves the status to that
-    /// collector, and treats the program as ended.
-    pub(crate) fn wait(&mut self) -> io::Result<ExitStatus> {
-        match self.child.wait() {
-            Ok(status) => {
-                self.exited();
-                Ok(status)
-            }
-            Err(error) => {
-                if error.raw_os_error() == Some(Errno::ECHILD as i32) {
-                    self.taken();
-                }
-                Err(error)
-            }
-        }
     }
 
     /// Returns the descriptors that move the execution on, each with what it waits on, which the

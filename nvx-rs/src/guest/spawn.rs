@@ -31,7 +31,7 @@
 //!
 //! No step needs NVX's control protocol, its managed agent and helper, or its workload identity:
 //! the caller chooses the program, and the identity, if any, that an entry gives it, or as which
-//! the child checks its working directory. NVX's managed agent is one caller.
+//! the child checks its working directory.
 //!
 //! The caller owns the child. [`Spawned::id`] names it, and the caller collects its status, for
 //! example through a [`process::Child`](super::process::Child): this module never waits for a

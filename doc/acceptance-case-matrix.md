@@ -482,8 +482,8 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/guest/activation/state.rs - guest::activation::state::Activation (line 56)` | kept |  |
 | `nvx-rs/src/guest/cgroup.rs - guest::cgroup (line 36)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
 | `nvx-rs/src/guest/entry.rs - guest::entry (line 90)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
-| `nvx-rs/src/guest/exec.rs - guest::exec (line 80)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
-| `nvx-rs/src/guest/exec.rs - guest::exec::Execution::adopt (line 620)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
+| `nvx-rs/src/guest/exec.rs - guest::exec (line 79)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
+| `nvx-rs/src/guest/exec.rs - guest::exec::Execution::adopt (line 619)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
 | `nvx-rs/src/guest/gpt.rs - guest::gpt (line 18)` | kept | The guest's space becomes private (#1127), whose PR moves it to the space's unit tests |
 | `nvx-rs/src/guest/mappings/mapper.rs - guest::mappings::mapper (line 107)` | kept | The guest's space becomes private (#1127), whose PR moves it to the space's unit tests |
 | `nvx-rs/src/guest/mappings/table.rs - guest::mappings::table::MappingTable (line 47)` | kept |  |
