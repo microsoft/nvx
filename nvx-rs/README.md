@@ -2729,7 +2729,7 @@ disk's block device.
 | `nvx-ingress [inherit\|start] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that the caller bound to one after the clone's process-free application; `start` binds such a socket and starts `inherit` on it in a session of its own, then exits once its program runs, or with status 1 if it does not start, for a guest agent that cannot hold the announcer; `test DIRECTORY` runs synthetic procfs snapshots |
 | `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v1: runs its conformance checks, repairs the wall clock after a restore, publishes the time state, and runs the discipline and violation-watcher daemon; `test NAME ...` runs its decoder and process test hooks (x86_64) |
 | `nvx-time-probe latency\|warp\|clock ...` | Diagnoses clock-read latency, cross-CPU TSC warp and offset, the clocks, CPUID, clock events, kernel messages, and optionally MSRs (x86_64) |
-| `nvx-init TIME_DAEMON [ANNOUNCER]` | Takes PID 1 over from a layered root's early boot, with its time daemon and optional announcer: gives itself and them an out-of-memory score adjustment of -1000 and a nice value of -10, collects every child's status, and, after `sync`, ends the VM with status 125 when a helper ends or 0 on `SIGTERM`; elsewhere it exits with 2 (x86_64) |
+| `nvx-init TIME_DAEMON [ANNOUNCER]` | Takes PID 1 over from a layered root's early boot, with its time daemon and optional announcer: gives itself and them an out-of-memory score adjustment of -1000 and a nice value of -10, collects every child's status, and, after `sync`, ends the VM with status 125 when a helper ends, 0 on `SIGTERM`, or the status of a failed restored activation's class; elsewhere it exits with 2 (x86_64) |
 
 Each binary's command line, exit statuses, and byte output are compatibility
 contracts; the [`nvx::guest`](src/guest/mod.rs) documentation describes each
@@ -2741,7 +2741,11 @@ then completes and reports Ready. The host supplies the complete mapping table
 before the first valid EXEC starts the restored workload; later executions and
 byte-identical activation retries, also those that arrive while a workload
 runs, reuse the retained state, and an activation with other bytes ends the VM
-as a failure.
+as a failure. A failed activation, which a deadline that passes before Ready
+and a refused activate request also are, ends the VM with the status of the
+failure's class, which [`nvx::protocol::status`](#nvxprotocolstatus) defines,
+such as 54, `ACTIVATION_ROOT`, for a root that does not assemble over its
+upper, or 51, `ACTIVATION_PROTOCOL`, for an activation with other bytes.
 The accepted proxy replaces the four HTTP(S) proxy defaults, or clears them when
 the restore has no proxy. Per-EXEC layered entries still win, and exact
 environments still replace every default.

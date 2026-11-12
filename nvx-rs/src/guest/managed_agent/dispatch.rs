@@ -79,7 +79,9 @@ impl AgentConfig {
         config.serve_init(runtime, control, HostMappings::default(), true)
     }
 
-    /// Borrows the one init runtime for either boot entry and returns its actual exit status.
+    /// Borrows the one init runtime for either boot entry and returns its actual exit status: a
+    /// failed restored activation, which its diagnostics named, ends the VM with the status of its
+    /// class.
     fn serve_init(
         &self,
         runtime: &mut Runtime,
@@ -92,10 +94,11 @@ impl AgentConfig {
         let mut session = Session::with_runtime(control, runtime)?.with_capture(capture);
         run(&mut system, &mut session, self, &mut mappings)
             .map(|Outcome::Stopped| session.capture_status().unwrap_or_default())
-            .map_err(|error| {
-                session
-                    .runtime_failure()
-                    .unwrap_or_else(|| format!("control session failed: {}", error.desc()))
+            .or_else(|error| match session.runtime_failure() {
+                Some(failure) => Err(failure),
+                None => session
+                    .activation_status()
+                    .ok_or_else(|| format!("control session failed: {}", error.desc())),
             })
     }
 }

@@ -276,6 +276,55 @@ fn failed_application_never_reports_ready_or_admits_root_dependent_work() {
     );
 }
 
+#[test]
+fn a_failed_restored_activation_gives_init_the_status_of_its_class() {
+    let (mut session, _peer) = connected(true);
+    assert_eq!(session.activation_status(), None);
+    let (mut session, mut peer, payload) = restored();
+    assert_eq!(session.activation_status(), None);
+    let bytes = activate_bytes(&mut session, &mut peer, 68, &payload);
+    let request = session
+        .accept_request(&bytes)
+        .unwrap_or_else(|_| panic!("valid activate"));
+    peer.credit();
+    let failure = crate::Error::io("the network settings cannot be applied").with_source(
+        crate::guest::activation::ApplyError::Network {
+            error: crate::guest::activation::NetworkError::Gateway,
+            teardown: None,
+        },
+    );
+    assert_eq!(
+        session
+            .activate_with::<()>(request, |_, _, _, _| Err(failure))
+            .err(),
+        Some(Errno::EPROTO)
+    );
+    assert_eq!(
+        session.activation_status(),
+        Some(protocol::status::ACTIVATION_NETWORK)
+    );
+    // A request while the record applies fails the activation as the protocol's failure.
+    let (mut session, mut peer, payload) = restored();
+    let bytes = activate_bytes(&mut session, &mut peer, 69, &payload);
+    let request = session
+        .accept_request(&bytes)
+        .unwrap_or_else(|_| panic!("valid activate"));
+    peer.credit();
+    let result = session.activate_with(request, |_, _, _, _| {
+        peer.send(protocol::APP_PING, 70, &[]);
+        Ok(())
+    });
+    assert_eq!(result.err(), Some(Errno::EPROTO));
+    assert_eq!(
+        session.activation_state_for_test(),
+        Some(ActivationState::Failed)
+    );
+    assert_eq!(
+        session.activation_status(),
+        Some(protocol::status::ACTIVATION_PROTOCOL)
+    );
+}
+
 fn short_deadline(session: &mut Session<'_>) -> Instant {
     let now = Instant::now();
     let repaired = crate::guest::snapshot::repair::tests::repaired_fixture();
