@@ -167,7 +167,6 @@
 
 use std::fmt;
 use std::net::IpAddr;
-use std::num::NonZeroU64;
 
 use crate::protocol::MAX_HOST_MAPPINGS;
 use crate::protocol::root::ImageFormat;
@@ -196,40 +195,6 @@ pub const MAX_HOSTNAME_BYTES: usize = 64;
 
 /// The longest proxy endpoint, in bytes.
 pub const MAX_PROXY_ENDPOINT_BYTES: usize = 255;
-
-/// The identity of a stored object's canonical form: 32 bytes that the host computes, such as a
-/// SHA-256 digest of a template's key. Activation records do not encode store identities.
-///
-/// It displays as 64 lowercase hexadecimal digits.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Identity([u8; 32]);
-
-impl Identity {
-    /// The length of an identity, in bytes.
-    pub const LEN: usize = 32;
-
-    /// Returns the identity whose bytes are `bytes`.
-    pub const fn from_bytes(bytes: [u8; Self::LEN]) -> Self {
-        Self(bytes)
-    }
-
-    /// Returns the identity's bytes.
-    pub const fn as_bytes(&self) -> &[u8; Self::LEN] {
-        &self.0
-    }
-}
-
-impl fmt::Display for Identity {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_hex(formatter, &self.0)
-    }
-}
-
-impl fmt::Debug for Identity {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "Identity({self})")
-    }
-}
 
 /// The transaction ID of a clone's restore: 16 random bytes that the host picks for each restore
 /// and keeps across the restore's retries, which the clone's Ready reports.
@@ -263,43 +228,6 @@ impl fmt::Debug for TransactionId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "TransactionId({self})")
     }
-}
-
-/// The generation of a template in its store: the template's publication ID, a nonzero number
-/// that the store assigns to each template that it publishes, in the order of publication, and
-/// never reuses.
-///
-/// Two generations of one store compare in the order of their publication. A generation displays
-/// as its decimal number.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StoreGeneration(NonZeroU64);
-
-impl StoreGeneration {
-    /// Returns the store generation `generation`.
-    pub const fn new(generation: NonZeroU64) -> Self {
-        Self(generation)
-    }
-
-    /// Returns the store generation's number.
-    pub const fn get(self) -> NonZeroU64 {
-        self.0
-    }
-}
-
-impl fmt::Display for StoreGeneration {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}", self.0)
-    }
-}
-
-/// The template that a clone restores: the generation of the template in its store, and the
-/// identity of the template's key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TemplateReference {
-    /// The template's generation in its store.
-    pub generation: StoreGeneration,
-    /// The identity of the template's key.
-    pub key: Identity,
 }
 
 /// The restore section of a clone's record: only the restore's transaction ID.

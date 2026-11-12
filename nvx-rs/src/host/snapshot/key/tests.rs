@@ -907,21 +907,6 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
 }
 
 #[test]
-fn a_key_identity_is_the_identity_that_names_a_clones_template() {
-    let identity = network_key().identity();
-    let named = activation::Identity::from(identity);
-    assert_eq!(named.as_bytes(), identity.as_bytes());
-    assert_eq!(named.to_string(), identity.to_string());
-    assert_eq!(KeyIdentity::from(named), identity);
-    // A clone's lease and durable records name its template by generation and key identity.
-    let reference = activation::TemplateReference {
-        generation: activation::StoreGeneration::new(std::num::NonZeroU64::MIN),
-        key: identity.into(),
-    };
-    assert_eq!(KeyIdentity::from(reference.key), identity);
-}
-
-#[test]
 fn identities_have_a_text_form() {
     let identity = network_key().identity();
     let text = identity.to_string();

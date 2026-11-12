@@ -102,12 +102,12 @@ nvx/
 |   |   |-- contract.rs          Control-contract versions and release compatibility
 |   |   |-- net/                 CIDR parsing and subtraction, and hostname and guest-network forms
 |   |   |-- gpt/                 Strict reading of GPT disks whose first partition configures an adapter and whose other partitions hold a root's read-only layers, shared by the host and the guest
-|   |   |-- host/                Artifacts, launch, network and egress-policy lowering, sessions, VM instances, sandbox stores, the sandbox launch profile, and the `nvx-rs` CLI (feature `cli`)
+|   |   |-- host/                Artifacts, launch, network and egress-policy lowering, sessions, VMs, the sandbox launch profile, and the `nvx-rs` CLI (feature `cli`)
 |   |   |-- testing/             Fake OpenVMM (feature `testing`)
 |   |   |-- guest/               Programs that run in Linux guests, the guest's NVXS connection, the libraries through which any guest init or agent opens the terminal on which it serves its session, starts a program, collects its children's statuses, settles its executions' cgroups, drives each execution, mounts host mappings beneath the descriptors of the roots that it names, assembles and tears down a layered root, and reads a GPT disk's partition table through its block device, and the typed calls through which it runs the time ABI's steps and the reseed (feature `guest`)
 |   |   `-- bin/                 nvx-rs CLI, nvx-fake-openvmm test double, and the guest binaries
 |   |-- examples/                The external-launch example, and the documented host and guest workflows, which only compile
-|   |-- tests/                   Fake-OpenVMM instance lifecycle, sandbox store, CLI scenario, NVXS session, guest-binary, and hypervisor managed-lifecycle and public-API VM lifecycle tests, the security checklist, the store's record fixtures and sandbox configurations of every format, the cases of the export and root boot tokens, and the conformance vectors of the wire formats
+|   |-- tests/                   Fake-OpenVMM behavior, process and VM spawn, CLI scenario, NVXS session, guest-binary, and hypervisor managed-lifecycle and public-API VM lifecycle tests, the security checklist, sandbox configurations of every format, the cases of the export and root boot tokens, and the conformance vectors of the wire formats
 |   |-- public-api/              The crate's public API on Linux and on Windows, which CI checks
 |   |-- build.rs                 Stages the bundled artifacts (feature `bundled`)
 |   `-- artifacts.json           Release package pinned for the bundled artifacts
@@ -295,8 +295,8 @@ authenticated control protocol of the guest agent, artifact discovery and
 bundled-release staging, OpenVMM's command line, the lowering of network and
 filesystem policies, the compiler of the egress policy files that `nvx-rs run`
 and `nvx-rs sandbox` accept, process and platform primitives for Linux and
-Windows hosts, the supervision of VM instances, the sandbox launch profile of
-`nvx-rs sandbox`, the `nvx-rs` command-line interface that runs NVX's
+Windows hosts, the creation, spawn, and stop of VMs, the sandbox launch profile
+of `nvx-rs sandbox`, the `nvx-rs` command-line interface that runs NVX's
 microVMs and sandboxes, downloads releases, compiles egress policies, and looks
 up artifacts, and a fake OpenVMM for tests. Its
 `guest` feature builds the ten static executables that every guest image
