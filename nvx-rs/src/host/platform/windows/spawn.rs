@@ -56,15 +56,6 @@ impl LaunchedProcess {
         ))
     }
 
-    /// Terminates the process and returns whether it exited within `timeout`.
-    pub(crate) fn terminate(self, timeout: Duration) -> bool {
-        // SAFETY: CreateProcessW returned the handle with full access.
-        unsafe { TerminateProcess(raw(&self.process), 1) };
-        let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(INFINITE - 1);
-        // SAFETY: as above.
-        unsafe { WaitForSingleObject(raw(&self.process), milliseconds) == WAIT_OBJECT_0 }
-    }
-
     /// Terminates this owned child and waits for its exit before releasing its handle.
     pub(crate) fn terminate_and_wait(self) -> io::Result<()> {
         // SAFETY: CreateProcessW returned the owned handle with full access.
@@ -88,6 +79,13 @@ impl LaunchedProcess {
 
     /// Waits up to `timeout` for the process to exit, and returns its exit status if it has,
     /// as `Popen.wait` reads it with `GetExitCodeProcess`.
+    #[cfg_attr(
+        not(feature = "cli"),
+        allow(
+            dead_code,
+            reason = "only the CLI's one-shot runs wait for the status of the VMMs that they start"
+        )
+    )]
     pub(crate) fn wait_timeout(&self, timeout: Duration) -> io::Result<Option<u32>> {
         let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(INFINITE - 1);
         // SAFETY: CreateProcessW returned the handle with full access.
@@ -207,8 +205,8 @@ impl Drop for InheritableForSpawn {
 /// and two that allow the same handle restore what it was before either. A process that the caller
 /// spawns concurrently without a handle list, as `std::process` does, inherits them if it is
 /// created in that window, and holds them until it exits, the log of OpenVMM's standard output and
-/// error among them, unless the caller spawns it under a `SpawnLock`, as [`spawn_command`] does; a
-/// process that it spawns with a handle list does not.
+/// error among them, unless the caller spawns it under a `SpawnLock`; a process that it spawns with
+/// a handle list does not.
 ///
 /// OpenVMM starts in `job`, which the process attribute that names it assigns before OpenVMM
 /// runs, and which every process that OpenVMM starts then joins too, but no process that the
@@ -223,7 +221,6 @@ impl Drop for InheritableForSpawn {
 ///
 /// [`create_log_job`]: crate::host::platform::windows::create_log_job
 /// [`SpawnLock`]: crate::host::platform::inherit::SpawnLock
-/// [`spawn_command`]: crate::host::platform::inherit::spawn_command
 /// [`log_claim_held`]: crate::host::platform::windows::log_claim_held
 pub(crate) fn spawn_with_stdio(
     program: &Path,

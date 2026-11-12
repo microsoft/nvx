@@ -126,7 +126,6 @@ changes only when the module's purpose does.
 | [`nvx::host::nvxs`](#nvxhostnvxs) | Compatibility paths for the host NVXS connection and its retained cause details |
 | [`nvx::host::transport`](#nvxhosttransport) | A verified VM endpoint connection and the blocking host NVXS driver, with the existing timed transport |
 | [`nvx::host::process`](#nvxhostprocess) | Verified references to OpenVMM processes, through which callers wait for them and end them |
-| [`nvx::host::supervisor`](#nvxhostsupervisor) | The transitional public path of the low-level spawn of a VMM, which code that stays uses until SL6.3 (#1122) |
 | [`nvx::host::seal`](#nvxhostseal) | `FileSeal`: what the host reports about an open file from its metadata alone, without reading it |
 | [`nvx::host::platform`, `report`](#nvxhostplatform-report) | Linux and Windows primitives, and OpenVMM's outcome report |
 | [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its plans, live shares, option checks, and bindings |
@@ -612,16 +611,28 @@ failure is reported with the original error. Spawn removes no output path.
 Dropping `Launched` closes the process handle but does not stop the VM.
 
 On Linux the detached child gets the caller's umask with the owner's bits
-cleared; the caller's own umask is unchanged. On Windows it starts without a
+cleared; the caller's own umask is unchanged. The umask still narrows the
+group's and others' permissions to the files that OpenVMM creates, such as its
+outcome report, its snapshots, and the files that a guest creates in a share,
+but never the owner's, which a umask such as 0400 would clear, so that the
+caller could not read the report, nor OpenVMM use its own files. In a directory
+that has a default POSIX ACL, Linux narrows those permissions by the ACL
+instead of the umask. On Windows it starts without a
 console in its log-named job, refusing a taken or untrusted job name, and
 leaves the caller's job when the runtime requests breakaway. The inheritance
 lock is internal to spawn. Windows callers coordinate their own other spawns,
 for example with their own lock around VM and other process starts: an
 unrelated process started during the inheritance window may inherit handles,
-but never the VM's job claim.
+but never the VM's job claim. Windows' process-creation API limits the VM
+directory, in which OpenVMM starts, to 258 UTF-16 code units in its absolute
+path, including any verbatim prefix and trailing separator: the spawn refuses
+a longer one before it creates a process.
 
 The [VM tests](src/host/vm/tests.rs) cover cleanup after child creation,
-ownership, caller survival, the Linux umask, and Windows job claims. Their
+ownership, caller survival, the Linux umask, and Windows job claims, and the
+[spawn tests](src/host/spawn/tests.rs) what the VMM inherits while other
+threads spawn, the working-directory limit, the survival of a VMM whose
+launcher crashed, and the waits and cleanup of its child. Their
 ignored cold-spawn smoke test runs the current library against explicit
 `NVX_VM_SPAWN_OPENVMM`, `NVX_VM_SPAWN_KERNEL`, and `NVX_VM_SPAWN_INITRAMFS`
 paths, using a fresh `NVX_VM_SPAWN_PROOF_DIR` and `NVX_HYPERVISOR` or the
@@ -1101,63 +1112,6 @@ io_uring, as OpenVMM reads a sandbox's block devices. On Linux, the count also
 holds what the process's children read once it reaped them, as the kernel
 accounts them to their parent, while Windows counts the process's own reads
 alone.
-
-### `nvx::host::supervisor`
-
-The transitional public path of the low-level spawn of a VMM, which code that
-stays uses until SL6.3 (#1122): `spawn` and `spawn_vm`, the `VmmCommand` that
-they start and the `Launched` VMM that they return, `Inherited`, and
-`spawn_command`. The module re-exports them and has no code of its own: it
-supervises nothing. [`nvx::host::vm`](#nvxhostvm) creates, spawns, reattaches
-to, and stops a VM in a private directory that its caller owns. SL6.3 deletes
-the module, with `spawn_command`: its last users are the tests of the spawn in
-`tests/supervisor.rs` and `tests/checked_handoff.rs`.
-
-`spawn_vm` starts a caller-owned command without a store, with the same strict
-Windows log-job requirement as `vm::spawn`: an untrusted job name or a log that
-cannot name a job is refused before child creation. The legacy `spawn` keeps
-its fallback without a job for those logs and names. Other spawn behavior is
-shared. If setup fails after a child is created, including failed process
-verification, `Launched::kill_and_confirm_exit` waits without a deadline for
-its exit and reaps it on Unix. The caller reports any cleanup error; the
-legacy `kill_and_wait` remains time-bounded and may release a running child.
-
-`VmmCommand::inherit` lists the descriptors (Linux) or handles (Windows) that
-the VMM inherits under their numbers, besides its standard streams, and it
-inherits nothing else of the caller's: on Linux, they must be close-on-exec, a
-flag that only the VMM's own process clears; on Windows, they join the VMM's
-explicit handle list.
-
-On Linux, the VMM starts with the caller's umask without the owner's bits,
-which only the VMM's own process clears. The umask still narrows the group's
-and others' permissions to the files that OpenVMM creates, such as its outcome
-report, its snapshots, and the files that a guest creates in a share, but never
-the owner's, which a umask such as 0400 would clear, so that the caller could
-not read the report, nor OpenVMM use its own files. The usual umasks, such as
-022 and 077, keep the owner's bits, so they apply unchanged. In a directory
-that has a default POSIX ACL, Linux narrows the permissions of what is created
-there by that ACL instead of the umask, so the ACL decides them, the owner's
-included.
-
-On Windows, the VMM's standard handles and its allowed handles are inheritable
-while it is created, and a process that another thread creates meanwhile
-without a handle list, as `std::process::Command` creates one, inherits them
-and holds them until it exits: the read end of the VMM's capability pipe, its
-log, and the handles that it allows. The VMM runs in a job object of its own,
-named after its log, whose processes are the launch's claim while such a
-process holds the log, so a recovery still ends the launch once the VMM exits.
-Each spawn of a VMM holds the crate's spawn lock throughout that window, so a
-caller that launches VMMs spawns its other processes with `spawn_command`,
-which spawns a `std::process::Command` under it. On other hosts, the lock holds
-nothing.
-
-#### Windows working-directory limit
-
-Windows' process-creation API limits `VmmCommand::working_dir` to 258 UTF-16
-code units in its absolute path, including any verbatim prefix and trailing
-separator. It may name a shorter directory than those of the VMM's other files.
-A raw `spawn` refuses an overlong working directory with `InvalidInput`, and
-never changes the requested directory.
 
 ### `nvx::host::seal`
 
@@ -2575,7 +2529,7 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
   where `nvx.py` passed the umask unchanged, so that a umask that clears the
   owner's own permissions, such as 0400, no longer keeps the caller, or `start`
   and `stop`, from reading OpenVMM's outcome report; see
-  [`nvx::host::supervisor`](#nvxhostsupervisor).
+  [`nvx::host::vm`](#nvxhostvm).
 - `start` and `exec` refuse, and `stop` terminates, a VM that another runtime
   identity started; see [Runtime identity](#runtime-identity).
 - `run --restore-snapshot` names a snapshot of `--store-dir` that

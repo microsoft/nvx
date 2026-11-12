@@ -3301,12 +3301,7 @@ fn the_children_of_host_depend_on_one_another_without_cycles() {
 #[test]
 fn the_graph_holds_well_known_dependencies_of_the_sources() {
     let graph = analyze(&read_sources()).unwrap_or_else(|error| panic!("{error}"));
-    for (from, to) in [
-        ("vm", "spawn"),
-        ("supervisor", "spawn"),
-        ("cli", "sandbox"),
-        ("spawn", "platform"),
-    ] {
+    for (from, to) in [("vm", "spawn"), ("cli", "sandbox"), ("spawn", "platform")] {
         assert!(
             graph.edges.contains_key(&(from.to_owned(), to.to_owned())),
             "the graph lacks {from} -> {to}"
