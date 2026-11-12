@@ -2304,7 +2304,7 @@ On Linux, the `nvx-rs` job also checks the public API of `nvx` against its
 snapshots, [`nvx-rs/public-api/linux.txt`](../nvx-rs/public-api/linux.txt) and
 [`windows.txt`](../nvx-rs/public-api/windows.txt), with
 [`public_api.py`](../scripts/public_api.py). The script builds the library's
-rustdoc JSON with every feature but `bundled`, on the pinned Rust release, for
+rustdoc JSON with every feature, on the pinned Rust release, for
 `x86_64-unknown-linux-musl`, the guests' target, and for
 `x86_64-pc-windows-msvc`, after it adds both targets to that release with
 rustup. rustdoc needs only a target's standard library, not its linker, so the
