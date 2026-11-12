@@ -4,24 +4,26 @@ use std::io::{self, Write};
 
 use super::*;
 
-pub(crate) use super::entry::tests::Simulation;
 pub(crate) use super::entry::tests::seed_inheritable_and_ambient;
-pub(crate) use super::fd::tests::{create_fifo, set_descriptor_limit};
+pub(crate) use super::fd::tests::create_fifo;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use super::kernel::tests::nice_of;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use super::port::tests::PortBackend;
-pub(crate) use super::process::tests::{
-    BEFORE_LINUX_6_16, continue_traced, deny_system_call, fork_isolated_test, has_exited,
-    isolate_process_test, spawn_child_without_exit_signal, spawn_traced_child,
-};
+#[cfg(feature = "cli")]
+pub(crate) use super::process::signal_through_pidfd;
+#[cfg(feature = "cli")]
+pub(crate) use super::process::tests::has_exited;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use super::process::tests::{deny_group_kill, exit_main_thread, forbid_system_calls};
+pub(crate) use super::process::tests::{
+    deny_system_call, fork_isolated_test, isolate_process_test,
+};
 pub(crate) use super::rooted::tests::{
     exchange_paths, restrict_new_entries, thread_umask, unshare_standard_descriptors,
     with_thread_umask,
 };
-pub(crate) use super::signal::tests::{default_sigpipe, has_child, reap_children_automatically};
+pub(crate) use super::signal::tests::{has_child, reap_children_automatically};
 pub(crate) use super::sock_diag::tests::{encode_inet_diag_done, encode_inet_diag_socket};
 #[cfg(feature = "cli")]
 pub(crate) use super::spawn::tests::{

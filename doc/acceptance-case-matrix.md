@@ -34,7 +34,7 @@ its own in turn.
 | [The adapter's other tests](#the-adapters-other-tests) | 169 | 0 | 9 | 160 |
 | [MicroVM scenarios](#microvm-scenarios) | 54 | 50 | 3 | 1 |
 | [CI](#ci) | 69 | 42 | 3 | 24 |
-| [Docs](#docs) | 36 | 25 | 3 | 8 |
+| [Docs](#docs) | 36 | 18 | 2 | 16 |
 
 ## The adapter's scenarios
 
@@ -480,22 +480,22 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/gpt/mod.rs - gpt (line 43)` | kept |  |
 | `nvx-rs/src/guest/activation.rs - guest::activation (line 158)` | kept | SL6.11c rewrote it on `guest::snapshot::capture`, when its capture preparation and admission fence left (#1087) |
 | `nvx-rs/src/guest/activation/state.rs - guest::activation::state::Activation (line 56)` | kept |  |
-| `nvx-rs/src/guest/cgroup.rs - guest::cgroup (line 36)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
-| `nvx-rs/src/guest/entry.rs - guest::entry (line 90)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
-| `nvx-rs/src/guest/exec.rs - guest::exec (line 79)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
-| `nvx-rs/src/guest/exec.rs - guest::exec::Execution::adopt (line 619)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
+| `nvx-rs/src/guest/cgroup.rs - guest::cgroup (line 36)` | retired | `guest::cgroup` leaves (SL6.11b) |
+| `nvx-rs/src/guest/entry.rs - guest::entry (line 90)` | retired | `guest::entry` leaves (SL6.11b) |
+| `nvx-rs/src/guest/exec.rs - guest::exec (line 79)` | retired | `guest::exec` leaves (SL6.11b) |
+| `nvx-rs/src/guest/exec.rs - guest::exec::Execution::adopt (line 619)` | retired | `guest::exec` leaves (SL6.11b) |
 | `nvx-rs/src/guest/gpt.rs - guest::gpt (line 18)` | kept | The guest's space becomes private (#1127), whose PR moves it to the space's unit tests |
 | `nvx-rs/src/guest/mappings/mapper.rs - guest::mappings::mapper (line 107)` | kept | The guest's space becomes private (#1127), whose PR moves it to the space's unit tests |
 | `nvx-rs/src/guest/mappings/table.rs - guest::mappings::table::MappingTable (line 47)` | kept |  |
-| `nvx-rs/src/guest/mod.rs - guest (line 39)` | kept | The guest-agent guidelines quote it |
+| `nvx-rs/src/guest/mod.rs - guest (line 34)` | kept | The guest-agent guidelines quote it |
 | `nvx-rs/src/guest/nvxs.rs - guest::nvxs (line 22)` | kept |  |
-| `nvx-rs/src/guest/process.rs - guest::process (line 12)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
-| `nvx-rs/src/guest/process.rs - guest::process (line 39)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
+| `nvx-rs/src/guest/process.rs - guest::process (line 12)` | retired | `guest::process` leaves (SL6.11b) |
+| `nvx-rs/src/guest/process.rs - guest::process (line 39)` | retired | `guest::process` leaves (SL6.11b) |
 | `nvx-rs/src/guest/reseed.rs - guest::reseed (line 17)` | kept |  |
-| `nvx-rs/src/guest/root.rs - guest::root (line 130)` | kept | The guest's space becomes private (#1127), whose PR moves it to the space's unit tests |
+| `nvx-rs/src/guest/root.rs - guest::root (line 126)` | kept | SL6.11b removed its bootstrap, which left with the cgroups. The guest's space becomes private (#1127), whose PR moves it to the space's unit tests |
 | `nvx-rs/src/guest/snapshot.rs - guest::snapshot (line 25)` | kept | The guest-agent guidelines quote it |
-| `nvx-rs/src/guest/spawn.rs - guest::spawn (line 41)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
-| `nvx-rs/src/guest/spawn.rs - guest::spawn::LaunchStage::from_code (line 201)` | rewritten | `nvx-rs/src/guest/spawn/tests.rs::launch_stages_keep_their_numbers`. The exec engine's launch failure and outcome, which the example read, leave with the engine (SL6.11a) |
+| `nvx-rs/src/guest/spawn.rs - guest::spawn (line 41)` | retired | `guest::spawn` leaves (SL6.11b) |
+| `nvx-rs/src/guest/spawn.rs - guest::spawn::LaunchStage::from_code (line 201)` | retired | `LaunchStage::from_code` and its test, `launch_stages_keep_their_numbers`, leave with `guest::spawn` (SL6.11b). The stages of nvx-init's executions keep their numbers in the crate's own fork boundary, whose launch report `nvx-rs/src/guest/init/tests/exec.rs::native_workload_cwd_accepts_procfs_links_but_closes_inherited_descriptors` reads from a real launch |
 | `nvx-rs/src/guest/terminal.rs - guest::terminal (line 10)` | kept |  |
 | `nvx-rs/src/guest/time/mod.rs - guest::time (line 9)` | kept | SL6.11c removed its capture and restore finish, which became crate-private: `guest::snapshot::capture` runs them |
 | `nvx-rs/src/host/sandbox/prepared.rs - host::sandbox::prepared::PreparedLaunch (line 92)` | retired | `PreparedLaunch` leaves with the checked-file handoff (SL6.3, #1122) |
@@ -505,9 +505,9 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/host/template/plan.rs - host::template::plan::TemplatePlan (line 137)` | retired | `TemplatePlan` leaves with the template store (SL6.2a, #1121) |
 | `nvx-rs/src/host/template/store.rs - host::template::store::Store (line 473)` | retired | The template store leaves (SL6.2a, #1121) |
 | `nvx-rs/src/host/transport.rs - host::transport (line 22)` | kept |  |
-| `nvx-rs/src/lib.rs - (line 58)` | rewritten | Its `Instance` and sandbox store leave (SL6.1, #1121): `nvx-rs/src/lib.rs - (line 57)` compiles a cold boot and a stop through `host::vm` |
+| `nvx-rs/src/lib.rs - (line 58)` | rewritten | Its `Instance` and sandbox store leave (SL6.1, #1121): `nvx-rs/src/lib.rs - (line 53)` compiles a cold boot and a stop through `host::vm` |
 | `nvx-rs/src/protocol/nvxs/mod.rs - protocol::nvxs (line 68)` | kept |  |
 | `nvx-rs/src/host/snapshot/capture.rs - host::snapshot::capture::finish_capture (line 48)` | kept |  |
 | `nvx-rs/src/host/store/mod.rs - host::store (line 104)` | retired | The sandbox store leaves (SL6.1, #1121) |
-| `nvx-rs/README.md`, its Example: an instance through `LaunchSpec` and the sandbox store | rewritten | Nothing compiles it. `nvx-rs/examples/host-workflows.rs` compiles the documented host workflows, and the library's guide (SL6.10a) replaces the example. SL6.1 (#1121) made it the cold boot that `nvx-rs/src/lib.rs - (line 57)` compiles |
+| `nvx-rs/README.md`, its Example: an instance through `LaunchSpec` and the sandbox store | rewritten | Nothing compiles it. `nvx-rs/examples/host-workflows.rs` compiles the documented host workflows, and the library's guide (SL6.10a) replaces the example. SL6.1 (#1121) made it the cold boot that `nvx-rs/src/lib.rs - (line 53)` compiles |
 | `nvx-rs/examples/external-launch.rs` | kept | Compiled with the crate's targets, and run by hand on a host. Since SL6.3 (#1122), which deletes `host::supervisor`, a minimal launcher of its own on `std::process` starts its VMM |

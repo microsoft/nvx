@@ -144,7 +144,7 @@ fn termination(helper_ends: bool) {
             sys::kill_through_pidfd(helper.descriptor.borrowed(), false).unwrap();
             assert!(sys::readable_or_hung_up(&[helper.descriptor.borrowed()], 5000).unwrap()[0]);
         }
-        sys::signal_through_pidfd(parent.borrowed(), Signal::SIGTERM as i32, false).unwrap();
+        sys::tests::signal_through_pidfd(parent.borrowed(), Signal::SIGTERM as i32, false).unwrap();
         let mut traffic = Vec::new();
         host.read_to_end(&mut traffic).unwrap();
         assert!(
@@ -247,7 +247,8 @@ fn prelaunch_termination(helper_ends: bool) {
         assert!(sys::readable_or_hung_up(&[helper.descriptor.borrowed()], 5000).unwrap()[0]);
     } else {
         let process = sys::open_pidfd(sys::current_process()).unwrap();
-        sys::signal_through_pidfd(process.borrowed(), Signal::SIGTERM as i32, false).unwrap();
+        sys::tests::signal_through_pidfd(process.borrowed(), Signal::SIGTERM as i32, false)
+            .unwrap();
     }
     let mut system = TestSystem::new(Paths::default());
     let config =
@@ -584,7 +585,7 @@ fn backpressured_termination(helper_ends: bool) {
             sys::kill_through_pidfd(helper.descriptor.borrowed(), false).unwrap();
             assert!(sys::readable_or_hung_up(&[helper.descriptor.borrowed()], 5000).unwrap()[0]);
         }
-        sys::signal_through_pidfd(parent.borrowed(), Signal::SIGTERM as i32, false).unwrap();
+        sys::tests::signal_through_pidfd(parent.borrowed(), Signal::SIGTERM as i32, false).unwrap();
         let mut traffic = Vec::new();
         host.read_to_end(&mut traffic).unwrap();
         only_stdout_prefix(&traffic);
@@ -651,7 +652,8 @@ fn privileged_layered_runtime_stops_before_attach_on_pending_sigterm() {
                 Session::with_runtime(FileDescriptor::from_owned(guest.into()), &mut runtime)
                     .unwrap();
             let process = sys::open_pidfd(sys::current_process()).unwrap();
-            sys::signal_through_pidfd(process.borrowed(), Signal::SIGTERM as i32, false).unwrap();
+            sys::tests::signal_through_pidfd(process.borrowed(), Signal::SIGTERM as i32, false)
+                .unwrap();
             let mut system = TestSystem::new(Paths::default());
             let config =
                 AgentConfig::layered(b"nvx_identity=1000:1000", c"workload".into(), c"/".into())

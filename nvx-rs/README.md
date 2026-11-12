@@ -52,13 +52,11 @@ nvx-rs/
 │   ├── testing/     feature `testing`: the fake OpenVMM
 │   ├── guest/       feature `guest`: the programs that run in Linux guests, the guest's NVXS
 │   │                connection, the libraries through which a guest init or agent opens the
-│   │                terminal on which it serves its session, starts a program, drives its
-│   │                execution, collects its children's statuses, settles its executions'
-│   │                cgroups, mounts host mappings beneath the descriptors of the roots that it
-│   │                names, assembles and tears down a layered root, reads a GPT disk's partition
-│   │                table through its block device, and prepares a template's guest for a
-│   │                capture before its root's assembly, and the typed calls through which it
-│   │                runs the time ABI's steps and the reseed
+│   │                terminal on which it serves its session, mounts host mappings beneath the
+│   │                descriptors of the roots that it names, assembles and tears down a layered
+│   │                root, reads a GPT disk's partition table through its block device, and
+│   │                prepares a template's guest for a capture before its root's assembly, and
+│   │                the typed calls through which it runs the time ABI's steps and the reseed
 │   └── bin/         nvx-rs, nvx-fake-openvmm, and the guest binaries
 ├── tests/           fake-OpenVMM, CLI, NVXS session, process and spawn, checked-handoff,
 │                    host-module layering, and guest-binary tests, the CLI's scenario tests and
@@ -128,16 +126,11 @@ changes only when the module's purpose does.
 | [`nvx::guest::mappings`](#nvxguestmappings) | `Mapping` and `MappingTable`: host mappings, and the account of a host's mapping table, for any guest init or agent |
 | [`nvx::guest::nvxs`](#nvxguestnvxs) | `GuestConnection`: the guest's role of the NVXS session over a byte stream, such as the control console |
 | [`nvx::guest::terminal`](#nvxguestterminal) | `Terminal`: the terminal on which a guest agent serves its session, such as the VM's control console |
-| [`nvx::guest::spawn`](#nvxguestspawn) | `Command`: starts a program in a new process, for any guest init or agent |
-| [`nvx::guest::entry`](#nvxguestentry) | `Entry`: the namespaces, view, root, and identity in which a program runs, for any guest init or agent |
-| [`nvx::guest::process`](#nvxguestprocess) | `Child`: the status of one child that the caller names, and of no other |
-| [`nvx::guest::cgroup`](#nvxguestcgroup) | Cgroup v2 handles through which a guest init or agent places, accounts, kills, and settles its executions |
-| [`nvx::guest::exec`](#nvxguestexec) | `Execution`: drives one program as an execution, for any guest init or agent |
 | [`nvx::guest::time`](#nvxguesttime) | x86_64: the boot steps of NVX time ABI v1 as typed calls in the caller's process, for any guest init or agent |
 | [`nvx::guest::snapshot`](#nvxguestsnapshot) | x86_64: bounded Fresh capture with inline restore repair and staged failure dispositions, without execution control |
 | [`nvx::guest::activation`](#nvxguestactivation) | x86_64: fence-free activation of each clone that its capture repaired |
 | [`nvx::guest::reseed`](#nvxguestreseed) | A restore's fresh entropy, and the reseed of the kernel's random number generator with it |
-| [`nvx::guest::root`](#nvxguestroot) | The operations of a layered root: its bootstrap, assembly, shares, export, mappings, and teardown |
+| [`nvx::guest::root`](#nvxguestroot) | The operations of a layered root: its assembly, shares, export, mappings, and teardown |
 | [`nvx::guest::view`](#nvxguestview) | The VM-wide hostname, machine ID, and single-server resolver, whose binds the layered root owns |
 | [`nvx::guest::gpt`](#nvxguestgpt) | `read_disk`: the partition table of a GPT disk, read and checked through its block device |
 
@@ -1177,101 +1170,6 @@ session's bytes as they are, and drains it, so that it sends what the agent
 wrote before the agent ends the VM. NVX's managed agent and other guest agents
 serve their sessions on it.
 
-### `nvx::guest::spawn`
-
-`Command`: starts a program in a new process for any guest init or agent, with
-its arguments, environment, a `PATH` in which it looks for a program named
-without a `/`, root and working directories, standard streams, inherited
-descriptors, cgroup, process group or new session, a `Barrier` at which the
-program waits until the caller releases it, a reset that gives every signal its
-default disposition and blocks none, and an `entry::Prepared` execution to
-enter, without NVX's control protocol, managed agent, or workload identity.
-
-Its `LaunchReport` tells whether the program started, or which `LaunchStage`
-failed and why. Each stage keeps its number, `LaunchStage::code`, which
-`LaunchStage::from_code` turns back into the stage, and a new stage takes a
-number of its own.
-
-### `nvx::guest::entry`
-
-`Entry`: the execution that a program enters, for any guest init or agent, from
-typed inputs: a root, which is a mount, moved over `/` in new mount, PID, and
-UTS namespaces, where the program is PID 1 and leads a new session; a hostname;
-a fresh procfs, a read-only sysfs, and a `/dev` of its own with only the
-allowlisted `DeviceNode`s, a devpts, and a `/dev/shm`, every other mount
-`nodev`; the `MachineId`, the image's own or one generated by
-`MachineId::generate`, the time status, and the resolver file that
-`Entry::resolver` names, if any, which `Entry::bind_runtime` binds read-only
-into the root once, through `mappings::bind`'s walk and attach, for every later
-execution, and returns as `RuntimeBinds`, which `RuntimeBinds::remove` unmounts
-in reverse order before the root's teardown, and of which a failed bind removes
-those made before it, with an `Error::Rollback` that names any that stays; and
-the `Identity`: user and group IDs, supplementary groups, and `Capabilities`
-from an allowlist, which only user ID 0 may hold, without `CAP_NET_BIND_SERVICE`
-and `CAP_NET_RAW` while the execution's listeners are `Publication::Published`,
-taken with `no_new_privs`.
-
-Its program starts with every signal's default disposition and none blocked. For
-user ID 0, the risky procfs and sysfs entries are read-only or masked.
-
-`Entry::prepare` checks it, reads the existing `Account` of the IDs from the
-root's account databases unless `AccountMode::Numeric` takes them as they are,
-and `spawn::Command::enter` runs it, with each step a `LaunchStage`. It reads no
-kernel command line or boot token and creates no account.
-
-### `nvx::guest::process`
-
-`Child`: the status of one child that the caller names, by its pidfd or its
-process ID. It waits for that child alone, so another child's status stays for
-the caller; a caller that collects every status itself, such as a PID 1 that
-adopts orphans, hands each one to its `Child` with `observe`. Statuses are
-`std::process::ExitStatus`, real-time signals included.
-
-### `nvx::guest::cgroup`
-
-`Layout`: the agent's cgroup and the workload cgroup, which the caller names,
-and which may not hold the agent's.
-
-`ExecutionCgroup`: the cgroup of one execution, the workload cgroup itself or a
-child of it, which it prepares with the caller's resource values, places
-processes in, checks for occupancy through `pids.current`, kills with
-`cgroup.kill`, and settles, over the execution's cgroup or the whole workload
-subtree, as the caller's `Scope` chooses. It holds its cgroups' directories
-open, and the process's removals and preparations of cgroups take turns, so that
-it never reaches another cgroup that takes one of their paths. Settling calls
-the caller's status collector between its checks, and collects no status itself.
-
-### `nvx::guest::exec`
-
-`Execution`: drives one program that the caller spawned with the program's ends
-of its `Pipes`, or that the caller started itself and adopts with its own ends
-of the program's pipes and a `Child` that names it, without blocking, from the
-caller's own loop or reactor, and reports each step as an `Event`: the launch
-report, which an adopted program has at once, the output of each stream, kill
-failures, and the `Outcome`.
-
-It reads a stream only as far as the caller's `grant` allows, so a stalled sink
-stalls its own execution alone, writes the program's standard input without
-`SIGPIPE`, and ends the program on a cancellation, a timeout, or a
-disconnection, with `SIGKILL` through the program's pidfd to the program and, if
-the caller asks, its process group, while no collector has taken its status,
-and, through the opened directory of a cgroup that the caller names, to that
-cgroup.
-
-`signal` sends the program a signal that the caller chooses, such as `SIGTERM`
-for a graceful stop, as container runtimes stop their workloads, to the same
-processes but the cgroup's, each of them once unless the program leaves its
-group meanwhile, while no collector has taken its status. It ends neither the
-program nor the execution: it records no cause, so a program that exits after it
-ends with its own status, and the caller ends one that outlives the caller's own
-deadline with `terminate` or `cancel`. It refuses `SIGKILL`, which only the
-execution's causes send.
-
-It closes the program's input once the program has ended. It waits for its
-program alone, by a pidfd, or takes the status from the caller's collector with
-`observe`; with `Options::caller_reaps`, that collector is the program's only
-one.
-
 ### `nvx::guest::time`
 
 x86_64: `TimeAbi`, the boot steps of NVX time ABI v1 as typed calls in the
@@ -1294,7 +1192,7 @@ snapshot capture below prepares strictly.
 A call takes the permission for OpenVMM's ports on the calling thread for each
 port transaction alone, and fails with `TimeError::PortRelease` if the thread
 may still hold some of it, which a process that it started would inherit, and
-from which `nvx::guest::spawn` starts none. No call waits for a child that it
+from which NVX's guest programs start none. No call waits for a child that it
 did not start.
 
 `nvx-time` runs its steps through them.
@@ -1456,11 +1354,6 @@ cloned, and formats none of them. `nvx-reseed` runs them.
 The operations of a layered root, for a guest init or agent, whether or not it
 is PID 1. The module is hidden: NVX's internal reference code of the guest's
 space, unstable, and crate-private once nothing outside NVX uses it.
-
-`bootstrap`: the agent's and the workload's sibling cgroups of a `Layout`, with
-every process of their parent moved into the agent's, the agent's `memory.low`,
-and the workload cgroup prepared through `ExecutionCgroup::prepare`, with its
-`memory.max` and `pids.max`, and user namespaces kept unavailable.
 
 `assemble`: the `Assembly`'s block devices, found by their MMIO windows, checked
 against their roles' access modes and their expected sizes, and flushed, and the
@@ -2664,17 +2557,12 @@ The `guest` feature adds the programs that run in NVX's Linux guests: the
 `nvx::guest` module and one binary per program. The Alpine, Ubuntu, and Azure
 Linux images ship all ten at their established `/sbin/nvx-*` paths. The
 module's libraries are not programs: `terminal` opens the terminal on which an
-agent serves its session, `spawn` starts a program in a new process, `entry`
-has the program enter an execution's namespaces, view, root, and identity,
-`process` collects the status of a child that the caller names, `cgroup`
-places, kills, and settles the processes of an execution, `exec` drives one
-program as an execution, and `mappings` describes host mappings and keeps the
+agent serves its session, and `mappings` describes host mappings and keeps the
 account of a host's mapping table. NVX's own guest space is internal reference
 code, hidden, unstable, and crate-private once nothing outside NVX uses it:
 the mapper of `mappings` mounts host mappings beneath the descriptors of the
-roots that its caller names, and `root` bootstraps the guest for a layered root
-through `cgroup`, assembles the root, mounts live shares and mappings in it
-through the mapper, and tears it down.
+roots that its caller names, and `root` assembles a layered root, mounts live
+shares and mappings in it through the mapper, and tears it down.
 `nvx-managed-agent` opens its control terminal and runs direct workloads through
 nvx-init's plain-process core: each child resets its priority, drops its
 credentials and capabilities, and enters its working directory before exec.

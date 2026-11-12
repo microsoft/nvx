@@ -45,7 +45,7 @@ pub use self::mapper::{
     ApplyError, Mapper, MappingError, Reserved, SourceRoot, Step, TargetRoot, TeardownError,
     UnmountFailure, bind,
 };
-pub(crate) use self::mapper::{Mapped, bind_with, unbind_with};
+pub(crate) use self::mapper::{Mapped, unbind_with};
 pub use self::table::{MappingTable, Refusal, TableError};
 
 /// The longest source or target of a [`Mapping`], in bytes: Linux's `PATH_MAX` without its
