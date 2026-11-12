@@ -44,7 +44,7 @@ impl HostQueries<'_> {
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), or
 /// [`ErrorKind::Io`](crate::ErrorKind::Io) if a path cannot be resolved or examined.
-pub fn validate_mount_host_paths(mounts: &[SandboxMount]) -> Result<()> {
+pub(crate) fn validate_mount_host_paths(mounts: &[SandboxMount]) -> Result<()> {
     validate_mount_host_paths_with(mounts, &HostQueries::native())
 }
 
@@ -102,13 +102,6 @@ pub(crate) fn validate_mount_host_paths_with(
 /// [`ErrorKind::Io`](crate::ErrorKind::Io) if a path cannot be examined.
 ///
 /// [`plan_mounts`]: crate::host::sandbox::mount::plan_mounts
-#[cfg_attr(
-    not(feature = "cli"),
-    allow(
-        dead_code,
-        reason = "only the CLI's sandboxes check their shares again"
-    )
-)]
 pub(crate) fn check_distinct_export_roots(
     export: &ExportPlan,
     host: &HostQueries<'_>,

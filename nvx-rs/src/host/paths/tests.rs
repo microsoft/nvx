@@ -1,3 +1,4 @@
+#[cfg(feature = "cli")]
 use std::fs;
 
 use super::*;
@@ -131,6 +132,7 @@ fn verbatim_directories_keep_the_components_after_them() {
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn resolution_follows_links_and_keeps_missing_components() {
     let directory = tempfile::tempdir().unwrap();
@@ -158,7 +160,7 @@ fn resolution_follows_links_and_keeps_missing_components() {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(feature = "cli", windows))]
 #[test]
 fn resolution_keeps_the_verbatim_path_that_alone_names_the_object() {
     let directory = tempfile::tempdir().unwrap();
