@@ -1,5 +1,6 @@
-//! `nvx-time`, the guest side of NVX time ABI v2, and the typed calls through which any guest
-//! init or agent runs the ABI's boot steps in its own process.
+//! `nvx-time`, the guest side of NVX's time ABI, whose version is
+//! [`TIME_ABI_VERSION`](crate::contract::TIME_ABI_VERSION), and the typed calls through which any
+//! guest init or agent runs the ABI's boot steps in its own process.
 //!
 //! [`TimeAbi`] runs the cold-boot time step and, separately, starts the time daemon, a process
 //! that the caller supervises; it reads the VM generation ID, with typed results and errors.
