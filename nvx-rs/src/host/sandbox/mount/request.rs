@@ -272,34 +272,9 @@ impl SandboxMount {
         })
     }
 
-    /// Returns the guest target.
-    pub fn guest_target(&self) -> &str {
-        &self.guest_target
-    }
-
     /// Returns the host directory or file.
     pub fn host_path(&self) -> &Path {
         &self.host_path
-    }
-
-    /// Returns the access mode.
-    pub fn access(&self) -> MountAccess {
-        self.access
-    }
-
-    /// Returns the access-policy paths.
-    pub fn policy(&self) -> &MountPolicy {
-        &self.policy
-    }
-
-    /// Returns the identity of the share's file operations.
-    pub fn owner(&self) -> MountOwner {
-        self.owner
-    }
-
-    /// Returns whether the share binds a directory or a file.
-    pub fn kind(&self) -> MountKind {
-        self.kind
     }
 
     /// Checks the share against the host: its owner must be one that the host supports, its
@@ -352,18 +327,14 @@ impl SandboxMount {
     }
 
     /// Returns the share with its host path made absolute, as the one function of NVX that makes
-    /// host paths absolute makes it: joined to the current directory if it is relative, without
-    /// resolving it, so OpenVMM still sees, and refuses, every symbolic-link component of the
-    /// path that was requested. On Windows, a path with another drive and no root, such as
-    /// `D:relative`, is below the current directory of its drive.
+    /// host paths absolute makes it, with `cwd` as the current directory: joined to the current
+    /// directory if it is relative, without resolving it, so OpenVMM still sees, and refuses,
+    /// every symbolic-link component of the path that was requested. On Windows, a path with
+    /// another drive and no root, such as `D:relative`, is below the current directory of its
+    /// drive.
     ///
     /// Fails with [`ErrorKind::Io`](crate::ErrorKind::Io) if a relative host path meets an
     /// unreadable current directory, or Windows cannot qualify a drive-relative path.
-    pub fn absolute(&self) -> Result<Self> {
-        self.absolute_with(&paths::current_dir)
-    }
-
-    /// Implements [`absolute`](Self::absolute) with `cwd` as the current directory.
     pub(crate) fn absolute_with(&self, cwd: &dyn Fn() -> io::Result<PathBuf>) -> Result<Self> {
         if self.host_path.is_absolute() {
             return Ok(self.clone());
@@ -376,16 +347,10 @@ impl SandboxMount {
     }
 
     /// Returns each kind of access-policy path with its requested paths, relative paths joined
-    /// to the absolute host path of the share, as OpenVMM attributes them to the children of an
-    /// aggregate.
+    /// to the absolute host path of the share, with `cwd` as the current directory, as OpenVMM
+    /// attributes them to the children of an aggregate.
     ///
-    /// Fails as [`absolute`](Self::absolute) does.
-    pub fn absolute_policy_paths(&self) -> Result<Vec<(PolicyKind, Vec<String>)>> {
-        self.absolute_policy_paths_with(&paths::current_dir)
-    }
-
-    /// Implements [`absolute_policy_paths`](Self::absolute_policy_paths) with `cwd` as the
-    /// current directory.
+    /// Fails as [`absolute_with`](Self::absolute_with) does.
     pub(crate) fn absolute_policy_paths_with(
         &self,
         cwd: &dyn Fn() -> io::Result<PathBuf>,

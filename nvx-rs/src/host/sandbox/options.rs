@@ -136,29 +136,6 @@ pub struct SandboxOptions {
 }
 
 impl SandboxOptions {
-    /// Returns the options of an operation with the defaults of `nvx-rs sandbox`.
-    pub fn new(operation: SandboxOperation) -> Self {
-        Self {
-            operation,
-            dry_run: false,
-            cwd: None,
-            environment: Vec::new(),
-            environment_file: None,
-            inherit_default_environment: false,
-            network_options: false,
-            net: false,
-            network_profile: false,
-            entrypoint: super::DEFAULT_ENTRYPOINT.to_owned(),
-            outcome_report: false,
-            mounts: Vec::new(),
-            policy_paths: Vec::new(),
-            mount_owner: None,
-            layers: false,
-            scratch: false,
-            upper: None,
-        }
-    }
-
     /// Applies the checks of `nvx-rs sandbox` that precede the launch, in its order, and
     /// returns the managed exec environment of a `run` or `exec`, if one was given.
     ///

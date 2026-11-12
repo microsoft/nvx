@@ -25,9 +25,6 @@ mod request;
 
 use std::fmt;
 
-use super::refused;
-use crate::error::Result;
-
 pub use crate::protocol::share::{RESERVED_EXACT_MOUNT_TARGETS, RESERVED_MOUNT_TARGETS};
 
 pub use self::aggregate::plan_mounts;
@@ -74,18 +71,6 @@ impl MountAccess {
             Self::ReadWrite => "rw",
         }
     }
-
-    /// Returns the mode that `name` names, as a recorded share gives it.
-    ///
-    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for another name.
-    pub fn from_name(name: &str) -> Result<Self> {
-        setting_from_name(
-            "mode",
-            [Self::ReadOnly, Self::ReadWrite],
-            Self::as_str,
-            name,
-        )
-    }
 }
 
 impl fmt::Display for MountAccess {
@@ -111,13 +96,6 @@ impl MountOwner {
             Self::Vmm => "vmm",
             Self::Caller => "caller",
         }
-    }
-
-    /// Returns the owner that `name` names, as a recorded share gives it.
-    ///
-    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for another name.
-    pub fn from_name(name: &str) -> Result<Self> {
-        setting_from_name("owner", [Self::Vmm, Self::Caller], Self::as_str, name)
     }
 }
 
@@ -145,41 +123,12 @@ impl MountKind {
             Self::File => "file",
         }
     }
-
-    /// Returns the kind that `name` names, as a recorded share gives it.
-    ///
-    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for another name.
-    pub fn from_name(name: &str) -> Result<Self> {
-        setting_from_name("kind", [Self::Directory, Self::File], Self::as_str, name)
-    }
 }
 
 impl fmt::Display for MountKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
-}
-
-/// Returns the one of `values`, the two values of a share's `setting`, whose name, as `as_str`
-/// gives it, is `name`, as a recorded share gives it.
-///
-/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for another name, with a
-/// message that names the setting and its two values.
-fn setting_from_name<T: Copy>(
-    setting: &str,
-    values: [T; 2],
-    as_str: fn(T) -> &'static str,
-    name: &str,
-) -> Result<T> {
-    values
-        .into_iter()
-        .find(|&value| as_str(value) == name)
-        .ok_or_else(|| {
-            let [first, second] = values.map(as_str);
-            refused(format!(
-                "unsupported sandbox mount {setting} {name:?}; choose {first} or {second}",
-            ))
-        })
 }
 
 /// A kind of access-policy path.

@@ -213,7 +213,7 @@ fn windows_drive_relative_and_unc_paths() {
             MountKind::Directory,
         )
         .unwrap()
-        .absolute()
+        .absolute_with(&paths::current_dir)
         .unwrap();
         assert_eq!(mount.host_path(), expected);
         assert!(mount.host_path().is_absolute());
@@ -243,7 +243,9 @@ fn windows_drive_relative_policy_paths_become_absolute() {
         MountKind::Directory,
     )
     .unwrap();
-    let paths = mount.absolute_policy_paths().unwrap();
+    let paths = mount
+        .absolute_policy_paths_with(&paths::current_dir)
+        .unwrap();
     assert_eq!(
         Path::new(&paths[0].1[0]),
         std::path::absolute(relative).unwrap()
@@ -339,11 +341,11 @@ proptest! {
             "/workspace", relative.to_str().unwrap(), MountAccess::ReadOnly,
             MountPolicy::default(), MountOwner::Vmm, MountKind::Directory,
         ).unwrap();
-        let absolute = mount.absolute().unwrap();
+        let absolute = mount.absolute_with(&paths::current_dir).unwrap();
         prop_assert_eq!(absolute.host_path(), &expected);
         prop_assert!(absolute.host_path().is_absolute());
         prop_assert!(absolute.host_path().is_dir());
-        prop_assert_eq!(absolute.absolute().unwrap(), absolute);
+        prop_assert_eq!(absolute.absolute_with(&paths::current_dir).unwrap(), absolute);
     }
 
     /// A share's target is one value for the guest: a target in which the kernel would end a

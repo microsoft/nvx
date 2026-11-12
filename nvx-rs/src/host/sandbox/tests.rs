@@ -161,10 +161,6 @@ fn file_shares_take_no_policy_paths_or_reserved_targets() {
         .unwrap_err();
         assert!(error.to_string().contains("shares a file"), "{error}");
     }
-    assert_eq!(
-        message(MountKind::from_name("socket")),
-        "unsupported sandbox mount kind \"socket\"; choose directory or file"
-    );
     // The runtime replaces /etc/machine-id with a file, binds the guest's resolver file over
     // /etc/resolv.conf, and binds its time state over /run/nvx/time, so nothing at or below them
     // may be shared.

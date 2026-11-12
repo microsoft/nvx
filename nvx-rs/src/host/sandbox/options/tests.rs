@@ -1,7 +1,7 @@
 //! The `nvx.py sandbox` and `nvx.py run` option tests of `scripts/test_nvx_tools.py`, ported.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use proptest::prelude::*;
 #[cfg(feature = "cli")]
@@ -12,11 +12,13 @@ use sha2::{Digest, Sha256};
 use super::*;
 use crate::ErrorKind;
 use crate::host::paths::{self, resolve};
+use crate::host::sandbox::DEFAULT_ENTRYPOINT;
 #[cfg(feature = "cli")]
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding, DistroFormat};
 #[cfg(feature = "cli")]
 use crate::host::sandbox::layer::{LayerRole, SandboxLayer};
-use crate::host::sandbox::mount::{plan_mounts, validate_mounts};
+use crate::host::sandbox::mount::{MountAccess, plan_mounts, validate_mounts};
+use crate::host::sandbox::tests::policy as mount_policy;
 
 fn message<T: std::fmt::Debug>(result: Result<T>) -> String {
     let error = result.unwrap_err();
@@ -24,11 +26,34 @@ fn message<T: std::fmt::Debug>(result: Result<T>) -> String {
     error.to_string()
 }
 
+/// Returns the options of `operation` with the defaults of `nvx-rs sandbox`.
+fn defaults(operation: SandboxOperation) -> SandboxOptions {
+    SandboxOptions {
+        operation,
+        dry_run: false,
+        cwd: None,
+        environment: Vec::new(),
+        environment_file: None,
+        inherit_default_environment: false,
+        network_options: false,
+        net: false,
+        network_profile: false,
+        entrypoint: DEFAULT_ENTRYPOINT.to_owned(),
+        outcome_report: false,
+        mounts: Vec::new(),
+        policy_paths: Vec::new(),
+        mount_owner: None,
+        layers: false,
+        scratch: false,
+        upper: None,
+    }
+}
+
 fn launching(operation: SandboxOperation) -> SandboxOptions {
     SandboxOptions {
         layers: true,
         scratch: true,
-        ..SandboxOptions::new(operation)
+        ..defaults(operation)
     }
 }
 
@@ -51,7 +76,7 @@ fn sandbox_rejects_systemd_entrypoint() {
         }
         let stop = SandboxOptions {
             entrypoint: entrypoint.to_owned(),
-            ..SandboxOptions::new(SandboxOperation::Stop)
+            ..defaults(SandboxOperation::Stop)
         };
         assert_eq!(stop.check().unwrap(), None);
     }
@@ -290,7 +315,11 @@ fn policy_paths_need_a_preceding_mount_only_with_several_shares() {
         path: "secret".to_owned(),
     };
     let mounts = sandbox_mounts(std::slice::from_ref(&first), &[option(None)], None).unwrap();
-    assert_eq!(mounts[0].policy().denied, ["secret"]);
+    let denied = mount_policy(&["secret"], &[], &[]);
+    assert_eq!(
+        mounts,
+        [SandboxMount::parse(&first, denied, MountOwner::Vmm, MountKind::Directory).unwrap()]
+    );
     for policy in [option(None), option(Some(2))] {
         assert_eq!(
             sandbox_mounts(&[first.clone(), second.clone()], &[policy], None)
@@ -340,10 +369,11 @@ proptest! {
         let actual = sandbox_mounts(&mounts, &options, None).unwrap();
         prop_assert_eq!(actual.len(), expected.len());
         for (index, (mount, policy)) in actual.iter().zip(expected).enumerate() {
-            prop_assert_eq!(mount.guest_target(), format!("/share-{index}"));
-            prop_assert_eq!(mount.policy(), &policy);
-            prop_assert_eq!(mount.owner(), MountOwner::Vmm);
-            prop_assert_eq!(mount.kind(), MountKind::Directory);
+            let share = SandboxMount::new(
+                &format!("/share-{index}"), &format!("host-{index}"), MountAccess::ReadWrite,
+                policy, MountOwner::Vmm, MountKind::Directory,
+            ).unwrap();
+            prop_assert_eq!(mount, &share);
         }
     }
 
@@ -563,7 +593,7 @@ fn sandbox_managed_operations_reject_dry_run_before_state_access() {
     ] {
         let options = SandboxOptions {
             dry_run: true,
-            ..SandboxOptions::new(operation)
+            ..defaults(operation)
         };
         assert_eq!(
             message(options.check()),
@@ -585,7 +615,7 @@ fn sandbox_exec_forwards_explicit_empty_environment_and_cwd() {
     let options = SandboxOptions {
         cwd: Some("/work".to_owned()),
         environment_file: Some(file.to_str().unwrap().to_owned()),
-        ..SandboxOptions::new(SandboxOperation::Exec)
+        ..defaults(SandboxOperation::Exec)
     };
     assert_eq!(options.check().unwrap(), Some(Vec::new()));
 }
@@ -601,7 +631,7 @@ fn sandbox_exec_forwards_environment_inheritance() {
         let options = SandboxOptions {
             environment: environment.iter().map(|&entry| entry.to_owned()).collect(),
             inherit_default_environment: true,
-            ..SandboxOptions::new(SandboxOperation::Exec)
+            ..defaults(SandboxOperation::Exec)
         };
         let expected =
             expected.map(|entries| entries.iter().map(|&entry| entry.to_owned()).collect());
@@ -614,7 +644,7 @@ fn sandbox_run_and_exec_alone_take_the_execution_options() {
     let both = SandboxOptions {
         environment: vec!["A=1".to_owned()],
         environment_file: Some("environment.json".to_owned()),
-        ..SandboxOptions::new(SandboxOperation::Exec)
+        ..defaults(SandboxOperation::Exec)
     };
     assert_eq!(
         message(both.check()),
@@ -637,17 +667,17 @@ fn sandbox_run_and_exec_alone_take_the_execution_options() {
     ] {
         let environment = SandboxOptions {
             environment: vec!["A=1".to_owned()],
-            ..SandboxOptions::new(operation)
+            ..defaults(operation)
         };
         assert_eq!(message(environment.check()), exec_only);
         let inheriting = SandboxOptions {
             inherit_default_environment: true,
-            ..SandboxOptions::new(operation)
+            ..defaults(operation)
         };
         assert_eq!(message(inheriting.check()), exec_only);
         let cwd = SandboxOptions {
             cwd: Some("/".to_owned()),
-            ..SandboxOptions::new(operation)
+            ..defaults(operation)
         };
         assert_eq!(message(cwd.check()), exec_only);
     }
@@ -693,7 +723,7 @@ fn sandbox_environment_is_validated_before_state_access() {
     ] {
         let options = SandboxOptions {
             environment,
-            ..SandboxOptions::new(SandboxOperation::Exec)
+            ..defaults(SandboxOperation::Exec)
         };
         assert_eq!(message(options.check()), expected);
     }
@@ -760,7 +790,7 @@ fn managed_non_launch_operations_reject_network_policy_options() {
     ] {
         let options = SandboxOptions {
             network_options: true,
-            ..SandboxOptions::new(operation)
+            ..defaults(operation)
         };
         assert_eq!(
             message(options.check()),
@@ -797,7 +827,7 @@ fn managed_non_launch_operations_reject_network_policy_options() {
     }
     let report = SandboxOptions {
         outcome_report: true,
-        ..SandboxOptions::new(SandboxOperation::Start)
+        ..defaults(SandboxOperation::Start)
     };
     assert_eq!(
         message(report.check()),
@@ -859,7 +889,7 @@ fn sandbox_launches_take_the_scratch_image_that_their_upper_needs() {
         for upper in [RootUpper::Scratch, RootUpper::Ram] {
             let options = SandboxOptions {
                 upper: Some(upper),
-                ..SandboxOptions::new(operation)
+                ..defaults(operation)
             };
             assert_eq!(
                 message(options.check()),
@@ -898,7 +928,7 @@ fn sandbox_command_rejects_misplaced_mount_options() {
     ] {
         let options = SandboxOptions {
             mounts: vec!["/workspace,share,rw".to_owned()],
-            ..SandboxOptions::new(operation)
+            ..defaults(operation)
         };
         assert_eq!(
             message(options.check()),
@@ -1155,11 +1185,19 @@ fn sandbox_command_attributes_policy_paths_to_the_preceding_mount() {
         })
         .collect();
     let parsed = sandbox_mounts(&mounts, &options, None).unwrap();
-    assert_eq!(parsed[0].policy().denied, ["logs"]);
-    assert_eq!(parsed[0].policy().allowed, ["logs/payloads"]);
-    assert_eq!(parsed[0].policy().writable, ["out"]);
-    assert_eq!(parsed[1].policy().denied, ["credentials"]);
-    assert!(parsed[1].policy().allowed.is_empty() && parsed[1].policy().writable.is_empty());
+    let share = |value: &str, requested: MountPolicy| {
+        SandboxMount::parse(value, requested, MountOwner::Vmm, MountKind::Directory).unwrap()
+    };
+    assert_eq!(
+        parsed,
+        [
+            share(
+                &mounts[0],
+                mount_policy(&["logs"], &["logs/payloads"], &["out"])
+            ),
+            share(&mounts[1], mount_policy(&["credentials"], &[], &[])),
+        ]
+    );
     let (arguments, _) = shares.run(&mounts, &policy, None).unwrap();
     // With several shares, OpenVMM attributes absolute paths.
     assert_eq!(
@@ -1318,7 +1356,16 @@ fn sandbox_command_attributes_mount_deny_to_the_preceding_mount() {
         None,
     )
     .unwrap();
-    assert_eq!(single[0].policy().denied, ["secrets"]);
+    assert_eq!(
+        single,
+        [SandboxMount::parse(
+            &format!("/w,{work},rw"),
+            mount_policy(&["secrets"], &[], &[]),
+            MountOwner::Vmm,
+            MountKind::Directory,
+        )
+        .unwrap()]
+    );
     let error = shares
         .run(
             &[
@@ -1354,17 +1401,31 @@ fn sandbox_command_attributes_mount_deny_to_the_preceding_mount() {
 fn sandbox_mounts_take_the_kind_of_each_host_path() {
     let mounts = ["/a,a".to_owned(), "/b,b.json,rw".to_owned()];
     let kind_of = |mount: &SandboxMount| {
-        if mount.guest_target() == "/b" {
+        if mount.host_path() == Path::new("b.json") {
             MountKind::File
         } else {
             MountKind::Directory
         }
     };
     let parsed = sandbox_mounts_with(&mounts, &[], Some(MountOwner::Caller), &kind_of).unwrap();
-    assert_eq!(parsed[0].kind(), MountKind::Directory);
-    assert_eq!(parsed[1].kind(), MountKind::File);
-    assert_eq!(parsed[0].owner(), MountOwner::Caller);
-    assert_eq!(parsed[1].owner(), MountOwner::Caller);
+    let share = |target, host_path, access, kind| {
+        SandboxMount::new(
+            target,
+            host_path,
+            access,
+            MountPolicy::default(),
+            MountOwner::Caller,
+            kind,
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        parsed,
+        [
+            share("/a", "a", MountAccess::ReadOnly, MountKind::Directory),
+            share("/b", "b.json", MountAccess::ReadWrite, MountKind::File),
+        ]
+    );
 }
 
 #[test]
