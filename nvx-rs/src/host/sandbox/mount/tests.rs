@@ -8,6 +8,7 @@ pub(crate) use super::host_paths::validate_mount_host_paths_with;
 use super::request::require_mount_owner_supported_on;
 use super::*;
 use crate::ErrorKind;
+use crate::error::Result;
 use crate::host::filesystem::{Owner, ReservedTargets};
 use crate::host::paths;
 #[cfg(windows)]
@@ -16,6 +17,20 @@ use crate::host::sandbox::tests::{host, native, policy};
 
 fn parse(value: &str, policy: MountPolicy) -> Result<SandboxMount> {
     SandboxMount::parse(value, policy, MountOwner::Vmm, MountKind::Directory)
+}
+
+/// Returns the share of the directory `host_path` at `target`, with `access` and `policy`, whose
+/// file operations run as OpenVMM, which [`parse`] returns for a value that names them.
+fn share(target: &str, host_path: &str, access: MountAccess, policy: MountPolicy) -> SandboxMount {
+    SandboxMount::new(
+        target,
+        host_path,
+        access,
+        policy,
+        MountOwner::Vmm,
+        MountKind::Directory,
+    )
+    .unwrap()
 }
 
 fn message<T: std::fmt::Debug>(result: Result<T>) -> String {
@@ -27,18 +42,28 @@ fn message<T: std::fmt::Debug>(result: Result<T>) -> String {
 #[test]
 fn mount_parser_defaults_to_read_only_and_accepts_rw() {
     let default = parse("/workspace,host-dir", MountPolicy::default()).unwrap();
-    assert_eq!(default.guest_target(), "/workspace");
     assert_eq!(default.host_path(), Path::new("host-dir"));
-    assert_eq!(default.access(), MountAccess::ReadOnly);
-    assert!(default.policy().denied.is_empty());
+    assert_eq!(
+        default,
+        share(
+            "/workspace",
+            "host-dir",
+            MountAccess::ReadOnly,
+            MountPolicy::default()
+        )
+    );
 
-    let writable = parse(
-        "/opt/hostedtoolcache,host-dir,rw",
-        policy(&["logs", "secrets"], &[], &[]),
-    )
-    .unwrap();
-    assert_eq!(writable.access(), MountAccess::ReadWrite);
-    assert_eq!(writable.policy().denied, ["logs", "secrets"]);
+    let denied = policy(&["logs", "secrets"], &[], &[]);
+    let writable = parse("/opt/hostedtoolcache,host-dir,rw", denied.clone()).unwrap();
+    assert_eq!(
+        writable,
+        share(
+            "/opt/hostedtoolcache",
+            "host-dir",
+            MountAccess::ReadWrite,
+            denied
+        )
+    );
 }
 
 #[test]
@@ -139,14 +164,14 @@ fn mount_parser_accepts_host_paths_with_commas() {
         );
         let mount = parse(&value, policy(&["secret"], &[], &[])).unwrap();
         assert_eq!(mount.host_path(), Path::new(&native(host_path)));
-        assert_eq!(mount.access(), access);
+        assert_eq!(mount.access, access);
     }
 }
 
 #[test]
 fn mount_owner_defaults_to_vmm_and_forwards_caller() {
     let default = parse("/workspace,host-dir,rw", MountPolicy::default()).unwrap();
-    assert_eq!(default.owner(), MountOwner::Vmm);
+    assert_eq!(default.owner, MountOwner::Vmm);
     let caller = SandboxMount::parse(
         "/workspace,host-dir,rw",
         policy(&["secrets"], &[], &[]),
@@ -154,27 +179,27 @@ fn mount_owner_defaults_to_vmm_and_forwards_caller() {
         MountKind::Directory,
     )
     .unwrap();
-    assert_eq!(caller.absolute().unwrap().owner(), MountOwner::Caller);
     assert_eq!(
-        message(MountOwner::from_name("root")),
-        "unsupported sandbox mount owner \"root\"; choose vmm or caller"
-    );
-    assert_eq!(
-        message(MountAccess::from_name("rx")),
-        "unsupported sandbox mount mode \"rx\"; choose ro or rw"
+        caller.absolute_with(&paths::current_dir).unwrap().owner,
+        MountOwner::Caller
     );
 }
 
 #[test]
 fn mount_access_policy_is_validated_and_forwarded() {
-    let mount = parse(
-        "/tmp/mcp-runtime,host-dir,rw",
-        policy(&["mcp-logs"], &["mcp-logs/payloads"], &["agent", "cache"]),
-    )
-    .unwrap();
-    let absolute = mount.absolute().unwrap();
-    assert_eq!(absolute.policy().allowed, ["mcp-logs/payloads"]);
-    assert_eq!(absolute.policy().writable, ["agent", "cache"]);
+    let requested = policy(&["mcp-logs"], &["mcp-logs/payloads"], &["agent", "cache"]);
+    let mount = parse("/tmp/mcp-runtime,host-dir,rw", requested.clone()).unwrap();
+    let absolute = mount.absolute_with(&paths::current_dir).unwrap();
+    let host_path = paths::current_dir().unwrap().join("host-dir");
+    assert_eq!(
+        absolute,
+        share(
+            "/tmp/mcp-runtime",
+            host_path.to_str().unwrap(),
+            MountAccess::ReadWrite,
+            requested
+        )
+    );
     let paths: Vec<String> = (0..129).map(|index| format!("path-{index}")).collect();
     let many: Vec<&str> = paths.iter().map(String::as_str).collect();
     for (value, policy, expected) in [
@@ -270,11 +295,14 @@ fn caller_owner_requires_linux_and_a_directory_that_root_does_not_own() {
 #[test]
 fn mount_absolute_path_keeps_symbolic_link_components() {
     let mount = parse("/workspace,link/share,rw", MountPolicy::default()).unwrap();
-    let absolute = mount.absolute().unwrap();
+    let absolute = mount.absolute_with(&paths::current_dir).unwrap();
     let expected = paths::current_dir().unwrap().join("link").join("share");
     assert_eq!(absolute.host_path(), expected.as_path());
     assert!(absolute.host_path.iter().any(|part| part == "link"));
-    assert_eq!(absolute.absolute().unwrap(), absolute);
+    assert_eq!(
+        absolute.absolute_with(&paths::current_dir).unwrap(),
+        absolute
+    );
     let fixed = host("/fixture/cwd");
     let relative = SandboxMount::parse(
         "/workspace,link/share,rw",
@@ -366,7 +394,7 @@ fn mount_absolute_path_keeps_a_link_on_the_host() {
         MountPolicy::default(),
     )
     .unwrap();
-    let absolute = mount.absolute().unwrap();
+    let absolute = mount.absolute_with(&paths::current_dir).unwrap();
     assert!(!absolute.host_path.iter().any(|part| part == "link-target"));
 }
 

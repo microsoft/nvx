@@ -26,7 +26,9 @@ use crate::host::sandbox::refused;
 /// finds to be of the other kind is refused, as [`SandboxMount::validated`] refuses it. Returns
 /// `None` without shares.
 ///
-/// Fails as those checks, [`SandboxMount::absolute`], and [`filesystem::plan`] do.
+/// Fails as those checks and [`filesystem::plan`] do, and with
+/// [`ErrorKind::Io`](crate::ErrorKind::Io) if a relative host path meets an unreadable current
+/// directory, or Windows cannot qualify a drive-relative path.
 pub fn plan_mounts(mounts: &[SandboxMount]) -> Result<Option<ExportPlan>> {
     validate_mounts(mounts)?;
     for mount in mounts {
