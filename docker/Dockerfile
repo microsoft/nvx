@@ -333,7 +333,7 @@ COPY --from=azurelinux-initramfs /tmp/initramfs-azurelinux.cpio.gz.packages.json
 FROM kernel AS linux-source-archive
 RUN mkdir -p /out \
     && python3 scripts/nvx.py create-linux-source-archive \
-        --config /repo/build/linux/.config \
+        --architecture "$NVX_ARCHITECTURE" \
         --output /out/nvx-linux-source-6.18.38.tar.gz
 
 FROM scratch AS artifacts

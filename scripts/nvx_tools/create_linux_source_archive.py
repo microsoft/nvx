@@ -15,18 +15,24 @@ from nvx_tools.build_constants import (
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument(
+        "--architecture", choices=("x86_64", "aarch64"), default="x86_64"
+    )
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.set_defaults(handler=command_create_linux_source_archive)
 
 
 def command_create_linux_source_archive(args: argparse.Namespace) -> None:
-    source, _ = prepare_kernel_source(KernelBuildConfig())
-    generated_config = args.config.resolve()
+    kernel = KernelBuildConfig.for_architecture(args.architecture)
+    generated_config = (
+        args.config or kernel.work / KernelBuildConstants.BUILD_CONFIG_NAME
+    ).resolve()
     if not generated_config.is_file():
         raise FileNotFoundError(
             f"generated kernel config not found: {generated_config}"
         )
+    source, _ = prepare_kernel_source(kernel)
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     root = KernelBuildConstants.SOURCE_ARCHIVE_ROOT

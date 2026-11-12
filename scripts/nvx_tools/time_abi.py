@@ -567,9 +567,11 @@ def describe_exit_status(returncode: int | None) -> str | None:
 
 
 def _command_option(command: Sequence[str], option: str) -> str | None:
-    for index, argument in enumerate(command[:-1]):
-        if argument == option:
+    for index, argument in enumerate(command):
+        if argument == option and index + 1 < len(command):
             return command[index + 1]
+        if argument.startswith(f"{option}="):
+            return argument[len(option) + 1 :]
     return None
 
 
