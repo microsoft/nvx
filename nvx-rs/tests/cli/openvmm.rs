@@ -37,6 +37,123 @@ fn mount_value(value: &str) -> (String, String, bool) {
     (name.to_owned(), host.to_owned(), mode == "ro")
 }
 
+/// Returns the export that `nvx-rs run` plans for the shares of a cold-run fixture, each a host
+/// directory or file at its guest target, inside no other, with the denied, allowed, and write
+/// paths of `policies`, and `owner`, or `None` without shares. It builds the plan from the fixture
+/// alone, as `nvx::host::filesystem` documents an export, independently of the CLI's planner: each
+/// share is a child of its own at its resolved host path, in the order of those paths, with the
+/// resolved policy paths inside it, sorted, and writable if its share is, whole or only below its
+/// write paths; each denied path that a workload could move, strictly inside a part that the guest
+/// may write, carries an identity, which `ExportPlan::check` requires there but no command line
+/// carries, so a zero one serves; and each share binds its child's root at its target, the
+/// shallower targets first.
+fn fixture_export(
+    shares: &[(String, PathBuf, bool)],
+    policies: &[Vec<PathBuf>; 3],
+    owner: nvx::host::filesystem::Owner,
+) -> Option<nvx::host::filesystem::ExportPlan> {
+    use nvx::host::filesystem::{Bind, ExportChild, ExportPlan, FileIdentity};
+
+    if shares.is_empty() {
+        return None;
+    }
+    // A host path resolved, without the verbatim prefix that Windows gives it.
+    let resolved = |path: &Path| {
+        let path = std::fs::canonicalize(path).unwrap();
+        let text = path.to_str().unwrap();
+        PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(text))
+    };
+    // The policy paths outside the shares are left out, and a denied one need not exist there.
+    let [denied, allowed, write] = policies.each_ref().map(|paths| {
+        let mut paths: Vec<PathBuf> = paths
+            .iter()
+            .filter(|path| path.exists())
+            .map(|path| resolved(path))
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    });
+    let inside = |paths: &[PathBuf], root: &Path| -> Vec<PathBuf> {
+        paths
+            .iter()
+            .filter(|path| path.starts_with(root))
+            .cloned()
+            .collect()
+    };
+    let mut roots: Vec<(PathBuf, bool, bool)> = shares
+        .iter()
+        .map(|(_, host, read_only)| (resolved(host), host.is_file(), !read_only))
+        .collect();
+    roots.sort();
+    let children: Vec<ExportChild> = roots
+        .into_iter()
+        .map(|(root, file, writable)| {
+            let write = if writable {
+                inside(&write, &root)
+            } else {
+                Vec::new()
+            };
+            let denied = inside(&denied, &root);
+            let moves = |path: &Path| {
+                writable
+                    && path != root.as_path()
+                    && (write.is_empty()
+                        || write
+                            .iter()
+                            .any(|part| path != part.as_path() && path.starts_with(part)))
+            };
+            let denied_identities = denied
+                .iter()
+                .map(|path| {
+                    moves(path).then_some(FileIdentity {
+                        device: 0,
+                        index: 0,
+                    })
+                })
+                .collect();
+            ExportChild {
+                allowed: inside(&allowed, &root),
+                denied,
+                denied_identities,
+                write,
+                root,
+                file,
+                writable,
+            }
+        })
+        .collect();
+    let mut binds: Vec<Bind> = shares
+        .iter()
+        .map(|(target, host, read_only)| {
+            let root = resolved(host);
+            Bind {
+                child: children
+                    .iter()
+                    .position(|child| child.root == root)
+                    .unwrap(),
+                source: String::new(),
+                target: target.clone(),
+                read_only: *read_only,
+                identity: None,
+            }
+        })
+        .collect();
+    binds.sort_by_key(|bind| {
+        let depth = bind
+            .target
+            .split('/')
+            .filter(|name| !name.is_empty())
+            .count();
+        (depth, bind.target.clone())
+    });
+    Some(ExportPlan {
+        children,
+        binds,
+        owner,
+    })
+}
+
 /// The options of OpenVMM that take no value.
 const FLAGS: [&str; 3] = [
     "--single-process",
@@ -257,13 +374,12 @@ impl Options {
     }
 
     /// Projects an old cold-run fixture onto the checked public VM contract, independently of
-    /// the CLI parser and its private token renderer. Restore and sandbox fixtures stay old.
+    /// the CLI's parser, planner, and private token renderer. Restore and sandbox fixtures stay
+    /// old.
     pub(crate) fn cold_run_expected(&self, root: &Root, mode: &str) -> nvx::Result<Self> {
         use nvx::activation::{MachineIdMode, View};
         use nvx::host::config::{Boot, ConsoleAttachment, NetworkConfig, RootConfig, VmConfig};
-        use nvx::host::filesystem::{
-            self, ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target,
-        };
+        use nvx::host::filesystem::Owner;
         use nvx::host::network::{
             Access, EgressRule, EgressRules, HostLoopback, LoopbackForward, NetworkPolicy,
             NetworkProxy,
@@ -351,40 +467,16 @@ impl Options {
                 });
             }
         }
-        let mappings: Vec<_> = shares
-            .iter()
-            .map(|(target, host, read_only)| Mapping {
-                name: "--mount",
-                path: host,
-                target: Target::Guest(target),
-                read_only: *read_only,
-            })
-            .collect();
-        let export = filesystem::plan(&ExportRequest {
-            mappings: &mappings,
-            denied: PathList {
-                name: "--mount-deny",
-                paths: &policies[0],
-            },
-            allowed: PathList {
-                name: "--mount-allow",
-                paths: &policies[1],
-            },
-            write: PathList {
-                name: "--mount-write",
-                paths: &policies[2],
-            },
-            owner: if old
-                .values("--mount-owner")
-                .first()
-                .is_some_and(|value| value == "caller")
-            {
-                Owner::Caller
-            } else {
-                Owner::Vmm
-            },
-            reserved: ReservedTargets::BLOCKLESS_ROOT,
-        })?;
+        let owner = if old
+            .values("--mount-owner")
+            .first()
+            .is_some_and(|value| value == "caller")
+        {
+            Owner::Caller
+        } else {
+            Owner::Vmm
+        };
+        let export = fixture_export(&shares, &policies, owner);
         let mut boot_tokens = vec![format!("nvx_mode={mode}")];
         if let Some(export) = &export {
             boot_tokens.extend(export.guest_table().into_iter().map(|row| {
