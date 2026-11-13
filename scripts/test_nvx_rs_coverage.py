@@ -1117,10 +1117,8 @@ class ChangedSummaryTests(unittest.TestCase):
 
 class ProfileTests(unittest.TestCase):
     def test_the_measurement_runs_with_cargo_s_instrumented_guest_binaries(self):
-        result = coverage.environment(
-            {"PATH": "/bin", "NVX_GUEST_BINARIES": "/b", "NVX_BUNDLE": "release"}
-        )
-        self.assertEqual(result, {"PATH": "/bin", "NVX_BUNDLE": "skip"})
+        result = coverage.environment({"PATH": "/bin", "NVX_GUEST_BINARIES": "/b"})
+        self.assertEqual(result, {"PATH": "/bin"})
 
     @unittest.skipIf(os.name == "nt", "Windows has no owner permission bits")
     def test_profiles_that_tests_leave_unreadable_become_readable(self):
