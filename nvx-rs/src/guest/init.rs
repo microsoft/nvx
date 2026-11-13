@@ -1007,6 +1007,9 @@ fn serve_boot(runtime: &mut Runtime) -> Result<u8, String> {
         );
     }
     let boot = boot::cold_boot(&command_line).map_err(|error| error.to_string())?;
+    // Keeps the switched root, with its runtime directory's lock and the descriptors of its view
+    // and live shares, until the VM's service ends.
+    let _root = boot.root;
     runtime.system.report(
         format!(
             "NVX-INIT-ROOT: switched mappings={}\n",
