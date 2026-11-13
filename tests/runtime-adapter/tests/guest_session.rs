@@ -24,14 +24,12 @@
 //! On x86_64, the worker of a clone, which a restore of a template's snapshot started, resumes the
 //! session that the template's VM attached before its capture, active in the epoch of its broker's
 //! first reset, with the same fake root operations, whose application of an activation record
-//! mirrors the guest's: the tests cover the reset that the restore queued, at which the clone
-//! applies the record of its restore packet, the host's `Await`s, which the clone takes before it
-//! is ready, which join the application, or make the clone ready once the record applied, the
-//! `Ready` that reports the activation, to each `Await` of any session, the order that the worker
-//! serves once the clone is ready, the status of each class of the activation's failures, which
-//! the worker answers with nothing, before any side effect where the class allows, its deadline,
-//! which ends a clone whose host never asks, also once the stream takes nothing more, the record's
-//! workload identity, as which every execution runs, the
+//! mirrors the guest's: the tests cover the reset that the restore queued, the one `Activate` that
+//! the clone takes before it is ready, the application of its record, the `Ready` that reports the
+//! activation, retries of the `Activate`, the order that the worker serves once the clone is
+//! ready, the status of each class of the activation's failures, which the worker answers with
+//! nothing, before any side effect where the class allows, its deadline, also once the stream
+//! takes nothing more, the record's workload identity, as which every execution runs, the
 //! mapping table of the record's export, which the worker applies from the export that the
 //! application mounted, while it leaves the endpoint of the network's proxy to the host, and the
 //! announcer of the listeners of a record whose network publishes them, whose end ends the clone,
@@ -772,8 +770,7 @@ fn the_guest_agent_refuses_messages_that_its_framing_does_not_allow() {
     };
     let cases = [
         (header([0; 4], 0), FrameError::Kind(0)),
-        (header([0; 4], 27), FrameError::Kind(27)),
-        (header([0; 4], 29), FrameError::Kind(29)),
+        (header([0; 4], 28), FrameError::Kind(28)),
         (
             header(too_long, 3),
             FrameError::Length {
@@ -794,8 +791,8 @@ fn the_guest_agent_refuses_messages_that_its_framing_does_not_allow() {
 
     // The guest agent answers requests, and refuses the messages that only it sends, and those
     // about a layered root, which its VM does not have: its configuration, a part of its mapping
-    // table, and the start of its workloads, the request for a clone's Ready, and executions,
-    // which only the worker of a layered root runs.
+    // table, and the start of its workloads, a clone's activation, and executions, which only the
+    // worker of a layered root runs.
     let refused_messages = [
         Message::Pong,
         Message::Stopped,
@@ -809,7 +806,7 @@ fn the_guest_agent_refuses_messages_that_its_framing_does_not_allow() {
         Message::RootConfig(RootConfig::default().encode()),
         Message::Maps(maps_part()),
         Message::Start,
-        Message::Await,
+        Message::Activate(Vec::new()),
         Message::ExecStart(Vec::new()),
         Message::ExecCredit(Vec::new()),
         Message::ExecTerminal(Vec::new()),
@@ -1009,13 +1006,13 @@ fn the_guest_binary_serves_the_session_on_its_standard_streams() {
     // The host sends a malformed message.
     let (mut broker, child) = start_binary();
     broker.attach(FIRST);
-    broker.send_data(&[0, 0, 0, 0, 29], OUTER_MAX_PAYLOAD);
+    broker.send_data(&[0, 0, 0, 0, 28], OUTER_MAX_PAYLOAD);
     let output = child.finished();
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let diagnostic = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         diagnostic,
-        "runtime-adapter-guest: unknown message kind 29\n"
+        "runtime-adapter-guest: unknown message kind 28\n"
     );
 }
 
@@ -2137,14 +2134,14 @@ fn the_worker_accepts_only_its_configuration_or_a_stop_before_its_root() {
     assert_eq!(root.calls, []);
 
     // Any other message ends it with an error, as do the messages that only the guest sends, and
-    // the request for a clone's Ready, which a VM that boots cold does not take.
+    // a clone's activation, which a VM that boots cold does not take.
     let refused = [
         Message::Ping,
         Message::Echo(b"early".to_vec()),
         Message::Probe(b"mounts".to_vec()),
         Message::Maps(maps_part()),
         Message::Start,
-        Message::Await,
+        Message::Activate(Vec::new()),
         Message::Pong,
         ready(),
         Message::Report(Vec::new()),
@@ -2163,10 +2160,9 @@ fn the_worker_accepts_only_its_configuration_or_a_stop_before_its_root() {
         assert_eq!(root.calls, [], "{message:?}");
     }
 
-    // Once the root is ready, a second configuration ends it with an error too, as does the
-    // request for a clone's Ready, and the worker leaves the root that it assembled to its
-    // operations.
-    for refused in [configuration(), Message::Await] {
+    // Once the root is ready, a second configuration ends it with an error too, as does a clone's
+    // activation, and the worker leaves the root that it assembled to its operations.
+    for refused in [configuration(), Message::Activate(Vec::new())] {
         let (mut broker, working) = start_worker(FakeRoot::booting(&layout()));
         broker.attach(FIRST);
         let replies = broker.exchange(&[configuration()], OUTER_MAX_PAYLOAD, 1);
@@ -4118,9 +4114,8 @@ fn the_worker_runs_executions_on_a_tty() {
 
 /// The worker of a clone, which a restore of a template's snapshot started, on x86_64, whose time
 /// ABI a clone needs. It resumes the session that the template's VM attached before its capture,
-/// answers the reset that the restore queued, applies the record of its restore packet then, takes
-/// nothing but resets and the host's `Await` until the clone is ready, which it is once the record
-/// applied and the host asked for `Ready`, and then serves the host's order, as after a cold boot.
+/// answers the reset that the restore queued, takes nothing but the host's `Activate` until the
+/// clone is ready, applies its record, and then serves the host's order, as after a cold boot.
 #[cfg(target_arch = "x86_64")]
 mod clones {
     use std::net::{IpAddr, Ipv4Addr};
@@ -4134,6 +4129,7 @@ mod clones {
     use nvx::guest::clone::{Activation, AdmissionFence, RootTemplate};
     use nvx::protocol::nvxs::{GuestEvent, GuestSession};
     use nvx::protocol::status;
+    use runtime_adapter::frame::MAX_ACTIVATE_BODY;
     use runtime_adapter::worker::UNACTIVATED_DRAIN;
     use runtime_adapter::worker::activation::{ACTIVATION_PROBE, ACTIVATION_TIMEOUT};
     use runtime_adapter::worker::capture::{self, Admission};
@@ -4163,7 +4159,7 @@ mod clones {
     /// The IPv4 gateway of the NIC of the clones' template.
     const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
-    /// Returns the activation record of a clone of the transaction `transaction`, whose workload
+    /// Returns the record of a clone's Activate of the transaction `transaction`, whose workload
     /// runs as `identity`, if any: an EROFS image over a scratch, without an export, a mapping, or
     /// a network, which expects [`RESOURCES`].
     fn record(transaction: u8, identity: Option<(u32, u32)>) -> ActivationRecord {
@@ -4241,25 +4237,13 @@ mod clones {
         })
     }
 
-    /// Returns the activation of a clone that the worker repaired, with [`RESOURCES`], whose
-    /// restore packet carried the activation record `packet`, if it carried one, behind the
+    /// Returns the activation of a clone that the worker repaired, with [`RESOURCES`], behind the
     /// worker's fence, which the capture's barrier handed over closed, and whose deadline ends
     /// `timeout` after `acknowledged`, as from the repair's acknowledgement of the restore.
-    fn repaired(
-        packet: Option<&[u8]>,
-        acknowledged: Instant,
-        timeout: Duration,
-    ) -> Activation<Admission> {
+    fn repaired(acknowledged: Instant, timeout: Duration) -> Activation<Admission> {
         let mut fence = Admission::default();
         fence.close().unwrap();
-        Activation::with_resources(
-            RESOURCES,
-            packet,
-            Some(acknowledged),
-            fence,
-            timeout,
-            acknowledged,
-        )
+        Activation::with_resources(RESOURCES, Some(acknowledged), fence, timeout, acknowledged)
     }
 
     /// Returns the inputs of the activation of the clones that their template captured: those of
@@ -4286,46 +4270,34 @@ mod clones {
         session
     }
 
-    /// Starts a clone's worker in a thread, with the root operations `root`, whose restore packet
-    /// carried `record`, on one end of a socket pair, and returns the broker on the other end with
-    /// the thread. The worker resumes the session that the template's VM attached, so it sends no
-    /// attachment, and the activation's deadline ends `timeout` from now.
-    fn start_clone(
-        root: FakeRoot,
-        record: &ActivationRecord,
-        timeout: Duration,
-    ) -> (Broker, Working) {
-        start_clone_after(root, Some(record.encode()), timeout, |_| {})
+    /// Starts a clone's worker in a thread, with the root operations `root`, on one end of a
+    /// socket pair, and returns the broker on the other end with the thread. The worker resumes
+    /// the session that the template's VM attached, so it sends no attachment, and its
+    /// activation's deadline ends `timeout` from now.
+    fn start_clone(root: FakeRoot, timeout: Duration) -> (Broker, Working) {
+        start_clone_after(root, timeout, |_| {})
     }
 
-    /// Starts a clone's worker as [`start_clone`] does, whose restore packet carried the activation
-    /// record `packet`, if it carried one, once `ahead` sent what the broker sends before the
-    /// worker runs, which the worker then takes at once, however late its thread runs.
+    /// Starts a clone's worker as [`start_clone`] does, once `ahead` sent what the broker sends
+    /// before the worker runs, which the worker then takes at once, however late its thread runs.
     fn start_clone_after(
         root: FakeRoot,
-        packet: Option<Vec<u8>>,
         timeout: Duration,
         ahead: impl FnOnce(&mut Broker),
     ) -> (Broker, Working) {
         let (broker, guest) = UnixStream::pair().unwrap();
         let mut broker = Broker::new(broker);
         ahead(&mut broker);
-        (broker, run_clone(guest, root, packet, timeout))
+        (broker, run_clone(guest, root, timeout))
     }
 
-    /// Runs a clone's worker in a thread, with the root operations `root`, whose restore packet
-    /// carried the activation record `packet`, if it carried one, on `guest`, the guest's end of
-    /// the stream, and returns the thread, as [`start_clone`] does. The clone's repair acknowledged
-    /// the restore now.
-    fn run_clone(
-        guest: UnixStream,
-        root: FakeRoot,
-        packet: Option<Vec<u8>>,
-        timeout: Duration,
-    ) -> Working {
+    /// Runs a clone's worker in a thread, with the root operations `root`, on `guest`, the guest's
+    /// end of the stream, and returns the thread, as [`start_clone`] does. The clone's repair
+    /// acknowledged the restore now.
+    fn run_clone(guest: UnixStream, root: FakeRoot, timeout: Duration) -> Working {
         let session = captured_session();
         let acknowledged = Instant::now();
-        let activation = repaired(packet.as_deref(), acknowledged, timeout);
+        let activation = repaired(acknowledged, timeout);
         thread::spawn(move || {
             let mut root = root;
             let worked = worker::work_clone(
@@ -4379,9 +4351,14 @@ mod clones {
         }
     }
 
-    /// Returns the worker's answer to the host's `Await` once it activated the clone with
-    /// `record`: its readiness, with the guest agent's build, and the activation, which reports
-    /// that it applied, with the record's transaction.
+    /// Returns the host's Activate of `record`.
+    fn activate(record: &ActivationRecord) -> Message {
+        Message::Activate(record.encode())
+    }
+
+    /// Returns the worker's answer to the Activate of `record` once it activated the clone: its
+    /// readiness, with the guest agent's build, and the activation, which reports that it applied,
+    /// with the record's transaction.
     fn activated(record: &ActivationRecord) -> Message {
         let ready = Ready::new(GUEST_BUILD).unwrap();
         Message::Ready(ready.with_activation(ReadyActivation::of(record)).encode())
@@ -4409,21 +4386,19 @@ mod clones {
 
     impl Host {
         /// Starts a clone's worker with the root operations `root`, and returns the host, once the
-        /// worker activated the clone with `record`, the record of its restore packet, which
-        /// announces no mapping, and started the sandbox. The host waits for Ready, which it asks
-        /// for, before it starts the sandbox.
+        /// worker activated the clone with `record`, which announces no mapping, and started the
+        /// sandbox. The host waits for Ready before it starts the sandbox.
         fn activated(root: FakeRoot, record: &ActivationRecord) -> Self {
             Self::mapped(root, record, &[])
         }
 
         /// Starts a clone's worker with the root operations `root`, and returns the host, once the
-        /// worker activated the clone with `record`, the record of its restore packet, applied
-        /// `parts`, the parts of the mapping table that the record announces, in order, and started
-        /// the sandbox.
+        /// worker activated the clone with `record`, applied `parts`, the parts of the mapping
+        /// table that the record announces, in order, and started the sandbox.
         fn mapped(root: FakeRoot, record: &ActivationRecord, parts: &[Vec<u8>]) -> Self {
-            let (mut broker, working) = start_clone(root, record, ACTIVATION_TIMEOUT);
+            let (mut broker, working) = start_clone(root, ACTIVATION_TIMEOUT);
             broker.reset(RESTORED);
-            let replies = broker.exchange(&[Message::Await], OUTER_MAX_PAYLOAD, 1);
+            let replies = broker.exchange(&[activate(record)], OUTER_MAX_PAYLOAD, 1);
             assert_eq!(replies, [activated(record)]);
             let mut messages = parts.iter().cloned().map(Message::Maps).collect::<Vec<_>>();
             messages.push(Message::Start);
@@ -4442,15 +4417,13 @@ mod clones {
     }
 
     #[test]
-    fn a_clone_activates_with_the_record_of_its_restore_packet_and_answers_the_host_s_await() {
-        let record = record(1, Some(WORKLOAD));
-        let root = FakeRoot::booting(&layout());
-        let (mut broker, working) = start_clone(root, &record, ACTIVATION_TIMEOUT);
+    fn a_clone_answers_the_restore_s_reset_and_activates_with_the_record_of_its_activate() {
+        let (mut broker, working) = start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
         // The worker sends no attachment: it acknowledges the reset that the restore queued, with
-        // its receive window, first, and then applies the record of its restore packet, whatever
-        // the host sends. The host asks for the clone's Ready with its `Await`.
+        // its receive window, first.
         broker.reset(RESTORED);
-        let replies = broker.exchange(&[Message::Await], OUTER_MAX_PAYLOAD, 1);
+        let record = record(1, Some(WORKLOAD));
+        let replies = broker.exchange(&[activate(&record)], OUTER_MAX_PAYLOAD, 1);
         assert_eq!(replies, [activated(&record)]);
         let Message::Ready(body) = &replies[0] else {
             panic!("{replies:?}");
@@ -4459,25 +4432,26 @@ mod clones {
         assert_eq!(ready.build(), GUEST_BUILD);
         assert_eq!(ready.activation(), Some(ReadyActivation::of(&record)));
 
-        // Another `Await` gets the same Ready, without a second application, in records of any
-        // size, and after a later reset, as once the host attached again.
-        let replies = broker.exchange(&[Message::Await], 2, 1);
+        // A retry of the Activate, byte for byte, gets the same Ready, without a second
+        // application, in records of any size, and after a later reset, as once the host attached
+        // again.
+        let replies = broker.exchange(&[activate(&record)], 7, 1);
         assert_eq!(replies, [activated(&record)]);
         broker.settle();
         broker.reset(Identity {
             epoch: 2,
             ..RESTORED
         });
-        let replies = broker.exchange(&[Message::Await], OUTER_MAX_PAYLOAD, 1);
+        let replies = broker.exchange(&[activate(&record)], OUTER_MAX_PAYLOAD, 1);
         assert_eq!(replies, [activated(&record)]);
 
         // The worker then serves the host's order, as after a cold boot: the record announces no
-        // mapping, so the sandbox starts at once, and an `Await` still gets the same Ready.
+        // mapping, so the sandbox starts at once, and a retry still gets the same Ready.
         let messages = [
             Message::Ping,
             Message::Start,
             Message::Probe(b"mounts".to_vec()),
-            Message::Await,
+            activate(&record),
             Message::Stop,
         ];
         let expected = [
@@ -4505,12 +4479,10 @@ mod clones {
     }
 
     #[test]
-    fn a_clone_takes_nothing_but_resets_and_awaits_before_it_is_ready() {
-        // Before the host's first `Await`, while the record applies or once it applied, any other
-        // message fails the activation, finally, with the status of the host's session, a stop and
-        // a ping included, as do the messages that only the guest sends. The worker answers
-        // nothing, and mounts and spawns nothing more.
-        let record = record(1, Some(WORKLOAD));
+    fn a_clone_takes_nothing_but_its_activate_before_it_is_ready() {
+        // Any other message fails the activation, finally, with the status of the host's session,
+        // a stop and a ping included, as do the messages that only the guest sends. The worker
+        // answers nothing, and applies, mounts, and spawns nothing.
         let refused = [
             Message::Ping,
             Message::Stop,
@@ -4525,63 +4497,55 @@ mod clones {
             Message::Started,
         ];
         for message in refused {
-            let root = FakeRoot::booting(&layout());
-            let (mut broker, working) = start_clone(root, &record, ACTIVATION_TIMEOUT);
+            let (mut broker, working) =
+                start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
             broker.reset(RESTORED);
             broker.send_data(&message.encode().unwrap(), OUTER_MAX_PAYLOAD);
             let root = unactivated(&mut broker, working, status::ACTIVATION_PROTOCOL);
-            assert_eq!(root.calls, [applied(&record)], "{message:?}");
+            assert_eq!(root.calls, [], "{message:?}");
         }
 
-        // A later reset, as once the host attached again, which the worker acknowledges, abandons
-        // the `Await`s of the earlier session, which no Ready answers, and the clone, whose record
-        // applied meanwhile, answers the `Await` of the new session, which makes it ready.
-        let (root, gate) = FakeRoot::booting(&layout()).gated();
-        let (mut broker, working) = start_clone(root, &record, ACTIVATION_TIMEOUT);
+        // So does another reset, which the worker acknowledges first.
+        let (mut broker, working) = start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
         broker.reset(RESTORED);
-        broker.send_data(&Message::Await.encode().unwrap(), OUTER_MAX_PAYLOAD);
-        broker.reset_ahead(Identity {
+        broker.reset(Identity {
             epoch: 2,
             ..RESTORED
         });
-        gate.send(()).unwrap();
-        broker.acknowledged();
-        let replies = broker.exchange(&[Message::Await, Message::Stop], OUTER_MAX_PAYLOAD, 2);
-        assert_eq!(replies, [activated(&record), Message::Stopped]);
-        let (root, worked) = joined(working);
-        assert_eq!(worked.unwrap(), Worked::Stopped);
-        assert_eq!(root.calls, [applied(&record), Call::Teardown]);
+        let root = unactivated(&mut broker, working, status::ACTIVATION_PROTOCOL);
+        assert_eq!(root.calls, []);
     }
 
     #[test]
     fn a_clone_s_activation_fails_finally_with_the_status_of_the_failure_s_class() {
-        // The activation refuses a restore packet without a record, and a record that does not
-        // decode, a cold boot's, and one that expects other resources than the repair found, at
-        // the restore's reset, before anything has a side effect.
+        // The activation refuses a record that does not decode, a cold boot's, and one that
+        // expects other resources than the repair found, before anything has a side effect.
         let clone = record(1, None);
         let cold = ActivationRecord::new(None, clone.configuration().clone()).unwrap();
         let more = changed(&clone, |configuration| configuration.resources.memory *= 2);
         let cases = [
-            (None, status::ACTIVATION_RECORD),
-            (Some(Vec::new()), status::ACTIVATION_RECORD),
-            (Some(b"\x01".to_vec()), status::ACTIVATION_RECORD),
-            (Some(cold.encode()), status::ACTIVATION_RECORD),
-            (Some(more.encode()), status::ACTIVATION_RESOURCES),
+            (Message::Activate(Vec::new()), status::ACTIVATION_RECORD),
+            (
+                Message::Activate(b"\x01".to_vec()),
+                status::ACTIVATION_RECORD,
+            ),
+            (activate(&cold), status::ACTIVATION_RECORD),
+            (activate(&more), status::ACTIVATION_RESOURCES),
         ];
-        for (packet, expected) in cases {
-            let root = FakeRoot::booting(&layout());
+        for (message, expected) in cases {
             let (mut broker, working) =
-                start_clone_after(root, packet.clone(), ACTIVATION_TIMEOUT, |_| {});
+                start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
             broker.reset(RESTORED);
+            broker.send_data(&message.encode().unwrap(), OUTER_MAX_PAYLOAD);
             let root = unactivated(&mut broker, working, expected);
-            assert_eq!(root.calls, [], "{packet:?}");
+            assert_eq!(root.calls, [], "{message:?}");
         }
 
         // The application fails once the kernel refused to reread a GPT disk's partition table,
         // and refuses a machine ID that it cannot generate, and a hostname or machine ID that it
         // cannot set for every execution, an export that it cannot mount, a resolver file that it
         // cannot write, and an announcer of the workload's listeners that it cannot start, before
-        // Ready, without the host's `Await`.
+        // Ready.
         let gpt = changed(&clone, |configuration| {
             configuration.image = activation::Image::Gpt {
                 binding: activation::Identity::from_bytes([0x11; 32]),
@@ -4625,89 +4589,116 @@ mod clones {
             ),
         ];
         for (record, root, expected) in cases {
-            let (mut broker, working) = start_clone(root, &record, ACTIVATION_TIMEOUT);
+            let (mut broker, working) = start_clone(root, ACTIVATION_TIMEOUT);
             broker.reset(RESTORED);
+            broker.send_data(&activate(&record).encode().unwrap(), OUTER_MAX_PAYLOAD);
             let root = unactivated(&mut broker, working, expected);
             assert_eq!(root.calls, [applied(&record)]);
         }
     }
 
     #[test]
-    fn a_clone_that_is_not_ready_in_time_ends_with_the_deadline_s_status() {
-        // Without the restore's reset, the clone does not activate, and the deadline ends the
-        // activation, before anything has a side effect, as it does once it passed when the reset
-        // came, which the worker still acknowledges. The broker sends what it sends before the
-        // worker runs, which then takes it at once.
+    fn a_clone_fails_on_an_activate_longer_than_a_record_before_it_takes_its_body() {
+        // The framing refuses the header of an Activate that announces more bytes than a record
+        // can have before it takes any byte of its body, and the activation takes it as a record
+        // that long: it fails with the record's status, whether the clone is ready or not, and the
+        // worker answers nothing more.
+        let accepted = record(1, Some(WORKLOAD));
+        let kind = activate(&accepted).kind();
+        for length in [MAX_ACTIVATE_BODY + 1, usize::try_from(u32::MAX).unwrap()] {
+            let mut header = u32::try_from(length).unwrap().to_le_bytes().to_vec();
+            header.push(kind);
+            for ready in [false, true] {
+                let (mut broker, working) =
+                    start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
+                broker.reset(RESTORED);
+                let mut calls = Vec::new();
+                if ready {
+                    let replies = broker.exchange(&[activate(&accepted)], OUTER_MAX_PAYLOAD, 1);
+                    assert_eq!(replies, [activated(&accepted)]);
+                    calls.push(applied(&accepted));
+                }
+                broker.send_data(&header, OUTER_MAX_PAYLOAD);
+                let (root, worked) = joined(working);
+                let worked = worked.unwrap();
+                let Worked::Unactivated {
+                    status: code,
+                    problem,
+                } = &worked
+                else {
+                    panic!("{length}, ready {ready}: {worked:?}");
+                };
+                assert_eq!(*code, status::ACTIVATION_RECORD, "{problem}");
+                assert!(problem.contains(&format!("{length} bytes")), "{problem}");
+                while let Some(record) = broker.read() {
+                    broker.check(&record);
+                    assert_eq!(broker.accept(&record), [], "{problem}");
+                }
+                assert_eq!(root.calls, calls, "{problem}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_clone_that_the_host_does_not_activate_in_time_ends_with_the_deadline_s_status() {
+        // Whether the restore's reset came or not, or part of an Activate, the deadline ends the
+        // activation, before anything has a side effect. The broker sends what it sends before the
+        // worker runs, which then takes it at once: a worker that runs only once the deadline
+        // passed still acknowledges the reset, and fails with the deadline's status.
         let record = record(1, Some(WORKLOAD));
-        for (reset, deadline) in [(false, Duration::from_millis(200)), (true, Duration::ZERO)] {
+        let bytes = activate(&record).encode().unwrap();
+        let cases: [Option<&[u8]>; 3] = [None, Some(&[]), Some(&bytes[..bytes.len() / 2])];
+        for sent in cases {
+            let deadline = Duration::from_millis(200);
             let root = FakeRoot::booting(&layout());
-            let packet = Some(record.encode());
-            let (mut broker, working) = start_clone_after(root, packet, deadline, |broker| {
-                if reset {
+            let (mut broker, working) = start_clone_after(root, deadline, |broker| {
+                if let Some(sent) = sent {
                     broker.reset_ahead(RESTORED);
+                    broker.send_data(sent, OUTER_MAX_PAYLOAD);
                 }
             });
-            if reset {
+            if sent.is_some() {
                 broker.acknowledged();
             }
             let root = unactivated(&mut broker, working, status::ACTIVATION_DEADLINE);
-            assert_eq!(root.calls, [], "reset {reset}");
+            assert_eq!(root.calls, [], "{sent:?}");
         }
 
-        // A clone whose record applied, at the restore's reset, is not ready until the host asks
-        // for its `Ready`: one whose host never asks ends at the deadline too.
-        let deadline = Duration::from_secs(1);
-        let started = Instant::now();
-        let root = FakeRoot::booting(&layout());
-        let (mut broker, working) = start_clone(root, &record, deadline);
-        broker.reset(RESTORED);
-        let root = unactivated(&mut broker, working, status::ACTIVATION_DEADLINE);
-        assert!(started.elapsed() >= deadline);
-        assert_eq!(root.calls, [applied(&record)]);
-
-        // The clone applies its record before the host's first message, its `Await`, which then
-        // makes it ready at once, and once it is ready, the deadline ends nothing.
+        // Once the clone is ready, the deadline ends nothing.
         let deadline = Duration::from_secs(2);
         let root = FakeRoot::booting(&layout());
-        let (mut broker, working) = start_clone(root, &record, deadline);
-        broker.reset(RESTORED);
-        thread::sleep(Duration::from_millis(500));
-        let replies = broker.exchange(&[Message::Await], OUTER_MAX_PAYLOAD, 1);
+        let (mut broker, working) = start_clone_after(root, deadline, |broker| {
+            broker.reset_ahead(RESTORED);
+            broker.send_data(&bytes, OUTER_MAX_PAYLOAD);
+        });
+        broker.acknowledged();
+        let mut replies = Vec::new();
+        while replies.is_empty() {
+            replies.extend(broker.take());
+        }
         assert_eq!(replies, [activated(&record)]);
-        thread::sleep(deadline);
-        let probe = Message::Probe(ACTIVATION_PROBE.as_bytes().to_vec());
-        let messages = [probe, Message::Ping, Message::Stop];
-        let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 3);
-        let facts = reported(&replies[0]);
-        assert!(
-            after(&facts, "applied") < after(&facts, "message"),
-            "{facts:?}"
-        );
-        assert!(
-            after(&facts, "message") <= after(&facts, "ready"),
-            "{facts:?}"
-        );
-        assert_eq!(replies[1..], [Message::Pong, Message::Stopped]);
-        let (root, worked) = joined(working);
+        thread::sleep(deadline + Duration::from_millis(500));
+        let replies = broker.exchange(&[Message::Ping, Message::Stop], OUTER_MAX_PAYLOAD, 2);
+        assert_eq!(replies, [Message::Pong, Message::Stopped]);
+        let (_, worked) = joined(working);
         assert_eq!(worked.unwrap(), Worked::Stopped);
-        assert_eq!(root.calls, [applied(&record), Call::Teardown]);
     }
 
     #[test]
     fn a_clone_s_application_ends_by_the_activation_s_deadline() {
         // The worker hands the application the activation's deadline, until which it waits for
-        // the devices at the latest: a record whose application would outlast the deadline, such
-        // as one whose device never appears, ends the clone with the deadline's status once the
-        // deadline passed, rather than once the application's waits would have ended, with no
-        // Ready.
+        // the devices at the latest: an Activate whose application would outlast the deadline,
+        // such as one whose device never appears, ends the clone with the deadline's status once
+        // the deadline passed, rather than once the application's waits would have ended, with
+        // no Ready.
         let timeout = Duration::from_secs(2);
         let slow = Duration::from_secs(60);
         let root = FakeRoot::booting(&layout()).assembling_for(slow);
         let started = Instant::now();
-        let record = record(1, Some(WORKLOAD));
-        let (mut broker, working) = start_clone(root, &record, timeout);
+        let (mut broker, working) = start_clone(root, timeout);
         broker.reset(RESTORED);
-        broker.send_data(&Message::Await.encode().unwrap(), OUTER_MAX_PAYLOAD);
+        let record = record(1, Some(WORKLOAD));
+        broker.send_data(&activate(&record).encode().unwrap(), OUTER_MAX_PAYLOAD);
         let root = unactivated(&mut broker, working, status::ACTIVATION_DEADLINE);
         let ended = Instant::now();
         assert!(ended - started < slow, "{:?}", ended - started);
@@ -4723,26 +4714,39 @@ mod clones {
 
     #[test]
     fn a_clone_takes_what_came_during_its_application_before_it_is_ready() {
-        // The application runs until the test opens the gate, by when the host sent its `Await`,
-        // and a request, before Ready, which the worker takes before it completes the activation:
-        // the request fails the activation, with the status of the host's session, after one
-        // application, and with no Ready.
+        // The application runs until the test opens the gate, by when the host sent more after
+        // its Activate, before Ready, which the worker takes before it completes the activation:
+        // another reset, which the worker acknowledges, or a request fails the activation, with
+        // the status of the host's session, after one application, and with no Ready.
         let record = record(1, Some(WORKLOAD));
-        let (root, gate) = FakeRoot::booting(&layout()).gated();
-        let (mut broker, working) = start_clone(root, &record, ACTIVATION_TIMEOUT);
-        broker.reset(RESTORED);
-        let bytes = encode(&[Message::Await, Message::Ping]);
-        broker.send_data(&bytes, OUTER_MAX_PAYLOAD);
-        gate.send(()).unwrap();
-        let root = unactivated(&mut broker, working, status::ACTIVATION_PROTOCOL);
-        assert_eq!(root.calls, [applied(&record)]);
+        let bytes = activate(&record).encode().unwrap();
+        for reset in [true, false] {
+            let (root, gate) = FakeRoot::booting(&layout()).gated();
+            let (mut broker, working) = start_clone(root, ACTIVATION_TIMEOUT);
+            broker.reset(RESTORED);
+            broker.send_data(&bytes, OUTER_MAX_PAYLOAD);
+            if reset {
+                broker.reset_ahead(Identity {
+                    epoch: 2,
+                    ..RESTORED
+                });
+            } else {
+                broker.send_data(&Message::Ping.encode().unwrap(), OUTER_MAX_PAYLOAD);
+            }
+            gate.send(()).unwrap();
+            if reset {
+                broker.acknowledged();
+            }
+            let root = unactivated(&mut broker, working, status::ACTIVATION_PROTOCOL);
+            assert_eq!(root.calls, [applied(&record)], "reset {reset}");
+        }
 
-        // Each `Await` that came meanwhile joins the application: the worker answers each with
-        // Ready, after one application, then serves the host's order.
+        // A retry of the Activate, byte for byte, joins the application: the worker answers both
+        // with Ready, after one application, then serves the host's order.
         let (root, gate) = FakeRoot::booting(&layout()).gated();
-        let (mut broker, working) = start_clone(root, &record, ACTIVATION_TIMEOUT);
+        let (mut broker, working) = start_clone(root, ACTIVATION_TIMEOUT);
         broker.reset(RESTORED);
-        let bytes = encode(&[Message::Await, Message::Await]);
+        broker.send_data(&bytes, OUTER_MAX_PAYLOAD);
         broker.send_data(&bytes, OUTER_MAX_PAYLOAD);
         gate.send(()).unwrap();
         let mut replies = Vec::new();
@@ -4760,49 +4764,45 @@ mod clones {
     #[test]
     fn a_clone_whose_stream_takes_nothing_still_ends_once_its_activation_failed() {
         // The guest's direction of the stream is full, as once the broker failed: the worker
-        // cannot send its acknowledgement of the restore's reset, still applies the record of its
-        // restore packet, for which no host asks, and ends once the deadline passed, with the
-        // deadline's status, once it waited for the stream for `UNACTIVATED_DRAIN`.
-        let record = record(1, Some(WORKLOAD));
+        // cannot send its acknowledgement of the restore's reset, and still ends once the
+        // deadline passed, with the deadline's status, once it waited for the stream for
+        // `UNACTIVATED_DRAIN`.
         let (broker, guest) = stalled();
         let reset = super::record(RecordType::Reset, RESTORED, 0, &[]);
         (&broker).write_all(&reset).unwrap();
-        let deadline = Duration::from_secs(1);
+        let deadline = Duration::from_millis(200);
         let started = Instant::now();
-        let root = FakeRoot::booting(&layout());
-        let working = run_clone(guest, root, Some(record.encode()), deadline);
+        let working = run_clone(guest, FakeRoot::booting(&layout()), deadline);
         let (root, worked) = joined(working);
         let worked = worked.unwrap();
         assert_eq!(worked.status(), status::ACTIVATION_DEADLINE, "{worked:?}");
         assert!(started.elapsed() >= deadline + UNACTIVATED_DRAIN);
-        assert_eq!(root.calls, [applied(&record)]);
+        assert_eq!(root.calls, []);
 
         // So does a worker whose broker closes its end of the stream before the clone is ready,
-        // as an abandoned clone, long before the deadline passes, once it applied its record.
+        // as an abandoned clone, long before the deadline passes.
         let (broker, guest) = stalled();
         (&broker).write_all(&reset).unwrap();
         broker.shutdown(Shutdown::Write).unwrap();
         let started = Instant::now();
-        let root = FakeRoot::booting(&layout());
-        let working = run_clone(guest, root, Some(record.encode()), ACTIVATION_TIMEOUT);
+        let working = run_clone(guest, FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
         let (root, worked) = joined(working);
         assert_eq!(worked.unwrap(), Worked::Abandoned);
         assert!(started.elapsed() >= UNACTIVATED_DRAIN);
-        assert_eq!(root.calls, [applied(&record)]);
+        assert_eq!(root.calls, []);
     }
 
     #[test]
     fn a_clone_whose_broker_closes_the_stream_before_it_is_ready_is_abandoned() {
-        // Whether the restore's reset came or not, or part of an `Await`, a broker that closes
-        // the stream before the clone is ready, which it is not before the host's `Await`, ends
-        // the clone with the status of the host's session, with its fence closed, whether its
-        // record applied or not.
+        // Whether the restore's reset came or not, or part of an Activate, a broker that closes
+        // the stream before the clone is ready ends the clone with the status of the host's
+        // session, with nothing applied, and its fence closed.
         let record = record(1, Some(WORKLOAD));
-        let bytes = Message::Await.encode().unwrap();
-        let cases: [Option<&[u8]>; 3] = [None, Some(&[]), Some(&bytes[..2])];
+        let bytes = activate(&record).encode().unwrap();
+        let cases: [Option<&[u8]>; 3] = [None, Some(&[]), Some(&bytes[..bytes.len() / 2])];
         for sent in cases {
-            let root = FakeRoot::booting(&layout());
-            let (mut broker, working) = start_clone(root, &record, ACTIVATION_TIMEOUT);
+            let (mut broker, working) =
+                start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
             if let Some(sent) = sent {
                 broker.reset(RESTORED);
                 broker.send_data(sent, OUTER_MAX_PAYLOAD);
@@ -4815,12 +4815,7 @@ mod clones {
                 (&Worked::Abandoned, 1),
                 "{sent:?}"
             );
-            let calls = if sent.is_some() {
-                vec![applied(&record)]
-            } else {
-                Vec::new()
-            };
-            assert_eq!(root.calls, calls, "{sent:?}");
+            assert_eq!(root.calls, [], "{sent:?}");
             while let Some(record) = broker.read() {
                 broker.check(&record);
                 assert_eq!(broker.accept(&record), [], "{sent:?}");
@@ -4829,10 +4824,9 @@ mod clones {
 
         // Once the clone is ready, it ends as the worker of a VM that boots cold does, and leaves
         // the root that it assembled to its operations.
-        let root = FakeRoot::booting(&layout());
-        let (mut broker, working) = start_clone(root, &record, ACTIVATION_TIMEOUT);
+        let (mut broker, working) = start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
         broker.reset(RESTORED);
-        let replies = broker.exchange(&[Message::Await], OUTER_MAX_PAYLOAD, 1);
+        let replies = broker.exchange(&[activate(&record)], OUTER_MAX_PAYLOAD, 1);
         assert_eq!(replies, [activated(&record)]);
         broker.close();
         let (root, worked) = joined(working);
@@ -4845,10 +4839,8 @@ mod clones {
     fn a_clone_whose_broker_is_gone_still_ends_as_its_activation_tells() {
         // The broker sends the restore's reset, and a ping, which fails the activation, or
         // nothing more, and closes its socket before the worker runs: the worker cannot write
-        // its acknowledgement, applies the record of its restore packet, and still ends with the
-        // activation's status, or as an abandoned clone, rather than with the failure of its
-        // stream.
-        let record = record(1, Some(WORKLOAD));
+        // its acknowledgement, and still ends with the activation's status, or as an abandoned
+        // clone, rather than with the failure of its stream.
         let reset = super::record(RecordType::Reset, RESTORED, 0, &[]);
         let ping = Message::Ping.encode().unwrap();
         let ping = super::record(RecordType::Data, RESTORED, 1, &ping);
@@ -4863,8 +4855,7 @@ mod clones {
             let (broker, guest) = UnixStream::pair().unwrap();
             (&broker).write_all(&sent).unwrap();
             drop(broker);
-            let root = FakeRoot::booting(&layout());
-            let working = run_clone(guest, root, Some(record.encode()), ACTIVATION_TIMEOUT);
+            let working = run_clone(guest, FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
             let (root, worked) = joined(working);
             let worked = worked.unwrap();
             match expected {
@@ -4874,7 +4865,34 @@ mod clones {
                 }
                 None => assert_eq!(worked, Worked::Abandoned),
             }
-            assert_eq!(root.calls, [applied(&record)], "{worked:?}");
+            assert_eq!(root.calls, [], "{worked:?}");
+        }
+    }
+
+    #[test]
+    fn a_ready_clone_fails_on_an_activate_that_is_not_a_retry() {
+        // An Activate of another transaction, or of the same transaction with another record, once
+        // the clone is ready or its sandbox started, fails the activation with the status of the
+        // host's session. The worker leaves the root that it assembled to its operations.
+        let accepted = record(1, Some(WORKLOAD));
+        let cases = [
+            (record(2, Some(WORKLOAD)), false),
+            (record(1, None), false),
+            (record(1, None), true),
+        ];
+        for (other, started) in cases {
+            let (mut broker, working) =
+                start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
+            broker.reset(RESTORED);
+            let replies = broker.exchange(&[activate(&accepted)], OUTER_MAX_PAYLOAD, 1);
+            assert_eq!(replies, [activated(&accepted)]);
+            if started {
+                let replies = broker.exchange(&[Message::Start], OUTER_MAX_PAYLOAD, 1);
+                assert_eq!(replies, [Message::Started]);
+            }
+            broker.send_data(&activate(&other).encode().unwrap(), OUTER_MAX_PAYLOAD);
+            let root = unactivated(&mut broker, working, status::ACTIVATION_PROTOCOL);
+            assert_eq!(root.calls, [applied(&accepted)], "{other:?}");
         }
     }
 
@@ -4980,12 +4998,12 @@ mod clones {
         let record = published(&record(1, None));
         for started in [false, true] {
             let (root, ending) = FakeRoot::booting(&layout()).ending();
-            let (mut broker, working) = start_clone(root, &record, ACTIVATION_TIMEOUT);
+            let (mut broker, working) = start_clone(root, ACTIVATION_TIMEOUT);
             broker.reset(RESTORED);
-            let replies = broker.exchange(&[Message::Await], OUTER_MAX_PAYLOAD, 1);
+            let replies = broker.exchange(&[activate(&record)], OUTER_MAX_PAYLOAD, 1);
             assert_eq!(replies, [activated(&record)]);
             // The host waits for Ready before it starts the sandbox: until the activation
-            // settled, any message but an `Await` fails it.
+            // settled, any message but a retry of the Activate fails it.
             if started {
                 let replies = broker.exchange(&[Message::Start], OUTER_MAX_PAYLOAD, 1);
                 assert_eq!(replies, [Message::Started]);
@@ -5020,8 +5038,7 @@ mod clones {
         let mut broker = Broker::new(broker);
         let session = captured_session();
         let acknowledged = Instant::now();
-        let packet = record.encode();
-        let activation = repaired(Some(&packet), acknowledged, ACTIVATION_TIMEOUT);
+        let activation = repaired(acknowledged, ACTIVATION_TIMEOUT);
         let gatewayless = RootTemplate {
             gateway: None,
             ..template()
@@ -5040,6 +5057,7 @@ mod clones {
             (root, worked)
         });
         broker.reset(RESTORED);
+        broker.send_data(&activate(&record).encode().unwrap(), OUTER_MAX_PAYLOAD);
         let root = unactivated(&mut broker, working, status::ACTIVATION_NETWORK);
         assert!(root.announcer.is_none());
     }
@@ -5065,8 +5083,8 @@ mod clones {
     fn a_clone_reports_when_its_events_happened_after_the_acknowledgement() {
         // The worker answers the probe of the clone's activation itself, with no root operation,
         // executions running or not: the restore's reset came after the repair's acknowledgement,
-        // then the application of the record of its restore packet, and the host's first message,
-        // its `Await`, in either order, then the clone's Ready, its start, and no execution yet.
+        // then the host's first message, the clone's Activate, then its Ready and its start, and
+        // no execution yet.
         let record = record(1, Some(WORKLOAD));
         let mut host = Host::activated(FakeRoot::booting(&layout()), &record);
         let probe = Message::Probe(ACTIVATION_PROBE.as_bytes().to_vec());
@@ -5077,11 +5095,8 @@ mod clones {
         // Its template delayed no repair.
         assert_eq!(facts.get("repair-delay"), Some("none"));
         assert_eq!(facts.get("execution"), Some("none"));
-        let [reset, message, applied, ready, started] =
-            ["reset", "message", "applied", "ready", "started"].map(|name| after(&facts, name));
-        assert!(reset <= message.min(applied), "{facts:?}");
-        assert!(message.max(applied) <= ready, "{facts:?}");
-        assert!(ready <= started, "{facts:?}");
+        let events = ["reset", "message", "ready", "started"].map(|name| after(&facts, name));
+        assert!(events.is_sorted(), "{facts:?}");
 
         // The start of the first execution came once the sandbox started.
         let workload = exec::Identity::new(WORKLOAD.0, WORKLOAD.1);
@@ -5092,7 +5107,7 @@ mod clones {
         host.send(&[probe]);
         host.run_until(|host| !host.replies.is_empty());
         let facts = reported(&host.replies.remove(0));
-        assert!(after(&facts, "execution") >= started, "{facts:?}");
+        assert!(after(&facts, "execution") >= events[3], "{facts:?}");
         host.run_until(|host| host.outcome(1).is_some());
         check_lossless(&host, 1, Status::Exited(0));
         let (root, worked) = host.stop();
@@ -5102,34 +5117,6 @@ mod clones {
             "{:?}",
             root.calls
         );
-    }
-
-    #[test]
-    fn a_clone_reports_its_application_before_an_await_that_came_during_it() {
-        // The host's `Await` came while the record applied, which runs until the test opens the
-        // gate: the application completed before the worker took the `Await`, which made the
-        // clone ready once the worker took what came meanwhile, so the clone reports its reset,
-        // its application, the host's first message, and its Ready in that order.
-        let record = record(1, Some(WORKLOAD));
-        let (root, gate) = FakeRoot::booting(&layout()).gated();
-        let (mut broker, working) = start_clone(root, &record, ACTIVATION_TIMEOUT);
-        broker.reset(RESTORED);
-        broker.send_data(&encode(&[Message::Await]), OUTER_MAX_PAYLOAD);
-        gate.send(()).unwrap();
-        let mut replies = Vec::new();
-        while replies.is_empty() {
-            replies.extend(broker.take());
-        }
-        assert_eq!(replies, [activated(&record)]);
-        let probe = Message::Probe(ACTIVATION_PROBE.as_bytes().to_vec());
-        let replies = broker.exchange(&[probe, Message::Stop], OUTER_MAX_PAYLOAD, 2);
-        let facts = reported(&replies[0]);
-        let events = ["reset", "applied", "message", "ready"].map(|name| after(&facts, name));
-        assert!(events.is_sorted(), "{facts:?}");
-        assert_eq!(replies[1], Message::Stopped);
-        let (root, worked) = joined(working);
-        assert_eq!(worked.unwrap(), Worked::Stopped);
-        assert_eq!(root.calls, [applied(&record), Call::Teardown]);
     }
 
     #[test]

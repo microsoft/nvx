@@ -21,10 +21,8 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io;
-use std::iter;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -45,8 +43,6 @@ pub(crate) const SCRATCH_TEMPLATE: &str = "ubuntu-smoke-scratch.ext4";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
 /// How much of the end of the VMM's log a failure shows.
 const LOG_TAIL: usize = 8192;
-/// The number of the next sandbox of the test process.
-static NEXT_SANDBOX: AtomicUsize = AtomicUsize::new(0);
 
 /// The `KEY=VALUE` lines that a command of the host program printed.
 pub(crate) type Printed = BTreeMap<String, String>;
@@ -152,12 +148,11 @@ impl Drop for Started {
 impl Sandbox {
     /// Creates the directory of the test `name`, in the system's temporary directory, so that the
     /// path of a Linux control socket in it stays short. A directory that an earlier test process
-    /// kept stays as it is. Each sandbox of the process takes a name of its own, since Windows
-    /// refuses to create a directory under the name of one that another test is still removing.
+    /// kept stays as it is.
     pub(crate) fn new(name: &str) -> Self {
         let pid = std::process::id();
-        let root = iter::repeat_with(|| NEXT_SANDBOX.fetch_add(1, Ordering::Relaxed))
-            .map(|number| env::temp_dir().join(format!("runtime-adapter-{name}-{pid}-{number}")))
+        let root = (0..)
+            .map(|attempt| env::temp_dir().join(format!("runtime-adapter-{name}-{pid}-{attempt}")))
             .find(|root| match fs::create_dir(root) {
                 Ok(()) => true,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,

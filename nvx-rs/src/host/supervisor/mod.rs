@@ -16,7 +16,7 @@
 //!
 //! 1. [`LockedStore::begin_launch`] writes the journal's marker, which names the launch, and the
 //!    caller's `command` builds the VMM's [`VmmCommand`] with the control endpoint that the
-//!    launch chose, in the working directory that [`vmm_working_dir`] chooses for the store.
+//!    launch chose.
 //! 2. [`spawn`] starts the VMM with the launch's claimed log as its standard output and error, and
 //!    [`Launch::record_process`] records its identity right after.
 //! 3. The caller checks, through its own transport, that the VMM serves its control endpoint, and
@@ -55,14 +55,9 @@
 //!         Reattached::Indeterminate(reason) => return Err(nvx::Error::other(reason)),
 //!     }
 //!     let launch = LaunchId::generate()?;
-//!     // On Windows, the VMM starts in the system directory, whose path is short whatever the
-//!     // store's.
-//!     let working_dir = supervisor::vmm_working_dir(store.dir()).map_err(|error| {
-//!         nvx::Error::io("cannot find the VMM's working directory").with_source(error)
-//!     })?;
 //!     let starting = supervisor::launch(&mut locked, &launch, runtime, capability, |endpoint| {
 //!         let arguments = spec.openvmm_arguments(endpoint, &store.outcome_path())?;
-//!         Ok(VmmCommand::new(&spec.openvmm, arguments, &working_dir))
+//!         Ok(VmmCommand::new(&spec.openvmm, arguments, store.dir()))
 //!     })?;
 //!     // Connect to `starting.endpoint()` through the caller's own transport, then commit once
 //!     // the VMM serves it, or else abandon the launch.
@@ -239,4 +234,4 @@ pub(crate) use self::reattach::reattach_reporting;
 pub use self::reattach::{Reattached, reattach};
 pub use self::vmm::{StopOutcome, Stopped, Vmm};
 pub use super::platform::inherit::{Inherited, SpawnLock, lock_spawns, spawn_command};
-pub use super::spawn::{Launched, VmmCommand, spawn, vmm_working_dir};
+pub use super::spawn::{Launched, VmmCommand, spawn};
