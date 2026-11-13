@@ -269,21 +269,13 @@ impl Process {
     /// process, or with [`WaitMethod::Polling`], checks its identity at a short interval. An
     /// error means that the wait cannot determine whether the process exited.
     pub fn wait(&self, deadline: Instant) -> io::Result<Option<Exited>> {
-        Ok(if self.wait_bool(deadline)? {
-            Some(Exited(()))
-        } else {
-            None
-        })
-    }
-
-    /// Keeps the boolean wait result for the legacy lifecycle callers.
-    pub(crate) fn wait_bool(&self, deadline: Instant) -> io::Result<bool> {
-        wait_handle(
+        let exited = wait_handle(
             &self.handle,
             self.reference.pid,
             self.reference.start_time,
             deadline,
-        )
+        )?;
+        Ok(exited.then_some(Exited(())))
     }
 
     /// Returns whether the process has exited, without waiting.
