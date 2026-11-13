@@ -1129,6 +1129,7 @@ fn values<'a>(arguments: &'a [OsString], option: &str) -> Vec<&'a OsStr> {
 fn capture_arguments_accept_platform_tokens_and_refuse_nonplatform_tokens() {
     let mut config = captured();
     config.check().unwrap();
+    config.boot.as_mut().unwrap().command_line = "nvx_sandbox=1 nokaslr".to_owned();
     for result in [
         config.kernel_command_line().map(|_| ()),
         config.check_command_line(),
@@ -1143,7 +1144,7 @@ fn capture_arguments_accept_platform_tokens_and_refuse_nonplatform_tokens() {
     ] {
         let error = result.unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
-        assert!(error.to_string().contains("quiet"), "{error}");
+        assert!(error.to_string().contains("nokaslr"), "{error}");
     }
     config.boot.as_mut().unwrap().command_line = "nvx_sandbox=1".to_owned();
     config.check_command_line().unwrap();
@@ -1187,6 +1188,53 @@ fn capture_command_lines_keep_only_unowned_platform_tokens() {
             format!("{command_line} maxcpus=1")
         );
         config.check_command_line().unwrap();
+    }
+}
+
+#[test]
+fn capture_command_lines_take_each_kernel_tuning_parameter_at_most_once() {
+    for command_line in [
+        "nvx_sandbox=1 mitigations=off",
+        "nvx_sandbox=1 mitigations=auto,nosmt no_timer_check quiet loglevel=0",
+        "nvx_sandbox=1 loglevel=7 quiet mitigations=auto",
+    ] {
+        let mut config = captured();
+        config.boot.as_mut().unwrap().command_line = command_line.to_owned();
+        assert_eq!(
+            config.kernel_command_line().unwrap(),
+            format!("{command_line} maxcpus=1")
+        );
+        config.check_command_line().unwrap();
+    }
+    // Other values and spellings, which OpenVMM's allowlist refuses, and a parameter repeated,
+    // which OpenVMM refuses at the capture's publication and at every restore.
+    for (command_line, refused) in [
+        ("nvx_sandbox=1 mitigations=on", "mitigations"),
+        ("nvx_sandbox=1 loglevel=8", "loglevel"),
+        ("nvx_sandbox=1 no-timer-check", "no-timer-check"),
+        (
+            "nvx_sandbox=1 quiet quiet",
+            "repeats the kernel tuning parameter \"quiet\"",
+        ),
+        (
+            "nvx_sandbox=1 mitigations=off mitigations=auto",
+            "repeats the kernel tuning parameter \"mitigations\"",
+        ),
+        (
+            "nvx_sandbox=1 loglevel=0 quiet loglevel=7",
+            "repeats the kernel tuning parameter \"loglevel\"",
+        ),
+    ] {
+        let mut config = captured();
+        config.boot.as_mut().unwrap().command_line = command_line.to_owned();
+        for result in [
+            config.kernel_command_line().map(|_| ()),
+            config.check_command_line(),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unsupported, "{command_line}");
+            assert!(error.to_string().contains(refused), "{error}");
+        }
     }
 }
 
@@ -1269,6 +1317,20 @@ fn capture_platform_allowlist_matches_openvmms_named_contract() {
         "nvx_maps=1",
         "quiet",
         "custom=tenant",
+        // The kernel tuning parameters, and other values and spellings of them.
+        "mitigations=off",
+        "mitigations=auto",
+        "mitigations=auto,nosmt",
+        "no_timer_check",
+        "loglevel=0",
+        "loglevel=7",
+        "mitigations=on",
+        "mitigations=",
+        "loglevel=8",
+        "loglevel=07",
+        "quiet=1",
+        "no-timer-check",
+        "nokaslr",
     ] {
         assert_eq!(
             super::platform_command_line_token_is_invariant(token),

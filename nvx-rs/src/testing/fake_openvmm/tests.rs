@@ -877,10 +877,10 @@ fn captures_may_boot_with_the_kernel_tuning_parameters_that_openvmm_admits() {
 
 #[cfg(feature = "host")]
 #[test]
-fn the_kernel_tuning_parameters_are_those_of_nvx_s_capture_classes() {
+fn the_kernel_tuning_parameters_are_those_that_nvx_s_captures_admit() {
     assert_eq!(
         KERNEL_TUNING_PARAMETERS,
-        crate::host::template::KERNEL_TUNING_PARAMETERS
+        crate::host::config::KERNEL_TUNING_PARAMETERS
     );
 }
 
