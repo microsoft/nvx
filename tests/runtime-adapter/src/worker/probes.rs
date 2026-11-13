@@ -18,15 +18,13 @@
 //! | `cgroups` | The file system at the cgroups' parent, `parent.type`, and its `parent.subtree-control`; whether each cgroup exists, `agent.exists` and `workload.exists`; `agent.memory.low`, `workload.memory.max`, and `workload.pids.max`; the number of processes in each, `agent.processes` and `workload.processes`; and `user-namespaces`, the guest's limit of user namespaces, or `unavailable` without them |
 //! | `processes` | For PID 1, `pid1`, the worker, `worker`, and PID 1's unrelated child, `sibling`: `NAME.pid`, and while the process exists, `NAME.state`, `NAME.ppid`, `NAME.root`, `NAME.cgroup`, `NAME.command`, and `NAME.namespaces`: `same` if it shares PID 1's, or the ones that differ |
 //! | `hold` | It opens the root, and keeps it open until the worker ends, so that the teardown finds the root busy: `held`, the path that it holds |
-//! | `kmsg TEXT` | It writes TEXT, as one line after [`KMSG_PREFIX`], to the kernel's log, [`KERNEL_LOG`], which the kernel prints on its console, the boot console of a VM that has one: `written`, the bytes that it wrote |
 //!
-//! FILE and DIRECTORY are relative paths in the root, of normal components, TEXT is any one
-//! argument, which the rules of a [`Probe`] keep free of whitespace and control characters, and
-//! the other probes take no arguments. A value that a probe cannot read is `absent` if its
-//! file does not exist, and otherwise `unreadable: PROBLEM`. The probes of the mappings beneath
-//! the root, and of the host export that they come from, are those of the
-//! [`mapping`](super::mapping) module. The worker of a clone also answers the probe of the clone's
-//! activation, `activation::ACTIVATION_PROBE`, as the `activation` module describes.
+//! FILE and DIRECTORY are relative paths in the root, of normal components, and the other probes take
+//! no arguments. A value that a probe cannot read is `absent` if its file does not exist, and
+//! otherwise `unreadable: PROBLEM`. The probes of the mappings beneath the root, and of the host
+//! export that they come from, are those of the [`mapping`](super::mapping) module. The worker of
+//! a clone also answers the probe of the clone's activation, `activation::ACTIVATION_PROBE`, as
+//! the `activation` module describes.
 
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -72,13 +70,6 @@ const DEVICE_NODES: &str = "/dev";
 const READ_CHUNK: usize = 1 << 20;
 /// The guest's time state, which the `time` probe reports.
 pub const TIME_STATE: &str = "/run/nvx/time/state";
-/// The kernel's log, to which the `kmsg` probe writes, and whose records the kernel prints on its
-/// console.
-pub const KERNEL_LOG: &str = "/dev/kmsg";
-/// The text with which the `kmsg` probe starts each record that it writes to [`KERNEL_LOG`], which
-/// takes a record that starts with `<N>` for one of priority N, and drops that prefix: after it,
-/// the probe's text stays as it is.
-pub const KMSG_PREFIX: &str = "runtime-adapter: ";
 /// The mount table of the worker's mount namespace.
 pub(super) const MOUNTINFO: &str = "/proc/self/mountinfo";
 /// The guest's limit of user namespaces, which only a kernel with user namespaces has.
@@ -160,16 +151,9 @@ pub fn run(probe: &Probe, context: &Context<'_>, held: &mut Vec<File>) -> Result
         "cgroups",
         "processes",
         "hold",
-        "kmsg",
     ];
     if !probes.contains(&name) {
         return Err(format!("the worker runs no probe named {name}"));
-    }
-    if name == "kmsg" {
-        let [text] = probe.arguments() else {
-            return Err(format!("the {name} probe takes one argument"));
-        };
-        return kmsg(text).map_err(|error| format!("the {name} probe failed: {error}"));
     }
     let path = match (name, probe.arguments()) {
         ("copy-up" | "rename", [argument]) => Some(path_argument(name, argument)?),
@@ -660,27 +644,6 @@ fn hold(context: &Context<'_>, held: &mut Vec<File>) -> io::Result<Facts> {
     let mut facts = Facts::new();
     facts.push("held", context.root.display().to_string());
     Ok(facts)
-}
-
-/// Runs the `kmsg` probe: writes the record of `text`, [`kmsg_record`], to the kernel's log,
-/// [`KERNEL_LOG`], in one write, which the log takes as one record, at its default level, which
-/// the kernel prints on its console.
-fn kmsg(text: &str) -> io::Result<Facts> {
-    let line = kmsg_record(text);
-    fs::OpenOptions::new()
-        .write(true)
-        .open(KERNEL_LOG)?
-        .write_all(line.as_bytes())?;
-    let mut facts = Facts::new();
-    facts.push("written", line.len().to_string());
-    Ok(facts)
-}
-
-/// Returns the record that the `kmsg` probe writes for `text`: one line, `text` after
-/// [`KMSG_PREFIX`], so that the kernel's log takes no `<N>` at the start of `text` for the
-/// record's priority.
-fn kmsg_record(text: &str) -> String {
-    format!("{KMSG_PREFIX}{text}\n")
 }
 
 /// Returns the namespaces of the process `id`, each as its name and its identity, in the order

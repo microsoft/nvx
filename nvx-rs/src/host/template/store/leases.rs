@@ -24,8 +24,8 @@ use crate::host::filesystem;
 use crate::host::platform;
 use crate::host::store::files::{remove_if_present, sync_dir};
 use crate::host::store::lease::{
-    Lease, LeaseId, LeaseRecord, MAX_LEASE_RECORD_LEN, clone_console_endpoint, clone_console_name,
-    clone_socket_name, open_payload, read_binding, read_binding_in, read_lease,
+    Lease, LeaseId, LeaseRecord, MAX_LEASE_RECORD_LEN, clone_socket_name, open_payload,
+    read_binding, read_binding_in, read_lease,
 };
 use crate::host::store::regular::{open_regular_in, was_removed};
 use crate::host::store::{
@@ -357,36 +357,6 @@ impl Store {
             .join(clone_socket_name(lease.launch()))
     }
 
-    /// Returns the path of the Linux socket at which the boot console of the VMM of the clone that
-    /// holds `lease` listens, if the clone's launch attached one: `<launch>.console`, beside the
-    /// VMM's control socket, [`clone_socket_path`](Self::clone_socket_path), in the payload of the
-    /// leased generation, since OpenVMM requires a restore's console socket in the snapshot's
-    /// parent too. It lasts as the control socket does.
-    pub(crate) fn clone_console_path(&self, lease: &Lease) -> PathBuf {
-        self.payload_dir(lease.generation())
-            .join(clone_console_name(lease.launch()))
-    }
-
-    /// Returns the endpoint at which the boot console of the VMM of the clone that holds `lease`
-    /// listens, if the clone's launch attached one, as
-    /// [`ClonePlan::with_boot_console`](crate::host::template::ClonePlan::with_boot_console)
-    /// asks, and as OpenVMM's `--virtio-console listen=<endpoint>` takes it: on Linux, the socket
-    /// `<launch>.console` in the payload of the leased generation, after the launch that the lease
-    /// reserves, beside the VMM's control socket; on Windows, the named pipe
-    /// `//./pipe/openvmm-microvm-<launch>.console`. The lease fixes it for as long as the clone
-    /// runs, so a caller that takes the clone over, as
-    /// [`reattach_clone`](crate::host::template::reattach_clone) does, finds it again, and
-    /// connects to it as to the clone's control endpoint, with
-    /// [`session::connect`](crate::host::session::connect), which checks that the clone's VMM
-    /// serves it. The endpoint exists only while the clone's VMM runs, and only if its launch
-    /// attached a boot console.
-    ///
-    /// Fails with [`ErrorKind::Unsupported`] on Linux if the socket's path is not valid UTF-8,
-    /// which a launch refuses too.
-    pub fn clone_console_endpoint(&self, lease: &Lease) -> Result<String> {
-        clone_console_endpoint(&self.clone_console_path(lease), lease.launch())
-    }
-
     /// Releases the lease that the sandbox of `locked` holds, and returns it, or returns `None` if
     /// the sandbox holds none.
     ///
@@ -407,9 +377,8 @@ impl Store {
     /// [`CLONE_PROGRESS_NAME`](crate::host::store::CLONE_PROGRESS_NAME), and the record of its
     /// failure, [`CLONE_FAILURE_NAME`](crate::host::store::CLONE_FAILURE_NAME);
     /// then, on Linux, the control socket of the clone's VMM, `<launch>.sock` in the leased
-    /// generation's payload, after the launch that the lease reserved, and the socket of the
-    /// clone's boot console beside it, `<launch>.console`, whose absence it makes durable; then
-    /// the clone binding, and once their removal is durable, the lease's record in
+    /// generation's payload, after the launch that the lease reserved, whose absence it makes
+    /// durable; then the clone binding, and once their removal is durable, the lease's record in
     /// the store, so that an interrupted release leaves a record that no binding names, which a
     /// [retirement](Self::retire) removes, and never a binding without its record. It takes no
     /// lock of the store.
@@ -562,31 +531,22 @@ impl Store {
     }
 
     /// Removes the control socket of the VMM of the clone that holds `lease`, beside the snapshot
-    /// that the VMM restored, and the socket of the clone's boot console beside it, from
-    /// `payload`, the handle of the leased generation's payload, if they are there, and makes
-    /// their absence durable with `sync`, through that handle. The VMM removes its sockets as it
-    /// exits, and a stop or a recovery removes those that an abrupt exit leaves, but neither makes
-    /// the removal durable.
+    /// that the VMM restored, from `payload`, the handle of the leased generation's payload, if it
+    /// is there, and makes its absence durable with `sync`, through that handle. The VMM removes
+    /// its socket as it exits, and a stop or a recovery removes the one that an abrupt exit
+    /// leaves, but neither makes the removal durable.
     fn remove_clone_socket(
         &self,
         lease: &Lease,
         payload: &platform::Directory,
         sync: &dyn Fn(&platform::Directory) -> io::Result<()>,
     ) -> Result<()> {
-        for (name, path) in [
-            (
-                clone_socket_name(lease.launch()),
-                self.clone_socket_path(lease),
-            ),
-            (
-                clone_console_name(lease.launch()),
-                self.clone_console_path(lease),
-            ),
-        ] {
-            payload
-                .remove_file(&name)
-                .map_err(store_error(format!("cannot remove {}", path.display())))?;
-        }
+        payload
+            .remove_file(&clone_socket_name(lease.launch()))
+            .map_err(store_error(format!(
+                "cannot remove {}",
+                self.clone_socket_path(lease).display()
+            )))?;
         sync(payload).map_err(store_error(format!(
             "cannot sync the directory {}",
             self.payload_dir(lease.generation()).display()

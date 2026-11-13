@@ -974,7 +974,6 @@ pub(super) fn class() -> CaptureClass {
         },
         network: None,
         invariants: Invariants::new(),
-        kernel_tuning: Vec::new(),
     }
 }
 

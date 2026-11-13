@@ -25,9 +25,6 @@
 //!   NVX's plan refuses a count that a microVM cannot have, and one beyond the capacity, before
 //!   any VMM starts. The generation of a template that boots with 2 of its 4 processors online
 //!   refuses a clone of 1, and serves those of 2, its default, and 4.
-//! - A template whose kernel boots with the kernel tuning parameter `mitigations=off`, which Linux
-//!   applies once, as it boots, holds it in its key's kernel command line, and its clone runs with
-//!   it: the clone's `/proc/cmdline` is the template's command line, which the restore keeps.
 //! - One generation serves clones of either format over either upper, at once: the platform's
 //!   EROFS image, and GPT disks of other layouts than the template's placeholder, a GPT disk too,
 //!   and than each other's. The guest of a GPT clone rereads its disk's partition table before it
@@ -51,8 +48,8 @@
 //! - A clone whose activation fails ends before it is ready, with the status of the failure's
 //!   class, which attributes the failure, and the VMM's exit: a scratch image that holds no ext4
 //!   file system, a journal that the clone's record forbids, and a host that sends anything but the
-//!   clone's Await first, a ping, a start, or an execution, which fails the clone whether its
-//!   record applied or not. The sandbox records the failure until the release of its lease.
+//!   clone's Activate first, a ping, a start, or an execution. The sandbox records the failure
+//!   until the release of its lease.
 //! - A clone refuses a scratch image whose upper is not fresh, as an earlier clone left it, and
 //!   ends before it is ready.
 //! - Clones at once each keep a root of their own, and every execution of a clone sees its
@@ -103,17 +100,8 @@
 //!   holds, gets its answer within a fraction of the delay, as the positive control, and the guest
 //!   reports that it waited the delay before its repair.
 //! - Each command after the start reattaches to the clone from a new process: the clone answers
-//!   the Await of the new session, of the same broker, with its Ready, without activating again,
-//!   and serves the command.
-//! - A clone's boot console, which its start asks to listen, delivers to each reader, from a new
-//!   process, what the guest writes to its kernel's log once the reader connected, at the endpoint
-//!   that the clone's lease fixes, and discards what the guest writes while no reader is connected,
-//!   rather than wait for one. A reader that crashes once it connected leaves the clone running, and
-//!   the console to the next reader, and the sandbox's console log keeps what each reader read. The
-//!   stop removes the console's socket with the control socket, and a clone whose start asked for
-//!   no boot console restores as before: nothing listens at its endpoint. A reader whose reattach
-//!   ends the clone, as one of another runtime's does, keeps what the console delivered, and ends
-//!   as the reattach does.
+//!   the Activate of its record again, in a new session of the same broker, with its Ready, without
+//!   activating again, and serves the command.
 //! - A host program of another runtime ends the clone through its verified identity, without a
 //!   word to its guest, and releases its lease: the template still serves its other clones.
 //! - A clone whose VM ends without a word of its guest once a stop found it running fails, as NVX
@@ -261,7 +249,7 @@ use runtime_adapter::clone::{
 };
 use runtime_adapter::exec::{HostMessage, Start};
 use runtime_adapter::frame::Message;
-use runtime_adapter::hook::{Action, HOOK_EXIT, STEP_HOOK, Step, StepHook};
+use runtime_adapter::hook::{Action, STEP_HOOK, Step, StepHook};
 use runtime_adapter::host::{Client, CloneOrder, OrderError};
 use runtime_adapter::layered::PROXY_VARIABLES;
 use runtime_adapter::root::DEFAULT_RUNTIME;
@@ -269,7 +257,6 @@ use runtime_adapter::runtime::Runtime;
 use runtime_adapter::sharing::HostFsSharing;
 use runtime_adapter::staged::Staged;
 use serde_json::{Value, json};
-use socket2::SockRef;
 
 use common::gpt::{self, Contents, Layout, Partition, hexadecimal, small_layer};
 use common::{Fixtures, Printed, Sandbox, Started};
@@ -441,13 +428,8 @@ const GATEWAY: &str = "192.0.2.1";
 /// one of its ports, and hold until they end.
 static HOST_SIDE: LazyLock<HostSide> = LazyLock::new(HostSide::bind);
 /// The first and the last of the ports that the host draws for a listener of a clone's guest and
-/// for a forward: the dynamic range. On Linux, the host draws above its ephemeral range; see
-/// [`first_port`].
+/// for a forward: the dynamic range.
 const PORTS: (u16, u16) = (49152, 65535);
-/// The file that names Linux's ephemeral port range, as its first and last ports: the host draws
-/// the ports of a listener of a clone's guest and of a forward above the range's end; see
-/// [`first_port`].
-const IP_LOCAL_PORT_RANGE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
 /// The number of ports that the host draws for each before it gives up. Windows excludes ports per
 /// protocol, in blocks, and gives consecutive ports to consecutive binds of port 0, so the host
 /// draws each port independently.
@@ -893,29 +875,8 @@ impl HostSide {
     }
 }
 
-/// Returns the first port that the host draws: above the host's ephemeral range on Linux, so that
-/// no `connect()` takes a drawn port as its source port and opens a connection to itself, which
-/// would leave a `TIME_WAIT` at the port for OpenVMM's bind to trip over. On Linux, the range ends
-/// at [`IP_LOCAL_PORT_RANGE`], which leaves 61000-65535 by default. Windows's
-/// ephemeral range is its whole dynamic range, so whether it needs the same is open, and the host
-/// draws from the dynamic range there.
-fn first_port() -> u16 {
-    if cfg!(target_os = "linux")
-        && let Ok(range) = fs::read_to_string(IP_LOCAL_PORT_RANGE)
-        && let Some(end) = range
-            .split_whitespace()
-            .nth(1)
-            .and_then(|end| end.parse::<u16>().ok())
-            .and_then(|end| end.checked_add(1))
-    {
-        return PORTS.0.max(end);
-    }
-    PORTS.0
-}
-
-/// Returns a port that the host draws from [`first_port`] to the last of [`PORTS`], independently
-/// each time, at most [`PORT_ATTEMPTS`] times, but none of `taken`, and none that a socket holds:
-/// OpenVMM publishes a
+/// Returns a port that the host draws from [`PORTS`], independently each time, at most
+/// [`PORT_ATTEMPTS`] times, but none of `taken`, and none that a socket holds: OpenVMM publishes a
 /// listener of the guest at the same port of host IPv4 and IPv6 loopback, for TCP and UDP, after
 /// it checks, on Windows, every host address of each family there, and binds a forward's port on
 /// host IPv4 loopback. Windows lets a socket bind every host address beside one that binds loopback
@@ -932,8 +893,7 @@ fn free_port(taken: &[u16]) -> u16 {
             IpAddr::V6(Ipv6Addr::LOCALHOST),
         ]);
     }
-    let first = first_port();
-    let last = PORTS.1;
+    let (first, last) = PORTS;
     let random = RandomState::new();
     let mut refused = Vec::new();
     for attempt in 0..PORT_ATTEMPTS {
@@ -2246,22 +2206,17 @@ fn assert_generated(view: &View) {
 
 /// Checks the events of a clone's activation that its `activation` probe found: the repair
 /// acknowledged the restore, and the clone took its reset, the host's first message, its Ready,
-/// and its start, in that order, after the acknowledgement, and the application of the record of
-/// its restore packet completed between its reset and its Ready, before the host's first message
-/// or after it. Returns when the reset, the first message, Ready, and the start came, in
+/// and its start, in that order, after the acknowledgement. Returns when each came, in
 /// microseconds after the acknowledgement.
 fn assert_timeline(facts: &Printed) -> [u64; 4] {
     assert_eq!(facts["activation.acknowledged"], "yes", "{facts:?}");
-    let [reset, message, applied, ready, started] =
-        ["reset", "message", "applied", "ready", "started"].map(|event| {
-            let value = &facts[&format!("activation.{event}")];
-            value
-                .parse::<u64>()
-                .unwrap_or_else(|_| panic!("the clone's {event} is {value}: {facts:?}"))
-        });
-    let events = [reset, message, ready, started];
+    let events = ["reset", "message", "ready", "started"].map(|event| {
+        let value = &facts[&format!("activation.{event}")];
+        value
+            .parse::<u64>()
+            .unwrap_or_else(|_| panic!("the clone's {event} is {value}: {facts:?}"))
+    });
     assert!(events.is_sorted(), "{facts:?}");
-    assert!((reset..=ready).contains(&applied), "{facts:?}");
     events
 }
 
@@ -2331,7 +2286,7 @@ fn other_boot(boot: BootId) -> BootId {
 }
 
 /// The adapter's framing of a clone's control session that sends `early`, which the host must not
-/// send before the clone is ready, in place of the clone's Await, and, once the clone ended its
+/// send before the clone is ready, in place of the clone's Activate, and, once the clone ended its
 /// session, waits for the clone's VMM to exit, so that the restore sequence, which then ends the
 /// launch, ends it once the VM ended on its own.
 struct Early {
@@ -2356,9 +2311,10 @@ impl CloneControl for Early {
         Client::attach(transport, capability, deadline).map_err(io::Error::other)
     }
 
-    fn ready(
+    fn activate(
         &mut self,
         session: &mut Client,
+        _record: &[u8],
         deadline: Instant,
     ) -> io::Result<Option<ReadyActivation>> {
         session
@@ -2391,7 +2347,7 @@ impl CloneControl for Early {
 }
 
 /// Starts a clone of `template` in RAM, in a sandbox of its own, through NVX's public API, whose
-/// host sends `early` before the clone's Await, and checks that the clone ended before it was
+/// host sends `early` before the clone's Activate, and checks that the clone ended before it was
 /// ready, with the status of the host's session, which attributes the failure to no one, as the
 /// sandbox records it, and that the VMM exited, then releases the clone's lease, which removes the
 /// record.
@@ -2654,12 +2610,13 @@ impl CloneControl for Watched {
         attached
     }
 
-    fn ready(
+    fn activate(
         &mut self,
         session: &mut Client,
+        record: &[u8],
         deadline: Instant,
     ) -> Result<Option<ReadyActivation>, OrderError> {
-        self.order.ready(session, deadline)
+        self.order.activate(session, record, deadline)
     }
 
     fn map(
@@ -2894,42 +2851,6 @@ fn a_generation_refuses_clones_of_fewer_processors_than_its_template_booted_with
         assert_processors(&facts, online, "0-3", restored);
         cloned.stop();
     }
-    assert!(template.leases().is_empty());
-}
-
-#[test]
-#[ignore = "boots VMs; see the module documentation for what they need"]
-fn a_template_s_clones_run_with_its_kernel_tuning_parameters() {
-    // Linux applies `mitigations=` once, as it boots, so a clone gets it from its template alone.
-    let tuning = ["--kernel-tuning", "mitigations=off"];
-    let template = Template::captured("cl-tune", None, None, &tuning, &[]);
-    let key = template
-        .store()
-        .read_key(&template.generation())
-        .expect("the store holds the template's key");
-    let count = |command_line: &str| {
-        command_line
-            .split_ascii_whitespace()
-            .filter(|token| *token == "mitigations=off")
-            .count()
-    };
-    assert_eq!(count(key.command_line()), 1, "{}", key.command_line());
-
-    // The clone's kernel command line, the template's, which the restore keeps, holds it.
-    let mut cloned = template.start("cl-t", StartOf::default(), 0);
-    cloned.assert_started();
-    let lines = cloned.script("cat /proc/cmdline");
-    let [command_line] = lines.as_slice() else {
-        panic!("{lines:?}");
-    };
-    assert_eq!(count(command_line), 1, "{command_line}");
-    assert_eq!(
-        command_line.split_ascii_whitespace().collect::<Vec<_>>(),
-        key.command_line()
-            .split_ascii_whitespace()
-            .collect::<Vec<_>>()
-    );
-    cloned.stop();
     assert!(template.leases().is_empty());
 }
 
@@ -3215,9 +3136,8 @@ fn a_clone_whose_activation_fails_ends_before_it_is_ready() {
         ended.assert_unactivated(&template, evidence, expected);
     }
 
-    // Until the clone is ready, which it is not before the host's Await, whether its record
-    // applied or not, it takes nothing but its Await: a ping, a start, and the start of an
-    // execution, before it, each end the clone with the status of the host's session.
+    // Until the clone is ready, it takes nothing but its Activate: a ping, a start, and the start
+    // of an execution, before it, each end the clone with the status of the host's session.
     let timers = Timers::new(Duration::from_secs(1), Duration::from_secs(5));
     let execution = Start::new(Key::new(1, 1), limits(), timers, [b"/bin/true".to_vec()]);
     for early in [
@@ -3928,8 +3848,8 @@ fn each_command_reattaches_to_the_clone_from_a_new_process() {
     assert!(records.journal.is_none() && records.failure.is_none());
 
     // Each command, from a new process, reattaches to the clone in a new session of the same
-    // broker, in which the clone answers the host's Await with its Ready, without activating
-    // again, so that the events of its activation stay as they were.
+    // broker, in which the clone answers the Activate of its record again with its Ready, without
+    // activating again, so that the events of its activation stay as they were.
     let first = cloned.sandbox.run("reattach", &[], 0);
     assert_eq!(first["reattached"], "live", "{first:?}");
     assert_eq!(first["pid"], cloned.started["pid"]);
@@ -3955,165 +3875,6 @@ fn each_command_reattaches_to_the_clone_from_a_new_process() {
     cloned.stop();
     let store = SandboxStore::open(&cloned.sandbox.store).unwrap();
     assert!(CloneRecords::read(&store).unwrap().is_none());
-}
-
-/// Reads the boot console of the clone `cloned`, from a new process, until it delivers `marker`,
-/// which the guest writes to its kernel's log, and returns what `console` printed, once it
-/// checked that the read reached the clone, which runs, at the endpoint `endpoint`, and that what
-/// it read holds the marker.
-fn read_console(cloned: &mut Cloned, endpoint: &str, marker: &str) -> Printed {
-    let read = cloned.sandbox.run("console", &[OsStr::new(marker)], 0);
-    let found = ["reattached", "pid", "console"].map(|key| &read[key]);
-    assert_eq!(
-        found,
-        ["live", cloned.started["pid"].as_str(), endpoint],
-        "{read:?}"
-    );
-    assert!(read["console.text"].contains(marker), "{read:?}");
-    let bytes = read["console.read"].parse::<usize>().unwrap();
-    assert!(bytes > marker.len(), "{read:?}");
-    read
-}
-
-#[test]
-#[ignore = "boots VMs; see the module documentation for what they need"]
-fn a_clone_s_boot_console_delivers_what_its_guest_writes_once_its_reader_connected() {
-    let template = Template::create("cl-con");
-    let start = StartOf {
-        options: &["--boot-console", "listen"],
-        ..StartOf::default()
-    };
-    let mut cloned = template.start("cl-k", start, 0);
-    cloned.assert_started();
-    // The clone's console listens at the endpoint that its lease fixes: on Linux, a socket beside
-    // the generation's snapshot, as its control socket is.
-    let endpoint = cloned.started["console"].clone();
-    let lease = template
-        .leases()
-        .pop()
-        .expect("the clone leases the generation");
-    let socket = template
-        .payload()
-        .join(format!("{}.console", lease.launch()));
-    if cfg!(windows) {
-        let pipe = format!("//./pipe/openvmm-microvm-{}.console", lease.launch());
-        assert_eq!(endpoint, pipe);
-    } else {
-        assert_eq!(endpoint, socket.display().to_string());
-        assert!(socket.exists(), "{}", socket.display());
-    }
-
-    // A reader, from a new process, gets what the guest writes to its kernel's log once it
-    // connected, which the kernel prints on the console.
-    read_console(&mut cloned, &endpoint, "first-996");
-    // While no reader is connected, the clone discards what its guest writes there, rather than
-    // wait for a reader, and runs on.
-    let dropped = cloned.probe(&["kmsg dropped-996"]);
-    let record = "runtime-adapter: dropped-996\n";
-    assert_eq!(
-        dropped["kmsg.written"],
-        record.len().to_string(),
-        "{dropped:?}"
-    );
-    let second = read_console(&mut cloned, &endpoint, "second-996");
-    assert!(
-        !second["console.text"].contains("dropped-996"),
-        "{second:?}"
-    );
-
-    // A reader that crashes once it connected, as the hook ends it at `found`, without a word,
-    // leaves the clone running, and its console to the next reader.
-    let hook = OsString::from(
-        StepHook {
-            step: Step::Found,
-            action: Action::Exit,
-        }
-        .to_string(),
-    );
-    let crashing = cloned.sandbox.start(
-        "console",
-        &[OsStr::new("lost-996")],
-        &[(STEP_HOOK, hook.as_os_str())],
-    );
-    let crashed = cloned.sandbox.finish(crashing, i32::from(HOOK_EXIT));
-    assert_eq!(crashed["console"], endpoint, "{crashed:?}");
-    assert!(!crashed.contains_key("console.read"), "{crashed:?}");
-    // A marker that starts as a record's priority would, `<N>`, reaches the console as it is.
-    let third = read_console(&mut cloned, &endpoint, "<2>third-996");
-    assert!(!third["console.text"].contains("lost-996"), "{third:?}");
-
-    // The sandbox's console log keeps what each reader read, in order.
-    let store = SandboxStore::open(&cloned.sandbox.store).unwrap();
-    let log = String::from_utf8(fs::read(store.console_path()).unwrap()).unwrap();
-    let positions = ["first-996", "second-996", "<2>third-996"].map(|marker| {
-        log.find(marker)
-            .unwrap_or_else(|| panic!("the console log lacks {marker}: {log:?}"))
-    });
-    assert!(positions.is_sorted(), "{log:?}");
-    assert!(!log.contains("dropped-996"), "{log:?}");
-
-    // The clone still answers, and stops; the release of its lease removes its console's socket
-    // with its control socket.
-    let facts = cloned.probe(&["memory"]);
-    assert_memory(&facts, TEMPLATE_MEMORY);
-    cloned.stop();
-    assert!(!socket.exists(), "{}", socket.display());
-    assert_payload(&template, false);
-
-    // A clone whose start asked for no boot console restores with the template's, which listens
-    // nowhere: a read of it finds nothing at the endpoint that its lease fixes.
-    let mut silent = template.start("cl-q", StartOf::default(), 0);
-    silent.assert_started();
-    assert!(
-        !silent.started.contains_key("console"),
-        "{:?}",
-        silent.started
-    );
-    let refused = silent
-        .sandbox
-        .run("console", &[OsStr::new("none-996")], FAILED);
-    assert!(refused.contains_key("console"), "{refused:?}");
-    assert!(!refused.contains_key("console.read"), "{refused:?}");
-    let stderr = silent.sandbox.stderr();
-    assert!(
-        stderr.contains("nothing serves the boot console"),
-        "{stderr}"
-    );
-    let facts = silent.probe(&["memory"]);
-    assert_memory(&facts, TEMPLATE_MEMORY);
-    silent.stop();
-    assert_payload(&template, false);
-
-    // A reattach that ends the clone, as that of a host program of another runtime does, without
-    // a word to its guest, ends the command as it ends `reattach`, once the command read what the
-    // console delivered until it ended, which the console log keeps.
-    let start = StartOf {
-        options: &["--boot-console", "listen"],
-        ..StartOf::default()
-    };
-    let mut ended = template.start("cl-r", start, 0);
-    ended.assert_started();
-    let options = [
-        OsStr::new("ended-996"),
-        OsStr::new("--guest-build"),
-        OsStr::new(ANOTHER_BUILD),
-    ];
-    let printed = ended.sandbox.run("console", &options, CLONE_FAILED);
-    let found = ["reattached", "failure.code", "released"].map(|key| &printed[key]);
-    assert_eq!(
-        found,
-        [
-            "failed",
-            "runtime-mismatch",
-            ended.started["lease"].as_str()
-        ],
-        "{printed:?}"
-    );
-    assert!(printed.contains_key("console.read"), "{printed:?}");
-    let store = SandboxStore::open(&ended.sandbox.store).unwrap();
-    assert!(store.console_path().is_file());
-    assert!(template.leases().is_empty());
-    assert_payload(&template, false);
 }
 
 #[test]
@@ -5036,18 +4797,6 @@ fn a_clone_whose_mapping_fails_ends_before_its_sandbox_starts() {
 fn reach_guest(address: SocketAddr, stop: &AtomicBool) -> bool {
     while !stop.load(Ordering::SeqCst) {
         if let Ok(mut stream) = TcpStream::connect(address) {
-            // The connection opened to itself when its local and peer addresses are the same:
-            // drop it at once, with SO_LINGER 0, so that it leaves no TIME_WAIT at the port for
-            // OpenVMM's bind to trip over.
-            if matches!(
-                (stream.local_addr(), stream.peer_addr()),
-                (Ok(local), Ok(peer)) if local == peer
-            ) {
-                SockRef::from(&stream)
-                    .set_linger(Some(Duration::ZERO))
-                    .unwrap();
-                continue;
-            }
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
@@ -5264,9 +5013,8 @@ fn a_forward_whose_port_another_socket_holds_fails_the_clone_as_the_host_s() {
 
     // The clone's VMM exits before its restore-ready event, and NVX attributes the failure to the
     // host, by the evidence of the forward's bind, at the restore, which quarantines nothing. The
-    // start's diagnostic keeps OpenVMM's fatal error, which leads with the stable code of the
-    // forward's bind, and names the forward, and the start released the lease, with the records
-    // of the clone's launch.
+    // start's diagnostic names the forward, and the start released the lease, with the records of
+    // the clone's launch.
     let failed = start_with(&template, "cl-b", &options, CLONE_FAILED);
     let printed = &failed.started;
     assert!(printed.contains_key("pid"), "{printed:?}");
@@ -5285,12 +5033,8 @@ fn a_forward_whose_port_another_socket_holds_fails_the_clone_as_the_host_s() {
     assert_eq!(printed["quarantined"], "no", "{printed:?}");
     assert_eq!(printed["released"], printed["lease"], "{printed:?}");
     let stderr = failed.sandbox.stderr();
-    for reported in [
-        "fatal error: [E_PORT_FORWARD_BIND] ".to_owned(),
-        format!("(Tcp 127.0.0.1:{port})"),
-    ] {
-        assert!(stderr.contains(&reported), "{reported:?} in {stderr}");
-    }
+    let cause = format!("failed to create socket for port forward (Tcp 127.0.0.1:{port})");
+    assert!(stderr.contains(&cause), "{cause:?} in {stderr}");
     assert!(failed.sandbox.record().is_none());
     let store = SandboxStore::open(&failed.sandbox.store).unwrap();
     assert!(CloneRecords::read(&store).unwrap().is_none());

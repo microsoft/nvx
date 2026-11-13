@@ -334,30 +334,35 @@ fn openvmm_s_fatal_error_is_evidence_of_an_incompatible_host_only_for_its_codes(
 }
 
 #[test]
-fn openvmm_s_fatal_error_is_evidence_of_a_forward_bind_when_it_leads_with_its_code() {
-    // OpenVMM leads its fatal error with the code of a forward that it cannot bind, which leads
-    // the cause of the error's chain that names the forward too, which may follow the line.
+fn openvmm_s_fatal_error_is_evidence_of_a_forward_bind_when_it_names_a_forward_it_cannot_bind() {
+    // OpenVMM spells the error as its source, which the excerpt copies, writes it.
+    let excerpt =
+        include_str!("../../../../../tests/vectors/openvmm/port_forward_socket_creation.rs");
+    let attribute = format!("#[error(\"{FORWARD_BIND_TEXT}{{details}})\")]");
+    assert!(
+        excerpt.lines().any(|line| line.trim() == attribute),
+        "{attribute} in {excerpt}"
+    );
+    // The cause of the chain follows the line that leads the error, or is the line's own.
     for line in [
-        "fatal error: [E_PORT_FORWARD_BIND] failed to launch vm worker",
-        "fatal error: [E_PORT_FORWARD_BIND] failed to launch vm worker: failed to create socket \
-         for port forward (Tcp 127.0.0.1:18080)",
-        "fatal error: [E_PORT_FORWARD_BIND] failed to create socket for port forward \
-         (Udp 127.0.0.1:5353)",
+        "fatal error: failed to launch vm worker: failed to create socket for port forward \
+             (Tcp 127.0.0.1:18080)",
+        "fatal error: failed to create socket for port forward (Udp 127.0.0.1:5353)",
+        "fatal error: [E_MANIFEST_TIME] failed to launch vm worker: failed to create socket \
+             for port forward (Tcp 127.0.0.1:18080)",
     ] {
         assert_eq!(fatal_evidence(line), Some(Evidence::ForwardBind), "{line}");
     }
-    // Only the code that leads the fatal error tells it: another code, the code after the line's
-    // start, the forward's text without the code, or a line that is not the fatal error tells
+    // A code of an incompatible host prevails, and a line that is not the fatal error tells
     // nothing.
-    for line in [
-        "fatal error: [E_PORT_FORWARD_BINDING] failed to launch vm worker",
-        "fatal error: failed to launch vm worker: [E_PORT_FORWARD_BIND] quoted",
-        "fatal error: failed to launch vm worker: failed to create socket for port forward \
-         (Tcp 127.0.0.1:18080)",
-        "warning: [E_PORT_FORWARD_BIND] failed to launch vm worker",
-    ] {
-        assert_eq!(fatal_evidence(line), None, "{line}");
-    }
+    let incompatible = "fatal error: [E_CPU_GENERATION] failed to launch vm worker: failed to \
+                            create socket for port forward (Tcp 127.0.0.1:18080)";
+    assert_eq!(
+        fatal_evidence(incompatible),
+        Some(Evidence::IncompatibleHost)
+    );
+    let quoted = "warning: failed to create socket for port forward (Tcp 127.0.0.1:18080)";
+    assert_eq!(fatal_evidence(quoted), None);
 }
 
 #[test]

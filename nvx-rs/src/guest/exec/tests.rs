@@ -38,12 +38,6 @@ const PATIENCE: Duration = Duration::from_secs(20);
 /// the execution, and the allowance that they grant each stream at a time.
 const MAX_EVENT_BYTES: usize = 4096;
 
-/// More bytes than a program's output pipe can hold, even after the program grows the pipe, as
-/// uutils' `head -c` (Ubuntu 26.04's `head`) does to fit what it copies. Without privileges, a
-/// program can grow a pipe to `/proc/sys/fs/pipe-max-size` at most, 1 MiB by default, and uutils
-/// grows it to 1 MiB at most.
-const MORE_THAN_A_PIPE_HOLDS: usize = 4 * 1024 * 1024;
-
 /// Spawns `command` with new pipes, its standard input piped if `input`, in a process group of
 /// its own, and starts its execution with `options`.
 fn start(command: Command, input: bool, options: Options) -> Execution {
@@ -294,7 +288,7 @@ fn concurrent_executions_progress_independently() {
 
 #[test]
 fn a_stalled_sink_stalls_only_its_own_execution_and_loses_nothing() {
-    const LENGTH: usize = MORE_THAN_A_PIPE_HOLDS;
+    const LENGTH: usize = 256 * 1024;
     let mut stalled = start(
         shell(&format!("head -c {LENGTH} /dev/zero")),
         false,
@@ -343,10 +337,7 @@ fn a_stalled_sink_stalls_only_its_own_execution_and_loses_nothing() {
 fn cancellation_ends_a_stalled_program_and_the_caller_discards_the_rest() {
     // The program fills its pipe with the first page, which any pipe holds, before it says so.
     let mut execution = start(
-        shell(&format!(
-            "head -c 4096 /dev/zero; printf ready >&2; \
-             exec head -c {MORE_THAN_A_PIPE_HOLDS} /dev/zero"
-        )),
+        shell("head -c 4096 /dev/zero; printf ready >&2; exec head -c 262144 /dev/zero"),
         true,
         Options::new(),
     );
@@ -778,27 +769,19 @@ fn a_status_that_another_collector_took_first_is_left_to_it() {
 fn a_start_after_another_collector_took_the_status_ends_nothing_by_id() {
     let temporary = tempfile::tempdir().unwrap();
     let file = temporary.path().join("descendant");
-    // Whatever this kernel answers for the program's ID, which the descendant keeps as its
-    // process group's, and as a kernel before Linux 6.16 answers, `EINVAL`, where a later one
-    // answers `ESRCH`.
-    for before_linux_6_16 in [false, true] {
-        let (pipes, ends) = Pipes::new(false).unwrap();
-        let spawned = leave_a_descendant(&file, 0)
-            .stdout(ends.stdout)
-            .stderr(ends.stderr)
-            .new_process_group()
-            .spawn()
-            .unwrap();
-        let status = Child::new(spawned.id()).unwrap().wait().unwrap();
-        assert!(status.success());
-        let descendant = Descendant::open(&file);
-        sys::tests::BEFORE_LINUX_6_16.set(before_linux_6_16);
-        let started = Execution::new(spawned, pipes, Options::new().process_group());
-        sys::tests::BEFORE_LINUX_6_16.set(false);
-        descendant.assert_runs();
-        let error = started.unwrap_err();
-        assert_eq!(sys::errno_of(&error), Errno::ESRCH, "{before_linux_6_16}");
-    }
+    let (pipes, ends) = Pipes::new(false).unwrap();
+    let spawned = leave_a_descendant(&file, 0)
+        .stdout(ends.stdout)
+        .stderr(ends.stderr)
+        .new_process_group()
+        .spawn()
+        .unwrap();
+    let status = Child::new(spawned.id()).unwrap().wait().unwrap();
+    assert!(status.success());
+    let descendant = Descendant::open(&file);
+    let error = Execution::new(spawned, pipes, Options::new().process_group()).unwrap_err();
+    assert_eq!(sys::errno_of(&error), Errno::ESRCH);
+    descendant.assert_runs();
 }
 
 #[test]
@@ -1349,31 +1332,26 @@ fn an_adopted_program_whose_status_was_observed_has_ended_and_its_output_is_read
 fn adopting_a_program_whose_status_another_collector_took_ends_nothing_by_id() {
     let temporary = tempfile::tempdir().unwrap();
     let file = temporary.path().join("descendant");
-    // As for a start, whatever this kernel answers, and as a kernel before Linux 6.16 answers.
-    for before_linux_6_16 in [false, true] {
-        let (id, pipes) = start_own(
-            &format!(
-                "sleep 30 </dev/null >/dev/null 2>&1 & echo $! >'{}'",
-                file.display()
-            ),
-            false,
-        );
-        let status = Child::new(id).unwrap().wait().unwrap();
-        assert!(status.success());
-        let descendant = Descendant::open(&file);
-        // Nothing handed the status over, so `adopt` looks for the program by its ID, which names
-        // no process now, while the descendant keeps the program's process group.
-        sys::tests::BEFORE_LINUX_6_16.set(before_linux_6_16);
-        let adopted = Execution::adopt(
-            Child::new(id).unwrap(),
-            pipes,
-            Options::new().process_group(),
-        );
-        sys::tests::BEFORE_LINUX_6_16.set(false);
-        descendant.assert_runs();
-        let error = adopted.unwrap_err();
-        assert_eq!(sys::errno_of(&error), Errno::ESRCH, "{before_linux_6_16}");
-    }
+    let (id, pipes) = start_own(
+        &format!(
+            "sleep 30 </dev/null >/dev/null 2>&1 & echo $! >'{}'",
+            file.display()
+        ),
+        false,
+    );
+    let status = Child::new(id).unwrap().wait().unwrap();
+    assert!(status.success());
+    let descendant = Descendant::open(&file);
+    // Nothing handed the status over, so `adopt` looks for the program by its ID, which names no
+    // process now, while the descendant keeps the program's process group.
+    let error = Execution::adopt(
+        Child::new(id).unwrap(),
+        pipes,
+        Options::new().process_group(),
+    )
+    .unwrap_err();
+    assert_eq!(sys::errno_of(&error), Errno::ESRCH);
+    descendant.assert_runs();
 }
 
 #[test]

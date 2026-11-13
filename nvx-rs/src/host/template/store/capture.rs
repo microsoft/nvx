@@ -92,9 +92,8 @@ const CAPTURES_WHAT: &str = "the captures of the template store";
 /// [`Store::create_template`] and [`Store::refresh_template`] capture.
 ///
 /// The adapter's plan is lowered as [`TemplatePlan::new`] lowers it, with the processors, those
-/// online at boot among them, and RAM of the class, and a scratch of the class's scratch length,
-/// and with the class's kernel tuning parameters, as [`TemplatePlan::with_kernel_tuning`] sets
-/// them; its upper is no part of the template. The class and the plan must describe one VM: a
+/// online at boot among them, and RAM of the class, and a scratch of the class's scratch length;
+/// its upper is no part of the template. The class and the plan must describe one VM: a
 /// placeholder whose binding records the class's `distro` length, and a network of the plan whose
 /// NIC, as [`SandboxNetwork::template_arguments`] lowers it for a template, is the class's: none,
 /// or one at the same guest's address, under the complete deny-all policy, whatever the policies
@@ -105,7 +104,7 @@ const CAPTURES_WHAT: &str = "the captures of the template store";
 pub struct Capture {
     /// The class of the capture, which names its slot, and from which the capture takes its
     /// backend, its CPU profile, its processors and those online at boot, its RAM, its scratch
-    /// length, its kernel tuning parameters, and the runtime identity of its launch.
+    /// length, and the runtime identity of its launch.
     pub class: CaptureClass,
     /// The adapter's plan, which [`SandboxPlan::adapter`] makes, of the placeholder `distro` and
     /// the template's network.
@@ -284,9 +283,8 @@ struct Vm<'a> {
 }
 
 impl Vm<'_> {
-    /// Returns the command of the VMM of the capture in its transaction `dir`, in the working
-    /// directory that [`supervisor::vmm_working_dir`] chooses for the transaction, whose control
-    /// console listens on `endpoint`, and whose outcome report goes to `report`.
+    /// Returns the command of the capture's VMM, run in the capture's transaction `dir`, whose
+    /// control console listens on `endpoint`, and whose outcome report goes to `report`.
     ///
     /// Its arguments are the template's, as [`TemplatePlan::openvmm_arguments`] renders them,
     /// then the backend, the CPU profile, the kernel and the initramfs, the template's kernel
@@ -323,18 +321,7 @@ impl Vm<'_> {
         ] {
             arguments.push(argument.to_owned());
         }
-        let working_dir = supervisor::vmm_working_dir(dir).map_err(|error| {
-            Error::io(format!(
-                "cannot find the working directory of the VMM of the capture in {}",
-                dir.display()
-            ))
-            .with_source(error)
-        })?;
-        Ok(VmmCommand::new(
-            &self.artifacts.openvmm,
-            arguments,
-            working_dir,
-        ))
+        Ok(VmmCommand::new(&self.artifacts.openvmm, arguments, dir))
     }
 }
 
@@ -517,8 +504,7 @@ impl Store {
             inputs.resources,
             &transaction,
             StorageGeneration::generate()?,
-        )?
-        .with_kernel_tuning(&capture.class.kernel_tuning)?;
+        )?;
         let envelope =
             match self.check_capture(capture, &inputs, &template, &locked, deadline, hooks) {
                 Ok(envelope) => envelope,
@@ -942,6 +928,7 @@ impl Store {
     fn open_slot(&self, class: ClassIdentity) -> Result<SandboxStore> {
         let captures = self.captures_dir();
         let slot = captures.join(slot_name(class));
+        platform::check_working_dir(&slot.join(TRANSACTION_NAME))?;
         create_private_dir(&captures, CAPTURES_WHAT)?;
         let slot = SandboxStore::create(slot)?;
         // A capture's VM listens in its transaction, the sandbox store from which it launches.
