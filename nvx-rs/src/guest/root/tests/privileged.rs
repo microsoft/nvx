@@ -492,9 +492,9 @@ fn view_generated_id_and_dns_are_read_only_and_the_root_unmounts_them() {
     let resolver = base.join("etc/resolv.conf");
     fs::remove_file(&resolver).unwrap();
     std::os::unix::fs::symlink("../run/image-resolver", &resolver).unwrap();
-    let view = crate::activation::View {
+    let view = crate::protocol::view::View {
         hostname: b"vm-view".to_vec(),
-        machine_id: crate::activation::MachineIdMode::Generated,
+        machine_id: crate::protocol::view::MachineIdMode::Generated,
     };
     let selected =
         crate::guest::view::apply(&mut root, &view, Some("fd00::53".parse().unwrap())).unwrap();
@@ -536,9 +536,9 @@ fn view_failure_after_the_machine_id_bind_leaves_it_owned_for_teardown() {
     let base = root.path().to_path_buf();
     fs::remove_file(base.join("etc/resolv.conf")).unwrap();
     fs::create_dir(base.join("etc/resolv.conf")).unwrap();
-    let view = crate::activation::View {
+    let view = crate::protocol::view::View {
         hostname: b"view-failure".to_vec(),
-        machine_id: crate::activation::MachineIdMode::Generated,
+        machine_id: crate::protocol::view::MachineIdMode::Generated,
     };
     let error =
         crate::guest::view::apply(&mut root, &view, Some("10.0.0.1".parse().unwrap())).unwrap_err();
@@ -560,9 +560,9 @@ fn view_binds_survive_the_actual_switch_teardown_refusal_and_drop() {
         return;
     };
     root.mount_runtime(None).unwrap();
-    let view = crate::activation::View {
+    let view = crate::protocol::view::View {
         hostname: b"switched-view".to_vec(),
-        machine_id: crate::activation::MachineIdMode::Generated,
+        machine_id: crate::protocol::view::MachineIdMode::Generated,
     };
     let selected =
         crate::guest::view::apply(&mut root, &view, Some("10.0.0.1".parse().unwrap())).unwrap();

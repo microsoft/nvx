@@ -8,15 +8,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::activation::{
-    ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image, MachineIdMode,
-    Network, OverlayMode, Publication, ReadyActivation, RestoreSection, TransactionId, Upper, View,
+    ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image, Network,
+    Publication, ReadyActivation, RestoreSection, TransactionId, Upper,
 };
 use crate::host::nvxs::HostConnection;
 use crate::host::runtime::Hypervisor;
 use crate::host::session;
 use crate::host::snapshot::SnapshotManifest;
 use crate::host::spawn::{Launched, VmmCommand, spawn_vm_with_mode};
+use crate::protocol::root::OverlayMode;
 use crate::protocol::v2::{self, Frame, Outcome};
+use crate::protocol::view::{MachineIdMode, View};
 use crate::protocol::{
     CAPABILITY_LEN, HostMap, Workload, WorkloadEnvironment, encode_exec_payload,
     encode_maps_payloads,

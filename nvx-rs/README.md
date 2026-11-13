@@ -102,7 +102,7 @@ changes only when the module's purpose does.
 | [`nvx::protocol::root`](#nvxprotocolroot) | The boot tokens that tell the guest which image its layered root assembles, where the root keeps its upper, and how the guest assembles them |
 | [`nvx::protocol::share`](#nvxprotocolshare) | The guest targets that a sandbox's live shares may not take, which the host and the guest both refuse |
 | [`nvx::protocol::status`](#nvxprotocolstatus) | The exit statuses with which a clone's guest ends its VM once it fails fast, and what each means |
-| [`nvx::protocol::view`](#nvxprotocolview) | A cold boot's hostname bytes and machine-ID mode, with their renderer and strict boot-token parser |
+| [`nvx::protocol::view`](#nvxprotocolview) | The `View`, hostname and machine-ID mode that cold boots and restores share, with a cold boot's renderer and strict parser of their tokens |
 | [`nvx::activation`](#nvxactivation) | The activation record of a layered root, which a clone reads in place of its captured configuration, and what Ready reports |
 | [`nvx::contract`](#nvxcontract) | The versions of the contracts that the crate speaks with OpenVMM and the guest, and the compatibility of releases with them |
 | [`nvx::net`](#nvxnet) | Network primitives that do not depend on the host: CIDR networks, hostnames, guest addresses, and gateways |
@@ -234,10 +234,10 @@ the same rules: a `RootLayout` is a `RootImage` on the `distro` block device, an
 EROFS filesystem or a GPT disk with the `nvx::uuid::Uuid` that the guest expects
 of it, if any, over a `RootUpper`, the ext4 scratch disk or RAM, with the
 settings of the root's assembly that it names: the overlay's `OverlayMode` and
-a scratch's `Journal` policy, both of `nvx::activation`, a GPT disk's
-first-partition bound, and a RAM upper's cap, from 1 to 90 percent of the VM's
-memory. The guest takes its own default for a setting that the layout leaves
-out.
+a scratch's `Journal` policy, which this module defines for cold boots and
+restores alike, a GPT disk's first-partition bound, and a RAM upper's cap, from
+1 to 90 percent of the VM's memory. The guest takes its own default for a
+setting that the layout leaves out.
 
 `RootLayout::tokens` renders `nvx_layer=distro,0xd0003000,FORMAT[:IDENTITY]` and
 `nvx_scratch=0xd0006000,ext4` or `nvx_overlay_upper=ramfs`, then
@@ -274,7 +274,13 @@ each class of a clone's activation's failures, `ACTIVATION_DEADLINE` to
 
 ### `nvx::protocol::view`
 
-`tokens` renders a cold boot's `activation::View`: `nvx_hostname=HEX`, always
+`View` is the view that a VM's configuration, a [`VmConfig`](#nvxhostconfig),
+gives its workload, at a cold boot and at a restore alike: its hostname, 1 to
+`MAX_HOSTNAME_BYTES`, 64, bytes without a NUL, and its `MachineIdMode`, the
+image's machine ID or a generated one, without an identity, which each
+execution names.
+
+`tokens` renders a cold boot's `View`: `nvx_hostname=HEX`, always
 lowercase hexadecimal with two digits per hostname byte, then
 `nvx_machine_id=image` or `nvx_machine_id=generated`. The hostname keeps the
 view's 1 to 64 non-NUL bytes, including whitespace and non-UTF-8 bytes, without
@@ -300,13 +306,12 @@ the `Upper`, a tmpfs with its cap in percent of the VM's memory or the scratch
 with its `Journal` policy; the `OverlayMode`; an `Export`, a directory or an
 aggregate, and its 1 to 4,096 mappings; the `Network`, a DNS address, the
 listeners' `Publication`, and a proxy endpoint without credentials; the `View`,
-its hostname and `MachineIdMode`; and the `ExpectedResources`. Store, binding,
-plan, policy and execution identities never enter a record. The other inputs
-of the root's assembly are invariants of the template.
-
-`View` is the view that a VM's configuration, a [`VmConfig`](#nvxhostconfig),
-gives its workload: its hostname and `MachineIdMode`, without an identity, which
-each execution names.
+its hostname and `MachineIdMode`; and the `ExpectedResources`. The `View`,
+`MachineIdMode`, and `MAX_HOSTNAME_BYTES` are those of
+[`nvx::protocol::view`](#nvxprotocolview), and the `OverlayMode` and `Journal`
+those of [`nvx::protocol::root`](#nvxprotocolroot), which cold boots share.
+Store, binding, plan, policy and execution identities never enter a record. The
+other inputs of the root's assembly are invariants of the template.
 
 `ActivationRecord::new` refuses a configuration that `Configuration::check`
 finds past a public limit, `MAX_MAPPINGS`, `MAX_HOSTNAME_BYTES`, or

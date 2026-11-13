@@ -3,6 +3,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::*;
+use crate::protocol::view::MachineIdMode;
 
 /// The disk GUID of the tests' GPT images.
 const DISK_GUID: &str = "fedcba98-7654-3210-fedc-ba9876543210";

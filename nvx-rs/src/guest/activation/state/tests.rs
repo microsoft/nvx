@@ -4,9 +4,9 @@
 //! host's bytes when and as a test chooses, and whose output takes nothing.
 
 use super::*;
-use crate::activation::{
-    Configuration, Image, MAX_RECORD_BYTES, MachineIdMode, OverlayMode, RestoreSection, Upper, View,
-};
+use crate::activation::{Configuration, Image, MAX_RECORD_BYTES, RestoreSection, Upper};
+use crate::protocol::root::OverlayMode;
+use crate::protocol::view::{MachineIdMode, View};
 
 /// The number of online CPUs of the clone.
 const CPUS: u32 = 2;

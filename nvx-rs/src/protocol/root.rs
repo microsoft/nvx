@@ -44,7 +44,6 @@ use std::ops::RangeInclusive;
 
 use super::cmdline::{self, Token};
 use super::{ProtocolError, violation};
-use crate::activation::{Journal, OverlayMode};
 use crate::uuid::Uuid;
 
 /// The MMIO base of the `distro` block device, which holds a layered root's image.
@@ -115,6 +114,26 @@ const SCRATCH_FILESYSTEM: &str = "ext4";
 const OVERLAY_MODES: [OverlayMode; 2] = [OverlayMode::TrustedLowers, OverlayMode::UntrustedLowers];
 /// Every journal policy.
 const JOURNALS: [Journal; 2] = [Journal::Allowed, Journal::Forbidden];
+
+/// The overlay's mode, which selects its one option set, as the guest's assembly names it, at a
+/// cold boot and at a restore alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OverlayMode {
+    /// `metacopy=on,xino=on`, for lowers whose overlay xattrs the guest trusts.
+    TrustedLowers,
+    /// `metacopy=off,redirect_dir=nofollow`, for lowers that may carry untrusted overlay xattrs.
+    UntrustedLowers,
+}
+
+/// Whether an ext4 scratch may have a journal, at a cold boot and at a restore alike: the guest's
+/// assembly refuses a scratch with one when the policy [forbids](Self::Forbidden) it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Journal {
+    /// The scratch may have a journal or none.
+    Allowed,
+    /// The scratch may not have a journal.
+    Forbidden,
+}
 
 /// The format of a layered root's image, which its token names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

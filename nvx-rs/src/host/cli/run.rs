@@ -62,7 +62,6 @@ use super::shell::format_command;
 use super::snapshots::{self, Name};
 use super::{Exit, Result, check_interrupt, output};
 use crate::ErrorCode;
-use crate::activation::{MachineIdMode, View};
 use crate::host::artifacts::{ArtifactDir, Guest, require_artifact};
 use crate::host::config::{
     Boot, COMMAND_LINE_BUDGET, ConsoleAttachment, NicConfig, RootConfig, VmConfig,
@@ -78,6 +77,7 @@ use crate::host::sandbox::mount::{
 };
 use crate::host::sandbox::options::{SandboxOperation, validate_run_share_targets};
 use crate::host::vm::{self, VmDir};
+use crate::protocol::view::{MachineIdMode, View};
 
 /// The usage and help of the parser.
 pub(super) const SYNTAX: Syntax = Syntax {

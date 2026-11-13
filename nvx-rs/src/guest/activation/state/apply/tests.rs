@@ -6,8 +6,7 @@ use std::path::Path;
 
 use super::*;
 use crate::activation::{
-    ExpectedResources, Export, ExportKind, MachineIdMode, Network, RestoreSection, TransactionId,
-    View,
+    ExpectedResources, Export, ExportKind, Network, RestoreSection, TransactionId,
 };
 use crate::guest::activation::{
     Activation, ActivationAction, ActivationCause, ActivationInput, ActivationState,
@@ -15,6 +14,7 @@ use crate::guest::activation::{
 use crate::guest::root::tests::assembly_failure;
 use crate::guest::sys::Errno;
 use crate::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
+use crate::protocol::view::{MachineIdMode, View};
 use crate::uuid::Uuid;
 
 /// The test template's runtime directory.
@@ -215,7 +215,7 @@ fn configuration() -> Configuration {
         upper: activation::Upper::Tmpfs {
             max_memory_percent: 50,
         },
-        overlay: activation::OverlayMode::UntrustedLowers,
+        overlay: OverlayMode::UntrustedLowers,
         export: None,
         mappings: 0,
         network: None,
@@ -421,7 +421,7 @@ fn assembly_inputs_are_taken_exactly_from_the_record() {
         ),
         (
             activation::Upper::Scratch {
-                journal: activation::Journal::Allowed,
+                journal: Journal::Allowed,
             },
             root::Upper::Scratch {
                 device: template().scratch,
@@ -430,7 +430,7 @@ fn assembly_inputs_are_taken_exactly_from_the_record() {
         ),
         (
             activation::Upper::Scratch {
-                journal: activation::Journal::Forbidden,
+                journal: Journal::Forbidden,
             },
             root::Upper::Scratch {
                 device: template().scratch,
@@ -439,12 +439,9 @@ fn assembly_inputs_are_taken_exactly_from_the_record() {
         ),
     ];
     let overlays = [
+        (OverlayMode::TrustedLowers, root::OverlayMode::TrustedLowers),
         (
-            activation::OverlayMode::TrustedLowers,
-            root::OverlayMode::TrustedLowers,
-        ),
-        (
-            activation::OverlayMode::UntrustedLowers,
+            OverlayMode::UntrustedLowers,
             root::OverlayMode::UntrustedLowers,
         ),
     ];

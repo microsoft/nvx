@@ -20,14 +20,14 @@ use super::filesystem::{ExportPlan, ReservedTargets};
 use super::network::{self, NetworkPolicy};
 use super::platform::parse_hex32;
 use super::runtime::{GuestPowerAction, Hypervisor, Runtime};
-use crate::activation::{self, Journal, MAX_HOSTNAME_BYTES, OverlayMode, View};
+use crate::activation;
 use crate::contract;
 use crate::error::{Error, Result};
 use crate::net::Ipv4Cidr;
 use crate::protocol::cmdline::{self, Parameter};
 use crate::protocol::maps::HostMap;
-use crate::protocol::root::{ImageFormat, RootImage, RootLayout, RootUpper};
-use crate::protocol::view;
+use crate::protocol::root::{ImageFormat, Journal, OverlayMode, RootImage, RootLayout, RootUpper};
+use crate::protocol::view::{self, MAX_HOSTNAME_BYTES, View};
 
 /// Bytes of the x86 kernel command line available to caller tokens, including the NUL.
 pub const COMMAND_LINE_BUDGET: usize = 1024;
@@ -845,7 +845,7 @@ impl VmConfig {
                 ReservedTargets::CONTAINER_ROOT
             }
         };
-        if !activation::is_hostname(&self.view.hostname) {
+        if !view::is_hostname(&self.view.hostname) {
             return Err(Error::unsupported(format!(
                 "the hostname is not 1 to {MAX_HOSTNAME_BYTES} bytes without a NUL"
             )));

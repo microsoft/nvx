@@ -358,7 +358,6 @@ impl Options {
         root: &Root,
         mode: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        use nvx::activation::{MachineIdMode, View};
         use nvx::host::config::{Boot, ConsoleAttachment, NetworkConfig, RootConfig, VmConfig};
         use nvx::host::filesystem::Owner;
         use nvx::host::network::{
@@ -367,6 +366,7 @@ impl Options {
         };
         use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
         use nvx::host::vm::{self, VmDir};
+        use nvx::protocol::view::{MachineIdMode, View};
 
         use nvx::host::network::{ForwardProtocol, Protocol};
 

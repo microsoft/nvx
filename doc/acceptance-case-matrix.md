@@ -475,7 +475,7 @@ this matrix. The README's own code is no doctest.
 
 | Code | Fate | Note |
 | --- | --- | --- |
-| `nvx-rs/src/activation/mod.rs - activation (line 130)` | kept |  |
+| `nvx-rs/src/activation/mod.rs - activation (line 134)` | kept |  |
 | `nvx-rs/src/exec/mod.rs - exec (line 113)` | retired | The exec engine leaves (SL6.11a) |
 | `nvx-rs/src/gpt/mod.rs - gpt (line 43)` | kept |  |
 | `nvx-rs/src/guest/activation.rs - guest::activation (line 127)` | kept | SL6.11c rewrote it on `guest::snapshot::capture`, when its capture preparation and admission fence left (#1087) |

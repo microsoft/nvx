@@ -29,6 +29,10 @@ changed item to its replacement, or to what its caller now does.
 - **`nvx::Hypervisor` is `nvx::host::runtime::Hypervisor`.** The crate root no
   longer exports it, so it needs the `host` feature, and the `serde` feature
   alone now covers only `net::Ipv4Cidr`.
+- **Shared settings.** The settings that cold boots and restores share leave
+  `nvx::activation`: `View`, `MachineIdMode` and `MAX_HOSTNAME_BYTES` are in
+  `nvx::protocol::view`, and `OverlayMode` and `Journal` in
+  `nvx::protocol::root`.
 - **The guest's space is private.** nvx-init's space, `nvx::guest::{root, gpt}`
   and the mapper of `nvx::guest::mappings`, is private to `nvx`.
   `resolve_guest_path` is gone, and `ExportPlan` holds paths only.
