@@ -10,9 +10,10 @@
   summary, and commit mapping below cover positions 001-131, the PR09 fixups at positions
   241-243, the PR13 fixup at position 247, the PR18 fixup at position 248, the PR20 fixup at
   position 249, and the PR19 fixup at position 250.
-- NVX's pinned OpenVMM revision: `60e160369b1f1f10543e0699d4ae1e95810a1e62`, position 267, the
-  head of microsoft/openvmm#5072, whose commit follows position 266, `6f57a6d61`, the head of
-  `feature/microvm/dev`, which microsoft/openvmm#5067 merged with position 265 after position 264,
+- NVX's pinned OpenVMM revision: `5ca20ee081c255bed107e58b6dc5b5b769b6101d`, position 268, the
+  head of microsoft/openvmm#5073, whose commit follows position 267, `60e160369`, the head of
+  `feature/microvm/dev`, which microsoft/openvmm#5072 merged after position 266, `6f57a6d61`,
+  which microsoft/openvmm#5067 merged with position 265 after position 264,
   `8eede133c`, which microsoft/openvmm#5065 merged after position 263, `5d656d854`,
   which microsoft/openvmm#5061 merged after position 262, `c2c21ddb2`,
   which microsoft/openvmm#5056 merged after position 261, `c72fc56a3`,
@@ -51,8 +52,8 @@
   position 221 into positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits
   of microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
   positions 149-220 are positions 148-219, and the tree of position 220 is the tree of
-  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 136 commits past
-  the mapped tip on the same first-parent chain. Positions 132-240, 244-246, and 251-267 are not
+  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 137 commits past
+  the mapped tip on the same first-parent chain. Positions 132-240, 244-246, and 251-268 are not
   yet assigned to PRs, positions 241-243 are PR09 fixups, position 247 is a PR13 fixup, position 248
   is a PR18 fixup, position 249 is a PR20 fixup, and position 250 is a PR19 fixup; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1041,7 +1042,8 @@ ba105dd7f
   -> PIT time below 100 ns counted once [264]
   -> PIT restore rejecting a control word with RW = 0 [265-266]
   -> RTC port reads wider than a byte zero-extended [267]
-  -> 60e160369 (NVX pin)
+  -> periodic timer's missed periods skipped at once [268]
+  -> 5ca20ee08 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -1078,7 +1080,7 @@ helper that the case uses.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. Of the 136 later commits,
+The NVX pin extends the chain past position 131 without merges. Of the 137 later commits,
 positions 241-243 are PR09 fixups, position 247 is a PR13 fixup, position 248 is a PR18 fixup,
 position 249 is a PR20 fixup, position 250 is a PR19 fixup, and the others are not yet classified
 or assigned to PRs.
@@ -1086,7 +1088,7 @@ Each of positions 132-186 combines the v2.4 commits that the table lists, as v3.
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 187-191 followed the v3.0 reorganization, positions 192-205 are the ABI restart
 of the v4.0 reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
-reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-267 followed the
+reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-268 followed the
 v6.0 reorganization, so they combine none, apart from position 220, which combines v5.1 positions
 222 and 223. Each commit has the position that it
 had in v5.1 through position 147, and one less from v5.1 position 149 on; see
@@ -1231,6 +1233,7 @@ at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4
 | 265 | `607407fa9` | - | - | - | - | chipset: reject a saved PIT control word with RW = 0 (microsoft/openvmm#5067) |
 | 266 | `6f57a6d61` | - | - | - | - | chipset: keep the PIT restore tests within Linux's open file limit (microsoft/openvmm#5067); fold into 265 |
 | 267 | `60e160369` | - | - | - | - | chipset: zero-extend wide reads of the RTC's ports (microsoft/openvmm#5072) |
+| 268 | `5ca20ee08` | - | - | - | - | vmcore: skip a periodic timer's missed periods at once (microsoft/openvmm#5073) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1927,6 +1930,15 @@ has, and adds a test, in a file that PR10's position 020, PR15's position 057, a
 also change, none of them in the code that it changes. It changes nothing that a mapped PR adds.
 Replaying it on upstream main applies without conflicts, and `chipset` type-checks there with its
 tests, which pass, so it can go upstream on its own.
+
+Position 268 makes `VmTimerPeriodic`, the timer of the RTC's periodic and update-ended interrupts,
+skip at once the deadlines that VM time passed, which its poll had passed one period per
+iteration, so that a restore after a long downtime stalled, and register its next deadline under
+the timer state's lock, in code that upstream main has, and adds tests, in a file that PR10's
+position 019 and positions 156, 157, and 255 also change, none of them in the code that it
+changes. It changes nothing that a mapped PR adds. Replaying it on upstream main applies without
+conflicts, and `vmcore` type-checks there with its tests, which pass, so it can go upstream on its
+own.
 
 ## PR summary
 
