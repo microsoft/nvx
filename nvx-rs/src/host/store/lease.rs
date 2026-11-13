@@ -264,37 +264,6 @@ pub(crate) fn clone_socket_name(launch: &LaunchId) -> String {
     format!("{launch}.sock")
 }
 
-/// Returns the name of the endpoint at which the boot console of the VMM of the clone whose launch
-/// is `launch` listens, if its launch attaches one: `<launch>.console`, a socket in the payload of
-/// the leased generation on Linux, beside the clone's control socket, and the name of a named pipe
-/// on Windows.
-pub(crate) fn clone_console_name(launch: &LaunchId) -> String {
-    format!("{launch}.console")
-}
-
-/// Returns the endpoint at which the boot console of the VMM of the clone whose launch is
-/// `launch` listens, if its launch attaches one, as OpenVMM's `--virtio-console listen=<endpoint>`
-/// takes it: on Linux, `socket`, the path of the socket [`clone_console_name`] in the payload of
-/// the leased generation; on Windows, the named pipe `//./pipe/openvmm-microvm-<launch>.console`,
-/// in the namespace of the pipes that OpenVMM takes for a microVM's consoles.
-///
-/// Fails with [`ErrorKind::Unsupported`] on Linux if `socket` is not valid UTF-8.
-pub(crate) fn clone_console_endpoint(socket: &Path, launch: &LaunchId) -> Result<String> {
-    if cfg!(windows) {
-        return Ok(format!(
-            "//./pipe/openvmm-microvm-{}",
-            clone_console_name(launch)
-        ));
-    }
-    socket.to_str().map(str::to_owned).ok_or_else(|| {
-        Error::unsupported(format!(
-            "the path of the console socket {} of a clone's VMM must be valid UTF-8, as OpenVMM \
-             takes it",
-            socket.display()
-        ))
-    })
-}
-
 /// Returns whether `path` names the control socket of the VMM of the clone that holds `lease`, as
 /// [`template::Store::clone_socket_path`](crate::host::template::Store::clone_socket_path) returns
 /// it: `generations/<generation>/<launch>.sock`, in a template store, which a lease names by its

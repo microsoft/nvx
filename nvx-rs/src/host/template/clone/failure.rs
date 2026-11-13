@@ -27,7 +27,7 @@ use crate::protocol::status;
 ///
 /// | Evidence | Outcome | Quarantine |
 /// | --- | --- | --- |
-/// | An authorization that the image's binding denies; a stale image binding; invalid targets, format, settings, activation record, or mappings; an image that the template can't serve; a scratch that isn't ext4 or isn't fresh; a root that does not assemble from them | [`Request`](Outcome::Request) | No |
+/// | An authorization that the image's binding denies; a stale image binding; invalid targets, format, settings, Activate, or mappings; an image that the template can't serve; a scratch that isn't ext4 or isn't fresh; a root that does not assemble from them | [`Request`](Outcome::Request) | No |
 /// | A supplied file with the wrong identity, length, or geometry | [`Request`](Outcome::Request), or the host's [`Staging`](Outcome::Staging) once the caller proves it | No |
 /// | An endpoint or forward that cannot be bound; resource exhaustion; a destination that cannot restore the template, such as an incompatible CPU or TSC; another runtime; another failure of the host's own operations | [`Host`](Outcome::Host) | No |
 /// | A lost status; a timeout; a reset; a forced kill; a broken protocol | [`Unknown`](Outcome::Unknown): the host, the protocol, or neither | No |
@@ -59,18 +59,17 @@ use crate::protocol::status;
 /// failure's record holds the status beside it.
 ///
 /// The host sees the failures of OpenVMM itself through the line with which OpenVMM reports the
-/// error that ended it, which the launch's log keeps, and which leads with the error's stable
-/// code, such as a time ABI code, a spelling that OpenVMM keeps stable for its callers. A VMM that
-/// exits before its restore-ready event with a code that says that the host cannot present the
-/// template's CPU profile, TSC, or LAPIC timer failed on an
-/// [incompatible host](Self::IncompatibleHost). One with the code that says that OpenVMM cannot
-/// bind the port of host loopback of a forward of the clone's network, as one that another socket
-/// holds, which OpenVMM binds as it restores the clone's NIC, before its restore-ready event,
-/// failed to [bind a forward](Self::ForwardBind), and the failure's message keeps the cause of the
-/// error's chain that names the forward after the line, unless the line names the forward itself.
-/// Any other code, such as one of the snapshot's time contract, keeps what the host saw, since it
-/// does not tell a defect of the generation from one of this host's OpenVMM, and the failure's
-/// message keeps the line.
+/// error that ended it, which the launch's log keeps, and which leads with the error's time ABI
+/// code, a spelling that OpenVMM keeps stable for its callers. A VMM that exits before its
+/// restore-ready event with a code that says that the host cannot present the template's CPU
+/// profile, TSC, or LAPIC timer failed on an [incompatible host](Self::IncompatibleHost). Any
+/// other code, such as one of the snapshot's time contract, keeps what the host saw, since it does
+/// not tell a defect of the generation from one of this host's OpenVMM, and the failure's message
+/// keeps the line. One error that has no code tells the host's fault by its text alone: a VMM
+/// whose error's chain names a forward of the clone's network whose port of host loopback OpenVMM
+/// cannot bind, as one that another socket holds, which OpenVMM binds as it restores the clone's
+/// NIC, before its restore-ready event, failed to [bind a forward](Self::ForwardBind). The failure's
+/// message keeps that cause of the chain after the line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
@@ -95,10 +94,9 @@ pub enum Evidence {
     /// apply, as its [`ACTIVATION_WORKLOAD`](crate::protocol::status::ACTIVATION_WORKLOAD) and
     /// [`ACTIVATION_NETWORK`](crate::protocol::status::ACTIVATION_NETWORK) tell.
     InvalidSettings,
-    /// The request's activation record is invalid: settings that no activation record holds, or
-    /// a record that the guest refused, as its
-    /// [`ACTIVATION_RECORD`](crate::protocol::status::ACTIVATION_RECORD) tells. Its name, which
-    /// records spell `invalid-activate`, predates the record's delivery in the restore packet.
+    /// The request's Activate is invalid: settings that no activation record holds, or a record
+    /// that the guest refused, as its
+    /// [`ACTIVATION_RECORD`](crate::protocol::status::ACTIVATION_RECORD) tells.
     InvalidActivate,
     /// The request's mappings are invalid: an export that no clone takes, such as one that
     /// overlaps the template store; an export whose read-only mappings the host cannot keep
@@ -382,8 +380,7 @@ pub enum Progress {
     /// A session of the adapter's framing attached: the guest's repair acknowledged the restore,
     /// before which OpenVMM reads none of the host's input.
     Acknowledged,
-    /// The host asked for the clone's Ready, with which the clone answers once it activated with
-    /// the record of its restore packet.
+    /// The Activate of the clone's record was sent.
     Activating,
     /// The clone's Ready was checked: the clone is activated, with the record's transaction. A
     /// clone with an export gets its mapping table at this step, before the start.
@@ -874,9 +871,8 @@ pub(super) fn prevailing(evidence: Evidence, reported: Option<Evidence>) -> Evid
 }
 
 /// The start of the line with which OpenVMM reports, on its standard error, which the launch's log
-/// keeps, the error that ended it: the line goes on with the first stable code of the error's
-/// chain in brackets, such as `[E_TSC_RATE_TOLERANCE]`, if the chain has one, as [`leading_code`]
-/// reads it.
+/// keeps, the error that ended it: the line goes on with the error's first time ABI code in
+/// brackets, such as `[E_TSC_RATE_TOLERANCE]`, if the error's chain has one.
 pub(super) const FATAL_PREFIX: &str = "fatal error: ";
 
 /// The time ABI codes with which OpenVMM refuses to restore a snapshot on a host that cannot
@@ -899,33 +895,31 @@ const INCOMPATIBLE_HOST_CODES: [&str; 13] = [
     "E_LAPIC_RATE_MISMATCH",
 ];
 
-/// The code with which OpenVMM reports a forward of a clone's network whose port of host loopback
-/// it cannot bind as it restores the clone's NIC, as one that another socket holds: it leads the
-/// cause of the error's chain that names the forward, its protocol, `Tcp` or `Udp`, its address,
-/// and its port, and so the line that leads the fatal error.
-pub(super) const FORWARD_BIND_CODE: &str = "E_PORT_FORWARD_BIND";
-
-/// Returns the code in brackets with which `text` starts, as OpenVMM leads an error, and the line
-/// of its fatal error, with the error's stable code, such as `E_TSC_RATE_TOLERANCE` of
-/// `[E_TSC_RATE_TOLERANCE] the destination's TSC rate`, or none if `text` starts with none.
-pub(super) fn leading_code(text: &str) -> Option<&str> {
-    let code = text.strip_prefix('[')?;
-    code.get(..code.find(']')?)
-}
+/// The text with which a cause of OpenVMM's fatal error names a forward of a clone's network whose
+/// port of host loopback OpenVMM cannot bind as it restores the clone's NIC: the forward's
+/// protocol, `Tcp` or `Udp`, its address, and its port follow, then `)`, as the excerpt of
+/// OpenVMM's source `tests/vectors/openvmm/port_forward_socket_creation.rs` spells the error.
+/// OpenVMM gives the error no code.
+pub(super) const FORWARD_BIND_TEXT: &str = "failed to create socket for port forward (";
 
 /// Returns the evidence of `line`, the line with which OpenVMM reported the error that ended a
 /// clone's VMM before its restore-ready event, followed by the cause of the error's chain that
 /// names a forward that OpenVMM cannot bind, if it has one, as the launch reads them from the end
 /// of the VMM's log, as [the attribution of evidence](Evidence#attribution) describes:
 /// [`Evidence::IncompatibleHost`] for an error whose time ABI code says that the host cannot
-/// present the template's CPU or time, [`Evidence::ForwardBind`] for one whose code,
-/// [`FORWARD_BIND_CODE`], says that OpenVMM cannot bind a forward, and none for any other.
+/// present the template's CPU or time, [`Evidence::ForwardBind`] for one that names a forward that
+/// OpenVMM cannot bind, [`FORWARD_BIND_TEXT`], and none for any other.
 pub(super) fn fatal_evidence(line: &str) -> Option<Evidence> {
-    match leading_code(line.strip_prefix(FATAL_PREFIX)?)? {
-        code if INCOMPATIBLE_HOST_CODES.contains(&code) => Some(Evidence::IncompatibleHost),
-        FORWARD_BIND_CODE => Some(Evidence::ForwardBind),
-        _ => None,
+    let reported = line.strip_prefix(FATAL_PREFIX)?;
+    let code = reported
+        .strip_prefix('[')
+        .and_then(|code| code.get(..code.find(']')?));
+    if code.is_some_and(|code| INCOMPATIBLE_HOST_CODES.contains(&code)) {
+        return Some(Evidence::IncompatibleHost);
     }
+    reported
+        .contains(FORWARD_BIND_TEXT)
+        .then_some(Evidence::ForwardBind)
 }
 
 #[cfg(test)]

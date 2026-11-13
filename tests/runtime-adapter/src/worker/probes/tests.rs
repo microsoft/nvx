@@ -78,42 +78,6 @@ fn the_os_release_id_loses_its_quotes() {
 }
 
 #[test]
-fn the_kmsg_probe_takes_one_argument() {
-    let lowers = [PathBuf::from("/run/runtime-adapter/layers/distro")];
-    let context = Context {
-        runtime: Path::new("/run/runtime-adapter"),
-        root: Path::new("/run/runtime-adapter/rootfs"),
-        lowers: &lowers,
-        upper: Path::new("/run/runtime-adapter/scratch"),
-        first_partition: None,
-        agent: Path::new("/sys/fs/cgroup/agent"),
-        workload: Path::new("/sys/fs/cgroup/workload"),
-        sibling: None,
-    };
-    let mut held = Vec::new();
-    for text in ["kmsg", "kmsg first second"] {
-        let probe = Probe::parse(text).unwrap();
-        assert_eq!(
-            run(&probe, &context, &mut held),
-            Err("the kmsg probe takes one argument".to_owned()),
-            "{text}"
-        );
-    }
-    assert!(held.is_empty());
-}
-
-#[test]
-fn the_kmsg_probe_keeps_its_text_out_of_the_record_s_priority() {
-    // The kernel's log takes a record that starts with `<N>` for one of priority N, and drops the
-    // prefix, so a text that starts so would not reach the console as it is.
-    for text in ["first-996", "<0>first-996", "<12>"] {
-        let record = kmsg_record(text);
-        assert_eq!(record, format!("{KMSG_PREFIX}{text}\n"));
-        assert!(!record.starts_with('<'), "{record:?}");
-    }
-}
-
-#[test]
 fn unknown_probes_and_arguments_are_refused() {
     let lowers = [PathBuf::from("/run/runtime-adapter/layers/distro")];
     let context = Context {

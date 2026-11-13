@@ -26,9 +26,10 @@ use crate::host::template::Lease;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ReattachedClone<S> {
-    /// The clone's VMM runs under the caller's runtime identity, and the clone answered the request
-    /// for its Ready in a new session of the adapter's framing with the Ready of the activation of
-    /// its record: the caller holds the VM, and the session, in which it drives the clone.
+    /// The clone's VMM runs under the caller's runtime identity, and the clone answered the
+    /// Activate of its record, byte for byte, in a new session of the adapter's framing, with the
+    /// Ready of the record's activation: the caller holds the VM, and the session, in which it
+    /// drives the clone.
     Live {
         /// The clone's VM.
         vmm: Box<Vmm>,
@@ -76,16 +77,15 @@ pub enum ReattachedClone<S> {
 ///
 /// - A VMM that runs under `runtime`, whose launch is the one that the clone's lease reserves, is
 ///   the clone's, which the reattach checks in a new session, as the restore sequence of the
-///   clone's launch does, [`Restoring::activate`](super::Restoring::activate): it asks for the
-///   clone's Ready, which reports the transaction of the sandbox's activation record, which must
-///   still be the canonical encoding of the record of a restore, the record of the clone's
-///   restore packet: the clone answers with the Ready that it answers in every session, and the
-///   reattach checks the transaction ID that it reports, which [`ReattachedClone::Live`] returns
-///   with the session. The clone's launch committed once the clone applied its mapping table, if
-///   it has one, and started its sandbox, so the reattach sends neither again, and no launch that
-///   it ends gets either. A check that fails, by the evidence that the restore sequence gives it,
-///   ends the VMM through its verified identity, as [`Vmm::terminate`] does within `bound`, and
-///   the clone fails at [`Stage::Reattach`].
+///   clone's launch does, [`Restoring::activate`](super::Restoring::activate), sending the
+///   sandbox's activation record, byte for byte, which must still be the canonical encoding of the
+///   record of a restore: the clone answers with the Ready that it answered once, and the reattach
+///   checks the transaction ID that it reports, which [`ReattachedClone::Live`] returns with the
+///   session. The clone's launch committed once the clone applied its mapping table, if it has one,
+///   and started its sandbox, so the reattach sends neither again, and no launch that it ends gets
+///   either. A check that fails, by the evidence that the restore sequence gives it, ends the VMM
+///   through its verified identity, as [`Vmm::terminate`] does within `bound`, and the clone fails
+///   at [`Stage::Reattach`].
 /// - A VMM that runs under another runtime identity, which might not speak the caller's
 ///   protocol, is ended the same way, without a word to its guest, and the clone fails at
 ///   [`Stage::Reattach`] with [`Evidence::RuntimeMismatch`], and
@@ -263,7 +263,7 @@ pub(super) fn reattach_clone_syncing<C: CloneControl>(
     let transaction = activation
         .as_ref()
         .ok()
-        .and_then(|record| record.restore().map(|restore| restore.transaction));
+        .and_then(|(_, record)| record.restore().map(|restore| restore.transaction));
     let recorder = Recorder::new(lease.clone(), transaction, locked).uncertain(uncertain);
     let fresh = earlier.is_none();
     // A record of an earlier failure may be in place without being durable, as a write whose sync
@@ -474,14 +474,13 @@ fn exit_fault(
 }
 
 /// Reads the clone's activation record at `path`, which must be the canonical encoding of the
-/// record of a restore, as the clone's launch wrote it, and from which OpenVMM read the record of
-/// the clone's restore packet, and returns the record, or the fault, the host's, of one that is
-/// not.
+/// record of a restore, as the clone's launch wrote it, and returns its bytes and the record, or
+/// the fault, the host's, of one that is not.
 ///
 /// It compares nothing of the record with the clone's lease: the reattach matches the clone's
 /// records with the lease as [`CloneRecords`](super::CloneRecords) does, through
 /// [`read_failure_of`], which refuses the record of the failure of another template's clone.
-fn read_activation(path: &Path) -> std::result::Result<ActivationRecord, Fault> {
+fn read_activation(path: &Path) -> std::result::Result<(Vec<u8>, ActivationRecord), Fault> {
     let bytes = open_regular(path)
         .and_then(|file| read_at_most(file, MAX_RECORD_BYTES as u64, "an activation record"))
         .map_err(|error| {
@@ -514,11 +513,11 @@ fn read_activation(path: &Path) -> std::result::Result<ActivationRecord, Fault> 
             malformed("is not the record of a restore"),
         ));
     }
-    Ok(record)
+    Ok((bytes, record))
 }
 
 /// Checks the clone of `lease`, whose VM `vmm` runs in the sandbox of `locked`, in a new session
-/// of `control`, with the sandbox's capability, against its activation record, `record`, by
+/// of `control`, with the sandbox's capability and its activation record, `activation`, by
 /// `deadline`, as the reattach that `started` describes, and returns the session in which the
 /// clone answered.
 fn check_activation<C: CloneControl>(
@@ -526,7 +525,7 @@ fn check_activation<C: CloneControl>(
     lease: &Lease,
     vmm: &Vmm,
     control: &mut C,
-    record: ActivationRecord,
+    (encoded, record): (Vec<u8>, ActivationRecord),
     deadline: Instant,
     started: Instant,
 ) -> std::result::Result<C::Session, Fault> {
@@ -543,9 +542,12 @@ fn check_activation<C: CloneControl>(
         ));
     }
     let capability = locked.read_capability().on_host()?;
+    let path = locked.clone_activation_path();
     let session = ActivationSession {
         capability: &capability,
+        record: &path,
         expected: ReadyActivation::of(&record),
+        encoded,
         deadline,
         timeout: deadline.saturating_duration_since(started),
         since: "its reattach",

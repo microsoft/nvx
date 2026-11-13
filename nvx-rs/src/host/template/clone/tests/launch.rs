@@ -61,10 +61,6 @@ const EXIT_MARKER: &str = "exit";
 /// File in which [`fake_vmm`] writes the arguments that a launch gave its VMM, as JSON, for the
 /// [`restore_vmm_role`] that runs instead.
 const ARGUMENTS: &str = "arguments.json";
-/// File in which [`fake_vmm`] keeps the activation record that a launch hands its VMM with
-/// `--restore-activation-record`, as OpenVMM reads it before the restored VM runs: the record of
-/// the clone's restore packet, with which the clone activates.
-const PACKET: &str = "packet";
 /// File in which a [`restore_vmm_role`] writes, once it has tried to send its restore-ready
 /// event, the capability that it read, in hexadecimal, and whether it sent the event.
 const STARTED: &str = "started";
@@ -123,7 +119,8 @@ pub(super) fn complete_snapshot(fixture: &Fixture) -> (PathBuf, Vec<(&'static st
 }
 
 /// Returns the seals of the files of the snapshot in `snapshot`, by name, which change with their
-/// content, their length, their modification time, and on Linux their change time.
+/// content, their length, their modification time, and on Linux their change time, which a
+/// restore checks.
 fn seals(snapshot: &Path) -> Vec<(&'static str, FileSeal)> {
     SNAPSHOT_ARTIFACTS
         .map(|name| {
@@ -282,8 +279,8 @@ pub(super) struct Made {
 
 /// Returns the seam of the command of a launch whose VMM is a [`restore_vmm_role`] in `vmm`: it
 /// keeps the command that the launch made in `made`, writes its arguments in [`ARGUMENTS`] in
-/// `vmm`, and the activation record that they hand the VMM in [`PACKET`] there, as OpenVMM reads
-/// it, and runs the role there instead, with the descriptors or handles that the command passes.
+/// `vmm`, and runs the role there instead, with the descriptors or handles that the command
+/// passes.
 pub(super) fn fake_vmm<'a>(
     vmm: &'a Path,
     made: &'a RefCell<Option<Made>>,
@@ -295,19 +292,13 @@ pub(super) fn fake_vmm<'a>(
             .map(|argument| argument.to_str().unwrap().to_owned())
             .collect();
         fs::write(vmm.join(ARGUMENTS), serde_json::to_vec(&arguments).unwrap()).unwrap();
-        // OpenVMM reads the record before the restored VM runs, and seals it in the packet.
-        let record = argument(&arguments, "--restore-activation-record").unwrap();
-        fs::write(vmm.join(PACKET), fs::read(record).unwrap()).unwrap();
-        // The VMM reports its outcome in the sandbox, wherever the VMM runs.
-        let report = argument(&arguments, "--microvm-report").unwrap();
-        let sandbox = Path::new(&report).parent().unwrap();
         made.replace(Some(Made {
             program: command.program.clone(),
             arguments,
             working_dir: command.working_dir.clone(),
             inherited: command.inherit.len(),
-            bound: sandbox.join(CLONE_BINDING_NAME).is_file(),
-            begun: sandbox.join(JOURNAL_NAME).is_file(),
+            bound: command.working_dir.join(CLONE_BINDING_NAME).is_file(),
+            begun: command.working_dir.join(JOURNAL_NAME).is_file(),
         }));
         VmmCommand {
             program: env::current_exe().unwrap(),
@@ -342,12 +333,6 @@ impl VmmDir {
     /// Returns the path of the directory.
     pub(super) fn path(&self) -> &Path {
         self.dir.path()
-    }
-
-    /// Returns the path of the file that holds the record of the clone's restore packet, which
-    /// [`fake_vmm`] wrote at the launch.
-    pub(super) fn packet(&self) -> PathBuf {
-        self.path().join(PACKET)
     }
 
     /// Waits until the VMM has tried to send its restore-ready event, and returns what it wrote
@@ -404,10 +389,9 @@ impl VmmDir {
     ///   error of the time ABI code `CODE`, and the error's chain, on its standard error, after a
     ///   warning that names another code, before it exits;
     /// - `forward:PORT`, with `exit` or `close`, writes the line with which OpenVMM reports a fatal
-    ///   error of the code of a forward that it cannot bind, and the error's chain, whose second
-    ///   cause leads with that code too and names the forward of host loopback's TCP port `PORT`
-    ///   in words of its own, on its standard error, after a warning that names that code and that
-    ///   forward too, before it exits;
+    ///   error without a code, and the error's chain, whose second cause names the forward of host
+    ///   loopback's TCP port `PORT` that OpenVMM cannot bind, on its standard error, after a
+    ///   warning that names that forward too, before it exits;
     /// - `other` sends a version of the event that OpenVMM does not send;
     /// - `partial` sends the first bytes of the event, then closes its end of the endpoint;
     /// - `flush` flushes the event as OpenVMM does, which waits on Windows until the host read
@@ -442,13 +426,11 @@ impl Drop for VmmDir {
 /// restore-ready event, and the snapshot that it restores, among the arguments that its launch
 /// made, which [`ARGUMENTS`] holds; holds the snapshot as OpenVMM does, which on Linux listens at
 /// the control endpoint beside the snapshot, and on Windows opens the snapshot's directory and
-/// files sharing nothing but reading, and serves its control endpoint's named pipe, and listens at
-/// the endpoint of a boot console that the arguments attach likewise; sends the
+/// files sharing nothing but reading, and serves its control endpoint's named pipe; sends the
 /// restore-ready event as OpenVMM does, or as its [plan](VmmDir::plan) says; writes [`STARTED`];
 /// then runs until a file named [`EXIT_MARKER`] appears, or for [`VMM_LIFETIME`] at most, writes
-/// the outcome report that its plan asks for, and removes its control socket, and the socket of
-/// its boot console, as it exits, as OpenVMM does at a normal exit. It never answers on its
-/// control endpoint, and writes nothing to its boot console.
+/// the outcome report that its plan asks for, and removes its control socket as it exits, as
+/// OpenVMM does at a normal exit. It never answers on its control endpoint.
 ///
 /// Where OpenVMM would refuse its arguments, this VMM writes why in [`STARTED`] after its
 /// capability and whether it sent its event. Where OpenVMM would abort a restore whose event it
@@ -490,16 +472,13 @@ fn restore_vmm_role() {
             .unwrap();
         }
         if let Some(port) = words.iter().find_map(|word| word.strip_prefix("forward:")) {
-            // OpenVMM leads its fatal error with the code of a forward that it cannot bind, which
-            // leads the cause of its chain that names the forward too, in words of its own, and
-            // numbers the causes of its chain.
+            // OpenVMM gives the error no code, and numbers the causes of its chain.
             writeln!(
                 std::io::stderr(),
-                "warning: [E_PORT_FORWARD_BIND] the test's forward (Tcp 127.0.0.1:{port}) is not \
-                 yet bound\n\
-                 fatal error: [E_PORT_FORWARD_BIND] failed to launch vm worker\n\nCaused by:\n    \
+                "warning: the test's forward (Tcp 127.0.0.1:{port}) is not yet bound\n\
+                 fatal error: failed to launch vm worker\n\nCaused by:\n    \
                  0: failed to resolve the test's network endpoint\n    \
-                 1: [E_PORT_FORWARD_BIND] the test's forward (Tcp 127.0.0.1:{port}) is held\n    \
+                 1: failed to create socket for port forward (Tcp 127.0.0.1:{port})\n    \
                  2: the test's port is held"
             )
             .unwrap();
@@ -585,49 +564,30 @@ struct Held {
     /// The listener at the control endpoint, on Linux, and the path at which it listens.
     #[cfg(unix)]
     listener: (std::os::unix::net::UnixListener, PathBuf),
-    /// The listener at the endpoint of the boot console, if the arguments attach one, on Linux,
-    /// and the path at which it listens.
-    #[cfg(unix)]
-    console: Option<(std::os::unix::net::UnixListener, PathBuf)>,
     /// The snapshot's directory and files, open, on Windows.
     #[cfg(windows)]
     _files: Vec<File>,
     /// The instances of the control endpoint's named pipe, on Windows.
     #[cfg(windows)]
     _control: Vec<std::os::windows::io::OwnedHandle>,
-    /// The instances of the named pipe of the boot console, if the arguments attach one, on
-    /// Windows.
-    #[cfg(windows)]
-    _console: Vec<std::os::windows::io::OwnedHandle>,
 }
 
 impl Held {
-    /// Lets go of the restore, as OpenVMM does at a normal exit, which removes its control socket,
-    /// and the socket of its boot console.
+    /// Lets go of the restore, as OpenVMM does at a normal exit, which removes its control socket.
     fn release(self) {
         #[cfg(unix)]
         {
-            for (listener, path) in std::iter::once(self.listener).chain(self.console) {
-                drop(listener);
-                fs::remove_file(path).unwrap();
-            }
+            let (listener, path) = self.listener;
+            drop(listener);
+            fs::remove_file(path).unwrap();
         }
     }
-}
-
-/// Returns the endpoint of the boot console that `arguments` attach as a listener, as
-/// `--virtio-console listen=<endpoint>` names it, if they attach one.
-fn console_endpoint(arguments: &[String]) -> Option<String> {
-    argument(arguments, "--virtio-console")
-        .and_then(|console| console.strip_prefix("listen=").map(str::to_owned))
 }
 
 /// Holds the snapshot that `arguments` restore as OpenVMM does, or returns why OpenVMM would
 /// refuse them. On Linux, OpenVMM requires the parent of its control endpoint to be a directory
 /// of its user with mode 0700, not a link, whose path with its links resolved is that of the
-/// snapshot's parent, and listens at the endpoint's path with its parent's links resolved. It
-/// requires the socket of a boot console that it listens at to be beside the snapshot too, and
-/// listens there likewise.
+/// snapshot's parent, and listens at the endpoint's path with its parent's links resolved.
 #[cfg(unix)]
 fn hold_snapshot(arguments: &[String]) -> std::result::Result<Held, String> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -662,28 +622,8 @@ fn hold_snapshot(arguments: &[String]) -> std::result::Result<Held, String> {
     let path = canonical.join(name);
     let listener = std::os::unix::net::UnixListener::bind(&path)
         .map_err(|error| format!("cannot listen at {}: {error}", path.display()))?;
-    let console = match console_endpoint(arguments).map(PathBuf::from) {
-        Some(console) => {
-            let (Some(parent), Some(name)) = (console.parent(), console.file_name()) else {
-                return Err("the boot console names no directory".to_owned());
-            };
-            if fs::canonicalize(parent).map_err(|error| error.to_string())? != canonical {
-                return Err(format!(
-                    "the boot console {} is not beside the snapshot {}",
-                    console.display(),
-                    snapshot.display()
-                ));
-            }
-            let path = canonical.join(name);
-            let listener = std::os::unix::net::UnixListener::bind(&path)
-                .map_err(|error| format!("cannot listen at {}: {error}", path.display()))?;
-            Some((listener, path))
-        }
-        None => None,
-    };
     Ok(Held {
         listener: (listener, path),
-        console,
     })
 }
 
@@ -691,7 +631,7 @@ fn hold_snapshot(arguments: &[String]) -> std::result::Result<Held, String> {
 /// refuse them: on Windows, OpenVMM opens the snapshot's directory and files for reading, sharing
 /// nothing but reading, so that a restore of another clone, which shares reading, reads them too,
 /// while no one changes them. It also serves the named pipe of its control endpoint, as
-/// [`control_pipe::serve`] does, and that of its boot console, if the arguments attach one.
+/// [`control_pipe::serve`] does.
 #[cfg(windows)]
 fn hold_snapshot(arguments: &[String]) -> std::result::Result<Held, String> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -717,15 +657,9 @@ fn hold_snapshot(arguments: &[String]) -> std::result::Result<Held, String> {
         .ok_or("no control endpoint")?;
     let control = control_pipe::serve(&endpoint)
         .map_err(|error| format!("cannot serve the control endpoint {endpoint}: {error}"))?;
-    let console = match console_endpoint(arguments) {
-        Some(console) => control_pipe::serve(&console)
-            .map_err(|error| format!("cannot serve the boot console {console}: {error}"))?,
-        None => Vec::new(),
-    };
     Ok(Held {
         _files: files,
         _control: control,
-        _console: console,
     })
 }
 
@@ -823,18 +757,14 @@ fn a_clone_restores_its_leased_snapshot_with_its_devices_and_activation_record()
     // restore-ready endpoint, which listened before the VMM started.
     assert_eq!(vmm.started(), format!("{} true", hex(&capability)));
     // The VMM started once the sandbox held the clone binding and the launch's journal, in the
-    // working directory that `vmm_working_dir` chooses for the sandbox, with nothing of the
-    // caller's besides its standard streams.
+    // sandbox's directory, with nothing of the caller's besides its standard streams.
     let made = made.take().unwrap();
     assert!(made.bound && made.begun, "{made:?}");
     assert_eq!(
         made.program,
         artifacts::absolute(Path::new(OPENVMM)).unwrap()
     );
-    assert_eq!(
-        made.working_dir,
-        supervisor::vmm_working_dir(&sandbox).unwrap()
-    );
+    assert_eq!(made.working_dir, sandbox);
     assert_eq!(made.inherited, 0);
     // It restores the generation's snapshot in place, with the clone's devices: its image, and its
     // `scratch` block device, which an upper in RAM declares absent, so that OpenVMM attaches it
@@ -867,7 +797,6 @@ fn a_clone_restores_its_leased_snapshot_with_its_devices_and_activation_record()
     let (profile, processors) = (key.cpu_profile(), key.processors().to_string());
     let listen = format!("listen={endpoint}");
     let report = sandbox.join(OUTCOME_NAME);
-    let record = sandbox.join(CLONE_ACTIVATION_NAME);
     let expected = [
         "--machine",
         "microvm",
@@ -885,8 +814,6 @@ fn a_clone_restores_its_leased_snapshot_with_its_devices_and_activation_record()
         snapshot.to_str().unwrap(),
         "--restore-memory",
         "512M",
-        "--restore-activation-record",
-        record.to_str().unwrap(),
         "--restore-ready-path",
         &ready,
         "--virtio-console",
@@ -899,11 +826,9 @@ fn a_clone_restores_its_leased_snapshot_with_its_devices_and_activation_record()
     ];
     assert_eq!(made.arguments, expected);
     // The sandbox holds the clone's activation record, in its canonical encoding, which the
-    // launch keeps, and which the VMM reads, at the path that the arguments name, to hand it to
-    // the clone's guest in its restore packet.
-    let recorded = fs::read(&record).unwrap();
+    // launch keeps.
+    let recorded = fs::read(sandbox.join(CLONE_ACTIVATION_NAME)).unwrap();
     assert_eq!(recorded, activation.encode());
-    assert_eq!(fs::read(vmm.packet()).unwrap(), recorded);
     assert_eq!(ActivationRecord::decode(&recorded).unwrap(), activation);
     assert_eq!(restoring.activation(), &activation);
     assert_eq!(restoring.capability(), &capability);
@@ -924,103 +849,6 @@ fn a_clone_restores_its_leased_snapshot_with_its_devices_and_activation_record()
         Recovery::Terminated(reference)
     );
     assert!(!exists(&socket));
-    assert_eq!(
-        fixture.store.release(&mut acquired.locked).unwrap(),
-        Some(acquired.lease.clone())
-    );
-    assert_released(&sandbox);
-    assert_untouched(&fixture, &snapshot, &contents, &sealed);
-}
-
-#[test]
-fn a_clone_with_a_boot_console_listens_at_the_endpoint_that_its_lease_fixes() {
-    let fixture = Fixture::new();
-    let (snapshot, contents) = complete_snapshot(&fixture);
-    let sealed = seals(&snapshot);
-    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
-    let mut acquired = fixture.acquire("sandbox");
-    let request = tmpfs_request(&image, &binding);
-    let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
-    assert!(!plan.boot_console());
-    let plan = plan.with_boot_console();
-    assert!(plan.boot_console());
-    let key = plan.key().clone();
-    let capability = *plan.capability();
-    let sandbox = acquired.locked.dir().to_owned();
-    let lease = acquired.lease.clone();
-    let mut vmm = VmmDir::new();
-    let dir = vmm.path().to_owned();
-    let made = RefCell::new(None);
-    let command = fake_vmm(&dir, &made);
-    let hooks = Hooks {
-        command: &command,
-        ..Hooks::LAUNCH
-    };
-    let restoring = plan
-        .launch_with(&mut acquired, Path::new(OPENVMM), key.runtime(), hooks)
-        .unwrap();
-    let reference = restoring.starting().process().reference().clone();
-    vmm.reference = Some(reference.clone());
-    // The VMM took its arguments as OpenVMM does, and listens at both of its endpoints.
-    assert_eq!(vmm.started(), format!("{} true", hex(&capability)));
-    // The boot console listens at the endpoint that the lease fixes, which the store finds again
-    // from the lease alone: on Linux, beside the snapshot, after the launch, as OpenVMM requires
-    // of a restore's console socket, and on Windows, at a named pipe after the launch.
-    let console = restoring.console_endpoint().unwrap().to_owned();
-    assert_eq!(
-        console,
-        fixture.store.clone_console_endpoint(&lease).unwrap()
-    );
-    let name = format!("{}.console", lease.launch());
-    if cfg!(target_os = "linux") {
-        assert_eq!(Path::new(&console), snapshot.parent().unwrap().join(&name));
-        assert!(exists(Path::new(&console)));
-    } else {
-        assert_eq!(console, format!("//./pipe/openvmm-microvm-{name}"));
-    }
-    let made = made.take().unwrap();
-    assert_eq!(
-        argument(&made.arguments, "--virtio-console"),
-        Some(format!("listen={console}"))
-    );
-    // The control console listens where it would without the boot console.
-    let endpoint = restoring.starting().endpoint().to_owned();
-    assert_eq!(
-        argument(&made.arguments, "--microvm-control-console"),
-        Some(format!("listen={endpoint}"))
-    );
-    assert_ne!(endpoint, console);
-    // A reader connects to the boot console as to the control endpoint, through the VMM's
-    // identity, and again once it disconnected, as one that takes the clone over does.
-    for _ in 0..2 {
-        let deadline = Instant::now() + TIMEOUT;
-        crate::host::session::connect(&console, reference.pid, reference.start_time, deadline)
-            .unwrap();
-    }
-    // A process that took the VMM's ID once the VMM exited, as one of another start time stands
-    // for, is not the VMM: a reader refuses the endpoint that it serves, since the boot console
-    // authenticates no one.
-    let deadline = Instant::now() + TIMEOUT;
-    let stale =
-        crate::host::session::connect(&console, reference.pid, reference.start_time + 1, deadline);
-    assert!(
-        matches!(
-            stale,
-            Err(crate::host::session::SessionError::ProcessExited)
-        ),
-        "{:?}",
-        stale.map(|_| ())
-    );
-    assert!(format!("{restoring:?}").contains(&console));
-    // Abandoning the launch ends its VMM, which leaves its sockets, and the end of the launch
-    // removes them.
-    assert_eq!(
-        restoring.abandon().unwrap(),
-        Recovery::Terminated(reference)
-    );
-    if cfg!(target_os = "linux") {
-        assert!(!exists(Path::new(&console)));
-    }
     assert_eq!(
         fixture.store.release(&mut acquired.locked).unwrap(),
         Some(acquired.lease.clone())
@@ -1670,7 +1498,7 @@ fn a_clone_launches_only_as_the_launch_that_its_durable_binding_reserves() {
 
 #[cfg(windows)]
 #[test]
-fn clones_in_sandboxes_beyond_the_working_directory_limit_launch() {
+fn working_directory_limits_are_checked_before_clone_launches() {
     use std::os::windows::ffi::OsStrExt;
 
     let fixture = Fixture::new();
@@ -1685,29 +1513,24 @@ fn clones_in_sandboxes_beyond_the_working_directory_limit_launch() {
     let sandbox = parent.join("sandbox");
     let mut acquired = fixture.acquire(sandbox.to_str().unwrap());
     let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
-    let mut vmm = VmmDir::new();
-    let dir = vmm.path().to_owned();
-    let made = RefCell::new(None);
-    let command = fake_vmm(&dir, &made);
     let hooks = Hooks {
-        command: &command,
+        command: &never_spawned,
         ..Hooks::LAUNCH
     };
-    let restoring = plan
-        .launch_with(
+    let (kind, message) = refused_at(
+        plan.launch_with(
             &mut acquired,
             Path::new(OPENVMM),
             &runtime_of(&fixture),
             hooks,
-        )
-        .unwrap();
-    vmm.reference = Some(restoring.starting().process().reference().clone());
-    // The sandbox's directory exceeds the 258 UTF-16 code units of a process's working
-    // directory, so its VMM starts in the system directory, once the sandbox holds the clone
-    // binding and the launch's journal.
-    let made = made.take().unwrap();
-    assert_eq!(made.working_dir, platform::system_directory().unwrap());
-    assert!(made.bound && made.begun, "{made:?}");
+        ),
+        Stage::Launch,
+        Evidence::HostFailure,
+    );
+    assert_eq!(kind, ErrorKind::Unsupported);
+    assert!(message.contains("working directory"));
+    assert!(message.contains("258"));
+    assert_unlaunched(&fixture, &acquired);
 }
 
 /// Returns OpenVMM's outcome report of a VM whose guest ended it with `status`.
@@ -1831,47 +1654,6 @@ fn too_long(path: &Path) -> String {
          socket's address requires",
         path.display()
     )
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn a_clone_whose_console_socket_does_not_fit_starts_nothing() {
-    // A store whose path leaves room for the control socket of a clone's VMM in a payload,
-    // `generations/1/<launch>.sock`, 106 bytes, but not for the socket of its boot console beside
-    // it, `<launch>.console`, three bytes longer.
-    let fixture = Fixture::in_store(
-        |directory| {
-            let socket = "/templates/generations/1/".len() + 32 + ".sock".len();
-            let room = 106 - socket - directory.as_os_str().len() - 1;
-            let parent = directory.join("p".repeat(room));
-            assert_eq!(platform::create_owner_only_dir(&parent).unwrap(), None);
-            parent.join("templates")
-        },
-        |_, _, _| {},
-    );
-    complete_snapshot(&fixture);
-    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
-    let mut acquired = fixture.acquire("sandbox");
-    let socket = fixture.store.clone_socket_path(&acquired.lease);
-    let console = fixture.store.clone_console_path(&acquired.lease);
-    assert_eq!(socket.as_os_str().len(), 106, "{}", socket.display());
-    assert_eq!(console.as_os_str().len(), 109, "{}", console.display());
-    let plan = fixture
-        .plan(&mut acquired, &tmpfs_request(&image, &binding), NO_CONTENT)
-        .unwrap()
-        .with_boot_console();
-    let hooks = Hooks {
-        command: &never_spawned,
-        ..Hooks::LAUNCH
-    };
-    let runtime = runtime_of(&fixture);
-    let launched = plan.launch_with(&mut acquired, Path::new(OPENVMM), &runtime, hooks);
-    let (kind, message) = refused_at(launched, Stage::Launch, Evidence::EndpointBind);
-    assert_eq!(
-        (kind, message),
-        (ErrorKind::Unsupported, too_long(&console))
-    );
-    assert_unlaunched(&fixture, &acquired);
 }
 
 #[cfg(target_os = "linux")]
@@ -2100,12 +1882,8 @@ fn launch_role() {
     if step == "launched" {
         crash(&step);
     }
-    // The restore sequence, through a framing that crashes as it awaits the clone's Ready or
-    // within the start.
-    let mut control = RoleControl {
-        step: &step,
-        packet: vmm.join(PACKET),
-    };
+    // The restore sequence, through a framing that crashes within the Activate or the start.
+    let mut control = RoleControl { step: &step };
     let activated = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap();
@@ -2133,14 +1911,12 @@ fn launch_role() {
     panic!("the clone's launch did not crash at {step}");
 }
 
-/// The adapter's framing of a [`launch_role`], whose clone answers with the activation of the
-/// record of its restore packet, and which crashes as it awaits the clone's Ready, at the step
-/// `activating`, or the start of its sandbox, at the step `starting`.
+/// The adapter's framing of a [`launch_role`], whose clone answers as the record asks, and which
+/// crashes as it awaits the clone's Ready, at the step `activating`, or the start of its sandbox,
+/// at the step `starting`.
 struct RoleControl<'a> {
     /// The step at which the role crashes.
     step: &'a str,
-    /// The file that holds the record of the clone's restore packet.
-    packet: PathBuf,
 }
 
 impl CloneControl for RoleControl<'_> {
@@ -2156,15 +1932,16 @@ impl CloneControl for RoleControl<'_> {
         Ok(transport)
     }
 
-    fn ready(
+    fn activate(
         &mut self,
         _session: &mut Box<dyn Transport>,
+        record: &[u8],
         _deadline: Instant,
     ) -> io::Result<Option<ReadyActivation>> {
         if self.step == "activating" {
             crash(self.step);
         }
-        let record = ActivationRecord::decode(&fs::read(&self.packet)?).unwrap();
+        let record = ActivationRecord::decode(record).unwrap();
         Ok(Some(ReadyActivation::of(&record)))
     }
 
@@ -2326,17 +2103,15 @@ impl Crashed {
         }
     }
 
-    /// Takes the clone of the sandbox of `locked` over, under `runtime`, through `control`, whose
-    /// clone answers with the record of the restore packet that its VMM kept, with
+    /// Takes the clone of the sandbox of `locked` over, under `runtime`, through `control`, with
     /// [`reattach_clone`], until the result is determinate, as a caller retries an indeterminate
     /// reattach, and returns it.
-    fn take_over(
+    fn take_over<C: CloneControl>(
         &self,
         locked: &mut LockedStore,
         runtime: &RuntimeIdentity,
-        control: &mut ReattachControl,
-    ) -> ReattachedClone<Box<dyn Transport>> {
-        control.packet = Some(self.vmm.packet());
+        control: &mut C,
+    ) -> ReattachedClone<C::Session> {
         let deadline = Instant::now() + TIMEOUT;
         loop {
             let session = Instant::now() + TIMEOUT;
@@ -2613,32 +2388,28 @@ fn a_restore_whose_caller_crashes_once_it_committed_keeps_its_lease_while_its_vm
     crashed.releases(&mut locked);
 }
 
-/// The Ready of a clone that a [`ReattachControl`] answers, from the activation of the record of
-/// the clone's restore packet.
+/// The Ready of a clone that a [`ReattachControl`] answers, from the activation of the record that
+/// the clone's Activate carries.
 type Answered = fn(ReadyActivation) -> Option<ReadyActivation>;
 
 /// The adapter's framing of the sessions of a reattach: it attaches a session to each connection
-/// to the clone's control endpoint, keeps the capability of each, and counts the requests for
-/// Ready, which it answers as its `answer` says, from the record of the clone's restore packet,
-/// which the clone's VMM keeps in its `packet`.
+/// to the clone's control endpoint, keeps the capability of each, and the record of each Activate,
+/// which it answers as its `answer` says.
 struct ReattachControl {
     /// The capabilities of the sessions, in order.
     capabilities: Vec<[u8; CAPABILITY_LEN]>,
-    /// The number of requests for Ready.
-    asked: usize,
-    /// The file that holds the record of the clone's restore packet, once the test names it.
-    packet: Option<PathBuf>,
-    /// How the clone answers a request for Ready.
+    /// The records of the Activates, in order.
+    records: Vec<Vec<u8>>,
+    /// How the clone answers an Activate.
     answer: Answered,
 }
 
 impl ReattachControl {
-    /// Returns a framing whose clone answers each request for Ready as `answer` says.
+    /// Returns a framing whose clone answers each Activate as `answer` says.
     fn answering(answer: Answered) -> Self {
         Self {
             capabilities: Vec::new(),
-            asked: 0,
-            packet: None,
+            records: Vec::new(),
             answer,
         }
     }
@@ -2658,17 +2429,14 @@ impl CloneControl for ReattachControl {
         Ok(transport)
     }
 
-    fn ready(
+    fn activate(
         &mut self,
         _session: &mut Box<dyn Transport>,
+        record: &[u8],
         _deadline: Instant,
     ) -> io::Result<Option<ReadyActivation>> {
-        self.asked += 1;
-        let packet = self
-            .packet
-            .as_ref()
-            .expect("the test names the clone's restore packet");
-        let record = ActivationRecord::decode(&fs::read(packet)?).unwrap();
+        self.records.push(record.to_vec());
+        let record = ActivationRecord::decode(record).unwrap();
         Ok((self.answer)(ReadyActivation::of(&record)))
     }
 
@@ -2712,12 +2480,11 @@ fn a_clone_whose_caller_crashed_once_it_committed_is_taken_over_in_a_new_session
         ReattachedClone::Live { vmm, session } => (vmm, session),
         other => panic!("the reattach found {}", describe(&other)),
     };
-    // The VM is the one that the launch committed, whose clone answered the request for its Ready
-    // with the activation of the sandbox's record, the record of its restore packet, in a session
-    // that the launch's capability authenticated, and runs on, with its lease.
+    // The VM is the one that the launch committed, whose clone answered the Activate of the
+    // sandbox's record, byte for byte, in a session that the launch's capability authenticated,
+    // and runs on, with its lease.
     assert_eq!(vmm.process().reference(), &reference);
-    assert_eq!(control.asked, 1);
-    assert_eq!(fs::read(crashed.vmm.packet()).unwrap(), recorded);
+    assert_eq!(control.records, [recorded]);
     let attached: Vec<String> = control.capabilities.iter().map(|key| hex(key)).collect();
     assert_eq!(attached, [capability]);
     drop(session);
@@ -2771,7 +2538,7 @@ fn a_journal_that_a_clone_s_commit_left_is_no_failure_of_the_clone() {
         );
         live = Some(vmm);
     }
-    assert_eq!(control.asked, 2);
+    assert_eq!(control.records.len(), 2);
     crashed.refuses_release(&mut locked);
     let vmm = live.unwrap();
     assert_eq!(
@@ -2814,7 +2581,7 @@ fn a_reattach_ends_a_clone_that_it_may_not_keep_through_its_verified_identity() 
         Evidence::Protocol,
         terminated,
     );
-    assert_eq!(control.asked, 1);
+    assert_eq!(control.records.len(), 1);
     assert!(locked.runtime().unwrap().is_none());
     crashed.releases(&mut locked);
 }
@@ -3941,7 +3708,6 @@ fn a_reattach_that_cannot_record_a_failure_ends_and_forgets_nothing_of_the_clone
             Some(other) => (other, &mut control),
             None => (&crashed.runtime, &mut refusing),
         };
-        control.packet = Some(crashed.vmm.packet());
         unrecorded(&unrecorded_take_over(&mut locked, runtime, control));
         let record = locked
             .runtime()

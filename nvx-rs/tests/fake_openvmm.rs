@@ -196,38 +196,6 @@ fn instances_start_run_workloads_and_stop() {
     assert!(instance.report_path().is_file());
 }
 
-#[cfg(windows)]
-#[test]
-fn instances_beyond_the_working_directory_limit_start_run_workloads_and_stop() {
-    use std::os::windows::ffi::OsStrExt;
-
-    let directory = tempfile::tempdir().unwrap();
-    // The instance's directory exceeds the 258 UTF-16 code units of a process's working
-    // directory, so its VMM starts in the system directory.
-    let mut parent = directory.path().to_path_buf();
-    while parent.as_os_str().encode_wide().count() < 300 {
-        parent.push("long-state-root-component");
-    }
-    fs::create_dir_all(&parent).unwrap();
-    let instance = Instance::create(parent.join("vm"), "test", CallerFiles::none()).unwrap();
-    let spec = spec(directory.path());
-    let started = start(&instance, &spec).unwrap();
-    assert_eq!(running(&instance).runtime(), &started.runtime);
-    let output = run(
-        &instance,
-        &workload(&["/bin/sh", "-c", "echo hello"]),
-        &AtomicBool::new(false),
-    );
-    assert_eq!(output.outcome, WorkloadOutcome::Exited(0));
-    assert_eq!(output.stdout, b"hello\n");
-    let stopped = stop(&instance, TIMEOUT).unwrap();
-    assert!(!stopped.forced);
-    let report = stopped.report.expect("the VM reports its outcome");
-    assert_eq!(report.category.as_deref(), Some("success"));
-    assert!(records_nothing(&instance));
-    assert!(instance.log_path().is_file());
-}
-
 #[test]
 fn timeouts_are_checked_before_they_are_used() {
     let directory = tempfile::tempdir().unwrap();

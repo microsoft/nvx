@@ -62,7 +62,6 @@ use runtime_adapter::root::{
 };
 use runtime_adapter::staged::STAGED_NAME;
 use serde_json::{Value, json};
-use socket2::SockRef;
 
 use common::gpt::{
     self, Contents, LAYER_BLOCK, LAYER_BLOCKS, Layout, Partition, hexadecimal, small_layer,
@@ -162,13 +161,7 @@ const GATEWAY: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 /// profile embeds the guest network's IPv4 addresses in `fd00::/96`.
 const GATEWAY_IPV6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0xc000, 0x0201);
 /// The first and the last of the ports that the host draws for its sockets: the dynamic range.
-/// The host draws the ports of a listener of the guest and of a forward above its ephemeral range
-/// on Linux; see [`first_port`].
 const PORTS: (u16, u16) = (49152, 65535);
-/// The file that names Linux's ephemeral port range, as its first and last ports: the host draws
-/// the ports of a listener of the guest and of a forward above the range's end; see
-/// [`first_port`].
-const IP_LOCAL_PORT_RANGE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
 /// The number of ports that the host draws for a socket before it gives up. Windows excludes
 /// ports per protocol, in blocks, and gives consecutive ports to consecutive binds of port 0, so
 /// the host draws each port independently.
@@ -489,11 +482,9 @@ impl Host {
         let mut held = HELD_PORTS.lock().unwrap_or_else(PoisonError::into_inner);
         let address = host_address();
         let ipv6 = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_ok();
-        let other = draw(&held, PORTS.0, |port| {
-            TcpListener::bind((Ipv4Addr::LOCALHOST, port))
-        });
+        let other = draw(&held, |port| TcpListener::bind((Ipv4Addr::LOCALHOST, port)));
         let other_port = other.local_addr().unwrap().port();
-        let (proxy, probes) = draw(&held, PORTS.0, |port| {
+        let (proxy, probes) = draw(&held, |port| {
             let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, port))?;
             let gateway = IpAddr::V4(GATEWAY);
             let mut probes = vec![Probe {
@@ -560,11 +551,8 @@ impl Host {
             }
             Ok(port)
         };
-        // A listener of the guest and a forward are published later, at ports that nothing holds
-        // until then, so the host draws theirs above its ephemeral range on Linux.
-        let first = first_port();
-        let listener = draw(&held, first, |port| free(port, &[proxy_port, other_port]));
-        let forward = draw(&held, first, |port| {
+        let listener = draw(&held, |port| free(port, &[proxy_port, other_port]));
+        let forward = draw(&held, |port| {
             free(port, &[proxy_port, other_port, listener])
         });
         let host = Self {
@@ -637,32 +625,10 @@ impl Drop for Host {
     }
 }
 
-/// Returns the first port from which the host draws the ports of a listener of the guest and of a
-/// forward: above the host's ephemeral range on Linux, so that no `connect()` takes a drawn port
-/// as its source port and opens a connection to itself, which would leave a `TIME_WAIT` at the
-/// port for OpenVMM's bind to trip over. On Linux, the range ends at
-/// [`IP_LOCAL_PORT_RANGE`], which leaves 61000-65535 by default. Windows's
-/// ephemeral range is its whole dynamic range, so whether it needs the same is open, and the host
-/// draws from the dynamic range there.
-fn first_port() -> u16 {
-    if cfg!(target_os = "linux")
-        && let Ok(range) = fs::read_to_string(IP_LOCAL_PORT_RANGE)
-        && let Some(end) = range
-            .split_whitespace()
-            .nth(1)
-            .and_then(|end| end.parse::<u16>().ok())
-            .and_then(|end| end.checked_add(1))
-    {
-        return PORTS.0.max(end);
-    }
-    PORTS.0
-}
-
-/// Returns what `bind` makes of a port that the host draws from `first` to the last of [`PORTS`],
-/// independently each time, past the ports that `held` names, until it succeeds, at most
-/// [`PORT_ATTEMPTS`] times.
-fn draw<T>(held: &BTreeSet<u16>, first: u16, mut bind: impl FnMut(u16) -> io::Result<T>) -> T {
-    let last = PORTS.1;
+/// Returns what `bind` makes of a port that the host draws from [`PORTS`], independently each
+/// time, past the ports that `held` names, until it succeeds, at most [`PORT_ATTEMPTS`] times.
+fn draw<T>(held: &BTreeSet<u16>, mut bind: impl FnMut(u16) -> io::Result<T>) -> T {
+    let (first, last) = PORTS;
     let random = RandomState::new();
     let mut refused = Vec::new();
     for attempt in 0..PORT_ATTEMPTS {
@@ -3053,18 +3019,6 @@ fn check_guest_listener(vm: &mut Vm<'_>, address: SocketAddr, reached: bool) {
 fn reach_guest(address: SocketAddr, stop: &AtomicBool) -> bool {
     while !stop.load(Ordering::SeqCst) {
         if let Ok(mut stream) = TcpStream::connect(address) {
-            // The connection opened to itself when its local and peer addresses are the same:
-            // drop it at once, with SO_LINGER 0, so that it leaves no TIME_WAIT at the port for
-            // OpenVMM's bind to trip over.
-            if matches!(
-                (stream.local_addr(), stream.peer_addr()),
-                (Ok(local), Ok(peer)) if local == peer
-            ) {
-                SockRef::from(&stream)
-                    .set_linger(Some(Duration::ZERO))
-                    .unwrap();
-                continue;
-            }
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();

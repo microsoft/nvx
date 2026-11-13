@@ -119,9 +119,8 @@ fn each_part_of_the_key_changes_it() {
             spec.contract().expansion_ranges =
                 vec![(512 * MIB, 512 * MIB), (4096 * MIB, 1024 * MIB)];
         }),
-        // Boot: the command line, whose kernel tuning parameters are the class's.
-        ("command line", |class, spec| {
-            class.kernel_tuning.push("quiet".to_owned());
+        // Boot.
+        ("command line", |_, spec| {
             spec.contract().command_line.push_str(" quiet");
         }),
         // Disks.
@@ -283,22 +282,6 @@ fn each_contract_version_changes_the_key() {
         // A key of other versions reads back as it is, so that a store can name what it holds.
         assert_eq!(TemplateKey::from_bytes(&other.to_bytes()).unwrap(), other);
     }
-}
-
-#[test]
-fn a_template_whose_clones_take_their_record_in_an_activate_speaks_no_current_contract() {
-    // A template that a build of activation contract 1 captured holds a guest that takes its
-    // clone's activation record in the adapter's Activate, which no host of this build sends, or
-    // that refuses the restore packet's record, so its key speaks no current contract, and no
-    // clone of this build restores it. The record's own schema keeps its version.
-    assert_eq!(activation::CONTRACT_VERSION, 2);
-    assert_eq!(activation::VERSION, 1);
-    let base = network_key();
-    assert_eq!(base.contracts.activation, activation::CONTRACT_VERSION);
-    let mut earlier = base.clone();
-    earlier.contracts.activation = 1;
-    assert!(!earlier.speaks_current_contracts());
-    assert_ne!(earlier.identity(), base.identity());
 }
 
 #[test]
@@ -924,193 +907,8 @@ fn identities_have_a_text_form() {
     );
 }
 
-/// Returns the manifest of the template of the tests whose kernel booted with the kernel tuning
-/// parameters `tuning`, which NVX gives it after its own tokens.
-fn tuned_spec(tuning: &str) -> ManifestSpec {
-    let mut spec = ManifestSpec::template();
-    let contract = spec.contract();
-    contract.command_line =
-        contract
-            .command_line
-            .replacen("nvx_sandbox=1", &format!("nvx_sandbox=1 {tuning}"), 1);
-    spec
-}
-
-/// Returns the class of the template of the tests with the kernel tuning parameters `tuning`.
-fn tuned_class(tuning: &[&str]) -> CaptureClass {
-    CaptureClass {
-        kernel_tuning: tuning
-            .iter()
-            .map(|parameter| (*parameter).to_owned())
-            .collect(),
-        ..support::class()
-    }
-}
-
-#[test]
-fn classes_refuse_kernel_tuning_parameters_that_no_capture_takes() {
-    for (tuning, named) in [
-        // Other values, and other parameters.
-        (&["mitigations=on"][..], "mitigations=on"),
-        (&["mitigations="][..], "mitigations="),
-        (
-            &["mitigations=auto,nosmt,off"][..],
-            "mitigations=auto,nosmt,off",
-        ),
-        (&["loglevel=8"][..], "loglevel=8"),
-        (&["loglevel=07"][..], "loglevel=07"),
-        (&["quiet=1"][..], "quiet=1"),
-        (&["no-timer-check"][..], "no-timer-check"),
-        (&["nokaslr"][..], "nokaslr"),
-        (&["tsc_early_khz=2100000"][..], "tsc_early_khz=2100000"),
-        (&["nvx_hostname=tenant"][..], "nvx_hostname=tenant"),
-        (&["quiet loglevel=0"][..], "quiet loglevel=0"),
-        (&[""][..], "\"\""),
-        // A parameter more than once, with one value or with two.
-        (&["quiet", "quiet"][..], "quiet"),
-        (&["mitigations=off", "mitigations=auto"][..], "mitigations"),
-        (&["loglevel=0", "quiet", "loglevel=7"][..], "loglevel"),
-    ] {
-        let class = tuned_class(tuning);
-        for error in [
-            class.check().unwrap_err(),
-            class.to_bytes().unwrap_err(),
-            class.identity().unwrap_err(),
-            TemplateKey::new(&class, &manifest(&ManifestSpec::template())).unwrap_err(),
-        ] {
-            assert_eq!(error.code(), ErrorCode::Unsupported, "{tuning:?}: {error}");
-            assert!(
-                error.message().contains("kernel tuning parameter")
-                    && error.message().contains(named),
-                "{tuning:?}: {:?}",
-                error.message()
-            );
-        }
-    }
-    // Each parameter of the set alone, and one of each.
-    for parameter in KERNEL_TUNING_PARAMETERS {
-        tuned_class(&[parameter]).check().unwrap();
-    }
-    tuned_class(&[
-        "mitigations=auto,nosmt",
-        "no_timer_check",
-        "quiet",
-        "loglevel=0",
-    ])
-    .check()
-    .unwrap();
-}
-
-#[test]
-fn classes_that_differ_in_their_kernel_tuning_alone_are_classes_of_their_own() {
-    let mut cases: Vec<Vec<&str>> = vec![Vec::new()];
-    cases.extend(
-        KERNEL_TUNING_PARAMETERS
-            .iter()
-            .map(|parameter| vec![*parameter]),
-    );
-    cases.extend([
-        vec!["quiet", "loglevel=0"],
-        // The kernel applies these two in their order, so the order is the class's too.
-        vec!["loglevel=0", "quiet"],
-        vec!["mitigations=off", "no_timer_check", "quiet", "loglevel=0"],
-    ]);
-    let mut identities = HashSet::new();
-    for tuning in &cases {
-        let class = tuned_class(tuning);
-        assert!(
-            identities.insert(class.identity().unwrap()),
-            "{tuning:?} leaves the class's identity as another's"
-        );
-        // Version 2 of the encoding holds the parameters last, as a list of texts.
-        let bytes = class.to_bytes().unwrap();
-        assert_eq!(&bytes[..2], &[2, 0]);
-        let mut list = u32::try_from(tuning.len()).unwrap().to_le_bytes().to_vec();
-        for parameter in tuning {
-            list.extend(u32::try_from(parameter.len()).unwrap().to_le_bytes());
-            list.extend(parameter.as_bytes());
-        }
-        assert!(bytes.ends_with(&list), "{tuning:?}");
-        let untuned = tuned_class(&[]).to_bytes().unwrap();
-        assert_eq!(
-            bytes[..bytes.len() - list.len()],
-            untuned[..untuned.len() - 4],
-            "{tuning:?}"
-        );
-    }
-    assert_eq!(CaptureClass::VERSION, 2);
-}
-
-#[test]
-fn a_key_holds_its_class_s_kernel_tuning_in_its_command_line() {
-    let untuned = key(&support::class(), &ManifestSpec::template());
-    let tuning = ["mitigations=off", "no_timer_check", "quiet", "loglevel=0"];
-    let tuned = key(&tuned_class(&tuning), &tuned_spec(&tuning.join(" ")));
-    assert!(
-        tuned
-            .command_line()
-            .contains("nvx_sandbox=1 mitigations=off no_timer_check quiet loglevel=0 "),
-        "{}",
-        tuned.command_line()
-    );
-    assert_ne!(tuned.identity(), untuned.identity());
-    // The command line of a template of other kernel tuning makes a key of its own.
-    let other = key(
-        &tuned_class(&["mitigations=auto"]),
-        &tuned_spec("mitigations=auto"),
-    );
-    assert_ne!(other.identity(), tuned.identity());
-    assert_ne!(other.identity(), untuned.identity());
-    // A capture whose kernel booted with other tuning than its class's did not make the template
-    // that its class requested.
-    for (class, spec, found, requested) in [
-        (
-            tuned_class(&tuning),
-            ManifestSpec::template(),
-            "none",
-            "mitigations=off no_timer_check quiet loglevel=0",
-        ),
-        (
-            support::class(),
-            tuned_spec("mitigations=off"),
-            "mitigations=off",
-            "none",
-        ),
-        (
-            tuned_class(&["quiet", "loglevel=0"]),
-            tuned_spec("loglevel=0 quiet"),
-            "loglevel=0 quiet",
-            "quiet loglevel=0",
-        ),
-        (
-            tuned_class(&["mitigations=off"]),
-            tuned_spec("mitigations=auto"),
-            "mitigations=auto",
-            "mitigations=off",
-        ),
-        // A value outside the set, which OpenVMM would refuse, names the parameter all the same.
-        (
-            tuned_class(&["mitigations=off"]),
-            tuned_spec("mitigations=on"),
-            "mitigations=on",
-            "mitigations=off",
-        ),
-    ] {
-        assert_mismatched(
-            &class,
-            &spec,
-            &format!(
-                "its kernel tuning parameters are {found}, but the class requests {requested}"
-            ),
-        );
-    }
-}
-
-/// The conformance vectors of version 1 of the canonical encoding of keys.
-const KEY_VECTORS: &str = include_str!("../../../../tests/vectors/template-key-v1.txt");
-
-/// The conformance vectors of version 2 of the canonical encoding of classes.
-const CLASS_VECTORS: &str = include_str!("../../../../tests/vectors/capture-class-v2.txt");
+/// The conformance vectors of version 1 of the canonical encodings of keys and classes.
+const VECTORS: &str = include_str!("../../../../tests/vectors/template-key-v1.txt");
 
 /// The versions of the contracts that the vectors hold.
 const VECTOR_CONTRACTS: Contracts = Contracts {
@@ -1121,9 +919,10 @@ const VECTOR_CONTRACTS: Contracts = Contracts {
     activation: 1,
 };
 
-/// Returns each vector of `kind` in the vectors `file`: its name, its bytes, and its values.
-fn vectors(file: &'static str, kind: &str) -> Vec<(&'static str, Vec<u8>, Vec<&'static str>)> {
-    file.lines()
+/// Returns each vector of `kind`: its name, its bytes, and its values.
+fn vectors(kind: &str) -> Vec<(&'static str, Vec<u8>, Vec<&'static str>)> {
+    VECTORS
+        .lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .filter_map(|line| {
             let mut fields = line.split('|');
@@ -1143,25 +942,18 @@ fn vectors(file: &'static str, kind: &str) -> Vec<(&'static str, Vec<u8>, Vec<&'
 /// Returns the class of the capture that the vectors call `name`, with the runtime that they
 /// hold.
 fn vector_class(name: &str) -> CaptureClass {
-    let mut class = match name {
-        "NETWORK" => {
-            let class = network_class();
-            CaptureClass {
-                invariants: Invariants::new()
-                    .with("isolation.seccomp", "strict")
-                    .unwrap()
-                    .with("limits.pids", "512")
-                    .unwrap(),
-                ..class
-            }
+    let mut class = if name == "NETWORK" {
+        let class = network_class();
+        CaptureClass {
+            invariants: Invariants::new()
+                .with("isolation.seccomp", "strict")
+                .unwrap()
+                .with("limits.pids", "512")
+                .unwrap(),
+            ..class
         }
-        "TUNING" => tuned_class(&[
-            "mitigations=auto,nosmt",
-            "no_timer_check",
-            "quiet",
-            "loglevel=0",
-        ]),
-        _ => support::class(),
+    } else {
+        support::class()
     };
     class.runtime = RuntimeIdentity {
         openvmm: artifact('a'),
@@ -1228,7 +1020,7 @@ fn vector_spec(name: &str) -> ManifestSpec {
 
 #[test]
 fn the_conformance_vectors_decode_and_encode() {
-    let keys = vectors(KEY_VECTORS, "KEY");
+    let keys = vectors("KEY");
     let names: Vec<&str> = keys.iter().map(|(name, ..)| *name).collect();
     assert_eq!(names, ["TEMPLATE", "NETWORK", "HOST_PROFILE", "MINIMAL"]);
     for (name, bytes, values) in keys {
@@ -1247,29 +1039,9 @@ fn the_conformance_vectors_decode_and_encode() {
             assert_eq!(derived, key, "{name}");
         }
     }
-    let versions = vectors(KEY_VECTORS, "INVALID_KEY_VERSION");
-    assert_eq!(versions.len(), 3);
-    for (name, bytes, _) in versions {
-        let error = TemplateKey::from_bytes(&bytes).expect_err(name);
-        assert_eq!(
-            error.code(),
-            ErrorCode::FormatUnsupported,
-            "{name}: {error}"
-        );
-    }
-    let invalid = vectors(KEY_VECTORS, "INVALID_KEY");
-    assert_eq!(invalid.len(), 23);
-    for (name, bytes, _) in invalid {
-        let error = TemplateKey::from_bytes(&bytes).expect_err(name);
-        assert_eq!(error.code(), ErrorCode::Io, "{name}: {error}");
-    }
-}
-
-#[test]
-fn the_conformance_vectors_of_classes_encode() {
-    let classes = vectors(CLASS_VECTORS, "CLASS");
+    let classes = vectors("CLASS");
     let names: Vec<&str> = classes.iter().map(|(name, ..)| *name).collect();
-    assert_eq!(names, ["TEMPLATE", "NETWORK", "TUNING"]);
+    assert_eq!(names, ["TEMPLATE", "NETWORK"]);
     for (name, bytes, values) in classes {
         let class = vector_class(name);
         assert_eq!(class.encode(&VECTOR_CONTRACTS).unwrap(), bytes, "{name}");
@@ -1279,13 +1051,20 @@ fn the_conformance_vectors_of_classes_encode() {
             "{name}"
         );
     }
-    // The file holds classes alone, and the keys' file no class.
-    let lines = |file: &str| {
-        file.lines()
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(|line| line.split('|').next().unwrap().to_owned())
-            .collect::<HashSet<_>>()
-    };
-    assert_eq!(lines(CLASS_VECTORS), HashSet::from(["CLASS".to_owned()]));
-    assert!(!lines(KEY_VECTORS).contains("CLASS"));
+    let versions = vectors("INVALID_KEY_VERSION");
+    assert_eq!(versions.len(), 3);
+    for (name, bytes, _) in versions {
+        let error = TemplateKey::from_bytes(&bytes).expect_err(name);
+        assert_eq!(
+            error.code(),
+            ErrorCode::FormatUnsupported,
+            "{name}: {error}"
+        );
+    }
+    let invalid = vectors("INVALID_KEY");
+    assert_eq!(invalid.len(), 23);
+    for (name, bytes, _) in invalid {
+        let error = TemplateKey::from_bytes(&bytes).expect_err(name);
+        assert_eq!(error.code(), ErrorCode::Io, "{name}: {error}");
+    }
 }

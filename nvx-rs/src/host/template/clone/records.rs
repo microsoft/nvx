@@ -16,9 +16,9 @@
 //! written during another boot, as by one that is damaged or missing: a workload may have run in
 //! the clone. The launch appends the spawn before it returns, although the launch's journal
 //! records it too, since a teardown of the launch removes the journal. A step that the next step
-//! follows at once, the acknowledgment, which the request for Ready follows, is appended with that
-//! next step, in its one write, so that the log takes a write for the spawn and for each step from
-//! the restore-ready event on. A reader ignores a last line that a crash cut short. A sandbox
+//! follows at once, the acknowledgment, which the Activate follows, is appended with that next
+//! step, in its one write, so that the log takes a write for the spawn and for each step from the
+//! restore-ready event on. A reader ignores a last line that a crash cut short. A sandbox
 //! that boots cold writes no log.
 //!
 //! # The failure record
@@ -974,15 +974,13 @@ fn read_private(path: &Path, description: &str, limit: u64) -> Result<Option<Vec
 
 /// Returns the last line with which OpenVMM reported the error that ended it in the VMM's log at
 /// `path`, cut to [`MAX_FATAL_CHARS`], or none if the log holds none, or cannot be read: the line
-/// that leads OpenVMM's fatal error, then the error's stable code, if it has one, as [the
+/// that leads OpenVMM's fatal error, then the error's time ABI code, if it has one, as [the
 /// attribution of evidence](Evidence#attribution) describes. The line is looked for back from the
 /// log's end, as [`last_line_start`] reads it, so that the error's chain, which follows the line,
-/// may be of any length. If the line leads with the code of a forward that OpenVMM cannot bind,
-/// [`failure::FORWARD_BIND_CODE`], the first cause of the error's chain that leads with the code
-/// too, which names the forward, follows the line, after `: `, cut to [`MAX_FATAL_CHARS`] too,
-/// without the indentation and the number with which the chain lists it, and without the code. A
-/// line that is the forward's own error names the forward itself, and its chain holds no such
-/// cause, so it stays alone.
+/// may be of any length. If the line does not name a forward that OpenVMM cannot bind,
+/// [`failure::FORWARD_BIND_TEXT`], but a cause of the error's chain that follows it does, the
+/// cause follows the line, after `: `, cut to [`MAX_FATAL_CHARS`] too, without the indentation and
+/// the number with which the chain lists it.
 fn read_fatal(path: &Path) -> Option<String> {
     let mut log = open_regular(path).ok()?;
     let start = last_line_start(&mut log, failure::FATAL_PREFIX.as_bytes()).ok()??;
@@ -992,21 +990,14 @@ fn read_fatal(path: &Path) -> Option<String> {
     let text = String::from_utf8_lossy(&rest);
     let mut lines = text.lines();
     let mut fatal: String = lines.next()?.chars().take(MAX_FATAL_CHARS).collect();
-    let tag = format!("[{}] ", failure::FORWARD_BIND_CODE);
-    let coded = fatal
-        .strip_prefix(failure::FATAL_PREFIX)
-        .and_then(failure::leading_code)
-        == Some(failure::FORWARD_BIND_CODE);
-    let forward = if coded {
-        lines
+    if !fatal.contains(failure::FORWARD_BIND_TEXT) {
+        let forward = lines
             .map(cause)
-            .find_map(|named| named.strip_prefix(tag.as_str()))
-    } else {
-        None
-    };
-    if let Some(forward) = forward {
-        fatal.push_str(": ");
-        fatal.extend(forward.chars().take(MAX_FATAL_CHARS));
+            .find(|cause| cause.starts_with(failure::FORWARD_BIND_TEXT));
+        if let Some(forward) = forward {
+            fatal.push_str(": ");
+            fatal.extend(forward.chars().take(MAX_FATAL_CHARS));
+        }
     }
     Some(fatal)
 }

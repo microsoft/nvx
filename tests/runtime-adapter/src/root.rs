@@ -51,7 +51,7 @@
 //! Once the guest assembled the root, it answers the configuration with its [`Ready`]: the length
 //! of the guest agent's build, one byte, then the build, 1 to [`MAX_BUILD_LEN`] printable ASCII
 //! characters without a space, such as [`GUEST_BUILD`](crate::GUEST_BUILD). A clone, which a
-//! restore of a template's snapshot started, answers the host's `Await` with its `Ready` once it
+//! restore of a template's snapshot started, answers the host's Activate with its `Ready` once it
 //! activated, which reports its activation after the build: the canonical encoding of
 //! `nvx::activation::ReadyActivation`, `1`, then the transaction ID of the restore whose record it
 //! applied. A cold boot's `Ready` reports no activation, since a root configuration, not an
@@ -741,10 +741,9 @@ pub enum RootReply {
 pub const MAX_BUILD_LEN: usize = u8::MAX as usize;
 
 /// The guest's readiness, with which it answers a root configuration once it assembled the root,
-/// or the host's `Await` once it activated a clone: the guest agent's build, which the host can
+/// or a clone's Activate once it activated the clone: the guest agent's build, which the host can
 /// check against the build that it ships, and, for a clone, what the guest reports about its
-/// activation, which the host can check against the record that it supplied at the clone's
-/// launch.
+/// activation, which the host can check against the record that it sent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ready {
     /// The guest agent's build.

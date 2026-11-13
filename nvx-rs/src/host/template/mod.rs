@@ -11,8 +11,7 @@
 //!
 //! - [`CaptureClass`] holds the invariant inputs of a capture, known before it: the runtime, the
 //!   guest's build, the backend, the CPU profile, the resources, the geometries of the disks, the
-//!   network, the other invariant settings, and the kernel tuning parameters, of
-//!   [`KERNEL_TUNING_PARAMETERS`], with which the template's kernel boots.
+//!   network, and the other invariant settings.
 //! - [`TemplateManifest::read`] reads the manifest that OpenVMM wrote for a capture, with its time
 //!   contract, and refuses one that is not a template's.
 //! - [`TemplateKey::new`] derives the key of a template from its class and its manifest, after it
@@ -43,17 +42,16 @@
 //!   or one at another guest address than the template's, before any VMM starts.
 //! - [`ClonePlan::launch`] launches the clone, as the launch that its lease reserves, once the
 //!   objects of its export are still those that its plan found: OpenVMM restores the generation's
-//!   snapshot in place with the clone's devices and export, and hands the clone's activation
-//!   record, which the launch wrote in its sandbox, to the clone's guest in its restore packet, as
-//!   a [`Restoring`] describes.
+//!   snapshot in place with the clone's devices and export, and the clone's activation record
+//!   waits in its sandbox, as a [`Restoring`] describes.
 //! - [`Restoring::activate`] runs the clone's restore sequence through the adapter's framing of
 //!   the clone's control session, a [`CloneControl`]: it waits for OpenVMM's restore-ready event,
-//!   then connects, asks for the clone's Ready, which the clone answers once it activated with the
-//!   record of its restore packet, and checks the activation that the Ready reports, by a deadline
-//!   that starts with the launch, and asks again in a new session once the adapter lost one.
-//!   [`Activated::start`] then sends the clone's mapping table, if it has an export, and starts
-//!   the clone's sandbox once the guest applied every mapping, by a deadline that starts at its
-//!   Ready, and [`Started::commit`] commits the launch.
+//!   then connects, sends the clone's activation record in the adapter's Activate, and checks the
+//!   activation that the clone's Ready reports, by a deadline that starts with the launch, and
+//!   resends the same record in a new session once the adapter lost one. [`Activated::start`]
+//!   then sends the clone's mapping table, if it has an export, and starts the clone's sandbox
+//!   once the guest applied every mapping, by a deadline that starts at its Ready, and
+//!   [`Started::commit`] commits the launch.
 //! - The plan, the launch, and the restore sequence fail with a [`CloneFailure`], whose
 //!   [`Evidence`] attributes it to an [`Outcome`], at a [`Stage`], once the clone got as far as
 //!   its [`Progress`], with the [`Teardown`] that followed: a failure from the launch on ends the
@@ -83,8 +81,7 @@
 //! - A list is its count, a `u32`, then its items in order.
 //!
 //! [`TemplateKey::from_bytes`] refuses any other encoding, and bytes left after it. The vectors in
-//! `tests/vectors/template-key-v1.txt` fix version 1 of a key's encoding, and those in
-//! `tests/vectors/capture-class-v2.txt` version 2 of a class's.
+//! `tests/vectors/template-key-v1.txt` fix version 1 of a key's encoding and of a class's.
 
 mod canonical;
 mod clone;
@@ -104,9 +101,7 @@ pub use self::clone::{
     RestoreDeadlines, Restoring, Stage, Started, Teardown, reattach_clone, status_evidence,
 };
 pub use self::eligibility::{Downtime, DowntimeSource, Eligibility, HostTime, MAX_DOWNTIME_NS};
-pub use self::key::{
-    CaptureClass, ClassIdentity, Invariants, KERNEL_TUNING_PARAMETERS, KeyIdentity, TemplateKey,
-};
+pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, TemplateKey};
 #[cfg(feature = "cli")]
 pub(crate) use self::manifest::read_attachments;
 pub use self::manifest::{

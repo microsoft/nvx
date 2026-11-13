@@ -14,7 +14,6 @@ use crate::host::network::{
 use crate::host::sandbox::distro::{BINDING_VERSION, DISTRO_POLICY_REVISION};
 use crate::host::sandbox::{SandboxDistro, SandboxNetwork, SandboxSettings};
 use crate::host::seal::SEAL_VERSION;
-use crate::host::template::KERNEL_TUNING_PARAMETERS;
 use crate::protocol::cmdline;
 use crate::protocol::root::RootImage;
 use crate::uuid::Uuid;
@@ -38,9 +37,6 @@ mod openvmm {
     pub(super) fn admits(token: &str) -> bool {
         platform_command_line_token_is_invariant(token)
     }
-
-    /// OpenVMM's kernel tuning parameters, which its platform allowlist admits.
-    pub(super) const TUNING: &[&str] = &PLATFORM_TUNING_TOKENS;
 }
 
 /// Bytes in a GiB.
@@ -88,7 +84,7 @@ const DESTINATION: &str = if cfg!(windows) {
 const GENERATION: &str = "000102030405060708090a0b0c0d0e0f";
 
 /// The options of templates' arguments, each of which takes one value.
-const OPTIONS: [&str; 13] = [
+const OPTIONS: [&str; 14] = [
     "--machine",
     "--microvm-sandbox-block",
     "--net",
@@ -101,6 +97,7 @@ const OPTIONS: [&str; 13] = [
     "--memory-capacity",
     "--snapshot-destination",
     "--snapshot-tier",
+    "--snapshot-block-identity",
     "--snapshot-generation-id",
 ];
 
@@ -370,6 +367,8 @@ fn templates_render_their_devices_resources_and_capture_options() {
         DESTINATION,
         "--snapshot-tier",
         "platform",
+        "--snapshot-block-identity",
+        "generation",
         "--snapshot-generation-id",
         GENERATION,
     ]);
@@ -493,100 +492,6 @@ fn templates_limit_their_processors_online_at_boot_on_their_command_line() {
 }
 
 #[test]
-fn templates_boot_with_their_kernel_tuning_parameters_after_their_own_tokens() {
-    let tuning = strings(&["mitigations=off", "no_timer_check", "quiet", "loglevel=0"]);
-    // After the limit of the processors online at boot, the last of the template's own tokens.
-    let limited = Inputs {
-        resources: TemplateResources {
-            boot_processors: 1,
-            ..resources(4)
-        },
-        ..Inputs::default()
-    }
-    .lower()
-    .unwrap();
-    let tuned = limited.clone().with_kernel_tuning(&tuning).unwrap();
-    assert_eq!(
-        tuned.kernel_command_line(),
-        "nvx_sandbox=1 maxcpus=1 mitigations=off no_timer_check quiet loglevel=0"
-    );
-    // Nothing else of the plan changes.
-    assert_eq!(
-        tuned.openvmm_arguments().unwrap(),
-        limited.openvmm_arguments().unwrap()
-    );
-    assert_eq!(
-        (tuned.resources(), tuned.plan(), tuned.nic_arguments()),
-        (limited.resources(), limited.plan(), limited.nic_arguments())
-    );
-    // In their order, which the kernel keeps: the last of `quiet` and `loglevel=` sets the
-    // console's log level.
-    let untuned = Inputs::default().lower().unwrap();
-    let ordered = strings(&["loglevel=7", "quiet", "mitigations=auto,nosmt"]);
-    assert_eq!(
-        untuned
-            .clone()
-            .with_kernel_tuning(&ordered)
-            .unwrap()
-            .kernel_command_line(),
-        "nvx_sandbox=1 loglevel=7 quiet mitigations=auto,nosmt"
-    );
-    // Each parameter alone, as OpenVMM's platform allowlist admits it.
-    for parameter in KERNEL_TUNING_PARAMETERS {
-        let template = untuned
-            .clone()
-            .with_kernel_tuning(&strings(&[parameter]))
-            .unwrap();
-        assert_eq!(
-            template.kernel_command_line(),
-            format!("nvx_sandbox=1 {parameter}")
-        );
-        assert!(openvmm::admits(parameter), "{parameter}");
-    }
-    // Later parameters replace earlier ones, and none leaves the template's own tokens.
-    assert_eq!(
-        tuned
-            .clone()
-            .with_kernel_tuning(&strings(&["quiet"]))
-            .unwrap()
-            .kernel_command_line(),
-        "nvx_sandbox=1 maxcpus=1 quiet"
-    );
-    assert_eq!(tuned.with_kernel_tuning(&[]).unwrap(), limited);
-}
-
-#[test]
-fn the_kernel_tuning_parameters_are_those_of_openvmms_platform_allowlist() {
-    assert_eq!(KERNEL_TUNING_PARAMETERS.as_slice(), openvmm::TUNING);
-}
-
-#[test]
-fn templates_refuse_kernel_tuning_parameters_that_no_capture_takes() {
-    for (parameters, named) in [
-        (&["mitigations=on"][..], "mitigations=on"),
-        (&["loglevel=8"][..], "loglevel=8"),
-        (&["no-timer-check"][..], "no-timer-check"),
-        (&["nokaslr"][..], "nokaslr"),
-        (&["nvx_hostname=tenant"][..], "nvx_hostname=tenant"),
-        (&["quiet loglevel=0"][..], "quiet loglevel=0"),
-        (&["quiet", "quiet"][..], "quiet"),
-        (&["mitigations=off", "mitigations=auto"][..], "mitigations"),
-    ] {
-        let error = Inputs::default()
-            .lower()
-            .unwrap()
-            .with_kernel_tuning(&strings(parameters))
-            .unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Unsupported, "{parameters:?}");
-        assert!(
-            error.message().contains("kernel tuning parameter") && error.message().contains(named),
-            "{parameters:?}: {}",
-            error.message()
-        );
-    }
-}
-
-#[test]
 fn the_upper_of_an_adapters_plan_is_a_clones_and_no_part_of_its_template() {
     let over_scratch = template(adapter(None));
     let over_ram = template(adapter_with(erofs(), SandboxUpper::RAM, None));
@@ -637,14 +542,6 @@ fn openvmms_platform_allowlist_admits_its_tokens_and_refuses_tenant_data() {
         "virtnet_dns=10.0.0.1",
         "virtnet_ip6=fd00::2/64",
         "virtnet_gw6=fd00::1",
-        // The kernel tuning parameters, which are fixed at boot and the same for every clone.
-        "mitigations=off",
-        "mitigations=auto",
-        "mitigations=auto,nosmt",
-        "no_timer_check",
-        "quiet",
-        "loglevel=0",
-        "loglevel=7",
     ] {
         assert!(openvmm::admits(token), "{token}");
     }
@@ -675,14 +572,7 @@ fn openvmms_platform_allowlist_admits_its_tokens_and_refuses_tenant_data() {
         "nvx_sandbox=0",
         "nvx_snapshot_tier=workload-start",
         "console=ttyS0",
-        // Other values of the kernel tuning parameters, and other spellings of them.
-        "mitigations=on",
-        "mitigations=",
-        "loglevel=8",
-        "loglevel=07",
-        "quiet=1",
-        "no-timer-check",
-        "nokaslr",
+        "quiet",
         "",
     ] {
         assert!(!openvmm::admits(token), "{token}");

@@ -36,7 +36,7 @@ const HOST_GENERATION: &str = "host";
 
 /// The versions of the contracts of a template's clones that its runtime identity does not
 /// record: the snapshot format, the saved device state, the time ABI, the restore packet, and the
-/// activation contract.
+/// activation record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Contracts {
     /// [`contract::SNAPSHOT_FORMAT_VERSION`].
@@ -47,7 +47,7 @@ struct Contracts {
     time: u64,
     /// [`contract::RESTORE_PACKET_VERSION`].
     restore_packet: u64,
-    /// [`activation::CONTRACT_VERSION`].
+    /// [`activation::VERSION`], as a `u64`, as the other versions are.
     activation: u64,
 }
 
@@ -58,7 +58,8 @@ impl Contracts {
         device_state: contract::DEVICE_STATE_SCHEMA_VERSION,
         time: contract::TIME_ABI_VERSION,
         restore_packet: contract::RESTORE_PACKET_VERSION,
-        activation: activation::CONTRACT_VERSION,
+        // `u64::from` is not `const`, and widening a `u16` is lossless.
+        activation: activation::VERSION as u64,
     };
 
     /// Writes the versions.
@@ -361,77 +362,6 @@ fn cpu_profile_problem(profile: &str) -> Option<String> {
     })
 }
 
-/// The kernel tuning parameters with which a template's kernel may boot: guest kernel parameters
-/// that an adapter's cold boots may pass too, and that OpenVMM admits on the command line of a
-/// capture of its platform tier, and again at every restore, since, like the other tokens of that
-/// command line, each is fixed when the kernel boots, is the same for every clone, and carries no
-/// tenant data:
-///
-/// - `mitigations=off`, `mitigations=auto`, and `mitigations=auto,nosmt`, which choose the
-///   kernel's mitigations of CPU vulnerabilities, which it applies once, as it boots, so that a
-///   clone has no other way to get them;
-/// - `no_timer_check`, which skips the kernel's check of the timer interrupt as it boots;
-/// - `quiet`, and `loglevel=0` to `loglevel=7`, the console's log level.
-///
-/// A template boots with each parameter at most once, so with one of the values of
-/// `mitigations=` and of `loglevel=`. The kernel takes `-` and `_` alike in a parameter's name,
-/// but OpenVMM admits these spellings alone, and none of the clock parameters that the time ABI
-/// refuses.
-pub const KERNEL_TUNING_PARAMETERS: [&str; 13] = [
-    "mitigations=off",
-    "mitigations=auto",
-    "mitigations=auto,nosmt",
-    "no_timer_check",
-    "quiet",
-    "loglevel=0",
-    "loglevel=1",
-    "loglevel=2",
-    "loglevel=3",
-    "loglevel=4",
-    "loglevel=5",
-    "loglevel=6",
-    "loglevel=7",
-];
-
-/// Returns the name of the kernel parameter `token`: what precedes its first `=`, or all of it.
-fn parameter_name(token: &str) -> &str {
-    token.split_once('=').map_or(token, |(name, _)| name)
-}
-
-/// Returns whether `token` names a kernel tuning parameter, with any value: whether its name is
-/// that of one of [`KERNEL_TUNING_PARAMETERS`].
-fn is_tuning_parameter(token: &str) -> bool {
-    let name = parameter_name(token);
-    KERNEL_TUNING_PARAMETERS
-        .iter()
-        .any(|parameter| parameter_name(parameter) == name)
-}
-
-/// Explains why `parameters` are not the kernel tuning parameters of a template, if they are not:
-/// each must be one of [`KERNEL_TUNING_PARAMETERS`], and each parameter must appear at most once.
-pub(super) fn kernel_tuning_problem(parameters: &[String]) -> Option<String> {
-    for (index, parameter) in parameters.iter().enumerate() {
-        if !KERNEL_TUNING_PARAMETERS.contains(&parameter.as_str()) {
-            return Some(format!(
-                "kernel tuning parameter {parameter:?} is not one with which a template may boot: \
-                 mitigations=off, mitigations=auto, mitigations=auto,nosmt, no_timer_check, \
-                 quiet, or loglevel=0 to loglevel=7"
-            ));
-        }
-        let name = parameter_name(parameter);
-        if parameters[..index]
-            .iter()
-            .any(|earlier| parameter_name(earlier) == name)
-        {
-            return Some(format!(
-                "kernel tuning parameter {name} appears more than once, but a template boots \
-                 with each at most once"
-            ));
-        }
-    }
-    None
-}
-
 /// Returns the guest's network on `nic`, its IPv4 address and prefix length, in the canonical form
 /// of a [`SandboxNetwork`].
 fn guest_network_of(nic: &Nic) -> String {
@@ -486,34 +416,15 @@ pub struct CaptureClass {
     pub network: Option<SandboxNetwork>,
     /// The invariant settings beyond the machine.
     pub invariants: Invariants,
-    /// The kernel tuning parameters with which the template's kernel boots, in their order, after
-    /// the template's own tokens, as [`TemplatePlan::kernel_command_line`] renders them: each one
-    /// of [`KERNEL_TUNING_PARAMETERS`], and each parameter at most once. An adapter passes those
-    /// of its cold boots, so that its clones run the kernel configuration of its cold sandboxes.
-    /// The template's key holds them in its kernel command line, so the templates of classes that
-    /// differ in them alone are templates of their own.
-    ///
-    /// [`TemplatePlan::kernel_command_line`]: super::TemplatePlan::kernel_command_line
-    pub kernel_tuning: Vec<String>,
 }
 
 impl CaptureClass {
     /// Version of the canonical encoding of a class, its first two bytes.
-    ///
-    /// Version 2 adds the kernel tuning parameters to version 1. A class's identity names the
-    /// slot of its captures and the class of each generation in a store's index, so
-    /// [`Store::create_template`] finds no generation that a class of version 1 captured, and
-    /// captures one again. Those generations still serve the clones that select them by their
-    /// keys, which version 2 leaves as they were.
-    ///
-    /// [`Store::create_template`]: super::Store::create_template
-    pub const VERSION: u16 = 2;
+    pub const VERSION: u16 = 1;
 
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) unless every field
     /// has the form that its documentation gives, the runtime identity passes
-    /// [`RuntimeIdentity::check`], the network lowers to OpenVMM's arguments, and each kernel
-    /// tuning parameter is one of [`KERNEL_TUNING_PARAMETERS`], each parameter at most once, so
-    /// that a class that no capture takes is refused before any VM boots.
+    /// [`RuntimeIdentity::check`], and the network lowers to OpenVMM's arguments.
     pub fn check(&self) -> Result<()> {
         self.runtime.check()?;
         if let Some(problem) = cpu_profile_problem(&self.cpu_profile) {
@@ -544,9 +455,6 @@ impl CaptureClass {
             }
         }
         self.network_arguments()?;
-        if let Some(problem) = kernel_tuning_problem(&self.kernel_tuning) {
-            return Err(Error::unsupported(problem));
-        }
         Ok(())
     }
 
@@ -562,7 +470,7 @@ impl CaptureClass {
     /// Returns the canonical encoding of the class, which its [`identity`](Self::identity)
     /// digests.
     ///
-    /// Version 2 holds, in order: [`VERSION`](Self::VERSION) as a `u16`; the runtime identity's
+    /// Version 1 holds, in order: [`VERSION`](Self::VERSION) as a `u16`; the runtime identity's
     /// OpenVMM, kernel, and initramfs identities as texts, its boot contract version as a `u64`,
     /// its control contract revision as a text, and its control session version as a `u64`; the
     /// guest build as a text; the snapshot format, device-state schema, time ABI, restore packet,
@@ -571,10 +479,8 @@ impl CaptureClass {
     /// capacity as `u64`s; the `distro` and scratch geometries, each a `u64` length and two
     /// `u32` block sizes; the network, as the list of the texts of OpenVMM's arguments of the
     /// template's NIC, which [`SandboxNetwork::template_arguments`] lowers it to, empty without a
-    /// NIC; the invariant settings, as a list of names and values, each a text, in the order of
-    /// their names; and the kernel tuning parameters, as a list of texts, in their order. Version
-    /// 1 held the same but the kernel tuning parameters. The [module](super) describes the
-    /// encoding of each kind of value.
+    /// NIC; and the invariant settings, as a list of names and values, each a text, in the order
+    /// of their names. The [module](super) describes the encoding of each kind of value.
     ///
     /// Fails as [`check`](Self::check) does.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
@@ -601,9 +507,6 @@ impl CaptureClass {
             writer.text(argument)
         });
         self.invariants.write(&mut writer);
-        writer.list(&self.kernel_tuning, |writer, parameter| {
-            writer.text(parameter)
-        });
         Ok(writer.finish())
     }
 
@@ -630,8 +533,7 @@ impl CaptureClass {
 ///   restoring host's TSC rate. The time ABI version is the time contract's.
 /// - **Resources:** the processor capacity and the processors online at boot; the RAM at boot,
 ///   its capacity, the size of the blocks in which a restore expands it, and the ranges of both.
-/// - **Boot:** the exact effective kernel command line, which holds the kernel tuning parameters
-///   of the template's class, and its digest.
+/// - **Boot:** the exact effective kernel command line, and its digest.
 /// - **Disks:** the length and block sizes of the `distro`, which is the capacity of every clone's
 ///   image, and of the scratch.
 /// - **Devices and isolation:** each device's ID, kind, state unit, transport, address ranges,
@@ -690,13 +592,11 @@ impl TemplateKey {
     ///
     /// The manifest's machine must be the class's: the backend, the processors and those online
     /// at boot, the RAM and its capacity, the `distro` and scratch geometries, the presence of a
-    /// NIC, and the NIC's address and prefix, a CPU profile that the class's request selects, and
-    /// the kernel tuning parameters of its kernel command line, the tokens that name one of
-    /// [`KERNEL_TUNING_PARAMETERS`], whatever their values, which must be the class's, in their
-    /// order. A manifest whose machine has no processors online at boot activates all of them at
-    /// boot, which a class whose processors are all online at boot requests. The key takes the
-    /// class's runtime, guest build, and invariant settings, and this crate's versions of the
-    /// other contracts.
+    /// NIC, and the NIC's address and prefix, and a CPU profile that the class's request selects.
+    /// A manifest whose machine has no processors online at boot activates all of them at boot,
+    /// which a class whose processors are all online at boot requests. The key takes the class's
+    /// runtime, guest build, and invariant settings, and this crate's versions of the other
+    /// contracts.
     ///
     /// The key also takes the identity of the network policy that OpenVMM enforced on the NIC,
     /// which this check leaves to OpenVMM: OpenVMM derives it from the arguments of the
@@ -786,28 +686,6 @@ impl TemplateKey {
             return mismatch(
                 format!("its NIC network is {}", describe(found_network)),
                 describe(requested_network),
-            );
-        }
-        let found_tuning: Vec<&str> = machine
-            .command_line
-            .split_ascii_whitespace()
-            .filter(|token| is_tuning_parameter(token))
-            .collect();
-        let requested_tuning: Vec<&str> = class.kernel_tuning.iter().map(String::as_str).collect();
-        if found_tuning != requested_tuning {
-            let describe = |parameters: &[&str]| {
-                if parameters.is_empty() {
-                    "none".to_owned()
-                } else {
-                    parameters.join(" ")
-                }
-            };
-            return mismatch(
-                format!(
-                    "its kernel tuning parameters are {}",
-                    describe(&found_tuning)
-                ),
-                describe(&requested_tuning),
             );
         }
         Ok(Self {

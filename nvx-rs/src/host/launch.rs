@@ -117,10 +117,9 @@ fn host_identity(wanted: bool) -> Option<(u32, u32)> {
 
 /// Everything that OpenVMM's command line for one VM depends on.
 ///
-/// Paths are used as given, and OpenVMM does not run in the caller's directory, but in the one
-/// that [`vmm_working_dir`](super::supervisor::vmm_working_dir) chooses for the instance, so make
-/// them absolute, for example with [`absolute`](super::artifacts::absolute). The other settings
-/// must pass [`check`](Self::check), which every method that builds a command line applies.
+/// Paths are used as given, and OpenVMM runs in the instance's directory, so make them absolute,
+/// for example with [`absolute`](super::artifacts::absolute). The other settings must pass
+/// [`check`](Self::check), which every method that builds a command line applies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchSpec {
     /// The `openvmm` executable.

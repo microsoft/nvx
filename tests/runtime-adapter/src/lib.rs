@@ -9,8 +9,8 @@
 //!   messages about a layered [`root`], its [`probe`]s, and [`exec`]utions, and the kernel command
 //!   line and statuses of its [`template`] mode;
 //! - host-only, with the `host` feature: the host API too, and the host program, in the `host`,
-//!   `runtime`, `initramfs`, `staged`, `sharing`, `layered`, `capture`, `clone`, `console`,
-//!   `generations`, and `hook` modules and the `runtime-adapter-host` binary;
+//!   `runtime`, `initramfs`, `staged`, `sharing`, `layered`, `capture`, `clone`, `generations`, and
+//!   `hook` modules and the `runtime-adapter-host` binary;
 //! - guest-only, with the `guest` feature: the guest API too, and the guest agent, in the `guest`
 //!   and `worker` modules and the `runtime-adapter-guest` binary, a static
 //!   `x86_64-unknown-linux-musl` executable.
@@ -50,25 +50,20 @@
 //! root of its own, in [`template`] mode. The host program's `runtime-adapter-host create`
 //! captures such a VM through NVX's template store, which publishes the snapshot as a generation
 //! of a template, in the `capture` module. In each clone, the worker repairs the restore, then
-//! activates the clone with the activation record of its restore packet, which the guest library
-//! applies, answers the host's `Await` with `Ready`, which reports the activation, and serves the
-//! host's order as after a cold boot. On the host, the
+//! activates the clone with the host's `Activate`, whose record the guest library applies, answers
+//! `Ready` with the activation, and serves the host's order as after a cold boot. On the host, the
 //! `host` module's clone order is the framing through which the restore sequence of
 //! `nvx::host::template` activates a clone and starts its sandbox, and the host program's
 //! `runtime-adapter-host start` starts a clone of a generation in a sandbox of its own, which
-//! leases the generation, in the `clone` module, and may read the clone's boot console, which
-//! keeps what the clone's kernel and init write once restored, in the `console` module. Its `run`
-//! runs one execution in such a clone, then tears the clone down. The host program's `refresh`
-//! captures a new generation, `list` and `inspect` report the store's generations, and `remove`
-//! retires one, in the `generations` module, which also decides which generations the host
-//! program evicts.
+//! leases the generation, in the `clone` module. Its `run` runs one execution in such a clone,
+//! then tears the clone down. The host program's `refresh` captures a new generation, `list` and
+//! `inspect` report the store's generations, and `remove` retires one, in the `generations`
+//! module, which also decides which generations the host program evicts.
 
 #[cfg(feature = "host")]
 pub mod capture;
 #[cfg(feature = "host")]
 pub mod clone;
-#[cfg(feature = "host")]
-pub mod console;
 pub mod exec;
 pub mod frame;
 #[cfg(feature = "host")]
