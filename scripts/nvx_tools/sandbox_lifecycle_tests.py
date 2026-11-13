@@ -37,7 +37,7 @@ from .build_constants import (
     KernelBuildConstants,
     OpenVMMBuildConstants,
 )
-from .common import sha256_file
+from .common import ScriptError, sha256_file
 from .managed_exec_tests import (
     WorkloadArtifacts,
     bounded_text,
@@ -159,11 +159,22 @@ def is_other_runtime_termination(stderr: bytes, pid: int) -> bool:
     )
 
 
-def read_build_provenance() -> dict[str, dict[str, Any]]:
+def read_build_provenance(*, architecture: str = "x86_64") -> dict[str, dict[str, Any]]:
     """Returns the build provenance from which nvx-rs reads the runtime identity
     of the checkout, by file name."""
     provenance: dict[str, dict[str, Any]] = {}
-    for name in PROVENANCE_NAMES:
+    if architecture not in ("x86_64", "aarch64"):
+        raise ScriptError(f"unsupported provenance architecture: {architecture}")
+    names = (
+        PROVENANCE_NAMES
+        if architecture == "x86_64"
+        else (
+            OpenVMMBuildConstants.PROVENANCE_NAME,
+            "aarch64/Image.provenance.json",
+            f"aarch64/{InitramfsBuildConstants.PROVENANCE_NAME}",
+        )
+    )
+    for name in names:
         path = BuildConstants.BUILD_DIR / name
         try:
             value: object = json.loads(path.read_text(encoding="utf-8"))
@@ -399,12 +410,14 @@ class LifecycleAcceptance:
         output_dir: Path,
         artifacts: WorkloadArtifacts,
         root: Path,
+        architecture: str = "x86_64",
     ) -> None:
         self.backend = backend
         self.timeout = timeout
         self.output_dir = output_dir
         self.artifacts = artifacts
         self.root = root
+        self.architecture = architecture
         self.state = root / "state"
         self.identity_state = root / "identity-state"
         self.scratch = root / "scratch.ext4"
@@ -887,8 +900,13 @@ class LifecycleAcceptance:
         there that differs from the checkout's in the initramfs."""
         build = self.other_root / BuildConstants.BUILD_DIRECTORY_NAME
         build.mkdir(parents=True)
-        for name, provenance in read_build_provenance().items():
-            if name == InitramfsBuildConstants.PROVENANCE_NAME:
+        provenance_files = (
+            read_build_provenance()
+            if self.architecture == "x86_64"
+            else read_build_provenance(architecture=self.architecture)
+        )
+        for name, provenance in provenance_files.items():
+            if Path(name).name == InitramfsBuildConstants.PROVENANCE_NAME:
                 digest = provenance.get(INITRAMFS_DIGEST)
                 if not isinstance(digest, str):
                     raise RuntimeError(f"build provenance {name} names no initramfs")
@@ -896,7 +914,9 @@ class LifecycleAcceptance:
                     **provenance,
                     INITRAMFS_DIGEST: hashlib.sha256(digest.encode()).hexdigest(),
                 }
-            (build / name).write_text(json.dumps(provenance), encoding="utf-8")
+            path = build / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(provenance), encoding="utf-8")
 
     def check_other_runtime(self, runtime: dict[str, Any]) -> None:
         # The CLI of other artifacts, as after an upgrade, reattaches to the VM
@@ -1090,8 +1110,10 @@ def run_acceptance(acceptance: LifecycleAcceptance) -> None:
     shutil.rmtree(acceptance.root)
 
 
-def run_sandbox_lifecycle(backend: str, *, timeout: float, output_dir: Path) -> None:
-    artifacts = load_workload_artifacts()
+def run_sandbox_lifecycle(
+    backend: str, *, timeout: float, output_dir: Path, architecture: str = "x86_64"
+) -> None:
+    artifacts = load_workload_artifacts(architecture=architecture)
     output_dir.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="nvx-public-lifecycle-"))
     run_acceptance(
@@ -1101,5 +1123,6 @@ def run_sandbox_lifecycle(backend: str, *, timeout: float, output_dir: Path) -> 
             output_dir=output_dir,
             artifacts=artifacts,
             root=root,
+            architecture=architecture,
         )
     )

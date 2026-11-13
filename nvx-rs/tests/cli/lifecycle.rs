@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use crate::harness::mode;
 use crate::harness::{
     Content, HYPERVISOR, Hosts, LAYER, OPENVMM, Outcome, PROVENANCE, Root, SCRATCH, UUID, entries,
-    in_parallel, is_hex, json,
+    in_parallel, is_hex, json, sandbox_relative,
 };
 use crate::openvmm::{
     NO_NETWORK, NetworkPolicy, Options, WORKLOAD, assert_checked_blocks, assert_checked_distro,
@@ -582,14 +582,17 @@ fn check_lifecycle(case: &Configuration) {
         let (endpoint, process) =
             assert_runtime_record(&root, case.state, &json(&state.join("runtime.json")));
         assert_capability(&state);
-        let mut options =
-            Options::parse(&root.openvmm_arguments(&format!("build/fake-openvmm-{token}.json")));
+        let mut options = Options::parse(&root.openvmm_arguments(&sandbox_relative(&format!(
+            "build/fake-openvmm-{token}.json"
+        ))));
         assert_checked_blocks(&root, &options.take("--microvm-sandbox-block"));
         assert_opened_images(&root, token);
         let mut expected = (case.openvmm)(managed(case.state, &endpoint));
         expected.take("--microvm-sandbox-block");
         expected.assert_matches(&root, &options, &context);
-        let maps = root.below(&format!("build/fake-openvmm-{token}-maps.json"));
+        let maps = root.below(&sandbox_relative(&format!(
+            "build/fake-openvmm-{token}-maps.json"
+        )));
         match &case.maps {
             Some(table) => assert_eq!(json(&maps), *table, "{context}"),
             None => assert!(!maps.exists(), "{context}"),
@@ -676,7 +679,9 @@ fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
         assert_eq!(entries(&state), running(), "{context}");
         let (endpoint, process) =
             assert_runtime_record(&root, "state", &json(&state.join("runtime.json")));
-        let mut options = Options::parse(&root.openvmm_arguments("build/fake-openvmm-state.json"));
+        let mut options = Options::parse(
+            &root.openvmm_arguments(&sandbox_relative("build/fake-openvmm-state.json")),
+        );
         assert_checked_distro(&root, &options.take("--microvm-sandbox-block"));
         assert_opened_distro(&root, "state");
         let mut expected = managed("state", &endpoint).in_ram();
@@ -1047,7 +1052,7 @@ fn managed_execs_exit_with_the_workload_status() {
                 outcome.assert_error(code, &fragments);
                 // A refusal changes nothing, but the fake OpenVMM's log of the connections to its
                 // control endpoint, and the workload did not run.
-                let log = "build/fake-openvmm-state-sessions.log".to_owned();
+                let log = sandbox_relative("build/fake-openvmm-state-sessions.log");
                 let mut after = root.snapshot();
                 after.insert(log.clone(), before[&log].clone());
                 assert_eq!(after, before, "{}", case.name);

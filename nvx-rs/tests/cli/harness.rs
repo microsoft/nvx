@@ -44,6 +44,18 @@ pub(crate) const OPENVMM: &str = "openvmm/target/release/openvmm{exe}";
 /// How the lines that `nvx-rs` prints end on this host, as Python's `print` ends them.
 pub(crate) const LINE_END: &str = if cfg!(windows) { "\r\n" } else { "\n" };
 
+/// The native sandbox fixture's counterpart of a legacy guest-build path.
+pub(crate) fn sandbox_relative(relative: &str) -> String {
+    if cfg!(target_arch = "aarch64") {
+        relative
+            .replace("build/vmlinux", "build/aarch64/Image")
+            .replace("build/initramfs", "build/aarch64/initramfs")
+            .replace("build/fake-openvmm", "build/aarch64/fake-openvmm")
+    } else {
+        relative.to_owned()
+    }
+}
+
 /// The hosts on which a case applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Hosts {
@@ -167,6 +179,24 @@ impl Root {
         }
         for (relative, text) in FILES {
             root.write(relative, text);
+        }
+        if cfg!(target_arch = "aarch64") {
+            let mut image = [0_u8; 64];
+            image[16..24].copy_from_slice(&4096_u64.to_le_bytes());
+            image[24..32].copy_from_slice(&10_u64.to_le_bytes());
+            image[56..60].copy_from_slice(b"ARM\x64");
+            root.write(&sandbox_relative("build/vmlinux"), image);
+            root.write(&sandbox_relative("build/initramfs.cpio.gz"), "initramfs\n");
+            root.write(
+                &sandbox_relative("build/initramfs.cpio.gz.packages.json"),
+                r#"{"architecture":"aarch64"}"#,
+            );
+            for (name, member, digest) in &PROVENANCE[1..] {
+                root.write(
+                    &sandbox_relative(&format!("build/{name}")),
+                    format!("{{\n  \"format\": 1,\n  \"{member}\": \"{digest}\"\n}}\n"),
+                );
+            }
         }
         for relative in DIRECTORIES {
             fs::create_dir_all(root.below(relative)).unwrap();

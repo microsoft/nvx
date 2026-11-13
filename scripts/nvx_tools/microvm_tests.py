@@ -53,6 +53,7 @@ from .benchmark import (
 from .benchmark import (
     run_guest_script as _run_guest_script,
 )
+from .build_config import BuildConfig, KernelBuildConfig
 from .build_constants import (
     BuildConstants,
     KernelBuildConstants,
@@ -66,7 +67,11 @@ from .common import (
     sha256_file,
 )
 from .guests import GUEST_NAMES, GuestDescriptor, guest_descriptor
-from .managed_exec_tests import run_managed_exec_configuration, workload_artifact_paths
+from .managed_exec_tests import (
+    WorkloadArtifacts,
+    run_managed_exec_configuration,
+    workload_artifact_paths,
+)
 from .microvm_durations import REPORT_NAME, DurationReport
 from .microvm_shards import configure_parser as configure_shards_parser
 from .microvm_shards import load_partition, shard_scenarios
@@ -785,6 +790,9 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--guest", choices=GUEST_NAMES, default="alpine")
     parser.add_argument(
+        "--architecture", choices=("x86_64", "aarch64"), default="x86_64"
+    )
+    parser.add_argument(
         "--scenario",
         action="append",
         choices=(*MICROVM_TEST_SCENARIOS, *MICROVM_EXPLICIT_SCENARIOS),
@@ -873,6 +881,7 @@ def run_guest_script(
     boot_marker: bytes = BOOT_MARKER,
     on_stderr: Callable[[bytes], None] | None = None,
     expected_exit_status: int = 0,
+    architecture: str | None = None,
 ) -> GuestScriptResult:
     """Run ``script`` in the shell of the guest that ``command`` boots, and
     require it to print the line ``completion_marker``.
@@ -910,6 +919,7 @@ def run_guest_script(
         time_abi_status=True,
         on_stderr=on_stderr,
         expected_exit_status=expected_exit_status,
+        architecture=architecture,
     )
     output = _guest_script_output(result["text"])
     if not contains_output_line(output.encode("utf-8"), completion_marker):
@@ -1258,6 +1268,7 @@ def run_guest_boot(
     memory_mib: int,
     timeout: float,
     log_path: Path,
+    architecture: str | None = None,
 ) -> None:
     command = workload_boot_command(
         executable,
@@ -1279,6 +1290,7 @@ def run_guest_boot(
         GUEST_BOOT_COMPLETION_MARKER,
         timeout=timeout,
         log_path=log_path,
+        architecture=architecture,
     )
 
 
@@ -1458,6 +1470,10 @@ def run_managed_lifecycle(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    processors: int = 1,
+    layered: WorkloadArtifacts | None = None,
+    scratch: Path | None = None,
+    expected_previous_state: str | None = None,
 ) -> None:
     """Run the managed lifecycle of a guest whose init hands the boot to the
     managed agent.
@@ -1465,8 +1481,16 @@ def run_managed_lifecycle(
     The nvx-rs test MANAGED_LIFECYCLE_TEST starts OpenVMM with the command
     built here and drives the guest's control session with nvx-rs, so that no
     Python client of the control protocol remains. This checks what the test
-    leaves: OpenVMM's outcome report and the guest console.
+    leaves: OpenVMM's outcome report and the guest console. Optional fixture
+    inputs run the same Rust assertions with a layered root and a selected VP
+    count; they do not extend the public sandbox CLI or its saved formats.
     """
+    if processors not in MICROVM_PROCESSOR_COUNTS:
+        raise ScriptError("managed test processors must be one of 1, 2, 4, or 8")
+    if scratch is not None and layered is None:
+        raise ScriptError("managed test scratch requires a layered-root fixture")
+    if expected_previous_state not in (None, "present", "absent"):
+        raise ScriptError("managed test previous state must be present or absent")
     cargo = shutil.which("cargo")
     if cargo is None:
         raise ScriptError(
@@ -1488,15 +1512,37 @@ def run_managed_lifecycle(
         console_endpoint = _console_endpoint(root)
         guest_log_path = output_dir / "managed-lifecycle-guest.log"
         guest_log_path.unlink(missing_ok=True)
+        cmdline = "quiet loglevel=0"
+        if layered is not None:
+            cmdline += (
+                f" nvx_sandbox=1 nvx_layer=distro,0xd0003000,erofs:{layered.layer_uuid}"
+            )
+            cmdline += (
+                " nvx_scratch=0xd0006000,ext4"
+                if scratch is not None
+                else " nvx_overlay_upper=ramfs"
+            )
         command = workload_boot_command(
             executable.resolve(),
             backend,
             kernel.resolve(),
             initrd.resolve(),
             memory_mib,
-            "quiet loglevel=0",
+            cmdline,
             boot_console=False,
+            processors=processors,
         )
+        if layered is not None:
+            command.extend(
+                [
+                    "--microvm-sandbox-block",
+                    f"distro:file:{layered.distro.resolve()},ro",
+                ]
+            )
+            if scratch is not None:
+                command.extend(
+                    ["--microvm-sandbox-block", f"scratch:file:{scratch.resolve()}"]
+                )
         command.extend(
             (
                 "--microvm-workload-identity",
@@ -1513,6 +1559,11 @@ def run_managed_lifecycle(
             )
         )
         environment = os.environ.copy()
+        environment.pop("NVX_MANAGED_LIFECYCLE_PREVIOUS_STATE", None)
+        if expected_previous_state is not None:
+            environment["NVX_MANAGED_LIFECYCLE_PREVIOUS_STATE"] = (
+                expected_previous_state
+            )
         # The test records OpenVMM's process ID for an adversarial campaign
         # as the microVM scenarios do, but from the nvx-rs directory, so a
         # relative journal resolves here.
@@ -1529,6 +1580,10 @@ def run_managed_lifecycle(
                 "NVX_MANAGED_LIFECYCLE_CONSOLE": console_endpoint,
                 "NVX_MANAGED_LIFECYCLE_TIMEOUT": str(timeout),
                 "NVX_MANAGED_LIFECYCLE_OUTPUT_DIR": os.fspath(output_dir),
+                "NVX_MANAGED_LIFECYCLE_PROCESSORS": str(processors),
+                "NVX_MANAGED_LIFECYCLE_ROOT_MODE": (
+                    "sandbox" if layered is not None else "direct"
+                ),
             }
         )
         test_command = managed_lifecycle_test_command(cargo)
@@ -1590,6 +1645,7 @@ def run_managed_lifecycle(
         initrd,
         memory_mib,
         "quiet loglevel=0",
+        processors=processors,
     )
     invalid.extend(
         (
@@ -11313,7 +11369,13 @@ def require_debug_kernel(config: Path) -> None:
 def run(args: argparse.Namespace) -> int:
     validate_openvmm_test_backend(args.backend)
     descriptor = guest_descriptor(args.guest)
+    architecture = getattr(args, "architecture", "x86_64")
     debug_kernel = getattr(args, "debug_kernel", False)
+    if architecture == "aarch64" and args.scenario is None:
+        raise ScriptError(
+            "ARM64 correctness runs require explicit --scenario selection; "
+            "the full x86 scenario matrix is not qualified for ARM64"
+        )
     shard: tuple[int, int] | None = getattr(args, "shard", None)
     if shard is not None and (
         args.scenario is not None or debug_kernel or descriptor.name != "alpine"
@@ -11326,7 +11388,17 @@ def run(args: argparse.Namespace) -> int:
     if args.memory_mib is None:
         args.memory_mib = descriptor.default_memory_mib
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
-    if debug_kernel:
+    if architecture != "x86_64":
+        selected = KernelBuildConfig.for_architecture(architecture, debug=debug_kernel)
+        if debug_kernel:
+            require_debug_kernel(
+                selected.output.with_name(f"{selected.output.name}.config")
+            )
+        kernel = require_file(
+            selected.output,
+            "microVM Linux direct kernel",
+        )
+    elif debug_kernel:
         require_debug_kernel(artifact_path(KernelBuildConstants.DEBUG_CONFIG_NAME))
         kernel = require_file(
             artifact_path(KernelBuildConstants.DEBUG_BINARY_NAME),
@@ -11337,8 +11409,14 @@ def run(args: argparse.Namespace) -> int:
             artifact_path(KernelBuildConstants.BINARY_NAME),
             "microVM Linux direct kernel",
         )
+    initrd_path = (
+        artifact_path(descriptor.initramfs_name)
+        if architecture == "x86_64"
+        else BuildConfig.initramfs_config(descriptor.name, architecture).output
+    )
+    assert initrd_path is not None
     initrd = require_file(
-        artifact_path(descriptor.initramfs_name),
+        initrd_path,
         f"microVM {descriptor.distribution} initramfs",
     )
     output_dir: Path = args.output_dir
@@ -11377,16 +11455,23 @@ def run(args: argparse.Namespace) -> int:
     ]
     if public:
         try:
-            for path, description in workload_artifact_paths():
+            for path, description in workload_artifact_paths(architecture=architecture):
                 require_file(path, description)
         except ScriptError as error:
+            advice = (
+                "build them with `build-distro-layer --guest ubuntu "
+                "--architecture aarch64` and `build-scratch-template "
+                "--output build/aarch64/ubuntu-smoke-scratch.ext4` on Linux"
+                if architecture == "aarch64"
+                else "install them with `nvx-rs download` or build them with "
+                "`build-guest --guest all`, format the template alone with "
+                "`build-scratch-template` on Linux"
+            )
             raise ScriptError(
                 f"{error}; {', '.join(public)} "
                 f"{'reads' if len(public) == 1 else 'read'} the Ubuntu distro "
-                "layer and the sandbox scratch template: install them with "
-                "`nvx-rs download` or build them with `build-guest --guest "
-                "all`, format the template alone with `build-scratch-template` "
-                "on Linux, or name other scenarios with --scenario"
+                f"layer and the sandbox scratch template: {advice}, "
+                "or name other scenarios with --scenario"
             ) from error
 
     with DurationReport(
@@ -11431,6 +11516,7 @@ def _run_scenarios(
 ) -> None:
     """Run the selected scenarios in their fixed order, and time each
     execution in `report`."""
+    architecture = getattr(args, "architecture", "x86_64")
     if "guest-boot" in scenarios:
         report.start(
             "guest-boot",
@@ -11446,6 +11532,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             log_path=output_dir / f"{descriptor.name}-guest-boot.log",
+            architecture=architecture,
         )
     if "guest-identity" in scenarios:
         report.start(
@@ -11631,28 +11718,44 @@ def _run_scenarios(
             f"Running public managed execution configuration on OpenVMM/{args.backend}",
         )
         run_managed_exec_configuration(
-            args.backend, timeout=args.timeout, output_dir=output_dir
+            args.backend,
+            timeout=args.timeout,
+            output_dir=output_dir,
+            architecture=architecture,
         )
     if "sandbox-lifecycle" in scenarios:
         report.start(
             "sandbox-lifecycle",
             f"Running public managed sandbox lifecycle on OpenVMM/{args.backend}",
         )
-        run_sandbox_lifecycle(args.backend, timeout=args.timeout, output_dir=output_dir)
+        run_sandbox_lifecycle(
+            args.backend,
+            timeout=args.timeout,
+            output_dir=output_dir,
+            architecture=architecture,
+        )
     if "sandbox-proxy-only" in scenarios:
         report.start(
             "sandbox-proxy-only",
             f"Running public proxy-only sandbox networking on OpenVMM/{args.backend}",
         )
         run_sandbox_proxy_only(
-            args.backend, timeout=args.timeout, output_dir=output_dir
+            args.backend,
+            timeout=args.timeout,
+            output_dir=output_dir,
+            architecture=architecture,
         )
     if "sandbox-ram-upper" in scenarios:
         report.start(
             "sandbox-ram-upper",
             f"Running public RAM-upper sandboxes on OpenVMM/{args.backend}",
         )
-        run_sandbox_ram_upper(args.backend, timeout=args.timeout, output_dir=output_dir)
+        run_sandbox_ram_upper(
+            args.backend,
+            timeout=args.timeout,
+            output_dir=output_dir,
+            architecture=architecture,
+        )
     if "managed-lifecycle" in scenarios:
         report.start(
             "managed-lifecycle",

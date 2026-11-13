@@ -5,7 +5,9 @@
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 
-use crate::harness::{Content, Hosts, LAYER, OPENVMM, Outcome, Root, SCRATCH, in_parallel, native};
+use crate::harness::{
+    Content, Hosts, LAYER, OPENVMM, Outcome, Root, SCRATCH, in_parallel, native, sandbox_relative,
+};
 use crate::openvmm::{
     DISCONNECTED_CONSOLE, NO_CONSOLE, Options, TERMINAL_CONSOLE, WORKLOAD, child, cold_boot,
     one_shot, restore, share_token, snapshot,
@@ -1194,11 +1196,22 @@ fn dry_runs_print_the_openvmm_command_and_launch_nothing() {
         .collect();
     in_parallel(&cases, |case| {
         let root = Root::new();
+        let fixture = |text: &str| {
+            if case
+                .arguments
+                .first()
+                .is_some_and(|argument| argument == "sandbox")
+            {
+                sandbox_relative(text)
+            } else {
+                text.to_owned()
+            }
+        };
         for (relative, content) in &case.files {
-            root.write_content(relative, *content);
+            root.write_content(&fixture(relative), *content);
         }
         for relative in &case.removed {
-            root.remove(relative);
+            root.remove(&fixture(relative));
         }
         let before = root.snapshot();
         let arguments: Vec<&str> = case.arguments.iter().map(String::as_str).collect();
