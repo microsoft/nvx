@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString};
 
-use crate::guest::init::{AccountMode, ExecRequest};
+use crate::guest::init::ExecRequest;
 use crate::guest::parse::parse_decimal;
 use crate::guest::sys::{Errno, c_string};
 use crate::protocol::GuestExecPayload;
@@ -33,7 +33,6 @@ pub(crate) fn direct_request(
         directory,
         uid: parse_id(config.uid.as_bytes())?,
         gid: parse_id(config.gid.as_bytes())?,
-        account: AccountMode::Numeric,
         timeout: None,
         input: false,
         search_path: None,

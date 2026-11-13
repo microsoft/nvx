@@ -41,7 +41,7 @@
 //! Outside PID 1, `nvx-init` changes nothing: it fails with status 2 and a message.
 
 use std::ffi::{CStr, CString, OsStr};
-use std::io::{self, Read};
+use std::io;
 use std::net::Ipv4Addr;
 use std::os::fd::BorrowedFd;
 use std::os::unix::ffi::OsStrExt;
@@ -336,17 +336,6 @@ pub(crate) fn report_activation(failure: impl std::fmt::Display) {
     );
 }
 
-/// Whether execution requires an account in the shared root's databases.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "SL7.6a selects an execution account mode")
-)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AccountMode {
-    Existing,
-    Numeric,
-}
-
 /// One output pipe of a plain execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stream {
@@ -399,23 +388,11 @@ pub(crate) struct StartFailure {
     pub(crate) cleanup: Option<Errno>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "SL7.6a settles failed starts before returning idle"
-    )
-)]
 impl StartFailure {
     /// Checks without collecting. The owner hands over queued terminal statuses first; `false`
     /// without one means the child's status was lost, including automatic kernel collection.
     pub(crate) fn is_pending(&self) -> Result<bool, Errno> {
         self.process.map_or(Ok(false), ProcessId::is_unreaped)
-    }
-
-    /// Transfers the first error, owned child, and cleanup diagnostic to their control owner.
-    pub(crate) fn into_parts(self) -> (io::Error, Option<ProcessId>, Option<Errno>) {
-        (self.error, self.process, self.cleanup)
     }
 }
 
@@ -446,32 +423,16 @@ impl std::fmt::Display for LaunchFailure {
     }
 }
 
-/// The terminal status and any requested ending, after launch and output have settled.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "SL7.6a consumes execution outcomes")
-)]
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Outcome {
-    pub(crate) status: ProcessStatus,
-    pub(crate) cause: Option<Cause>,
-    pub(crate) discarded: [u64; 2],
-}
-
 /// One nonblocking step of the init-owned execution.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "SL7.6a consumes execution events")
-)]
 #[derive(Debug)]
 pub(crate) enum Event<'a> {
     Launch(io::Result<Option<LaunchFailure>>),
     Output(Stream, &'a [u8]),
-    Discarded(Stream, usize),
-    Closed(Stream),
-    ReadFailed(Stream, io::Error),
+    Closed,
+    ReadFailed,
     KillFailed(KillTarget, io::Error),
-    Ended(Outcome),
+    /// The terminal status, after launch and output have settled.
+    Ended(ProcessStatus),
 }
 
 /// The inputs of one plain-process execution in the VM's shared root.
@@ -488,8 +449,6 @@ pub(crate) struct ExecRequest {
     pub(crate) uid: u32,
     /// Real, effective, and saved group ID.
     pub(crate) gid: u32,
-    /// Whether the image must contain this account.
-    pub(crate) account: AccountMode,
     /// How long the leader may run.
     pub(crate) timeout: Option<Duration>,
     /// A pipe for streaming input, or the null device.
@@ -509,63 +468,7 @@ impl ExecRequest {
         {
             return Err(Errno::EINVAL.into());
         }
-        match self.account {
-            AccountMode::Numeric => Ok(()),
-            AccountMode::Existing => {
-                let root = sys::open(
-                    c"/",
-                    OpenFlags::O_PATH | OpenFlags::O_CLOEXEC,
-                    Mode::empty(),
-                )?;
-                let read = |path| -> io::Result<Vec<u8>> {
-                    let file = sys::open_beneath(
-                        &root,
-                        path,
-                        OpenFlags::O_RDONLY | OpenFlags::O_NONBLOCK | OpenFlags::O_NOCTTY,
-                        Mode::empty(),
-                        true,
-                    )?;
-                    let (regular, length) = sys::file_size(&file)?;
-                    if !regular || length > 1 << 20 {
-                        return Err(Errno::EINVAL.into());
-                    }
-                    let mut bytes = Vec::new();
-                    file.take((1 << 20) + 1).read_to_end(&mut bytes)?;
-                    if bytes.len() > 1 << 20 {
-                        return Err(Errno::EFBIG.into());
-                    }
-                    Ok(bytes)
-                };
-                let passwd = read(c"etc/passwd")?;
-                let group = read(c"etc/group")?;
-                let mut matching = passwd.split(|&byte| byte == b'\n').filter_map(|line| {
-                    if matches!(line.trim_ascii_start().first(), None | Some(b'#')) {
-                        return None;
-                    }
-                    let fields: Vec<_> = line.split(|&byte| byte == b':').collect();
-                    (parse_decimal(fields.get(2)?) == Some(self.uid.into())).then_some(fields)
-                });
-                let fields = matching.next().ok_or(Errno::ENOENT)?;
-                if matching.next().is_some()
-                    || fields.len() != 7
-                    || fields[0].is_empty()
-                    || parse_decimal(fields[3]) != Some(self.gid.into())
-                    || fields[5].first() != Some(&b'/')
-                    || !group.split(|&byte| byte == b'\n').any(|line| {
-                        if matches!(line.trim_ascii_start().first(), None | Some(b'#')) {
-                            return false;
-                        }
-                        line.split(|&byte| byte == b':')
-                            .nth(2)
-                            .and_then(parse_decimal)
-                            == Some(self.gid.into())
-                    })
-                {
-                    return Err(Errno::EINVAL.into());
-                }
-                Ok(())
-            }
-        }
+        Ok(())
     }
 }
 
@@ -606,8 +509,6 @@ pub(crate) struct Exec {
     launch: Option<LaunchReport>,
     input: Option<FileDescriptor>,
     outputs: [Option<FileDescriptor>; 2],
-    discarding: [bool; 2],
-    discarded: [u64; 2],
     turn: usize,
     status: Option<ProcessStatus>,
     status_lost: bool,
@@ -617,10 +518,6 @@ pub(crate) struct Exec {
     ended: bool,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "SL7.6a drives nvx-init's exec core")
-)]
 impl Exec {
     /// Forks the program in its own process group, resetting its priority before taking its
     /// identity, with empty groups and capabilities and `no_new_privs`, before entering its cwd.
@@ -705,8 +602,6 @@ impl Exec {
             }),
             input,
             outputs,
-            discarding: [false; 2],
-            discarded: [0; 2],
             turn: 0,
             status: None,
             status_lost: false,
@@ -777,18 +672,14 @@ impl Exec {
             match reader.read(buffer) {
                 Ok(0) => {
                     self.outputs[index] = None;
-                    return Ok(Some(Event::Closed(stream)));
-                }
-                Ok(length) if self.discarding[index] => {
-                    self.discarded[index] = self.discarded[index].saturating_add(length as u64);
-                    return Ok(Some(Event::Discarded(stream, length)));
+                    return Ok(Some(Event::Closed));
                 }
                 Ok(length) => return Ok(Some(Event::Output(stream, &buffer[..length]))),
                 Err(Errno::EINTR) => self.turn = index,
                 Err(Errno::EAGAIN) => {}
-                Err(error) => {
+                Err(_) => {
                     self.outputs[index] = None;
-                    return Ok(Some(Event::ReadFailed(stream, error.into())));
+                    return Ok(Some(Event::ReadFailed));
                 }
             }
         }
@@ -797,11 +688,7 @@ impl Exec {
             && !self.has_open_output()
         {
             self.ended = true;
-            return Ok(Some(Event::Ended(Outcome {
-                status,
-                cause: self.cause,
-                discarded: self.discarded,
-            })));
+            return Ok(Some(Event::Ended(status)));
         }
         Ok(None)
     }
@@ -862,10 +749,9 @@ impl Exec {
         self.end_with(Cause::Cancelled);
     }
 
-    /// Ends the execution on session reset, killing its group and closing discarded output,
+    /// Ends the execution on session reset, killing its group and closing its output unread,
     /// including pipes that an escaped process keeps open.
     pub(crate) fn reset(&mut self) {
-        self.discarding = [true; 2];
         self.outputs = [None, None];
         self.end_with(Cause::Disconnected);
     }
@@ -876,14 +762,6 @@ impl Exec {
 
     pub(crate) fn has_open_output(&self) -> bool {
         self.outputs.iter().any(Option::is_some)
-    }
-
-    pub(crate) fn output_hung_up(&self, stream: Stream) -> io::Result<bool> {
-        self.outputs[stream as usize]
-            .as_ref()
-            .map_or(Ok(true), |reader| {
-                sys::hung_up(reader.borrowed()).map_err(Into::into)
-            })
     }
 
     pub(crate) fn kill_failure(&mut self) -> Option<Event<'static>> {

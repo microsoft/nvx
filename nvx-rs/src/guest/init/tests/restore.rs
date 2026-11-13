@@ -1,7 +1,7 @@
 //! The restore-only announcer step and its existing helper supervision.
 
 use std::cell::RefCell;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 

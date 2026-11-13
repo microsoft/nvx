@@ -1,5 +1,6 @@
 //! The plain-process core, including privileged checks run explicitly in a Linux guest.
 
+use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
@@ -34,7 +35,7 @@ impl Exec {
     }
 }
 
-/// One execution's observed streams, launch, outcome, and collected child IDs.
+/// One execution's observed streams, launch, terminal status, and collected child IDs.
 #[derive(Default)]
 struct Collected {
     /// Standard output.
@@ -43,13 +44,13 @@ struct Collected {
     stderr: Vec<u8>,
     /// The launch result, once it arrives.
     launch: Option<Option<LaunchFailure>>,
-    /// The execution's final outcome.
-    outcome: Option<Outcome>,
+    /// The execution's terminal status.
+    status: Option<ExitStatus>,
     /// The children reaped by this PID-1-style collector.
     reaped: Vec<u32>,
 }
 
-/// Describes a shell in numeric-account mode, with no inherited environment.
+/// Describes a shell, with no inherited environment.
 pub(super) fn request(script: &str) -> ExecRequest {
     ExecRequest {
         program: c"/bin/sh".to_owned(),
@@ -62,7 +63,6 @@ pub(super) fn request(script: &str) -> ExecRequest {
         directory: c"/".to_owned(),
         uid: 0,
         gid: 0,
-        account: AccountMode::Numeric,
         timeout: None,
         input: true,
         search_path: None,
@@ -101,9 +101,9 @@ fn step(execution: &mut Exec, collected: &mut Collected) {
         Some(Event::Launch(report)) => collected.launch = Some(report.unwrap()),
         Some(Event::Output(Stream::Stdout, bytes)) => collected.stdout.extend_from_slice(bytes),
         Some(Event::Output(Stream::Stderr, bytes)) => collected.stderr.extend_from_slice(bytes),
-        Some(Event::Ended(outcome)) => collected.outcome = Some(outcome),
+        Some(Event::Ended(status)) => collected.status = Some(status),
         Some(Event::KillFailed(target, error)) => panic!("kill {target:?}: {error}"),
-        Some(Event::ReadFailed(stream, error)) => panic!("read {stream:?}: {error}"),
+        Some(Event::ReadFailed) => panic!("an output read failed"),
         Some(_) | None => {}
     }
 }
@@ -121,11 +121,9 @@ fn until(execution: &mut Exec, collected: &mut Collected, ready: impl Fn(&Collec
     }
 }
 
-/// Drives the execution to its final outcome.
+/// Drives the execution to its terminal status.
 fn finish(execution: &mut Exec, collected: &mut Collected) {
-    until(execution, collected, |collected| {
-        collected.outcome.is_some()
-    });
+    until(execution, collected, |collected| collected.status.is_some());
 }
 
 #[test]
@@ -227,8 +225,6 @@ fn pipe_execution(stdout: &[u8], stderr: &[u8]) -> Exec {
         launch: Some(report),
         input: None,
         outputs: [output(stdout), output(stderr)],
-        discarding: [false; 2],
-        discarded: [0; 2],
         turn: 0,
         status: None,
         status_lost: true,
@@ -258,7 +254,7 @@ fn only_the_collectors_terminal_status_settles_the_owned_leader_and_output() {
     assert!(!execution.observe(43, ExitStatus::from_raw(7 << 8)));
     assert!(!execution.observe(42, ExitStatus::from_raw((19 << 8) | 0x7f)));
     let mut buffer = [0; 2];
-    let mut closed = Vec::new();
+    let mut closed = 0;
     let mut collected = [Vec::new(), Vec::new()];
     let deadline = Instant::now() + Duration::from_secs(5);
     while execution.launch.is_some() || execution.has_open_output() {
@@ -267,39 +263,36 @@ fn only_the_collectors_terminal_status_settles_the_owned_leader_and_output() {
             Some(Event::Output(stream, bytes)) => {
                 collected[stream as usize].extend_from_slice(bytes)
             }
-            Some(Event::Closed(stream)) => closed.push(stream),
+            Some(Event::Closed) => closed += 1,
             Some(Event::Launch(report)) => assert_eq!(report.unwrap(), None),
             None => std::thread::sleep(Duration::from_millis(1)),
             event => panic!("unexpected {event:?}"),
         }
     }
     assert_eq!(collected, [b"out".to_vec(), b"err".to_vec()]);
-    assert_eq!(closed.len(), 2);
+    assert_eq!(closed, 2);
     assert!(!execution.has_open_output());
-    assert!(execution.output_hung_up(Stream::Stdout).unwrap());
     assert!(execution.status().is_none());
     assert!(execution.observe(42, ExitStatus::from_raw(7 << 8)));
     assert!(!execution.observe(42, ExitStatus::from_raw(0)));
     assert!(matches!(execution.next_event(&mut buffer).unwrap(),
         Some(Event::KillFailed(KillTarget::ProcessGroup, error)) if error.raw_os_error() == Some(Errno::EBADF as i32)));
-    let Some(Event::Ended(outcome)) = execution.next_event(&mut buffer).unwrap() else {
-        panic!("no outcome");
+    let Some(Event::Ended(status)) = execution.next_event(&mut buffer).unwrap() else {
+        panic!("no terminal status");
     };
-    assert_eq!(outcome.status.code(), Some(7));
-    assert_eq!(outcome.cause, None);
-    assert_eq!(outcome.discarded, [0; 2]);
+    assert_eq!(status.code(), Some(7));
+    assert_eq!(execution.cause, None);
     assert!(execution.next_event(&mut buffer).unwrap().is_none());
 }
 
 #[test]
-fn ending_failures_are_reported_and_discarding_preserves_the_first_cause() {
-    let name = "guest::init::tests::exec::ending_failures_are_reported_and_discarding_preserves_the_first_cause";
+fn ending_failures_are_reported_and_the_first_cause_is_kept() {
+    let name = "guest::init::tests::exec::ending_failures_are_reported_and_the_first_cause_is_kept";
     if isolate_process_test("NVX_INIT_EXEC_ENDING_TEST", name) {
         return;
     }
-    let mut execution = pipe_execution(b"drop", b"keep");
+    let mut execution = pipe_execution(b"out", b"err");
     execution.status_lost = false;
-    execution.discarding[Stream::Stdout as usize] = true;
     execution.cancel();
     execution.end();
     assert!(matches!(
@@ -312,25 +305,23 @@ fn ending_failures_are_reported_and_discarding_preserves_the_first_cause() {
     ));
     assert!(execution.observe(42, ExitStatus::from_raw(9 | 0x80)));
     let mut buffer = [0; 2];
-    let mut dropped = 0;
-    let mut retained = Vec::new();
+    let mut collected = [Vec::new(), Vec::new()];
     loop {
         match execution.next_event(&mut buffer).unwrap() {
-            Some(Event::Discarded(Stream::Stdout, length)) => dropped += length,
-            Some(Event::Output(Stream::Stderr, bytes)) => retained.extend_from_slice(bytes),
-            Some(Event::Ended(outcome)) => {
-                assert_eq!(outcome.cause, Some(Cause::Cancelled));
-                assert_eq!(outcome.status.signal(), Some(9));
-                assert!(outcome.status.core_dumped());
-                assert_eq!(outcome.discarded, [4, 0]);
+            Some(Event::Output(stream, bytes)) => {
+                collected[stream as usize].extend_from_slice(bytes)
+            }
+            Some(Event::Ended(status)) => {
+                assert_eq!(status.signal(), Some(9));
+                assert!(status.core_dumped());
                 break;
             }
-            Some(Event::ReadFailed(_, error)) => panic!("{error}"),
+            Some(Event::ReadFailed) => panic!("an output read failed"),
             _ => {}
         }
     }
-    assert_eq!(dropped, 4);
-    assert_eq!(retained, b"keep");
+    assert_eq!(execution.cause, Some(Cause::Cancelled));
+    assert_eq!(collected, [b"out".to_vec(), b"err".to_vec()]);
 }
 
 #[test]
@@ -349,10 +340,6 @@ fn invalid_requests_fail_before_a_child_starts() {
     let mut invalid = request("exit 0");
     invalid.uid = u32::MAX;
     assert!(Exec::start(invalid).is_err());
-    let mut missing = request("exit 0");
-    missing.uid = 4_000_000_000;
-    missing.account = AccountMode::Existing;
-    assert!(Exec::start(missing).is_err());
 }
 
 /// Forces real failures at both post-fork descriptor boundaries while init remains the reaper.
@@ -536,7 +523,11 @@ fn a_failed_start_preserves_its_first_errno_and_the_cleanup_failure() {
             .err()
             .unwrap();
         assert!(failure.is_pending().unwrap());
-        let (error, owned, cleanup) = failure.into_parts();
+        let StartFailure {
+            error,
+            process: owned,
+            cleanup,
+        } = failure;
         assert_eq!(owned, Some(process));
         assert_eq!(error.raw_os_error(), Some(Errno::EBADF as i32));
         assert_eq!(cleanup, Some(Errno::EPERM));
@@ -630,7 +621,7 @@ fn host_launch_tests_use_the_syscall_seam_without_mocking_the_execution_core() {
         let mut collected = Collected::default();
         finish(&mut execution, &mut collected);
         assert_eq!(collected.stdout, b"native");
-        assert_eq!(collected.outcome.unwrap().status.code(), Some(9));
+        assert_eq!(collected.status.unwrap().code(), Some(9));
         let mut execution = Exec::start_simulated(request("exit 99"), Some(Errno::EPERM)).unwrap();
         let mut collected = Collected::default();
         finish(&mut execution, &mut collected);
@@ -641,7 +632,7 @@ fn host_launch_tests_use_the_syscall_seam_without_mocking_the_execution_core() {
                 error: Errno::EPERM as i32
             }))
         );
-        assert_eq!(collected.outcome.unwrap().status.code(), Some(125));
+        assert_eq!(collected.status.unwrap().code(), Some(125));
     });
 }
 
@@ -699,7 +690,7 @@ fn procfs_workload_cwd_checks(simulated: bool) {
             None => {
                 assert_eq!(collected.launch, Some(None));
                 assert_eq!(collected.stdout, expected.as_bytes());
-                assert!(collected.outcome.unwrap().status.success());
+                assert!(collected.status.unwrap().success());
             }
             Some(error) => {
                 assert_eq!(
@@ -710,7 +701,7 @@ fn procfs_workload_cwd_checks(simulated: bool) {
                     }))
                 );
                 assert!(collected.stdout.is_empty());
-                assert_eq!(collected.outcome.unwrap().status.code(), Some(125));
+                assert_eq!(collected.status.unwrap().code(), Some(125));
             }
         }
     }
@@ -771,8 +762,8 @@ fn a_stolen_or_auto_reaped_status_is_reported_once_and_never_reclassified_by_an_
             assert!(execution.observe(execution.id(), ExitStatus::from_raw(status)));
             let mut collected = Collected::default();
             finish(&mut execution, &mut collected);
-            assert_eq!(collected.outcome.unwrap().status.code(), Some(7));
-            assert_eq!(collected.outcome.unwrap().cause, None);
+            assert_eq!(collected.status.unwrap().code(), Some(7));
+            assert_eq!(execution.cause, None);
         }
     });
 }
@@ -867,7 +858,7 @@ fn privileged_exec_resets_priority_credentials_and_signals_before_exec() {
                 let mut collected = Collected::default();
                 finish(&mut execution, &mut collected);
                 assert_eq!(collected.launch, Some(None));
-                assert!(collected.outcome.unwrap().status.success());
+                assert!(collected.status.unwrap().success());
                 let output = String::from_utf8(collected.stdout).unwrap();
                 for expected in [
                     format!("Uid:\t{uid}\t{uid}\t{uid}\t{uid}\n"),
@@ -935,7 +926,7 @@ fn privileged_exec_streams_pipes_and_reports_its_status() {
             assert_eq!(collected.launch, Some(None));
             assert_eq!(collected.stdout, b"out:hello\n");
             assert_eq!(collected.stderr, b"err:hello\n");
-            assert_eq!(collected.outcome.unwrap().status.code(), Some(7));
+            assert_eq!(collected.status.unwrap().code(), Some(7));
             assert!(execution.descriptors().next().is_none());
             assert!(!execution.observe(execution.id(), ExitStatus::from_raw(0)));
             let mut values = request("if read -r line; then exit 99; fi; pwd");
@@ -951,7 +942,7 @@ fn privileged_exec_streams_pipes_and_reports_its_status() {
             let mut collected = Collected::default();
             finish(&mut execution, &mut collected);
             assert_eq!(collected.stdout, b"/\n");
-            assert!(collected.outcome.unwrap().status.success());
+            assert!(collected.status.unwrap().success());
             let mut values = request("");
             values.program = c"env".to_owned();
             values.arguments = vec![c"env".to_owned()];
@@ -968,30 +959,25 @@ fn privileged_exec_streams_pipes_and_reports_its_status() {
                     .lines()
                     .any(|line| line == "PWD=/tmp")
             );
-            assert!(collected.outcome.unwrap().status.success());
+            assert!(collected.status.unwrap().success());
         },
     );
 }
 
 #[test]
 #[ignore = "requires a guest's root credentials"]
-fn privileged_exec_checks_account_mode_and_enters_cwd_after_dropping_credentials() {
+fn privileged_exec_needs_no_account_and_enters_cwd_after_dropping_credentials() {
     isolated(
-        "privileged_exec_checks_account_mode_and_enters_cwd_after_dropping_credentials",
+        "privileged_exec_needs_no_account_and_enters_cwd_after_dropping_credentials",
         || {
-            for account in [AccountMode::Existing, AccountMode::Numeric] {
-                let mut values = request("pwd");
-                values.account = account;
-                if account == AccountMode::Numeric {
-                    values.uid = 4_000_000_000;
-                    values.gid = 4_000_000_000;
-                }
-                let mut execution = Exec::start(values).unwrap();
-                let mut collected = Collected::default();
-                finish(&mut execution, &mut collected);
-                assert_eq!(collected.launch, Some(None));
-                assert_eq!(collected.stdout, b"/\n");
-            }
+            let mut values = request("pwd");
+            values.uid = 4_000_000_000;
+            values.gid = 4_000_000_000;
+            let mut execution = Exec::start(values).unwrap();
+            let mut collected = Collected::default();
+            finish(&mut execution, &mut collected);
+            assert_eq!(collected.launch, Some(None));
+            assert_eq!(collected.stdout, b"/\n");
             let directory = tempfile::tempdir().unwrap();
             sys::chmod(
                 &sys::path_c_string(directory.path()).unwrap(),
@@ -1008,7 +994,7 @@ fn privileged_exec_checks_account_mode_and_enters_cwd_after_dropping_credentials
             let failure = collected.launch.unwrap().unwrap();
             assert_eq!(failure.stage, 18);
             assert_eq!(failure.error, Errno::EACCES as i32);
-            assert_eq!(collected.outcome.unwrap().status.code(), Some(125));
+            assert_eq!(collected.status.unwrap().code(), Some(125));
             let path = sys::path_c_string(directory.path()).unwrap();
             sys::chown(&path, 65534, 65534).unwrap();
             let mut values = request("exit 99");
@@ -1023,79 +1009,9 @@ fn privileged_exec_checks_account_mode_and_enters_cwd_after_dropping_credentials
                     error: Errno::EACCES as i32
                 }))
             );
-            assert_eq!(collected.outcome.unwrap().status.code(), Some(125));
-            let root = tempfile::tempdir().unwrap();
-            let etc = root.path().join("etc");
-            std::fs::create_dir(&etc).unwrap();
-            let passwd = "root:x:0:0::/:/bin/sh\n";
-            let group = "root:x:0:\n";
-            for (users, groups, expected) in [
-                (passwd.to_owned(), group, Ok(())),
-                (
-                    format!("# ignored:x:0:0::/:/bin/sh\n{passwd}"),
-                    group,
-                    Ok(()),
-                ),
-                (format!("{passwd}{passwd}"), group, Err(Errno::EINVAL)),
-                (
-                    "other:x:1:0::/:/bin/sh\n".to_owned(),
-                    group,
-                    Err(Errno::ENOENT),
-                ),
-                ("root:x:0:0::/\n".to_owned(), group, Err(Errno::EINVAL)),
-                (":x:0:0::/:/bin/sh\n".to_owned(), group, Err(Errno::EINVAL)),
-                (
-                    "root:x:0:1::/:/bin/sh\n".to_owned(),
-                    group,
-                    Err(Errno::EINVAL),
-                ),
-                (
-                    "root:x:0:0::relative:/bin/sh\n".to_owned(),
-                    group,
-                    Err(Errno::EINVAL),
-                ),
-                (passwd.to_owned(), "other:x:1:\n", Err(Errno::EINVAL)),
-            ] {
-                std::fs::write(etc.join("passwd"), users).unwrap();
-                std::fs::write(etc.join("group"), groups).unwrap();
-                check_account_fixture(root.path(), expected);
-            }
-            std::fs::write(etc.join("group"), group).unwrap();
-            std::fs::write(etc.join("users"), passwd).unwrap();
-            std::fs::remove_file(etc.join("passwd")).unwrap();
-            std::os::unix::fs::symlink("users", etc.join("passwd")).unwrap();
-            check_account_fixture(root.path(), Err(Errno::ELOOP));
-            std::fs::remove_file(etc.join("passwd")).unwrap();
-            nix::unistd::mkfifo(&etc.join("passwd"), nix::sys::stat::Mode::S_IRWXU).unwrap();
-            check_account_fixture(root.path(), Err(Errno::EINVAL));
-            std::fs::remove_file(etc.join("passwd")).unwrap();
-            std::fs::File::create(etc.join("passwd"))
-                .unwrap()
-                .set_len((1 << 20) + 1)
-                .unwrap();
-            check_account_fixture(root.path(), Err(Errno::EINVAL));
+            assert_eq!(collected.status.unwrap().code(), Some(125));
         },
     );
-}
-
-/// Reads fixture account files only in a guest test's forked child; production never changes root.
-fn check_account_fixture(root: &std::path::Path, expected: Result<(), Errno>) {
-    match sys::fork().unwrap() {
-        sys::ForkResult::Child => {
-            nix::unistd::chroot(root).unwrap();
-            nix::unistd::chdir("/").unwrap();
-            let mut values = request("exit 99");
-            values.account = AccountMode::Existing;
-            assert_eq!(
-                values.check().map_err(|error| error.raw_os_error()),
-                expected.map_err(|error| Some(error as i32))
-            );
-            sys::exit_immediately(0);
-        }
-        sys::ForkResult::Parent(child) => {
-            assert_eq!(sys::wait(child), Some(ChildStatus::Exited(0)));
-        }
-    }
 }
 
 #[test]
@@ -1142,9 +1058,7 @@ fn privileged_every_ending_kills_the_process_group_including_normal_completion()
                                 Some(Event::KillFailed(target, error)) => {
                                     panic!("kill {target:?}: {error}")
                                 }
-                                Some(Event::ReadFailed(stream, error)) => {
-                                    panic!("read {stream:?}: {error}")
-                                }
+                                Some(Event::ReadFailed) => panic!("an output read failed"),
                                 _ => {}
                             }
                         }
@@ -1163,7 +1077,7 @@ fn privileged_every_ending_kills_the_process_group_including_normal_completion()
                 until(&mut execution, &mut collected, |collected| {
                     collected.reaped.contains(&descendant)
                 });
-                let outcome = collected.outcome.unwrap();
+                let status = collected.status.unwrap();
                 let expected = [
                     None,
                     Some(Cause::Terminated),
@@ -1171,11 +1085,11 @@ fn privileged_every_ending_kills_the_process_group_including_normal_completion()
                     Some(Cause::TimedOut),
                     Some(Cause::Disconnected),
                 ][ending];
-                assert_eq!(outcome.cause, expected);
+                assert_eq!(execution.cause, expected);
                 if ending == 0 {
-                    assert_eq!(outcome.status.code(), Some(7));
+                    assert_eq!(status.code(), Some(7));
                 } else {
-                    assert_eq!(outcome.status.signal(), Some(nix::libc::SIGKILL));
+                    assert_eq!(status.signal(), Some(nix::libc::SIGKILL));
                 }
                 assert!(!sys::process_exists(
                     pid(i32::try_from(descendant).unwrap())
@@ -1281,10 +1195,7 @@ fn privileged_capture_sweep_kills_setsid_escapees_and_spares_both_helpers() {
                     held.reset();
                     finish(&mut held, &mut held_output);
                     assert!(sys::process_exists(held_id));
-                    assert_eq!(
-                        held_output.outcome.unwrap().cause,
-                        Some(Cause::Disconnected)
-                    );
+                    assert_eq!(held.cause, Some(Cause::Disconnected));
                     #[allow(clippy::zombie_processes)]
                     let unrelated = std::process::Command::new("sleep")
                         .arg("30")

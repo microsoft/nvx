@@ -51,7 +51,6 @@ fn direct_launch_uses_the_plain_process_core_without_a_helper_or_cgroup() {
         assert!(environment.contains(&expected), "{expected:?}");
     }
     assert!(!plan.input);
-    assert_eq!(plan.account, AccountMode::Numeric);
 }
 
 #[test]
@@ -216,13 +215,12 @@ fn privileged_direct_launch_hardens_credentials_and_resets_priority() {
             Some(Event::Launch(report)) => assert!(report.unwrap().is_none()),
             Some(Event::Output(Stream::Stdout, bytes)) => output.extend_from_slice(bytes),
             Some(Event::Output(Stream::Stderr, bytes)) => errors.extend_from_slice(bytes),
-            Some(Event::Ended(outcome)) => {
-                assert_eq!(outcome.status.code(), Some(0));
+            Some(Event::Ended(status)) => {
+                assert_eq!(status.code(), Some(0));
                 break;
             }
-            Some(Event::ReadFailed(_, error) | Event::KillFailed(_, error)) => {
-                panic!("{error}");
-            }
+            Some(Event::ReadFailed) => panic!("an output read failed"),
+            Some(Event::KillFailed(_, error)) => panic!("{error}"),
             Some(_) => {}
             None => {
                 let descriptors = workload.descriptors().map(|(_, fd)| fd).collect::<Vec<_>>();
