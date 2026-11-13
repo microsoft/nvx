@@ -1,5 +1,18 @@
 use super::*;
 
+#[test]
+fn report_only_phase_publication_keeps_the_actual_failure_count() {
+    let mut state = TimeState::default();
+    *state.check_mut(Phase::Boot).unwrap() = CheckState::completed(4, 17, 9, Some(2));
+    let output = state.status_markers(true);
+    assert!(output.starts_with("NVX-TIME-REPORT: v=1 phase=boot status=fail cpus=4 "));
+    assert!(output.contains("elapsed_us=17 cpu_us=9 failures=2\n"));
+    assert!(!state.checks_ok());
+    assert!(!state.pending(false));
+    *state.check_mut(Phase::Boot).unwrap() = CheckState::completed(4, 17, 9, Some(0));
+    assert!(state.checks_ok());
+}
+
 const ROUND_TRIP_STATE: &str = concat!(
     "version=1\n",
     "generation=2\n",

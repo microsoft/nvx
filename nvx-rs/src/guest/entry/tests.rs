@@ -1486,6 +1486,14 @@ fn check_search(entry: &Entry, root: &Path) {
     std::fs::remove_dir_all(root.join("tmp/only-inside")).unwrap();
 }
 
+fn kernel_interface_exists(path: &str) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!("read kernel interface {path}: {error}"),
+    }
+}
+
 #[test]
 fn privileged_entries_see_their_own_view_and_identity() {
     if crate::guest::managed_agent::tests::isolate_process_test(
@@ -1578,7 +1586,14 @@ fn privileged_entries_see_their_own_view_and_identity() {
                 for set in ["CapPrm", "CapEff", "CapBnd"] {
                     assert_eq!(value(&output, set), mask, "{set}");
                 }
-                assert_eq!(value(&output, "kcore"), "0");
+                assert_eq!(
+                    value(&output, "kcore"),
+                    if kernel_interface_exists("/proc/kcore") {
+                        "0"
+                    } else {
+                        "unreadable"
+                    }
+                );
                 assert_eq!(value(&output, "firmware"), "");
                 for point in [
                     "/proc/sys",
@@ -1586,7 +1601,16 @@ fn privileged_entries_see_their_own_view_and_identity() {
                     "/proc/kcore",
                     "/sys/firmware",
                 ] {
-                    assert!(mount_options(&output, point).contains(&"ro"), "{point}");
+                    if kernel_interface_exists(point) {
+                        assert!(mount_options(&output, point).contains(&"ro"), "{point}");
+                    } else {
+                        assert!(
+                            !values(&output, "mount")
+                                .iter()
+                                .any(|mount| mount.starts_with(&format!("{point} "))),
+                            "an absent kernel interface must not acquire a manufactured mount: {point}"
+                        );
+                    }
                 }
                 // A nested `chroot` and `..` from it land at the top of the root, never above.
                 for escape in values(&output, "escape") {

@@ -7,6 +7,7 @@ use super::*;
 /// Makes the kernel reap the calling process's children on its own, which the `SIG_IGN`
 /// disposition of `SIGCHLD` does when `ignored`, and `SA_NOCLDWAIT` with the default action
 /// does otherwise. [`reset_child_signal`] undoes either.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn reap_children_automatically(ignored: bool) -> Result<(), Errno> {
     use nix::sys::signal::{SaFlags, SigAction};
 
@@ -21,6 +22,7 @@ pub(crate) fn reap_children_automatically(ignored: bool) -> Result<(), Errno> {
 
 /// Returns whether the calling process has a child, which it has not reaped, without reaping
 /// it, whatever its disposition of `SIGCHLD`.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn has_child() -> bool {
     use nix::sys::wait::{Id, WaitPidFlag};
 

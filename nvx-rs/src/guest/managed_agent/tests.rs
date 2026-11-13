@@ -15,18 +15,40 @@ pub(crate) static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::ne
 /// should execute the test body. Isolation prevents PID-1-style `waitpid(-1)` behavior from
 /// reaping children that unrelated parallel host tests own.
 pub(crate) fn isolate_process_test(marker: &str, test: &str) -> bool {
-    if std::env::var_os(marker).is_some() {
+    if let Some(receipt) = std::env::var_os(marker) {
+        std::fs::write(receipt, test).expect("record entry into the selected isolated test");
         return false;
     }
+    let directory = tempfile::tempdir().expect("create isolated-test receipt directory");
+    let receipt = directory.path().join("entered");
     let status = std::process::Command::new(
         std::env::current_exe().expect("the test executable has a path"),
     )
     .args(["--exact", test, "--nocapture"])
-    .env(marker, "1")
+    .env(marker, &receipt)
     .status()
     .expect("the isolated test process starts");
     assert!(status.success(), "the isolated test process failed");
+    assert_eq!(
+        std::fs::read_to_string(receipt).ok().as_deref(),
+        Some(test),
+        "the isolated test did not enter its body; an exact selector matched zero tests or an ignored test",
+    );
     true
+}
+
+#[test]
+fn process_isolation_rejects_successful_zero_test_subprocesses() {
+    let result = std::panic::catch_unwind(|| {
+        isolate_process_test(
+            "NVX_MISSING_ISOLATED_TEST_RECEIPT",
+            "guest::this_exact_isolated_test_does_not_exist",
+        )
+    });
+    assert!(
+        result.is_err(),
+        "zero matching tests must not be a successful isolated run"
+    );
 }
 
 impl AgentConfig {

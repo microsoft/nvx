@@ -30,16 +30,16 @@
 //!
 //! Each other module holds one program, and the crate's binary of the same name runs its `main`.
 //! Two of them also offer their steps as typed calls, which any guest init or agent runs in its
-//! own process and their programs run on: on x86-64, `time`'s `TimeAbi` runs the time ABI's
-//! cold-boot step, capture, and restore finish, and [`reseed`] reseeds the kernel's random number
+//! own process and their programs run on: `time`'s `TimeAbi` runs the shared cold-boot step
+//! and daemon, and, on x86-64, capture and restore finish; [`reseed`] reseeds the kernel's random number
 //! generator with a restore's fresh entropy, which starts with the new [`GenerationId`]. And
 //! [`ingress`] starts its program, the announcer of the guest's listeners, from a socket that it
 //! binds for it, as a clone's application does. The
 //! libraries need none of NVX's control protocol, managed agent, or workload identity, and NVX's
 //! managed agent opens its control terminal, applies its host mapping table, and starts, drives,
-//! collects, and settles its workloads through them. On x86-64, the hidden `init` module holds
-//! `nvx-init`, a PID 1 for layered roots, which takes PID 1 over from their early boot with the
-//! guest's helpers, the time daemon and the announcer: it runs with them ahead of the workloads,
+//! collects, and settles its workloads through them. On x86-64 and AArch64, the hidden `init`
+//! module holds `nvx-init`, a PID 1 for layered roots, which takes PID 1 over from their early
+//! boot with the guest's helpers, the time daemon and the announcer: it runs ahead of the workloads,
 //! collects every child's status, and ends the VM after `SIGTERM` or once either helper ends.
 //!
 //! The programs keep the command lines, exit statuses, and output of the C programs that they
@@ -96,7 +96,6 @@ mod status;
 #[allow(unsafe_code)]
 mod sys;
 
-#[cfg(target_arch = "x86_64")]
 mod kernel_text;
 
 pub use generation::GenerationId;
@@ -111,13 +110,13 @@ pub mod console_pending;
 pub mod device_io;
 pub mod entry;
 pub mod exec;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[doc(hidden)]
 pub mod exit;
 #[doc(hidden)]
 pub mod gpt;
 pub mod ingress;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[doc(hidden)]
 pub mod init;
 #[doc(hidden)]
@@ -133,7 +132,7 @@ pub mod reseed;
 pub mod root;
 pub mod spawn;
 pub mod terminal;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod time;
 #[cfg(target_arch = "x86_64")]
 #[doc(hidden)]

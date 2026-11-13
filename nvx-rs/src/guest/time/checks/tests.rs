@@ -1,4 +1,5 @@
 use super::*;
+use crate::guest::time::deferred::{STATUS_POLL, STATUS_WAIT};
 
 #[test]
 fn the_daemon_is_recognized_by_the_name_that_it_takes() {

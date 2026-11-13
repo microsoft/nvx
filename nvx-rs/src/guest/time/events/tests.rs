@@ -24,10 +24,37 @@ fn event_has_the_abi_limit() {
 
 #[test]
 fn codes_and_sources_have_the_abi_names() {
-    assert_eq!(
-        ViolationCode::Conformance(CheckId::C12).to_string(),
-        "G_CONFORMANCE_C12"
-    );
+    for (index, check) in [
+        CheckId::C1,
+        CheckId::C2,
+        CheckId::C3,
+        CheckId::C4,
+        CheckId::C5,
+        CheckId::C6,
+        CheckId::C7,
+        CheckId::C8,
+        CheckId::C9,
+        CheckId::C10,
+        CheckId::C11,
+        CheckId::C12,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            ViolationCode::Conformance(check).to_string(),
+            format!("G_CONFORMANCE_C{}", index + 1)
+        );
+    }
+    for (code, name) in [
+        (ViolationCode::RepairClock, "G_REPAIR_CLOCK"),
+        (ViolationCode::RepairGeneration, "G_REPAIR_GENERATION"),
+        (ViolationCode::RepairPacket, "G_REPAIR_PACKET"),
+        (ViolationCode::RepairSample, "G_REPAIR_SAMPLE"),
+        (ViolationCode::RepairSuppression, "G_REPAIR_SUPPRESSION"),
+    ] {
+        assert_eq!(code.to_string(), name);
+    }
     assert_eq!(ViolationCode::KmsgOverrun.to_string(), "G_KMSG_OVERRUN");
     assert_eq!(EventSource::Repair.to_string(), "repair");
 }

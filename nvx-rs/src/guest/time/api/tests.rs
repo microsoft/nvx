@@ -699,6 +699,7 @@ fn privileged_captures_hand_over_the_entropy_in_their_mode() {
 fn cold_boot_in_strict_and_report_only_mode() {
     sys::enter_private_mount_namespace().unwrap();
     let _run = sys::TmpfsMount::mount(c"nvx-test", c"/run", c"mode=0755").unwrap();
+    assert!(matches!(checks::wait_for_checks(true), Err(Errno::ENOENT)));
     // Port B offers no time-sample window, so the initial sample fails check C12.
     let ops = FakeOps::new([0]);
     let runtime = Runtime::new(&ops, false).strict();
@@ -728,6 +729,7 @@ fn cold_boot_in_strict_and_report_only_mode() {
     assert!(!boot.synchronized());
     assert_eq!(boot.failures, 1);
     assert!(!state_load().unwrap().synchronized);
+    assert_eq!(state_load().unwrap().violations, 1);
     // A sample beyond the bound fails check C12 too.
     let host = HostClock {
         status: HostClockStatus::FreeRunning,

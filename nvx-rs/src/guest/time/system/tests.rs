@@ -909,3 +909,5 @@ fn a_save_waits_for_the_suppression_lock() {
     });
     assert_eq!(test.settings(), settings([Some("1"), Some("0"), Some("0")]));
 }
+use crate::guest::time::sample::HostClock;
+use crate::guest::time::state::STATE_TEMP_PATH;

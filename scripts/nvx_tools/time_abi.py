@@ -11,6 +11,7 @@ and doc/design/2.2-cpu-and-topology.md the CPU generations named in reports.
 from __future__ import annotations
 
 import json
+import platform
 import re
 import urllib.parse
 from collections.abc import Mapping, Sequence
@@ -566,15 +567,39 @@ def describe_exit_status(returncode: int | None) -> str | None:
 
 
 def _command_option(command: Sequence[str], option: str) -> str | None:
-    for index, argument in enumerate(command[:-1]):
-        if argument == option:
+    for index, argument in enumerate(command):
+        if argument == option and index + 1 < len(command):
             return command[index + 1]
+        if argument.startswith(f"{option}="):
+            return argument[len(option) + 1 :]
     return None
 
 
 def is_cold_boot_command(command: Sequence[str]) -> bool:
-    """Whether an OpenVMM command boots a kernel rather than restoring."""
-    return "--kernel" in command and "--restore-snapshot" not in command
+    """Whether a normal OpenVMM or nvx-rs run boots rather than restores."""
+    cli_run = (
+        bool(command) and Path(command[0]).stem == "nvx-rs" and "run" in command[1:]
+    )
+    return ("--kernel" in command or cli_run) and _command_option(
+        command, "--restore-snapshot"
+    ) is None
+
+
+def _counter_architecture(command: Sequence[str]) -> str:
+    """Use explicit ISA/product metadata, or the native default of the normal CLI."""
+    explicit = _command_option(command, "--architecture")
+    if explicit is not None:
+        return explicit
+    if command and Path(command[0]).stem == "nvx-rs":
+        return (
+            "aarch64"
+            if platform.machine().lower() in ("arm64", "aarch64")
+            else "x86_64"
+        )
+    kernel = _command_option(command, "--kernel")
+    return (
+        "aarch64" if kernel is not None and Path(kernel).name == "Image" else "x86_64"
+    )
 
 
 def _validate_marker(
@@ -584,6 +609,7 @@ def _validate_marker(
     backend: str | None,
     online_cpus: int | None,
     generation: int | None = None,
+    architecture: str = "x86_64",
 ) -> None:
     """Check a boot or restore line's fields against the backend's rates."""
     problems: list[str] = []
@@ -593,12 +619,25 @@ def _validate_marker(
         problems.append(f"it is not a passing {phase} check")
     try:
         tsc_hz = int(fields.get("tsc_hz", ""))
-        if not MIN_TSC_HZ <= tsc_hz <= MAX_TSC_HZ:
+        if architecture == "aarch64":
+            if not 0 < tsc_hz <= 0xFFFFFFFF:
+                problems.append(
+                    f"counter frequency={tsc_hz} is not a nonzero CNTFRQ value"
+                )
+        elif architecture != "x86_64":
+            problems.append(f"unknown counter architecture {architecture!r}")
+        elif not MIN_TSC_HZ <= tsc_hz <= MAX_TSC_HZ:
             problems.append(f"tsc_hz={tsc_hz} is outside 500 MHz to 10 GHz")
     except ValueError:
         problems.append(f"tsc_hz={fields.get('tsc_hz')!r} is not an integer")
     lapic = fields.get("lapic_hz")
-    expected_lapic = LAPIC_HZ.get(backend) if backend is not None else None
+    expected_lapic = (
+        0
+        if architecture == "aarch64"
+        else LAPIC_HZ.get(backend)
+        if backend is not None
+        else None
+    )
     if expected_lapic is not None and lapic != str(expected_lapic):
         problems.append(f"lapic_hz={lapic} is not the {backend} rate {expected_lapic}")
     actual = fields.get("generation", "")
@@ -621,9 +660,16 @@ def validate_boot_marker(
     *,
     backend: str | None,
     online_cpus: int | None = None,
+    architecture: str = "x86_64",
 ) -> None:
     """Check the boot marker's fields against the backend's declared rates."""
-    _validate_marker(fields, phase="boot", backend=backend, online_cpus=online_cpus)
+    _validate_marker(
+        fields,
+        phase="boot",
+        backend=backend,
+        online_cpus=online_cpus,
+        architecture=architecture,
+    )
 
 
 def validate_restore_marker(
@@ -660,8 +706,9 @@ class TimeAbiMonitor:
 
     def __init__(self, command: Sequence[str] = ()) -> None:
         self.backend = _command_option(command, "--hypervisor")
+        self.architecture = _counter_architecture(command)
         self.cold_boot = is_cold_boot_command(command)
-        self.restored = "--restore-snapshot" in command
+        self.restored = _command_option(command, "--restore-snapshot") is not None
         self.boot: dict[str, str] | None = None
         self.restores: list[dict[str, str]] = []
         self.runtime: dict[str, str] | None = None
@@ -807,7 +854,7 @@ class TimeAbiMonitor:
         online_cpus: int | None = None,
     ) -> dict[str, str]:
         """Return the validated boot marker of a cold boot, or fail clearly."""
-        if self.boot is None:
+        if self.boot is None or self.report_only:
             raise TimeAbiFailure(
                 f"guest did not report the NVX-TIME-ABI boot marker before {context}; "
                 f"{self._missing_reason()}"
@@ -816,6 +863,7 @@ class TimeAbiMonitor:
             self.boot,
             backend=self.backend,
             online_cpus=online_cpus,
+            architecture=self.architecture,
         )
         return self.boot
 
@@ -832,7 +880,7 @@ class TimeAbiMonitor:
         first, and each line keeps the values from when its check ran: only
         the restore line describes the CPUs that are online now.
         """
-        if not self.restores:
+        if not self.restores or self.report_only:
             raise TimeAbiFailure(
                 f"guest did not report an NVX-TIME-ABI restore marker before "
                 f"{context}; {self._missing_reason()}"
