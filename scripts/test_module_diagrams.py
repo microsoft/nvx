@@ -222,6 +222,20 @@ class ParseTests(unittest.TestCase):
         )
         self.assertEqual(parsed.uses, frozenset(LINUX_USES))
 
+    def test_filtered_parents_leave_children_under_the_nearest_ancestor(self):
+        for owner in ("nvx", "nvx::host"):
+            with self.subTest(owner=owner):
+                omitted = f"{owner}::gpt"
+                child = f"{omitted}::crc"
+                modules = {"nvx": "crate"}
+                if owner != "nvx":
+                    modules[owner] = "pub"
+                modules[child] = "pub(self)"
+                text = export(modules).replace(owns(omitted, child), owns(owner, child))
+                parsed = diagrams.parse(text, "linux")
+                self.assertEqual(parsed.visibility, modules)
+                self.assertEqual(parsed.owner[child], owner)
+
     def test_exports_of_anything_but_modules_and_their_uses_fail(self):
         modules = {"nvx": "crate", "nvx::host": "pub"}
         cases = {
@@ -348,12 +362,13 @@ class RestoreTests(unittest.TestCase):
         plain_uses: Iterable[tuple[str, str]] = (("nvx::host", "nvx::error"),),
         tested: Mapping[str, str] = TESTED,
         tested_uses: Iterable[tuple[str, str]] = TESTED_USES,
+        target: str = "linux",
     ) -> diagrams.Export:
         return diagrams.restore(
-            diagrams.parse(export(plain, plain_uses), "linux"),
-            diagrams.parse(export(tested, tested_uses), "linux"),
+            diagrams.parse(export(plain, plain_uses), target),
+            diagrams.parse(export(tested, tested_uses), target),
             conditions,
-            "linux",
+            target,
         )
 
     def test_modules_that_cargo_modules_drops_as_tests_return_with_their_uses(self):
@@ -394,6 +409,85 @@ class RestoreTests(unittest.TestCase):
             re.escape(f"nvx::host::imp builds under cfg({other})"),
         ):
             self.restore(found(imp=(other,)))
+
+    def test_a_test_or_platform_feature_tracks_its_target_and_descendants(self):
+        condition = 'any(test, all(feature = "guest", target_os = "linux"))'
+        child = "nvx::host::imp::child"
+        for platform, target in diagrams.TARGETS.items():
+            with self.subTest(platform=platform):
+                restored = self.restore(
+                    {**found(imp=(condition,)), child: ()},
+                    tested={**TESTED, child: "pub(self)"},
+                    tested_uses=(*TESTED_USES, (child, "nvx::error")),
+                    target=target,
+                )
+                visibility = dict(PLAIN)
+                uses = {("nvx::host", "nvx::error")}
+                if platform == LINUX:
+                    visibility.update(
+                        {"nvx::host::imp": "pub(self)", child: "pub(self)"}
+                    )
+                    uses.update(
+                        {
+                            ("nvx::host", "nvx::host::imp"),
+                            ("nvx::host::imp", "nvx::error"),
+                            (child, "nvx::error"),
+                        }
+                    )
+                self.assertEqual(restored.visibility, visibility)
+                self.assertEqual(restored.uses, uses)
+                self.assertEqual(
+                    diagrams.public(restored).visibility,
+                    {"nvx": "crate", "nvx::host": "pub"},
+                )
+
+    def test_a_platform_feature_needs_an_enabled_feature_and_known_target(self):
+        cases = (
+            (
+                'any(test, all(feature = "other", target_os = "linux"))',
+                diagrams.TARGETS[LINUX],
+            ),
+            ('any(test, all(feature = "guest", target_os = "linux"))', "unknown"),
+        )
+        for condition, target in cases:
+            with self.subTest(condition=condition, target=target):
+                with self.assertRaisesRegex(
+                    diagrams.DiagramError,
+                    re.escape(f"nvx::host::imp builds under cfg({condition})"),
+                ):
+                    self.restore(found(imp=(condition,)), target=target)
+
+    def test_filtered_children_regain_their_parent_and_production_uses(self):
+        parent = "nvx::host::imp"
+        child = f"{parent}::child"
+        target = diagrams.TARGETS[LINUX]
+        plain = export(
+            {**PLAIN, child: "pub(self)"},
+            (
+                ("nvx::host", "nvx::error"),
+                ("nvx::host", child),
+                (child, "nvx::error"),
+            ),
+        ).replace(owns(parent, child), owns("nvx::host", child))
+        tested = export(
+            {**TESTED, child: "pub(self)"},
+            (*TESTED_USES, (parent, child), (child, "nvx::error")),
+        )
+        restored = diagrams.restore(
+            diagrams.parse(plain, target),
+            diagrams.parse(tested, target),
+            {
+                **found(
+                    imp=('any(test, all(feature = "guest", target_os = "linux"))',)
+                ),
+                child: (),
+            },
+            target,
+        )
+        self.assertEqual(restored.owner[child], parent)
+        self.assertIn((parent, child), restored.uses)
+        self.assertNotIn(("nvx::host", child), restored.uses)
+        self.assertIn((child, "nvx::error"), restored.uses)
 
     def test_a_use_that_only_a_restored_module_makes_counts_once(self):
         # cargo-modules moves the uses of a module that it drops to the module

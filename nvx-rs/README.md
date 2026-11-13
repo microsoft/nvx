@@ -44,7 +44,7 @@ workspace.
 | `testing` | NVX's own `nvx-fake-openvmm` binary, a fake OpenVMM for tests; see [Test hooks](#test-hooks). It adds no API |
 
 Without default features, the crate has only `protocol`, `activation`,
-`contract`, `net`, `gpt`, `uuid`, `Hypervisor`, and `Error`, and depends on
+`contract`, `net`, `uuid`, `Hypervisor`, and `Error`, and depends on
 nothing but `serde` when `serde` is enabled and `nix` and `getrandom` when
 `guest` is.
 
@@ -62,7 +62,7 @@ nvx-rs/
 │   ├── contract.rs  the versions of the contracts that the crate speaks with OpenVMM and the
 │   │                guest, and the compatibility of releases with them
 │   ├── net/         CIDR networks and their subtraction, hostnames, guest addresses, and gateways
-│   ├── gpt/         strict reading of GPT disks; no dependencies, shared by the host and the guest
+│   ├── gpt/         strict reading of GPT disks for NVX's guest programs, private to the crate
 │   ├── uuid.rs      UUIDs in their canonical text and in GPT's layout
 │   ├── hypervisor.rs
 │   ├── error.rs     nvx::Error, its ErrorKind, and the stable codes that the CLI prints
@@ -108,7 +108,6 @@ changes only when the module's purpose does.
 | [`nvx::activation`](#nvxactivation) | The activation record of a layered root, which a clone reads in place of its captured configuration, and what Ready reports |
 | [`nvx::contract`](#nvxcontract) | The versions of the contracts that the crate speaks with OpenVMM and the guest, and the compatibility of releases with them |
 | [`nvx::net`](#nvxnet) | Network primitives that do not depend on the host: CIDR networks, hostnames, guest addresses, and gateways |
-| [`nvx::gpt`](#nvxgpt) | Strict reading of GPT disks whose first partition configures an adapter and whose others hold a root's read-only layers |
 | [`nvx::uuid`](#nvxuuid) | UUIDs, such as those of GPT disks and filesystems, in their canonical text and in GPT's layout |
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
 | [`nvx::Error`](#nvxerror) | `Error`, `ErrorKind`, and `Result`: the crate's error, which only `nvx` makes, and whose kinds callers act on |
@@ -352,23 +351,6 @@ address.
 `Ipv4Cidr::parse` refuse unless OpenVMM accepts it, as `is_valid_guest_network`
 does; it displays and parses as `ADDRESS/PREFIX`, such as `10.0.0.2/24`, and
 with the `serde` feature it serializes as that text.
-
-### `nvx::gpt`
-
-`Disk::read`: the protective MBR, primary header, and primary partition entry
-array of a GPT disk, read through a `ReadAt` source that the caller gives and
-checked strictly, as UEFI specifies them and as Linux requires them, without
-ever reading the backup: 128-byte entries, at most 1 MiB of them, used entries
-first and without holes, a first partition and 1 to 254 layers, extents in the
-usable blocks without overlap, and unique GUIDs, with checked arithmetic in the
-disk's logical blocks.
-
-`Expected` adds the disk GUID and the partitions' unique GUIDs and sizes that a
-caller knows, and `Disk::read_first_partition` returns the first partition's
-opaque bytes, up to a bound and without trailing NUL bytes and whitespace.
-
-GUIDs are `nvx::uuid::Uuid`s. It has no dependencies, so the guest and the
-host's checks of the images that it stages share it.
 
 ### `nvx::uuid`
 
@@ -2053,13 +2035,32 @@ runtime's file systems and live shares in it and the host's export beside it,
 switches into it once, and tears it down; `guest::view` sets the VM-wide
 hostname, machine ID, and resolver file, whose binds the root owns;
 `guest::gpt` reads the partition table of a GPT disk through its block device,
-with `nvx::gpt`; the mapper of `guest::mappings` mounts host mappings beneath
-the descriptors of the roots that its caller names; and the application of
-`guest::activation` assembles a restored VM's root and applies its view from
-its activation record, without starting a process. The
+with the internal `gpt` parser; the mapper of `guest::mappings` mounts host
+mappings beneath the descriptors of the roots that its caller names; and the
+application of `guest::activation` assembles a restored VM's root and applies
+its view from its activation record, without starting a process. The
 [guest-agent guidelines](../doc/guest-agent-guidelines.md#build-the-space)
 give its interface and the rules that it keeps, which another init's space may
 adapt.
+
+#### GPT validation
+
+The internal `gpt` parser reads a GPT disk's protective MBR, primary header,
+and primary partition entry array, checking them strictly as UEFI specifies
+them and as Linux requires them, without ever reading the backup: 128-byte
+entries, at most 1 MiB of them, used entries first and without holes, a first
+partition and 1 to 254 layers, extents in the usable blocks without overlap,
+and unique GUIDs, with checked arithmetic in the disk's logical blocks. It
+checks the disk GUID and partition identities and sizes that the guest
+expects, and returns the first partition's opaque bytes, up to a bound and
+without trailing NUL bytes and whitespace.
+
+The parser, its types, and its constants are not public API. The control plane
+owns producing, selecting, checking, and staging its images, and the chosen
+guest init owns interpreting and mounting them. NVX's bundled init and managed
+agent continue to share this parser internally. `nvx::uuid`,
+`protocol::root::ImageFormat::Gpt`, and `activation::Image::Gpt` remain public:
+UUID utilities and image-format selectors do not expose the parser.
 
 GPT lower layers use `noload,errors=remount-ro`: the kernel neither loads nor
 replays their journals, because even a journal whose file system does not
