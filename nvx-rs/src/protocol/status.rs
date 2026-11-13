@@ -12,9 +12,9 @@
 //!   status for each class.
 //! - [`ACTIVATION_DEADLINE`] to [`ACTIVATION_ORDER`], 50 to 58: the failures of a clone's
 //!   activation, which follows its repair, one status reserved for each class: the deadline, the
-//!   host's session, the activation record of the restore packet and the resources that it
-//!   expects, the activation of the root, of the workload, of the host export, and of the network
-//!   settings, and the guest's own order.
+//!   host's session, the Activate's record and the resources that it expects, the activation of
+//!   the root, of the workload, of the host export, and of the network settings, and the guest's
+//!   own order.
 //!
 //! The guest ends the VM with a status after a diagnostic that names the failure, such as a
 //! violation event of the time ABI, or an error line. A status alone does not tell the cause, nor
@@ -56,15 +56,15 @@ pub const REPAIR_FINISH: u8 = 45;
 /// The clone was not activated before its deadline, which starts at its repair's
 /// acknowledgement.
 pub const ACTIVATION_DEADLINE: u8 = 50;
-/// The host broke the session of a repaired clone's activation: it sent a request other than its
-/// request for the clone's Ready before the clone was ready.
+/// The host broke the session of a repaired clone's activation: before the clone was ready, it
+/// reset the session again, or sent a request before the activation, and, before or after, it
+/// sent an Activate of another transaction, or one that changes the accepted record.
 pub const ACTIVATION_PROTOCOL: u8 = 51;
-/// The activation record of the clone's restore packet is refused: the packet carries none, or
-/// the record does not decode, breaks a limit, or is a cold boot's, without the restore section
-/// of a clone's.
+/// The Activate's record is refused: it does not decode, breaks a limit, or is a cold boot's,
+/// without the restore section of a clone's.
 pub const ACTIVATION_RECORD: u8 = 52;
-/// The activation record of the clone's restore packet expects other resources than the repaired
-/// clone has: another number of online CPUs, or another memory size.
+/// The Activate's record expects other resources than the repaired clone has: another number of
+/// online CPUs, or another memory size.
 pub const ACTIVATION_RESOURCES: u8 = 53;
 /// The clone's root cannot be activated with the record's settings: its image does not assemble
 /// over its upper, a GPT image's partition table is refused, or its scratch is not fresh.
@@ -78,8 +78,8 @@ pub const ACTIVATION_EXPORT: u8 = 56;
 /// endpoint, or the announcer of the workload's listeners, which its network publishes, cannot
 /// start, or ended.
 pub const ACTIVATION_NETWORK: u8 = 57;
-/// The guest's own order misused the activation: it accepted the record again, completed an
-/// activation that did not run, or started the sandbox before the clone was ready.
+/// The guest's own order misused the activation: it completed an activation that did not run,
+/// or started the sandbox before the clone was ready.
 pub const ACTIVATION_ORDER: u8 = 58;
 
 /// The time ABI's statuses, from [`TIME_CONFORMANCE`] to [`TIME_REPAIR`].
@@ -104,9 +104,9 @@ pub fn describe(status: u8) -> Option<&'static str> {
         REPAIR_RESEED => "a clone's reseed failed",
         REPAIR_FINISH => "a clone's restore finish failed",
         ACTIVATION_DEADLINE => "a clone was not activated before its deadline",
-        ACTIVATION_PROTOCOL => "the host broke a repaired clone's session before it was ready",
-        ACTIVATION_RECORD => "a clone's activation record is refused",
-        ACTIVATION_RESOURCES => "a clone's activation record expects other resources",
+        ACTIVATION_PROTOCOL => "the host broke a repaired clone's restricted session",
+        ACTIVATION_RECORD => "a clone's Activate record is refused",
+        ACTIVATION_RESOURCES => "a clone's Activate record expects other resources",
         ACTIVATION_ROOT => "a clone's root activation failed",
         ACTIVATION_WORKLOAD => "a clone's workload activation failed",
         ACTIVATION_EXPORT => "a clone's host export cannot be mounted",
