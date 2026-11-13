@@ -6,9 +6,8 @@ use crate::activation::{MachineIdMode, View};
 use crate::host::cli::store::{files, record};
 use crate::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
 use crate::host::process::{BootId, ProcessRef};
-use crate::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
+use crate::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity};
 use crate::host::vm::{self, Prepared, SavedVm, VmDir};
-use crate::hypervisor::Hypervisor;
 use crate::protocol::CAPABILITY_LEN;
 
 pub(super) fn prepared(

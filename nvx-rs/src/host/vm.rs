@@ -35,7 +35,7 @@ use crate::host::paths::absolute;
 use crate::host::platform;
 use crate::host::report::{self, Report};
 use crate::host::restore::ReadyListener;
-use crate::host::runtime::{Runtime, RuntimeIdentity};
+use crate::host::runtime::{Hypervisor, Runtime, RuntimeIdentity};
 use crate::host::snapshot::{CaptureContext, HostTime, Snapshot};
 use crate::host::spawn;
 use crate::host::transport::{self, HostConnection};
@@ -805,8 +805,7 @@ fn restore_arguments(
     }
     for endpoint in std::iter::once(&outputs.endpoint).chain(outputs.console.as_ref()) {
         if endpoint == ready
-            || (runtime.hypervisor == crate::Hypervisor::Whp
-                && endpoint.eq_ignore_ascii_case(ready))
+            || (runtime.hypervisor == Hypervisor::Whp && endpoint.eq_ignore_ascii_case(ready))
         {
             return Err(Error::unsupported(
                 "restore-ready and console endpoints must be distinct",

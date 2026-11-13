@@ -8,17 +8,14 @@ fn hypervisors_parse_their_openvmm_spelling() {
             hypervisor.as_str().parse::<Hypervisor>().unwrap(),
             hypervisor
         );
-        #[cfg(feature = "serde")]
-        {
-            assert_eq!(
-                serde_json::to_string(&hypervisor).unwrap(),
-                format!("\"{hypervisor}\"")
-            );
-            assert_eq!(
-                serde_json::from_str::<Hypervisor>(&format!("\"{hypervisor}\"")).unwrap(),
-                hypervisor
-            );
-        }
+        assert_eq!(
+            serde_json::to_string(&hypervisor).unwrap(),
+            format!("\"{hypervisor}\"")
+        );
+        assert_eq!(
+            serde_json::from_str::<Hypervisor>(&format!("\"{hypervisor}\"")).unwrap(),
+            hypervisor
+        );
     }
     let error = "hyperv".parse::<Hypervisor>().unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unavailable);

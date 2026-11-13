@@ -26,6 +26,9 @@ changed item to its replacement, or to what its caller now does.
   `nvx::guest::{exec, spawn, process, cgroup, entry}`, are gone. A guest's init
   runs its executions itself.
 - **`nvx::guest::clone` is `nvx::guest::activation`.** The old name is gone.
+- **`nvx::Hypervisor` is `nvx::host::runtime::Hypervisor`.** The crate root no
+  longer exports it, so it needs the `host` feature, and the `serde` feature
+  alone now covers only `net::Ipv4Cidr`.
 - **The guest's space is private.** nvx-init's space, `nvx::guest::{root, gpt}`
   and the mapper of `nvx::guest::mappings`, is private to `nvx`.
   `resolve_guest_path` is gone, and `ExportPlan` holds paths only.

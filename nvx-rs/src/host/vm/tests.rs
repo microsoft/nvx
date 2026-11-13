@@ -18,10 +18,9 @@ use crate::host::network::{
 };
 #[cfg(any(target_os = "linux", windows))]
 use crate::host::process::Opened;
-use crate::host::runtime::{ArtifactIdentity, LaunchOptions, RuntimeIdentity};
+use crate::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, RuntimeIdentity};
 use crate::host::snapshot::{DESCRIPTION_FILE, KEY_FILE};
 use crate::host::vm_directory::{LOG, OUTCOME, RESTORE_READY, tests::vm_dir};
-use crate::hypervisor::Hypervisor;
 use crate::net::Ipv4Cidr;
 use crate::protocol::root::RootImage;
 use crate::uuid::Uuid;

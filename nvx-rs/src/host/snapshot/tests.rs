@@ -21,8 +21,7 @@ use crate::host::config::{
 };
 use crate::host::network::{Access, NetworkPolicy};
 use crate::host::process::BootId;
-use crate::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
-use crate::hypervisor::Hypervisor;
+use crate::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity};
 use crate::net::Ipv4Cidr;
 use crate::protocol::root::RootImage;
 

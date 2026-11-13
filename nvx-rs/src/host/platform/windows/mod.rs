@@ -21,7 +21,7 @@ use windows_sys::Win32::System::LibraryLoader::{
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::System::Threading::OpenProcess;
 
-use crate::hypervisor::Hypervisor;
+use super::hypervisor::Hypervisor;
 
 pub(crate) use self::endpoint::{ReadyListener, connect_endpoint};
 #[cfg(feature = "cli")]

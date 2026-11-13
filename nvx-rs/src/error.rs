@@ -261,6 +261,10 @@ pub struct Error {
 
 impl Error {
     /// Creates an error with the given code, or the code of the given kind, and description.
+    #[cfg_attr(
+        not(any(feature = "host", all(feature = "guest", target_os = "linux"))),
+        allow(dead_code, reason = "the host and the guest make errors")
+    )]
     pub(crate) fn new(code: impl Into<ErrorCode>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
@@ -270,6 +274,10 @@ impl Error {
     }
 
     /// Creates an [`ErrorKind::Unavailable`] error.
+    #[cfg_attr(
+        not(feature = "host"),
+        allow(dead_code, reason = "the host reports what it lacks")
+    )]
     pub(crate) fn unavailable(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Unavailable, message)
     }
@@ -312,6 +320,10 @@ impl Error {
 
     /// Attaches an underlying cause to this error.
     #[must_use]
+    #[cfg_attr(
+        not(any(feature = "host", all(feature = "guest", target_os = "linux"))),
+        allow(dead_code, reason = "the host and the guest make errors")
+    )]
     pub(crate) fn with_source(
         mut self,
         source: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>,

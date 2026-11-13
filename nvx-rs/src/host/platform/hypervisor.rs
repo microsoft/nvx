@@ -1,19 +1,34 @@
-//! The hypervisors that run NVX microVMs.
+//! The hypervisors that run NVX microVMs, which [`host::runtime`](crate::host::runtime) exports.
+//!
+//! [`Hypervisor`] lives in the platform layer, beneath `runtime`, because the platform's probes
+//! take it.
 
 use std::fmt;
 use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
 /// Hypervisor that runs the VMs.
 ///
-/// With the `serde` feature, it serializes as its OpenVMM spelling: `kvm`, `mshv`, or `whp`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(
-    feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
-    serde(rename_all = "lowercase")
-)]
+/// It displays, parses, and serializes as its OpenVMM spelling: `kvm`, `mshv`, or `whp`.
+///
+/// ```
+/// use nvx::host::runtime::Hypervisor;
+///
+/// assert_eq!("mshv".parse::<Hypervisor>()?, Hypervisor::Mshv);
+/// assert_eq!(Hypervisor::Whp.to_string(), "whp");
+/// # Ok::<(), nvx::Error>(())
+/// ```
+///
+/// The crate root does not export it:
+///
+/// ```compile_fail
+/// use nvx::Hypervisor;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Hypervisor {
     /// Linux KVM through `/dev/kvm`.
     Kvm,
