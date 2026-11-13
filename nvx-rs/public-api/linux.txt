@@ -66,7 +66,6 @@ method nvx::activation::ActivationRecord::encode
 method nvx::activation::ActivationRecord::new
 method nvx::activation::ActivationRecord::restore
 method nvx::activation::ActivationRecord::version
-const nvx::activation::CONTRACT_VERSION
 struct nvx::activation::Configuration
 method nvx::activation::Configuration::check
 field nvx::activation::Configuration::export

@@ -24,7 +24,6 @@ impl Restore {
             generation_id,
             memory_ranges: Vec::new(),
             network: None,
-            activation: None,
             finished: false,
             seed: None,
         }
@@ -45,13 +44,6 @@ impl Restore {
     /// Returns the restore with the host's input gated until the guest acknowledges it.
     pub(crate) fn gated(mut self) -> Self {
         self.flags |= decoders::PACKET_ACK_REQUIRED;
-        self
-    }
-
-    /// Returns the restore whose packet ends with the activation record `record`.
-    pub(crate) fn with_activation_record(mut self, record: &[u8]) -> Self {
-        self.flags |= decoders::PACKET_ACTIVATION;
-        self.activation = Some(record.to_vec());
         self
     }
 
@@ -596,7 +588,6 @@ fn requests_and_restores_carry_the_abi_values() {
         generation_id: GenerationId::from_bytes([7; GenerationId::LENGTH]),
         memory_ranges: vec![range],
         network: None,
-        activation: None,
         finished: false,
         seed: None,
     };
@@ -629,10 +620,6 @@ fn requests_and_restores_carry_the_abi_values() {
     assert!(!plain.acknowledgement_required() && !plain.memory_target());
     assert!(plain.finished());
     assert_eq!(plain.processor_target(), None);
-    assert_eq!(plain.activation_record(), None);
-    let activated = plain.with_activation_record(&[0xa1, 0xa2, 0xa3]);
-    assert_eq!(activated.activation_record(), Some(&[0xa1, 0xa2, 0xa3][..]));
-    assert_eq!(activated.flags(), decoders::PACKET_ACTIVATION);
 }
 
 #[test]
@@ -692,7 +679,6 @@ fn a_restore_hands_over_its_seed_once_and_formats_none_of_it() {
         generation_id: seed.generation_id(),
         memory_ranges: Vec::new(),
         network: None,
-        activation: None,
         finished: false,
         seed: Some(seed),
     };

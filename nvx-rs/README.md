@@ -329,13 +329,6 @@ more for a cold boot, in a canonical encoding of `COLD_LEN` or `CLONE_LEN`
 bytes, 1 or 17, that `ReadyActivation::encode` writes and
 `ReadyActivation::decode` reads.
 
-`CONTRACT_VERSION`, 2, which a template's compatibility key holds, versions the
-activation contract: the record's schema, at `VERSION`, and how a clone receives
-its record, at the end of its restore packet, which OpenVMM seals before the
-first restored vCPU runs, rather than in the adapter's Activate of version 1, so
-that no build restores a clone of a template whose guest takes its record
-otherwise.
-
 The records and both encodings need no features.
 
 ### `nvx::contract`
