@@ -86,3 +86,9 @@ linux-mshv-virtual-machine,3,8,5874bf809b9f16040c54570ccbac67b1584aa158,shell_sn
 linux-mshv-virtual-machine,3,8,b9948459ce57937cf4d6fb890922fb17cbe181ab,shell_snapshot_restore_512_mib,ms,lower,57.2
 linux-mshv-virtual-machine,3,8,fc59c9065ceb2a939874123f9cdc856ad7784cf6,shell_snapshot_restore_512_mib,ms,lower,55.4
 linux-mshv-virtual-machine,3,8,20a15b6bc60a451a81997181f5871abc7e884db5,shell_snapshot_restore_512_mib,ms,lower,56.8
+linux-mshv-virtual-machine,3,8,f7720fb6e8c22d0ebaee62c1b17f7326ceb93fcd,shell_snapshot_restore_512_mib,ms,lower,54.9
+linux-mshv-virtual-machine,3,8,83764f5ab0f366bb1fef734a6bd110afca1153ae,shell_snapshot_restore_512_mib,ms,lower,57.1
+linux-mshv-virtual-machine,3,8,cc12bae1b84cf379f95662b0cd01094cfc4df659,shell_snapshot_restore_512_mib,ms,lower,58.4
+linux-mshv-virtual-machine,3,8,c5fdc8b850c63dcb0dddb1a1a6ede5a42a20d692,shell_snapshot_restore_512_mib,ms,lower,60.4
+linux-mshv-virtual-machine,3,8,8e9e9eb74cf207c2538ed3ce1968be68728f72bc,shell_snapshot_restore_512_mib,ms,lower,57.5
+linux-mshv-virtual-machine,3,8,ccfe9cdf01ade4100b155b601cba97b907277d21,shell_snapshot_restore_512_mib,ms,lower,57.6
