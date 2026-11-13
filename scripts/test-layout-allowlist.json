@@ -3,7 +3,6 @@
   "schema_version": 2,
   "seams": {
     "nvx-rs/src/guest/init.rs": 2,
-    "nvx-rs/src/guest/init/boot.rs": 1,
     "nvx-rs/src/guest/reseed.rs": 1,
     "nvx-rs/src/guest/sys/spawn.rs": 5,
     "nvx-rs/src/guest/time/system.rs": 3,
