@@ -28,10 +28,6 @@
 //!   through which OpenVMM restores a snapshot.
 //! - [`net`]: IP networks in CIDR notation and their subtraction, and the forms of a VM's
 //!   hostname and guest network address.
-//! - [`gpt`]: GUID Partition Table disks whose first partition configures an adapter and whose
-//!   others hold the read-only layers of a root: a strict reader of their protective MBR,
-//!   primary header, and partition entries, which reads only through a source that its caller
-//!   gives, so that the guest and the host share it.
 //! - [`uuid`]: UUIDs, such as the GUIDs of a GPT disk, in their canonical text, the one form that
 //!   NVX writes and reads, and in the layout in which GPT stores them. It has no dependencies, so
 //!   the host and the guest share it.
@@ -53,6 +49,15 @@
 //! OpenVMM of its tests, build on the library and live in this crate, private to it, with the
 //! code that only they use, such as NVX's own control protocol. Each binary calls an entry point
 //! that `#[doc(hidden)]` hides, which is no part of the API.
+//!
+//! GPT parsing is internal to NVX's guest programs, not a public image-checking API. The control
+//! plane owns producing, checking, and staging its images; each guest init owns interpreting
+//! them. [`uuid`], [`protocol::root::ImageFormat::Gpt`], and [`activation::Image::Gpt`] remain
+//! public, independently of the parser.
+//!
+//! ```compile_fail
+//! use nvx::gpt::Disk;
+//! ```
 //!
 //! [library guide]: https://github.com/microsoft/nvx/blob/dev/doc/library.md
 //! [What the caller owns]: https://github.com/microsoft/nvx/blob/dev/doc/library.md#what-the-caller-owns
@@ -153,7 +158,8 @@
 pub mod activation;
 pub mod contract;
 mod error;
-pub mod gpt;
+#[cfg(any(test, all(feature = "guest", target_os = "linux")))]
+mod gpt;
 mod hypervisor;
 pub mod net;
 pub mod protocol;

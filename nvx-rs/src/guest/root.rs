@@ -341,7 +341,7 @@ pub(crate) enum Image {
     /// feature: the layer's read-only device can't take the recovery, and suppressing journal
     /// loading must not silently admit such a layer. The overlay
     /// stacks the layers with partition 2's at its base and the last partition's at its top. A
-    /// disk has at least one layer, as [`nvx::gpt`](crate::gpt) requires.
+    /// disk has at least one layer, as the internal [`GPT parser`](crate::gpt) requires.
     Gpt {
         /// What the caller expects of the disk beyond its format: its GUID, and its partitions'
         /// unique GUIDs and sizes, each if the caller knows it.

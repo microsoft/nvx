@@ -95,7 +95,7 @@ does not match it.
 | `guest` | The `guest` module, with the guest's space, executions, and processes, and nine guest binaries | The `guest` module, without the guest's space and executions, and ten guest binaries: `nvx-init` is new |
 
 Without default features, the crate holds what the host and the guest share:
-`protocol`, `activation`, `contract`, `net`, `gpt`, `uuid`, `Hypervisor`, and
+`protocol`, `activation`, `contract`, `net`, `uuid`, `Hypervisor`, and
 the errors. alpha.7's also held `exec`, which is gone.
 
 ### Hidden program entry points
@@ -258,7 +258,7 @@ keeps its path and its signature.
 | `guest::clone`'s `apply`, `Applied`, `ApplyError`, `AppliedTeardownError`, `NetworkError`, and `RootTemplate` | No longer public: the init applies a restore's activation record in its own space, as [Complete a restore before Ready](guest-agent-guidelines.md#complete-a-restore-before-ready) describes |
 | `guest::root` | No longer public: nvx-init's own space. Each init builds its own from the tokens of `protocol::root`, `protocol::view`, `protocol::export`, and `protocol::share`, and the records of `activation`, as [Build the space](guest-agent-guidelines.md#build-the-space) describes |
 | `guest::mappings`'s `Mapper`, `bind`, `ApplyError`, `MappingError`, `Reserved`, `SourceRoot`, `TargetRoot`, `Step`, `TeardownError`, and `UnmountFailure` | No longer public: the init mounts the mappings itself. `guest::mappings::MappingTable` keeps the account of the host's mapping table, beside `Mapping`, `Access`, `Kind`, and `InvalidMapping` |
-| `guest::gpt::read_disk`, `guest::gpt::DeviceError` | No longer public: the caller reads a disk with `nvx::gpt::Disk::read`, through a `gpt::ReadAt` source of its own |
+| `nvx::gpt`, `guest::gpt::read_disk`, `guest::gpt::DeviceError` | No longer public: GPT parsing is internal to NVX's guest programs. The control plane checks and stages its own images, and each init interprets them. `nvx::uuid`, `protocol::root::ImageFormat::Gpt`, and `activation::Image::Gpt` remain public |
 | `guest::ingress`'s `Announcer`, `PROGRAM`, and `StartError` | Removed: the activation reports the publication and the gateway, and the init runs `/sbin/nvx-ingress` itself, or has `nvx-ingress start` run it |
 | `guest::time`'s `CaptureRequest`, `CaptureOutcome`, `Restore`, `RestoreFinish`, `CpuSet`, `MemoryRange`, and `ScratchPolicy`, and `TimeAbi::capture` and `TimeAbi::restore_finish` | No longer public: `guest::snapshot::capture` runs the time ABI's capture and restore finish. `TimeError` has a new `Deadline` variant |
 

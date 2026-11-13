@@ -68,7 +68,6 @@ COLORS = {
 DESCRIPTIONS = {
     "activation": "Layered root activation",
     "contract": "Contract versions",
-    "gpt": "GPT partition reader",
     "guest": "Guest side",
     "host": "VMs, snapshots, restores",
     "net": "IP networks",
@@ -137,6 +136,10 @@ CONDITION = re.compile(r"#\[cfg\((?P<condition>.+?)\)\](?=, #\[cfg\(|$)")
 # A condition that holds outside tests too once the export enables its feature,
 # as any(test, feature = "cli") does.
 TEST_OR_FEATURE = re.compile(r'any\(test, feature = "(?P<feature>[^"]+)"\)')
+TEST_OR_FEATURE_TARGET = re.compile(
+    r'any\(test, all\(feature = "(?P<feature>[^"]+)",'
+    r' target_os = "(?P<target_os>[^"]+)"\)\)'
+)
 
 
 class DiagramError(Exception):
@@ -303,7 +306,8 @@ def structure_command(target: str) -> list[str]:
 
 
 def parse(text: str, target: str) -> Export:
-    """Reads and checks the cargo-modules export of one target."""
+    """Reads and checks the cargo-modules export of one target. A filtered module
+    leaves its children with the nearest ancestor still in the export."""
 
     def fail(reason: str) -> DiagramError:
         return DiagramError(f"unexpected cargo-modules export of {target}: {reason}")
@@ -331,10 +335,13 @@ def parse(text: str, target: str) -> Export:
                 raise fail(f"{path} has an edge but is no module")
         if match["type"] == "uses":
             uses.add((user, used))
-        elif used in owner or used.rpartition("::")[0] != user:
+            continue
+        parent = used.rpartition("::")[0]
+        while parent and parent not in visibility:
+            parent = parent.rpartition("::")[0]
+        if used in owner or parent != user:
             raise fail(f"{user} cannot contain {used}")
-        else:
-            owner[used] = user
+        owner[used] = user
     if owner.keys() != visibility.keys() - {CRATE}:
         raise fail("a module has no owner")
     return Export(visibility, owner, frozenset(uses))
@@ -396,8 +403,10 @@ def restore(
     modules, so this restores the modules that the plain analysis lacks among
     them. It refuses conditions that depend on test otherwise, such as
     any(test, unix) or not(test), whose modules it cannot tell apart, but for
-    any(test, feature = "cli") and its like, whose feature the export enables, and
-    which therefore holds outside tests too.
+    any(test, feature = "cli") and
+    any(test, all(feature = "guest", target_os = "linux")) and their like. The
+    feature must be one that the export enables; an OS restriction makes the
+    module test-only on other platforms.
 
     The plain analysis moves the uses of a module that it drops, and those of the
     modules that use it, to the nearest module that contains it and that it
@@ -415,16 +424,29 @@ def restore(
 
     if found.keys() != tested.visibility.keys():
         raise fail("its structure and its dependencies name different modules")
+    target_os = next(
+        (name.lower() for name, value in TARGETS.items() if value == target), None
+    )
+    resolved = dict(found)
     for path, listed in found.items():
         for condition in listed:
             enabled = TEST_OR_FEATURE.fullmatch(condition)
             if enabled is not None and enabled["feature"] in FEATURES:
                 continue
+            enabled = TEST_OR_FEATURE_TARGET.fullmatch(condition)
+            if (
+                enabled is not None
+                and enabled["feature"] in FEATURES
+                and target_os is not None
+            ):
+                if enabled["target_os"] != target_os:
+                    resolved[path] = (*listed, "test")
+                continue
             # A string, such as the name of a feature, holds no condition.
             unquoted = re.sub(r'"[^"]*"', '""', condition)
             if condition != "test" and re.search(r"\btest\b", unquoted):
                 raise fail(f"{path} builds under cfg({condition})")
-    built = {path for path in tested.visibility if not test_only(found, path)}
+    built = {path for path in tested.visibility if not test_only(resolved, path)}
     missing = sorted(plain.visibility.keys() - built)
     if missing:
         raise fail(f"{', '.join(missing)} build outside tests only")
