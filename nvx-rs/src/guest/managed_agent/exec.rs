@@ -299,11 +299,11 @@ impl Workload {
                     init::Event::Launch(report) => {
                         Event::Launch(report.map(|failure| failure.map(LaunchFailure::Direct)))
                     }
-                    init::Event::ReadFailed(..) => Event::ReadFailed,
+                    init::Event::ReadFailed => Event::ReadFailed,
                     init::Event::KillFailed(init::KillTarget::ProcessGroup, error) => {
                         Event::DirectKillFailed(error)
                     }
-                    init::Event::Ended(outcome) => Event::Ended(outcome.status),
+                    init::Event::Ended(status) => Event::Ended(status),
                     _ => Event::Other,
                 })
             }),
