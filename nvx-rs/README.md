@@ -701,10 +701,11 @@ capture, at most `MAX_MANIFEST_LEN` bytes of a regular file that is not a link
 or other reparse point, and refuses another snapshot format version, an unknown,
 mistyped, or repeated field, truncated bytes, and a capture that is not a
 template's: a platform-tier capture for clones, with a read-only `distro` whose
-identity is unbound, a fresh scratch, and the dormant filesystem slot. The
-restores of [`run`](#run) read the host attachments of the machine contract of
-any microVM snapshot's manifest through the same reader, with every check but
-those that make a manifest a template's.
+identity is unbound, a fresh scratch, and the dormant filesystem slot. Of the
+snapshot ID that OpenVMM's SaveVM records, which a microVM capture leaves zero,
+it checks only the length. The restores of [`run`](#run) read the host
+attachments of the machine contract of any microVM snapshot's manifest through
+the same reader, with every check but those that make a manifest a template's.
 
 `CaptureClass` holds the invariant inputs of a capture, known before it: the
 runtime, the guest's build, the backend, the requested CPU profile, the

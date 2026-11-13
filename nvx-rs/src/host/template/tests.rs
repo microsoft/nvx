@@ -600,6 +600,8 @@ pub(super) struct ManifestSpec {
     pub(super) restore_policy: String,
     /// Field 17.
     pub(super) consumed_sections: u32,
+    /// Field 18: the snapshot ID, which a microVM capture leaves zero, if it is written.
+    pub(super) snapshot_id: Option<Vec<u8>>,
 }
 
 /// The kernel command line of the template of [`ManifestSpec::template`].
@@ -817,6 +819,7 @@ impl ManifestSpec {
             tier: "platform".to_owned(),
             restore_policy: "clone".to_owned(),
             consumed_sections: 1,
+            snapshot_id: Some(vec![0; 16]),
         }
     }
 
@@ -929,15 +932,18 @@ impl ManifestSpec {
         if let Some(contract) = &self.contract {
             message = message.message(9, contract.encode());
         }
-        message
+        message = message
             .bytes(10, &self.magic)
             .varint(11, self.schema_version.into())
             .text(12, &self.root_type)
             .text(13, &self.tier)
             .text(14, &self.restore_policy)
-            .varint(15, self.consumed_sections.into())
-            .raw(&extra.finish())
-            .finish()
+            .varint(15, self.consumed_sections.into());
+        // `mesh` writes the snapshot ID, a fixed-size value, even when it is zero.
+        if let Some(snapshot_id) = &self.snapshot_id {
+            message = message.always_bytes(18, snapshot_id);
+        }
+        message.raw(&extra.finish()).finish()
     }
 
     /// Encodes the manifest.

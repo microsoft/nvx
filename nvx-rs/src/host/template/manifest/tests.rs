@@ -325,8 +325,8 @@ fn other_versions_of_the_format_are_unsupported() {
 #[test]
 fn fields_that_the_format_does_not_have_are_refused() {
     let template = ManifestSpec::template();
-    // Fields 16 and later do not exist yet.
-    for number in [16, 17, 18, 63, 64, 1000] {
+    // Fields 16 and 17, and 19 and later, do not exist yet.
+    for number in [16, 17, 19, 20, 63, 64, 1000] {
         let message = refusal(
             &template.encode_with(Proto::default().varint(number, 1)),
             ErrorCode::Io,
@@ -367,6 +367,25 @@ fn fields_that_the_format_does_not_have_are_refused() {
         decode_cpu_profile(&Proto::default().varint(5, 1).finish()).map(drop),
         Err("its CPU profile holds the unknown field 5".to_owned())
     );
+}
+
+#[test]
+fn only_the_length_of_the_snapshot_id_is_checked() {
+    // A manifest of an earlier OpenVMM has no snapshot ID, and one that SaveVM wrote has one
+    // that is not zero.
+    let template = parse(&ManifestSpec::template());
+    for snapshot_id in [None, Some(vec![0xa5; 16])] {
+        let mut spec = ManifestSpec::template();
+        spec.snapshot_id = snapshot_id;
+        assert_eq!(parse(&spec), template);
+    }
+    for len in [0, 15, 17] {
+        assert_refused(
+            |spec| spec.snapshot_id = Some(vec![0; len]),
+            ErrorCode::Io,
+            &format!("it has a snapshot ID of {len} bytes, not 16"),
+        );
+    }
 }
 
 #[test]
@@ -427,7 +446,15 @@ fn malformed_manifests_are_refused() {
 #[test]
 fn truncated_manifests_are_refused() {
     let bytes = ManifestSpec::template().encode();
+    // The snapshot ID comes last, so the manifest without it, one of an earlier OpenVMM, is the one
+    // prefix that is whole.
+    let mut earlier = ManifestSpec::template();
+    earlier.snapshot_id = None;
+    let earlier = earlier.encode();
     for len in 0..bytes.len() {
+        if bytes[..len] == earlier[..] {
+            continue;
+        }
         let error =
             TemplateManifest::parse(&bytes[..len]).expect_err("a truncated manifest is refused");
         // A manifest that ends between its fields lacks some, such as its format magic.
