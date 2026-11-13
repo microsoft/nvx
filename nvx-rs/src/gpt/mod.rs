@@ -36,26 +36,10 @@
 //!
 //! GUIDs are [`Uuid`]s, which GPT stores in the layout that [`Uuid::from_bytes_le`] reads.
 //!
-//! The module makes no I/O other than the reads of its source, and depends on nothing outside the
-//! standard library, so a guest that validates a block device and a host that checks an image
-//! that it stages share it.
-//!
-//! ```no_run
-//! use std::fs::File;
-//!
-//! use nvx::gpt::{Disk, Expected};
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let image = File::open("disk.img")?;
-//! let disk = Disk::read(&image, 512, image.metadata()?.len(), &Expected::new())?;
-//! let configuration = disk.read_first_partition(&image, 64 * 1024)?;
-//! println!("the first partition holds {} bytes of configuration", configuration.len());
-//! for layer in disk.lowers() {
-//!     println!("partition {}: {} bytes at {}", layer.number(), layer.size(), layer.offset());
-//! }
-//! # Ok(())
-//! # }
-//! ```
+//! The parser is private to the crate, shared by NVX's bundled init and managed agent. It makes
+//! no I/O other than the reads of its source and depends on nothing outside the standard library.
+//! The host launch path does not parse GPT images; the control plane owns checking and staging
+//! its images, and each guest init owns interpreting them.
 
 mod crc;
 mod error;
@@ -64,31 +48,31 @@ mod source;
 mod tests;
 
 use crc::{Crc32, crc32};
-pub use error::GptError;
-pub use source::ReadAt;
+pub(crate) use error::GptError;
+use source::ReadAt;
 
 use crate::uuid::Uuid;
 
 /// The smallest logical block size of a disk, in bytes.
-pub const MIN_LOGICAL_BLOCK_SIZE: u32 = 512;
+const MIN_LOGICAL_BLOCK_SIZE: u32 = 512;
 
 /// The largest logical block size of a disk, in bytes: the largest that Linux gives a block
 /// device.
-pub const MAX_LOGICAL_BLOCK_SIZE: u32 = 64 * 1024;
+const MAX_LOGICAL_BLOCK_SIZE: u32 = 64 * 1024;
 
 /// The size of a partition entry, in bytes: the only one that Linux reads, and the smallest that
 /// UEFI allows.
-pub const ENTRY_SIZE: u32 = 128;
+const ENTRY_SIZE: u32 = 128;
 
 /// The largest partition entry array that a disk may declare, in bytes, which bounds the array's
 /// allocation and the work of its CRC: 8,192 entries. UEFI's default array holds 128.
-pub const MAX_ENTRY_ARRAY_BYTES: u32 = 1024 * 1024;
+const MAX_ENTRY_ARRAY_BYTES: u32 = 1024 * 1024;
 
 /// The fewest partitions of a disk: the first partition and one layer.
-pub const MIN_PARTITIONS: usize = 2;
+const MIN_PARTITIONS: usize = 2;
 
 /// The most partitions of a disk: Linux creates partitions 1 through 255 only.
-pub const MAX_PARTITIONS: usize = 255;
+const MAX_PARTITIONS: usize = 255;
 
 /// The size of the MBR at the start of LBA 0, in bytes, whatever the logical block size.
 const MBR_SIZE: usize = 512;
@@ -179,7 +163,7 @@ mod entry {
 /// Every expectation is optional. [`Disk::read`] refuses a disk that differs from one that is
 /// set, once the disk has passed the format's own checks.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Expected {
+pub(crate) struct Expected {
     /// The disk's GUID, if the caller expects one.
     disk_guid: Option<Uuid>,
     /// The partitions, in the order of their numbers, if the caller expects them.
@@ -188,20 +172,13 @@ pub struct Expected {
 
 impl Expected {
     /// Expects nothing beyond the format.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Expects the disk's GUID to be `guid`.
-    pub fn disk_guid(mut self, guid: Uuid) -> Self {
+    pub(crate) fn disk_guid(mut self, guid: Uuid) -> Self {
         self.disk_guid = Some(guid);
-        self
-    }
-
-    /// Expects exactly as many partitions as `partitions` holds, in the order of their numbers,
-    /// and each to have the unique GUID and size that its expectation sets.
-    pub fn partitions(mut self, partitions: Vec<ExpectedPartition>) -> Self {
-        self.partitions = Some(partitions);
         self
     }
 
@@ -250,36 +227,17 @@ impl Expected {
 
 /// What a caller knows of one partition beforehand. Every expectation is optional.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ExpectedPartition {
+pub(crate) struct ExpectedPartition {
     /// The partition's unique GUID, if the caller expects one.
     unique_guid: Option<Uuid>,
     /// The partition's size in bytes, if the caller expects one.
     size: Option<u64>,
 }
 
-impl ExpectedPartition {
-    /// Expects nothing of the partition but that it exists.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Expects the partition's unique GUID to be `guid`.
-    pub fn unique_guid(mut self, guid: Uuid) -> Self {
-        self.unique_guid = Some(guid);
-        self
-    }
-
-    /// Expects the partition to be `bytes` long.
-    pub fn size(mut self, bytes: u64) -> Self {
-        self.size = Some(bytes);
-        self
-    }
-}
-
 /// A GPT disk whose protective MBR, primary header, and primary partition entry array
 /// [`Disk::read`] checked, and its partitions: the first partition and the layers after it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Disk {
+pub(crate) struct Disk {
     /// The size of a logical block, in bytes.
     logical_block_size: u32,
     /// The disk's size, in bytes.
@@ -296,7 +254,7 @@ impl Disk {
     ///
     /// The caller states the geometry as the device reports it, so that the checks bound every
     /// position to the disk. The partitions must also meet `expected`.
-    pub fn read<S: ReadAt + ?Sized>(
+    pub(crate) fn read<S: ReadAt + ?Sized>(
         source: &S,
         logical_block_size: u32,
         size: u64,
@@ -316,35 +274,14 @@ impl Disk {
         Ok(disk)
     }
 
-    /// Returns the size of a logical block, in bytes.
-    pub fn logical_block_size(&self) -> u32 {
-        self.logical_block_size
-    }
-
-    /// Returns the disk's size, in bytes.
-    pub fn size(&self) -> u64 {
-        self.size
-    }
-
-    /// Returns the disk's GUID.
-    pub fn guid(&self) -> Uuid {
-        self.guid
-    }
-
     /// Returns every partition, in the order of their numbers, which run from 1 without a gap.
-    pub fn partitions(&self) -> &[Partition] {
+    pub(crate) fn partitions(&self) -> &[Partition] {
         &self.partitions
     }
 
     /// Returns the first partition, whose bytes configure the adapter.
-    pub fn first_partition(&self) -> &Partition {
+    fn first_partition(&self) -> &Partition {
         &self.partitions[0]
-    }
-
-    /// Returns the partitions after the first, which hold the read-only layers of the root: at
-    /// least one.
-    pub fn lowers(&self) -> &[Partition] {
-        &self.partitions[1..]
     }
 
     /// Reads the first partition from `source`, the disk that [`Disk::read`] read: every byte of
@@ -353,7 +290,7 @@ impl Disk {
     ///
     /// A first partition larger than `bound` bytes fails before any of it is read, so that no
     /// more than `bound` bytes are read or allocated.
-    pub fn read_first_partition<S: ReadAt + ?Sized>(
+    pub(crate) fn read_first_partition<S: ReadAt + ?Sized>(
         &self,
         source: &S,
         bound: usize,
@@ -379,7 +316,7 @@ impl Disk {
 
 /// A partition of a [`Disk`]: a used partition entry, and the blocks that it spans.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Partition {
+pub(crate) struct Partition {
     /// The partition's number, one more than its entry's index.
     number: u8,
     /// The partition type GUID.
@@ -401,43 +338,8 @@ pub struct Partition {
 impl Partition {
     /// Returns the partition's number, as Linux numbers it: one more than its entry's index, so
     /// the first partition is 1, and the first layer 2.
-    pub fn number(&self) -> u8 {
+    pub(crate) fn number(&self) -> u8 {
         self.number
-    }
-
-    /// Returns the partition type GUID.
-    pub fn type_guid(&self) -> Uuid {
-        self.type_guid
-    }
-
-    /// Returns the unique partition GUID.
-    pub fn unique_guid(&self) -> Uuid {
-        self.unique_guid
-    }
-
-    /// Returns the partition's attribute bits, which the parser does not interpret.
-    pub fn attributes(&self) -> u64 {
-        self.attributes
-    }
-
-    /// Returns the partition's first logical block.
-    pub fn first_lba(&self) -> u64 {
-        self.first_lba
-    }
-
-    /// Returns the partition's last logical block, which it includes.
-    pub fn last_lba(&self) -> u64 {
-        self.last_lba
-    }
-
-    /// Returns the partition's byte offset in the disk.
-    pub fn offset(&self) -> u64 {
-        self.offset
-    }
-
-    /// Returns the partition's size, in bytes.
-    pub fn size(&self) -> u64 {
-        self.size
     }
 }
 

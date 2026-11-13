@@ -105,7 +105,7 @@ nvx/
 |   |   |-- activation/          The activation record of a layered root, its canonical encoding, and what Ready reports about it, shared by the host, the guest, and every adapter's framing
 |   |   |-- contract.rs          Control-contract versions and release compatibility
 |   |   |-- net/                 CIDR parsing and subtraction, and hostname and guest-network forms
-|   |   |-- gpt/                 Strict reading of GPT disks whose first partition configures an adapter and whose other partitions hold a root's read-only layers, shared by the host and the guest
+|   |   |-- gpt/                 Strict reading of GPT disks for NVX's guest programs, private to the crate
 |   |   |-- uuid.rs              UUIDs in their canonical text and in GPT's layout, shared by the host and the guest
 |   |   |-- hypervisor.rs        The hypervisors that run the VMs: KVM, MSHV, and WHP
 |   |   |-- error.rs             `nvx::Error` and its `ErrorKind`, and the crate's private `ErrorCode`

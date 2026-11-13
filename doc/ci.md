@@ -2756,8 +2756,12 @@ as one under `cfg(not(windows))`, so the script also reads its analysis with
 `cfg(test)` and restores those modules, with their own uses in place of those
 that the plain analysis moves to the modules that contain them, and stops at a
 cfg that depends on `test` in another way, but for `any(test, feature = "cli")`
-and its like, whose feature the script enables. Nobody edits the diagrams by
-hand:
+and `any(test, all(feature = "guest", target_os = "linux"))` and their like,
+whose feature the script enables and whose optional target OS it checks.
+When the plain analysis drops a module but keeps its children, it moves them
+under the nearest module that remains; the script accepts that ancestor and
+restores the ownership from the analysis with `cfg(test)`.
+Nobody edits the diagrams by hand:
 [`module-diagrams.yml`](../.github/workflows/module-diagrams.yml) draws them
 again every night, with the nightly full run of CI, and commits them to `dev`
 when they changed, so that `dev` takes at most one push of them a night outside
@@ -2798,10 +2802,12 @@ reuses the drawing of its run, which a newer run may have replaced. So, on each
 attempt, the job compares the inputs, the paths that start the workflow for a
 pull request, at the drawn commit and on the newest `dev`, and publishes
 nothing once `dev` has changed them: the next run of `dev` draws and publishes
-their diagrams. A ready pull request that changes the inputs runs the `draw`
-job alone, so that a change that breaks the drawing fails before it merges, and
-its summary and artifact show the diagrams that `dev` takes the night after it
-merges. The workflow is not part of `Required status check`. To draw the
+their diagrams. A ready pull request to `dev` that changes the inputs runs the
+`draw` job alone, so that a change that breaks the drawing fails before it
+merges, and its summary and artifact show the diagrams that `dev` takes the
+night after it merges. For a pull request to another branch, dispatch the
+workflow on its head branch to draw without publishing. The workflow is not
+part of `Required status check`. To draw the
 diagrams locally, install cargo-modules and Graphviz, and run
 `python3 scripts/module_diagrams.py`, which writes them to `build/modules`, or
 with `--output` to another directory that holds nothing but an earlier run's

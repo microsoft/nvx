@@ -164,7 +164,10 @@ owns the following.
   only their paths, and a restore their metadata, against the snapshot. The
   program checks the images that it launches, and keeps each path naming the
   image that it checked until OpenVMM opened it, for example by staging its
-  images where no other account can write.
+  images where no other account can write. GPT parsing is internal to NVX's
+  guest programs, not a public image-checking utility; the chosen init owns
+  interpreting and mounting its images, and NVX's bundled init keeps its GPT
+  validation and root assembly.
 - The export: an `ExportPlan` holds paths only, which the library checks and
   lowers without reading the host, and which OpenVMM resolves when it starts.
   The program keeps them naming the objects that it means: across that race;

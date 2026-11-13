@@ -8,7 +8,7 @@ use std::io;
 /// The parser only reads, at the offsets that the disk's checked fields give, and never past the
 /// size that its caller states. A source keeps its file position, if it has one, except a
 /// [`File`](std::fs::File) on Windows, whose positioned reads move it.
-pub trait ReadAt {
+pub(crate) trait ReadAt {
     /// Fills `buffer` with the bytes at `offset`, or fails, with
     /// [`ErrorKind::UnexpectedEof`](io::ErrorKind::UnexpectedEof) if the source ends first.
     fn read_exact_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<()>;

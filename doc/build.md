@@ -542,7 +542,7 @@ Its features select what it builds:
 | `testing` | NVX's `nvx-fake-openvmm` binary, a fake OpenVMM for tests, which adds only its hidden entry point to the API | The optional `getrandom`, `serde`, `serde_json`, and `nix` on Unix or `windows-sys` on Windows |
 
 Without default features, the library holds only what the host and the guest
-share: `protocol`, `activation`, `contract`, `net`, `gpt`, `uuid`,
+share: `protocol`, `activation`, `contract`, `net`, `uuid`,
 `Hypervisor`, and the crate's error types, such as `Error`. The manifest
 defines one Cargo profile of its own, and leaves Cargo's built-in profiles at
 their defaults. NVX's builds use these:
