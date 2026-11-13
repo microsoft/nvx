@@ -3,6 +3,9 @@
 //! Each platform module provides the same functions. Linux and Windows are supported hosts;
 //! other platforms compile but report NVX as unavailable.
 //!
+//! The private `hypervisor` module defines the [`Hypervisor`](crate::host::runtime::Hypervisor)
+//! that the platforms' probes take, and that [`host::runtime`](crate::host::runtime) exports.
+//!
 //! The crate-private `ProcessHandle` of each platform holds a process that `open_process` found
 //! with its recorded identity, or a child that the caller has not reaped yet: a pidfd on Linux,
 //! when the host provides them, and a process handle on Windows. Waits and termination go through
@@ -23,6 +26,7 @@ use std::time::Duration;
 
 use crate::error::{Error, Result};
 
+pub(crate) mod hypervisor;
 pub(crate) mod inherit;
 #[cfg(target_os = "linux")]
 /// Linux implementations of host process, socket, and hypervisor primitives.

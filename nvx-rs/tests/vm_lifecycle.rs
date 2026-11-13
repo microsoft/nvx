@@ -18,13 +18,12 @@ use std::env;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use nvx::Hypervisor;
 use nvx::activation::{Journal, MachineIdMode, OverlayMode, View};
 use nvx::host::config::{Boot, ConsoleAttachment, LayeredRoot, RootConfig, UpperConfig, VmConfig};
 use nvx::host::process::{Opened, Process, ProcessRef};
 use nvx::host::report::Report;
 use nvx::host::runtime::{
-    ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity, probe_hypervisor,
+    ArtifactIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity, probe_hypervisor,
 };
 use nvx::host::transport::HostConnection;
 use nvx::host::vm::{self, SavedVm, VmDir, VmOutputs};

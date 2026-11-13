@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use nvx::Hypervisor;
+use nvx::host::runtime::Hypervisor;
 use serde_json::{Value, json};
 
 /// Runs the fake in `directory` as `nvx-rs run` runs OpenVMM on the terminal: with two

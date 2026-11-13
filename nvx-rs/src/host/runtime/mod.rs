@@ -1,5 +1,5 @@
 //! What every launch shares: a [`Runtime`], the OpenVMM executable, guest kernel, and guest
-//! initramfs that it runs, with their [`RuntimeIdentity`], the hypervisor, which
+//! initramfs that it runs, with their [`RuntimeIdentity`], the [`Hypervisor`], which
 //! [`probe_hypervisor`] checks, and the [`LaunchOptions`].
 //!
 //! The runtime identity of a VM is the identities of its VMM, kernel, and initramfs, and the
@@ -13,10 +13,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+pub use super::platform::hypervisor::Hypervisor;
+
 use super::platform;
 use crate::contract;
 use crate::error::{Error, Result};
-use crate::hypervisor::Hypervisor;
 
 /// What every launch shares: the runtime's files and their identity, the hypervisor, and the
 /// options of OpenVMM that do not depend on the VM.

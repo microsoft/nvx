@@ -31,13 +31,13 @@
 //! - [`uuid`]: UUIDs, such as the GUIDs of a GPT disk, in their canonical text, the one form that
 //!   NVX writes and reads, and in the layout in which GPT stores them. It has no dependencies, so
 //!   the host and the guest share it.
-//! - [`Hypervisor`]: the hypervisors that run the VMs, and [`Error`]: the crate's error, whose
-//!   [`ErrorKind`]s callers act on.
-//! - [`host`] (feature `host`): a VM's runtime and configuration; its launch, stop, and
-//!   reattachment in a private directory that its caller owns; snapshots, their capture's finish,
-//!   and the restores that their caller drives; the lowering of network and filesystem policies;
-//!   and verified connections to a VM's endpoint, verified process references, and OpenVMM's
-//!   outcome reports.
+//! - [`Error`]: the crate's error, whose [`ErrorKind`]s callers act on.
+//! - [`host`] (feature `host`): a VM's runtime, with the
+//!   [`Hypervisor`](host::runtime::Hypervisor) that runs it, and its configuration; its launch,
+//!   stop, and reattachment in a private directory that its caller owns; snapshots, their
+//!   capture's finish, and the restores that their caller drives; the lowering of network and
+//!   filesystem policies; and verified connections to a VM's endpoint, verified process
+//!   references, and OpenVMM's outcome reports.
 //! - `guest` (feature `guest`, Linux): the guest's side, for any guest init or agent: its NVXS
 //!   connection and the terminal on which it serves it (`guest::nvxs`, `guest::terminal`), the
 //!   account of a host's mapping table (`guest::mappings`), the time ABI's steps in its own
@@ -75,10 +75,9 @@
 //! use std::path::Path;
 //! use std::time::{Duration, Instant};
 //!
-//! use nvx::Hypervisor;
 //! use nvx::activation::{MachineIdMode, View};
 //! use nvx::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
-//! use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
+//! use nvx::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity};
 //! use nvx::host::vm::{self, VmDir};
 //!
 //! // The caller locates OpenVMM, the guest kernel, and the Alpine initramfs, and identifies each
@@ -151,7 +150,7 @@
 //!   console without running a VM. It adds no API.
 //! - `cli`: NVX's own `nvx-rs` binary, the command-line interface that runs NVX's microVMs and
 //!   sandboxes. It adds no API, and enables `host`.
-//! - `serde`: the serde forms of [`Hypervisor`] and [`net::Ipv4Cidr`].
+//! - `serde`: the serde form of [`net::Ipv4Cidr`].
 //! - `guest`: the `guest` module and the guest binaries, which the `guest` profile builds as
 //!   static `x86_64-unknown-linux-musl` executables.
 
@@ -160,7 +159,6 @@ pub mod contract;
 mod error;
 #[cfg(any(test, all(feature = "guest", target_os = "linux")))]
 mod gpt;
-mod hypervisor;
 pub mod net;
 pub mod protocol;
 pub mod uuid;
@@ -180,4 +178,3 @@ pub(crate) use error::ErrorCode;
 pub use error::{Error, ErrorKind, Result};
 #[cfg(feature = "host")]
 pub use host::filesystem::guest_path;
-pub use hypervisor::Hypervisor;

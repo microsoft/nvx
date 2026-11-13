@@ -91,12 +91,13 @@ does not match it.
 | `bundled` | Staged a release's OpenVMM, kernel, and initramfs at build time for `Artifacts::bundled`, through the crate's build script, `links = "nvx"` with `DEP_NVX_ARTIFACTS_DIR`, `artifacts.json`, and the `NVX_BUNDLE`, `NVX_BUNDLE_DIR`, and `NVX_BUNDLE_HYPERVISOR` variables | Removed, with the build script and `links`: the caller locates the runtime's files, as [Install pins](#install-pins) says |
 | `cli` | `host::cli`, whose public `main` the `nvx-rs` binary ran | The `nvx-rs` binary, which adds only its hidden `main` to the API |
 | `testing` | `testing::fake_openvmm`, whose public `main` the `nvx-fake-openvmm` binary ran | The `nvx-fake-openvmm` binary, which adds only its hidden `main` to the API |
-| `serde` | The serde form of `Hypervisor` | The serde forms of `Hypervisor` and `net::Ipv4Cidr` |
+| `serde` | The serde form of `Hypervisor` | The serde form of `net::Ipv4Cidr`. `Hypervisor`, now `host::runtime::Hypervisor`, has its serde form with the `host` feature |
 | `guest` | The `guest` module, with the guest's space, executions, and processes, and nine guest binaries | The `guest` module, without the guest's space and executions, and ten guest binaries: `nvx-init` is new |
 
 Without default features, the crate holds what the host and the guest share:
-`protocol`, `activation`, `contract`, `net`, `uuid`, `Hypervisor`, and
-the errors. alpha.7's also held `exec`, which is gone.
+`protocol`, `activation`, `contract`, `net`, `uuid`, and the errors. alpha.7's
+also held `exec`, which is gone, and `Hypervisor`, which moved to
+`host::runtime`.
 
 ### Hidden program entry points
 
@@ -150,7 +151,8 @@ keeps its path and its signature.
 | `nvx::Artifacts`, the same type as `host::artifacts::Artifacts`, with `new`, `discover`, `from_dir`, `from_release_dir`, `from_repo_layout`, `artifact_dir`, `ENV_OPENVMM`, `ENV_KERNEL`, `ENV_INITRD`, `ENV_DIR`, and `BESIDE_EXE_DIR` | No longer public: the caller locates OpenVMM, the guest kernel, and the initramfs, and gives their paths in a `host::runtime::Runtime`. NVX's CLI keeps a lookup of its own, which [`nvx-rs artifacts`](../nvx-rs/README.md#artifacts) prints |
 | `Artifacts::bundled` | Removed, with the `bundled` feature |
 | `Artifacts::runtime_identity`, and `host::store`'s `RuntimeIdentity`, `ArtifactIdentity`, `IdentityPart`, and `MAX_IDENTITY_LEN` | `host::runtime`'s `RuntimeIdentity`, `ArtifactIdentity`, `IdentityPart`, and `MAX_IDENTITY_LEN`: `RuntimeIdentity::new` takes three labels that the caller reads from install metadata, such as `ArtifactIdentity::sha256` of the digests that a release's `SHA256SUMS` lists |
-| `Artifacts::probe`, `host::platform::probe_hypervisor`, `host::platform::SUPPORTED` | `host::runtime::probe_hypervisor` checks a hypervisor, and `Hypervisor::supported_on_host` whether the host's operating system can have it. The caller checks that its files exist |
+| `nvx::Hypervisor` | `host::runtime::Hypervisor`, with the `host` feature: the same variants, OpenVMM spellings, and calls, such as `from_env_or_default`, which reads `NVX_HYPERVISOR`. The crate root no longer exports it |
+| `Artifacts::probe`, `host::platform::probe_hypervisor`, `host::platform::SUPPORTED` | `host::runtime::probe_hypervisor` checks a hypervisor, and `host::runtime::Hypervisor::supported_on_host` whether the host's operating system can have it. The caller checks that its files exist |
 | `host::artifacts::check_manifest` | `contract::manifest_mismatches`, or `contract::manifest_is_compatible`, of the release's `SOURCE-MANIFEST.json`, which the caller reads |
 | The rest of `host::artifacts`: `ArtifactDir`, `ArtifactPaths`, `GuestPaths`, `Guest`, `Layout`, `absolute`, `openvmm_executable`, and the names of a release's files, such as `KERNEL_NAME`, `CHECKSUMS_NAME`, and `MANIFEST_NAME` | No longer public: the caller knows the layout of the releases that it runs, which [Release packages](build.md#release-packages) gives |
 

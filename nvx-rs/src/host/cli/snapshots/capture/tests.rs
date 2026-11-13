@@ -13,6 +13,7 @@ use super::*;
 use crate::host::config::NicConfig;
 use crate::host::platform;
 use crate::host::process::{BootId, Opened, ProcessRef};
+use crate::host::runtime::Hypervisor;
 use crate::host::snapshot::tests::{ManifestSpec, SnapshotFixture, context};
 use crate::host::snapshot::{MANIFEST_NAME, Snapshot};
 use crate::host::spawn::{self, VmmCommand};
@@ -191,9 +192,9 @@ fn runtime(root: &Path) -> Runtime {
         initramfs: root.join("fake-initramfs"),
         identity: context().runtime,
         hypervisor: if cfg!(windows) {
-            crate::Hypervisor::Whp
+            Hypervisor::Whp
         } else {
-            crate::Hypervisor::Kvm
+            Hypervisor::Kvm
         },
         cpu_profile: None,
         windows_breakaway: false,

@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::*;
-use crate::Hypervisor;
 use crate::host::config::{DiskCapture, NicConfig};
 use crate::host::process::{BootId, Opened, Process, ProcessRef};
+use crate::host::runtime::Hypervisor;
 use crate::host::snapshot::Snapshot;
 use crate::host::snapshot::tests::{ManifestSpec, SnapshotFixture, context};
 use crate::host::vm::create_private_dir;

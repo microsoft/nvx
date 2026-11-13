@@ -7,8 +7,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use super::Transport;
+use super::hypervisor::Hypervisor;
 use super::inherit::Inherited;
-use crate::hypervisor::Hypervisor;
 
 #[cfg(all(feature = "cli", unix))]
 pub(crate) use crate::host::sys::{interrupted, watch_interrupts, write_interruptibly};

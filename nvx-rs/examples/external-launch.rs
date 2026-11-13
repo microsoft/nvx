@@ -33,14 +33,13 @@ use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use nvx::Hypervisor;
 use nvx::activation::{MachineIdMode, View};
 use nvx::host::config::{
     Boot, ConsoleAttachment, LayeredRoot, NetworkConfig, RootConfig, UpperConfig, VmConfig,
 };
 use nvx::host::network::{Access, NetworkPolicy};
 use nvx::host::process::{BootId, Opened, Process, ProcessRef};
-use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
+use nvx::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity};
 use nvx::host::transport::{self, Transport};
 use nvx::host::{report, snapshot, vm};
 use nvx::protocol::root::RootImage;

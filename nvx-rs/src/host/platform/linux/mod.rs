@@ -11,7 +11,7 @@ use std::fs::OpenOptions;
 
 use nix::sys::stat::Mode;
 
-use crate::hypervisor::Hypervisor;
+use super::hypervisor::Hypervisor;
 
 #[cfg(feature = "cli")]
 pub(crate) use crate::host::sys::{interrupted, watch_interrupts, write_interruptibly};

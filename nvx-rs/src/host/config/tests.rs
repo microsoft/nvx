@@ -9,8 +9,9 @@ use super::*;
 use crate::activation::MachineIdMode;
 use crate::host::filesystem::{Bind, ExportChild, Owner};
 use crate::host::network::{Access, EgressRule, Protocol};
-use crate::host::runtime::{ArtifactIdentity, GuestPowerAction, LaunchOptions, RuntimeIdentity};
-use crate::hypervisor::Hypervisor;
+use crate::host::runtime::{
+    ArtifactIdentity, GuestPowerAction, Hypervisor, LaunchOptions, RuntimeIdentity,
+};
 use crate::protocol::{cmdline, parse_host_mapping_count};
 use crate::uuid::Uuid;
 use crate::{ErrorCode, ErrorKind};
