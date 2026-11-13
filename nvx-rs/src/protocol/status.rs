@@ -1,7 +1,7 @@
 //! The exit statuses with which a clone's guest ends its VM once it fails fast, and from which
 //! the host classifies a clone's end. The guest library's errors select them: the time ABI's
 //! violations, `nvx::guest::time::Violation::status`, and a clone's repair errors,
-//! `nvx::guest::clone::RepairError::status`.
+//! `nvx::guest::snapshot::RepairError::status`.
 //!
 //! - [`TIME_CONFORMANCE`], 193, [`TIME_VIOLATION`], 194, and [`TIME_REPAIR`], 195: the time ABI's
 //!   own statuses, which keep their meanings. In enforcing mode, the time ABI stops the VM with

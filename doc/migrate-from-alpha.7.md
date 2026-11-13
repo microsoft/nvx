@@ -252,7 +252,7 @@ keeps its path and its signature.
 
 | alpha.7 | The release |
 | --- | --- |
-| `guest::clone` | `guest::activation`, which `guest::clone` still names. Its `CaptureCause` and `CaptureStage` have a new `Repair` variant |
+| `guest::clone` | `guest::activation`: the old name is gone. Its `CaptureCause` and `CaptureStage` have a new `Repair` variant |
 | `guest::clone`'s `CapturePreparation`, `CaptureBarrier`, `AdmissionFence`, `CaptureError`, `Captured`, `Devices`, `Repair`, `Restored`, and `repair` | `guest::snapshot::capture(&devices, disks, deadline)`, one call that checks the devices, captures, and, in a VM that a restore started, repairs the restore before it returns `Captured::Restored`. A `CaptureFailure` says whether the guest resumed or must end. The init stops its own executions first, as [Coordinate a capture](guest-agent-guidelines.md#coordinate-a-capture) describes |
 | `guest::clone::Activation::new`, `guest::clone::Activation::with_resources` | Take no admission fence: `guest::activation::Activation::new(&repaired, timeout, now)` |
 | `guest::clone`'s `apply`, `Applied`, `ApplyError`, `AppliedTeardownError`, `NetworkError`, and `RootTemplate` | No longer public: the init applies a restore's activation record in its own space, as [Complete a restore before Ready](guest-agent-guidelines.md#complete-a-restore-before-ready) describes |

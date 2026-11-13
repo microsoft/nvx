@@ -65,9 +65,6 @@ pub use generation::GenerationId;
 
 #[cfg(target_arch = "x86_64")]
 pub mod activation;
-/// Compatibility name for the guest's activation.
-#[cfg(target_arch = "x86_64")]
-pub use activation as clone;
 #[doc(hidden)]
 pub mod console_pending;
 #[cfg(target_arch = "x86_64")]
