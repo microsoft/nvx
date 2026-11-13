@@ -116,6 +116,9 @@ const SHA256_LEN: usize = 32;
 /// Bytes of a host or boot identity.
 const HOST_IDENTITY_LEN: usize = 16;
 
+/// Bytes of a snapshot ID, a GUID.
+const SNAPSHOT_ID_LEN: usize = 16;
+
 /// Nanoseconds in a second.
 const NANOS_PER_SECOND: i32 = 1_000_000_000;
 
@@ -663,7 +666,8 @@ impl Machine {
 /// format does not have, a field that is not of its type or that appears twice, truncated bytes,
 /// and a manifest that is not a template's: a platform-tier capture of a microVM, for clones, with
 /// a read-only `distro` whose identity is unbound, a fresh scratch, and the dormant filesystem
-/// slot. It never reads another artifact of the snapshot.
+/// slot. Of the snapshot ID in field 18, which OpenVMM's SaveVM records and a microVM capture
+/// leaves zero, it checks only the length. It never reads another artifact of the snapshot.
 ///
 /// A template's [`TemplateKey`](super::TemplateKey) projects its machine. The rest is the
 /// capture's own: when it was taken, its [`TimeContract`]'s anchor, host, boot, and lineage
@@ -1019,7 +1023,7 @@ fn decode_manifest(data: &[u8]) -> Result<RawManifest, String> {
     decode(
         data,
         what,
-        &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18],
         &[],
         |field| {
             match field.number {
@@ -1042,6 +1046,15 @@ fn decode_manifest(data: &[u8]) -> Result<RawManifest, String> {
                 13 => raw.tier = field.text().map_err(&wire)?.to_owned(),
                 14 => raw.restore_policy = field.text().map_err(&wire)?.to_owned(),
                 15 => raw.consumed_sections = field.uint32().map_err(&wire)?,
+                18 => {
+                    let id = field.bytes().map_err(&wire)?;
+                    if id.len() != SNAPSHOT_ID_LEN {
+                        return Err(format!(
+                            "{what} has a snapshot ID of {} bytes, not {SNAPSHOT_ID_LEN}",
+                            id.len()
+                        ));
+                    }
+                }
                 _ => unreachable!("the message refuses unknown fields"),
             }
             Ok(())
