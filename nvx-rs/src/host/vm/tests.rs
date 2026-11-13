@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::ErrorKind;
-use crate::activation::{Journal, MachineIdMode, Network, OverlayMode, Publication, View};
+use crate::activation::{Network, Publication};
 use crate::host::config::{
     Boot, Capacity, DEFAULT_GUEST_NETWORK, Invariants, LayeredRoot, PROCESS_COMMAND_LINE_LIMIT,
     RootConfig, UpperConfig, process_command_line_units,
@@ -22,7 +22,8 @@ use crate::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, RuntimeI
 use crate::host::snapshot::{DESCRIPTION_FILE, KEY_FILE};
 use crate::host::vm_directory::{LOG, OUTCOME, RESTORE_READY, tests::vm_dir};
 use crate::net::Ipv4Cidr;
-use crate::protocol::root::RootImage;
+use crate::protocol::root::{Journal, OverlayMode, RootImage};
+use crate::protocol::view::{MachineIdMode, View};
 use crate::uuid::Uuid;
 
 #[cfg(any(target_os = "linux", windows))]

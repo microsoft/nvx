@@ -11,13 +11,15 @@ use std::time::Instant;
 use super::*;
 use crate::ErrorKind;
 use crate::activation::{
-    ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image, MachineIdMode,
-    OverlayMode, ReadyActivation, RestoreSection, TransactionId, Upper, View,
+    ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image, ReadyActivation,
+    RestoreSection, TransactionId, Upper,
 };
 use crate::host::process::{BootId, Opened};
 use crate::host::tests::spawn_locked;
 use crate::host::vm::create_private_dir;
 use crate::protocol::restore_ready::parse_ready_event;
+use crate::protocol::root::OverlayMode;
+use crate::protocol::view::{MachineIdMode, View};
 
 fn vm_directory() -> (tempfile::TempDir, VmDir) {
     let temporary = tempfile::tempdir().unwrap();

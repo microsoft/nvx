@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use super::root::Root;
 use super::sys::{self, Mode, OpenFlags};
-use crate::activation::{self, MachineIdMode, View};
 use crate::protocol::cmdline::write_resolver;
+use crate::protocol::view::{MachineIdMode, View, is_hostname};
 use crate::{Error, Result};
 
 /// The generated machine ID's file in the root's runtime directory.
@@ -124,7 +124,7 @@ pub(crate) fn apply_staged(
     view: &View,
     dns: Option<IpAddr>,
 ) -> std::result::Result<MachineId, ApplyFailure> {
-    if !activation::is_hostname(&view.hostname) {
+    if !is_hostname(&view.hostname) {
         return Err(Error::unsupported("the view's hostname is not valid").into());
     }
     root.begin_view()?;

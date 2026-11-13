@@ -1,8 +1,8 @@
 use super::*;
 use crate::ErrorKind;
-use crate::activation::MachineIdMode;
 use crate::guest::mappings::SystemKernel;
 use crate::guest::{account as accounts, sys};
+use crate::protocol::view::MachineIdMode;
 
 const ROOT: &str = "nvx_layer=distro,0xd0003000,erofs nvx_overlay_upper=ramfs";
 const VIEW: &str = "nvx_hostname=626f78 nvx_machine_id=generated";
@@ -19,12 +19,13 @@ fn the_reference_space_steps_compile() {
     use std::path::Path;
     use std::time::Instant;
 
-    use crate::activation::{ActivationRecord, View};
+    use crate::activation::ActivationRecord;
     use crate::guest::activation::{self, Applied, RootTemplate};
     use crate::guest::mappings::{Mapper, Reserved, SourceRoot, TargetRoot};
     use crate::guest::root::{self, Assembly, Root};
     use crate::guest::view;
     use crate::protocol::export::HostExport;
+    use crate::protocol::view::View;
 
     // A cold boot, as `boot::cold_boot` builds it.
     let _cold = |assembly: &Assembly,

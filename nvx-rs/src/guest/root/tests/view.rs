@@ -1,9 +1,7 @@
 use super::*;
+use crate::ErrorKind;
 use crate::guest::view::{self as vm_view, MACHINE_ID_FILE, RESOLVER_FILE};
-use crate::{
-    ErrorKind,
-    activation::{MachineIdMode, View},
-};
+use crate::protocol::view::{MachineIdMode, View};
 use std::error::Error as _;
 
 #[test]

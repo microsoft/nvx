@@ -6,13 +6,15 @@ use std::path::PathBuf;
 
 use super::*;
 use crate::activation::{
-    Configuration, ExpectedResources, Export, ExportKind, Image, MachineIdMode, OverlayMode,
-    ReadyActivation, RestoreSection, TransactionId, Upper, View,
+    Configuration, ExpectedResources, Export, ExportKind, Image, ReadyActivation, RestoreSection,
+    TransactionId, Upper,
 };
 use crate::host::process::Opened;
 use crate::host::session::ExecEvent;
 use crate::protocol::WorkloadEnvironment;
+use crate::protocol::root::OverlayMode;
 use crate::protocol::v2::Outcome;
+use crate::protocol::view::{MachineIdMode, View};
 
 /// A stand-in for OpenVMM and its guest, which serves the control endpoint, sends the
 /// restore-ready event, attaches the host with the capability of its standard input, and answers

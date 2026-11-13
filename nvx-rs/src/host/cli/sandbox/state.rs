@@ -34,7 +34,6 @@ use serde_json::Value;
 use super::lifecycle::ProvisionConfig;
 use super::{MAX_MEMORY_MIB, path_string, sandbox_network};
 use crate::ErrorCode;
-use crate::activation::{Journal, MachineIdMode, OverlayMode, View};
 use crate::host::cli::json::{Object, pretty_serde, read_object};
 use crate::host::cli::network::{NativeRules, NetworkOptions};
 use crate::host::cli::output::LINE_SEPARATOR;
@@ -52,7 +51,8 @@ use crate::host::sandbox::mount::{HostQueries, check_distinct_export_roots, os_e
 use crate::host::sandbox::scratch::ScratchBinding;
 use crate::host::sandbox::{DEFAULT_ENTRYPOINT, has_kernel_separator, require_file};
 use crate::net::is_valid_hostname;
-use crate::protocol::root::{RAM_UPPER_CAPS, RootImage};
+use crate::protocol::root::{Journal, OverlayMode, RAM_UPPER_CAPS, RootImage};
+use crate::protocol::view::{MachineIdMode, View};
 use crate::uuid::Uuid;
 
 pub(crate) use crate::host::cli::{hex, random_bytes, temporary_path};

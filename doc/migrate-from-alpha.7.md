@@ -160,7 +160,7 @@ keeps its path and its signature.
 
 | alpha.7 | The release |
 | --- | --- |
-| `host::launch::LaunchSpec`, and `host::sandbox`'s `SandboxPlan`, `SandboxLaunch`, `SandboxSettings`, `SandboxNetwork`, `SandboxUpper`, `SandboxDistro`, and `PreparedLaunch`, with `host::sandbox::plan` and `host::sandbox::prepared` | One `host::config::VmConfig` for cold boots, captures, and restores: a `RootConfig`, blockless or a `LayeredRoot` with an `UpperConfig`, an `activation::View`, a `NetworkConfig`, an `ExportPlan`, a `ConsoleAttachment`, and, for a cold boot, a `Boot`. Every launch also takes a `host::runtime::Runtime`; see [The library](library.md#the-library) |
+| `host::launch::LaunchSpec`, and `host::sandbox`'s `SandboxPlan`, `SandboxLaunch`, `SandboxSettings`, `SandboxNetwork`, `SandboxUpper`, `SandboxDistro`, and `PreparedLaunch`, with `host::sandbox::plan` and `host::sandbox::prepared` | One `host::config::VmConfig` for cold boots, captures, and restores: a `RootConfig`, blockless or a `LayeredRoot` with an `UpperConfig`, a `protocol::view::View`, a `NetworkConfig`, an `ExportPlan`, a `ConsoleAttachment`, and, for a cold boot, a `Boot`. Every launch also takes a `host::runtime::Runtime`; see [The library](library.md#the-library) |
 | `host::supervisor::launch`, `host::supervisor::spawn` | `host::vm::create(&runtime, &config, from, &dir)`, which checks a launch and starts nothing, then `host::vm::spawn`, in a directory that the caller creates with `vm::create_private_dir` and opens with `vm::VmDir::open` |
 | `host::supervisor::VmmCommand`, `host::supervisor::spawn_command`, `host::supervisor::Inherited` | `vm::Prepared::into_command`, whose `vm::VmmCommand` and `vm::InheritedHandle`s a launcher of the caller's own starts, as `VmmCommand` documents and the [`external-launch`](../nvx-rs/examples/external-launch.rs) example does |
 | `host::supervisor::Launched`, `host::supervisor::Vmm`, `host::supervisor::Starting` | `host::vm::Launched`: the VM's verified `host::process::Process`, its `VmOutputs`, its `Capability`, and, for a restore, its `ReadyListener` |
@@ -235,7 +235,9 @@ keeps its path and its signature.
 | alpha.7 | The release |
 | --- | --- |
 | `activation::VERSION`, 1 | 2: the record's decoder refuses version 1, and alpha.7 cannot read version 2 |
-| `activation::WorkloadView`, `Configuration::workload` | `activation::View`, which holds no identity, and `Configuration::view` |
+| `activation::WorkloadView`, `Configuration::workload` | `protocol::view::View`, which holds no identity, and `Configuration::view` |
+| `activation::MachineIdMode`, `activation::MAX_HOSTNAME_BYTES` | `protocol::view::MachineIdMode` and `protocol::view::MAX_HOSTNAME_BYTES`, beside `View`, which cold boots share |
+| `activation::OverlayMode`, `activation::Journal` | `protocol::root::OverlayMode` and `protocol::root::Journal`, beside `RootLayout`, which cold boots share |
 | `activation::WorkloadIdentity`, `ActivationError::WorkloadIdentity`, `Field::WorkloadIdentity` | Removed: the record carries no workload identity, which the caller gives in its own protocol. `Field::ALL` lists the 13 other fields |
 | `activation::Identity`, `Image::binding`, and the `binding` of `Image::Erofs`, `Image::Gpt`, and `Upper::Scratch` | Removed: the caller checks its images before it launches them |
 | `activation::StoreGeneration`, `activation::TemplateReference`, `RestoreSection::template` | Removed: the record names no store or template |

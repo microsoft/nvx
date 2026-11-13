@@ -7,7 +7,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::activation::{self, View};
+use crate::activation;
 use crate::gpt::Expected;
 use crate::guest::activation::{
     self as guest_activation, Activation, ActivationAction, ActivationCause, ActivationFailure,
@@ -23,6 +23,7 @@ use crate::protocol::export::{EXPORT_DIRECTORY, HostExport};
 use crate::protocol::root::{
     DISTRO_MMIO_BASE, ImageFormat, RootLayout, RootUpper, SCRATCH_MMIO_BASE,
 };
+use crate::protocol::view::View;
 use crate::protocol::{self, ProtocolError, status};
 use crate::{Error, Result};
 
@@ -214,9 +215,9 @@ fn assembly(layout: RootLayout) -> Assembly {
                 mmio: SCRATCH_MMIO_BASE,
                 sectors: None,
             },
-            journal: match layout.journal.unwrap_or(activation::Journal::Allowed) {
-                activation::Journal::Allowed => root::Journal::Allowed,
-                activation::Journal::Forbidden => root::Journal::Forbidden,
+            journal: match layout.journal.unwrap_or(protocol::root::Journal::Allowed) {
+                protocol::root::Journal::Allowed => root::Journal::Allowed,
+                protocol::root::Journal::Forbidden => root::Journal::Forbidden,
             },
         },
     };
@@ -230,10 +231,10 @@ fn assembly(layout: RootLayout) -> Assembly {
         upper,
         overlay: match layout
             .overlay
-            .unwrap_or(activation::OverlayMode::TrustedLowers)
+            .unwrap_or(protocol::root::OverlayMode::TrustedLowers)
         {
-            activation::OverlayMode::TrustedLowers => root::OverlayMode::TrustedLowers,
-            activation::OverlayMode::UntrustedLowers => root::OverlayMode::UntrustedLowers,
+            protocol::root::OverlayMode::TrustedLowers => root::OverlayMode::TrustedLowers,
+            protocol::root::OverlayMode::UntrustedLowers => root::OverlayMode::UntrustedLowers,
         },
         timeout: Duration::from_secs(30),
     }

@@ -61,6 +61,8 @@ use crate::guest::root::{self, Assembly, AssemblyError, Device, Root, TeardownEr
 #[cfg(doc)]
 use crate::guest::snapshot::Devices;
 use crate::guest::view::{self, MachineId};
+use crate::protocol::root::{Journal, OverlayMode};
+use crate::protocol::view::View;
 
 pub use crate::guest::view::{MACHINE_ID_FILE, RESOLVER_FILE};
 
@@ -325,7 +327,7 @@ trait System {
     fn view(
         &mut self,
         root: &mut Self::Root,
-        view: &activation::View,
+        view: &View,
         dns: Option<IpAddr>,
     ) -> Result<MachineId, view::ApplyFailure>;
     /// Tears the root down, including its view binds.
@@ -372,7 +374,7 @@ impl System for LiveSystem {
     fn view(
         &mut self,
         root: &mut Root,
-        view: &activation::View,
+        view: &View,
         dns: Option<IpAddr>,
     ) -> Result<MachineId, view::ApplyFailure> {
         view::apply_staged(root, view, dns)
@@ -509,14 +511,14 @@ fn assembly(template: &RootTemplate, configuration: &Configuration) -> Assembly 
         activation::Upper::Scratch { journal } => root::Upper::Scratch {
             device: template.scratch,
             journal: match journal {
-                activation::Journal::Allowed => root::Journal::Allowed,
-                activation::Journal::Forbidden => root::Journal::Forbidden,
+                Journal::Allowed => root::Journal::Allowed,
+                Journal::Forbidden => root::Journal::Forbidden,
             },
         },
     };
     let overlay = match configuration.overlay {
-        activation::OverlayMode::TrustedLowers => root::OverlayMode::TrustedLowers,
-        activation::OverlayMode::UntrustedLowers => root::OverlayMode::UntrustedLowers,
+        OverlayMode::TrustedLowers => root::OverlayMode::TrustedLowers,
+        OverlayMode::UntrustedLowers => root::OverlayMode::UntrustedLowers,
     };
     Assembly {
         runtime: template.runtime.clone(),

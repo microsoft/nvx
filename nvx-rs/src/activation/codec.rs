@@ -3,10 +3,10 @@
 
 use super::{
     ActivationError, ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image,
-    Journal, MAX_RECORD_BYTES, MachineIdMode, Network, OverlayMode, Publication, RestoreSection,
-    TransactionId, Upper, VERSION, View,
+    MAX_RECORD_BYTES, Network, Publication, RestoreSection, TransactionId, Upper, VERSION,
 };
-use crate::protocol::root::ImageFormat;
+use crate::protocol::root::{ImageFormat, Journal, OverlayMode};
+use crate::protocol::view::{MachineIdMode, View};
 use crate::uuid::Uuid;
 use std::fmt;
 use std::net::IpAddr;

@@ -75,10 +75,10 @@
 //! use std::path::Path;
 //! use std::time::{Duration, Instant};
 //!
-//! use nvx::activation::{MachineIdMode, View};
 //! use nvx::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
 //! use nvx::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity};
 //! use nvx::host::vm::{self, VmDir};
+//! use nvx::protocol::view::{MachineIdMode, View};
 //!
 //! // The caller locates OpenVMM, the guest kernel, and the Alpine initramfs, and identifies each
 //! // by the SHA-256 digest that its install metadata records, such as the `SHA256SUMS` of an NVX

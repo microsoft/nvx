@@ -14,7 +14,6 @@ use super::{
     OPENVMM_DIR, Snapshot, SnapshotKey, SnapshotManifest,
 };
 use crate::ErrorKind;
-use crate::activation::{Journal, MachineIdMode, OverlayMode, View};
 use crate::host::config::{
     Capacity, CaptureConfig, ConsoleAttachment, DiskCapture, LayeredRoot, NetworkConfig, NicConfig,
     RootConfig, UpperConfig, VmConfig,
@@ -23,7 +22,8 @@ use crate::host::network::{Access, NetworkPolicy};
 use crate::host::process::BootId;
 use crate::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity};
 use crate::net::Ipv4Cidr;
-use crate::protocol::root::RootImage;
+use crate::protocol::root::{Journal, OverlayMode, RootImage};
+use crate::protocol::view::{MachineIdMode, View};
 
 /// Bytes in a MiB.
 pub(in crate::host) const MIB: u64 = 1024 * 1024;

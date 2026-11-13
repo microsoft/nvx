@@ -2,13 +2,13 @@ use std::error::Error as _;
 
 use super::*;
 use crate::ErrorKind;
-use crate::activation::{MachineIdMode, View};
 use crate::host::cli::store::{files, record};
 use crate::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
 use crate::host::process::{BootId, ProcessRef};
 use crate::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity};
 use crate::host::vm::{self, Prepared, SavedVm, VmDir};
 use crate::protocol::CAPABILITY_LEN;
+use crate::protocol::view::{MachineIdMode, View};
 
 pub(super) fn prepared(
     state: &StateDir,
