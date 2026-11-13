@@ -10,19 +10,21 @@
 - Mapped fork tip: `7f31de5352aed253234f87995423406d29dcaa29`, position 124. The graph, PR
   summary, and commit mapping below cover positions 001-124, the PR09 fixups at positions
   234-236, the PR13 fixup at position 240, the PR18 fixup at position 241, the PR20 fixup at
-  position 242, and the PR19 fixup at position 243.
-- NVX's pinned OpenVMM revision: `73cf403574a8907ee94dab0ab9d648152b832b05`, position 269, the
-  head of `feature/microvm/release/v6.1`. The v6.1 rebase replayed the 268 commits of
-  `feature/microvm/dev` at NVX's previous pin, `5ca20ee08`, whose first 220 commits are those of
-  `feature/microvm/release/v6.0`, onto the new fork base without the seven whose changes upstream
-  had landed, and added eight fixups at its tip, positions 262-269. A commit's position is its
-  v6.0 position less the number of dropped commits before it: v6.0 positions 003-007 are
-  positions 002-006, 010-013 are 007-010, 015-050 are 011-046, and 054-268 are 047-261; see
-  [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 145 commits past the
-  mapped tip on the same first-parent chain. Positions 125-233, 237-239, and 244-269 are not yet
-  assigned to PRs, positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position 241
-  is a PR18 fixup, position 242 is a PR20 fixup, and position 243 is a PR19 fixup; see
-  [Commits after the mapped tip](#commits-after-the-mapped-tip).
+  position 242, the PR19 fixup at position 243, and the PR10 fixup at position 271.
+- NVX's pinned OpenVMM revision: `fb2c8b75c038c77a9d64668ad6a3553ff71dc981`, position 272, the
+  head of microsoft/openvmm#5077, whose three commits, positions 270-272, follow position 269,
+  `73cf40357`, the head of `feature/microvm/dev` and of `feature/microvm/release/v6.1`. The v6.1
+  rebase replayed the 268 commits of `feature/microvm/dev` at NVX's pin before it, `5ca20ee08`,
+  whose first 220 commits are those of `feature/microvm/release/v6.0`, onto the new fork base
+  without the seven whose changes upstream had landed, and added eight fixups at its tip,
+  positions 262-269. A commit's position is its v6.0 position less the number of dropped commits
+  before it: v6.0 positions 003-007 are positions 002-006, 010-013 are 007-010, 015-050 are
+  011-046, and 054-268 are 047-261; see
+  [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 148 commits past the
+  mapped tip on the same first-parent chain. Positions 125-233, 237-239, 244-270, and 272 are not
+  yet assigned to PRs, positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position
+  241 is a PR18 fixup, position 242 is a PR20 fixup, position 243 is a PR19 fixup, and position
+  271 is a PR10 fixup; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `7d90c41044077e31ca060df9206532f579f24716` (2026-11-13), the fork base itself;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -999,7 +1001,7 @@ flowchart TB
     subgraph Generic["Generic snapshot and persistence chain"]
         direction LR
         P09["PR09<br/>Fallible VM lifecycle<br/>U - 4 commits + 3 fixups, 3 in review"]
-        P10["PR10<br/>CPU/clock state<br/>U - 11 commits"]
+        P10["PR10<br/>CPU/clock state<br/>U - 11 commits + 1 fixup"]
         P11["PR11<br/>Snapshot publication<br/>U - 4 commits"]
         P12["PR12<br/>Private-CoW restore<br/>U - 5 commits"]
         P13["PR13<br/>Virtio persistence<br/>U - 12 commits + 1 fixup"]
@@ -1150,7 +1152,10 @@ The physical branch is one first-parent chain:
   -> RTC port reads wider than a byte zero-extended [260]
   -> periodic timer's missed periods skipped at once [261]
   -> v6.1 rebase fixups [262-269]
-  -> 73cf40357 (NVX pin)
+  -> periodic timer started at a given deadline [270]
+  -> PR10 fixup [271]
+  -> microVM RPC options parsed on a big stack [272]
+  -> fb2c8b75c (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1188,22 +1193,32 @@ helper that the case uses. Fold the v6.1 rebase's fixups at positions 262-269 in
 that [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase) names before submission, PR23's
 positions 103 and 110, PR15's position 055, PR12's positions 031 and 032, PR17's position 069,
 PR26's position 119, PR25's position 118, PR11's position 028, and PR13's position 044 among them.
+Fold position 271 into PR10's position 016 before submission, which adds the RTC's clock
+persistence, whose save read the clock source after the RTC had stopped, so that the guest's time
+gained the time from the stop to the save. Its saved timer deadlines restore the periodic timers
+through position 270's `start_at`, which builds on position 261's rounding, so positions 261 and
+270, which can go upstream on their own in that order, go before PR10; its saved-state fields'
+numbering folds into position 193, which renumbers position 016's fields, and its comment on the
+chipset state unit's time advance and its sentence of the snapshot guide into position 248, which
+writes them.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 124 without merges. Of the 145 later commits,
+The NVX pin extends the chain past position 124 without merges. Of the 148 later commits,
 positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position 241 is a PR18 fixup,
 position 242 is a PR20 fixup, position 243 is a PR19 fixup, positions 262-269 are the fixups of
-the v6.1 rebase, and the others are not yet classified or assigned to PRs.
+the v6.1 rebase, position 271 is a PR10 fixup, and the others are not yet classified or assigned
+to PRs.
 Each of positions 125-179 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 180-184 followed the v3.0 reorganization, positions 185-198 are the ABI restart
 of the v4.0 reorganization, positions 199-204 followed it, positions 205-211 followed the v5.0
 reorganization, positions 212 and 213 followed the v5.1 rebase, positions 214-261 followed the
-v6.0 reorganization, and positions 262-269 are the v6.1 rebase's fixups, so they combine none,
-apart from position 213, which combines v5.1 positions 222 and 223. Each commit's position is its
-v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and its
-v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on; see
+v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-272
+followed the v6.1 rebase, so they combine none, apart from position 213, which combines v5.1
+positions 222 and 223. Each commit's position is its v6.0 position less seven, the number of
+commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position
+through 147 and one less from v5.1 position 149 on; see
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase) and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.0 position counts in
 `feature/microvm/dev` at `5ca20ee08`, whose first 220 commits are those of
@@ -1357,11 +1372,15 @@ v6.0 position is its v5.1 position through 147 and one less from v5.1 position 1
 | 267 | `4a1d9b07a` | - | - | - | - | - | Guide, openvmm_entry: describe upstream's snapshots with the chain's publication (v6.1 rebase fixup for microsoft/openvmm#4553); fold into 028, 032, and 069 |
 | 268 | `63688dd58` | - | - | - | - | - | vmm_tests: save the ttrpc interface test's VM with a VMBus NIC (v6.1 rebase fixup for microsoft/openvmm#4553); fold into 044 |
 | 269 | `73cf40357` | - | - | - | - | - | openvmm_helpers: drop an independent snapshot copy's page cache (v6.1 rebase fixup for microsoft/openvmm#4553); fold into 028 |
+| 270 | `fad381b7a` | - | - | - | - | - | vmcore: start a periodic timer at a given deadline (microsoft/openvmm#5077) |
+| 271 | `67ac3e283` | - | - | - | - | - | chipset: keep the RTC's time and timer phases across a snapshot (microsoft/openvmm#5077); fold into 016, its fields' numbering into 193, its comment and guide sentence into 248 |
+| 272 | `fb2c8b75c` | - | - | - | - | - | openvmm_entry: parse the microVM options on a big stack on every host (microsoft/openvmm#5077) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
-that it regrouped, and later fork bases, up to `ba105dd7f`, for later commits. They name the
-positions that the commits have now, but the v6.1 rebase did not check them again on `7d90c4104`.
+that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-272, for later
+commits. They name the positions that the commits have now, but the v6.1 rebase did not check the
+earlier ones again on `7d90c4104`.
 
 Some of these commits change mapped work rather than add to it. Position 140 removes the
 legacy microVM clock paths, changing files that PR10 and PR17 also change, and makes manifest
@@ -2068,6 +2087,48 @@ changes. It changes nothing that a mapped PR adds. Replaying it on upstream main
 conflicts, and `vmcore` type-checks there with its tests, which pass, so it can go upstream on its
 own.
 
+Position 270 adds `VmTimerPeriodic::start_at`, which starts the timer with its first deadline at a
+given VM time and every period after it, and `deadline`, which returns the next deadline while the
+timer runs, and has `start` start the timer through `start_at`, in code that upstream main has,
+and adds a test, in a file that PR10's position 015 and positions 149, 150, 248, and 261 also
+change. It moves the period rounding that position 261 gives `start` into a helper that both use,
+and its test uses position 261's bounded test runner. It changes nothing that a mapped PR adds.
+Replaying it on upstream main conflicts in its only file, which lacks position 261's rounding;
+after position 261, it applies without conflicts, and `vmcore` type-checks there with its tests,
+which pass, so it follows position 261 upstream.
+
+Position 271 keeps the CMOS RTC's time at a snapshot's cut, and the phases of its alarm, periodic,
+and update-ended interrupts, across a restore. The RTC's saved state adds the timers' deadlines in
+VM time and the time of the last update-in-progress report as fields 5-8, after the clock time and
+calendar validity that PR10's position 016 adds and position 193 renumbers, and a restore checks
+each deadline against the restored VM time in the snapshot fields' validation of positions 016
+and 193. The restore arms the timers at those deadlines, the periodic ones through position 270's
+`start_at`, instead of through `update_timers`, which upstream main's restore calls and which
+armed them a period after the restore and latched the clock into the calendar registers. While
+stopped, the RTC holds its time and runs it with VM time, in the clock module that position 016
+adds, so that a save records the time at the cut rather than position 016's reading of the clock
+source at the save, and position 016's restore and time advance set the held time, which the RTC
+sets in its clock source as it starts. The PIIX4 RTC, which position 016 has forward the time
+advance, now forwards start and stop. It also changes the comment on the time advance in the
+chipset's state unit and the snapshot guide's sentence on the emulated devices' timers, which
+position 248 writes, adds to the Guide's timekeeping reference, and adds tests beside those of
+positions 016, 017, and 193 and a test of the PIIX4 RTC. It fixes the clock persistence of PR10's
+position 016, and changes nothing else that a mapped PR adds. Replaying it on upstream main
+conflicts in six of its eight files, all but the timekeeping reference and the PIIX4 RTC:
+upstream main lacks the RTC's clock module, snapshot fields, and their tests, which position 016
+adds, the time advance of PR10's position 015, position 248's sentences, and position 270's
+`start_at`, so it follows PR10 upstream, folded into position 016 after positions 261 and 270,
+with its fields' numbering folded into position 193 and its comment and sentence into position
+248.
+
+Position 272 changes only `microvm_options`, which position 221 adds to the CLI's options module,
+so that it builds a management RPC request's options on a thread with a 4 MiB stack on every host
+rather than only on Windows: the RPC calls it on its worker thread, whose 2 MiB stack clap's
+construction of the options overflows in debug builds. It moves that thread into a helper, which
+`on_big_stack`, which upstream main has, also uses on Windows. It changes nothing that a mapped PR
+adds. Replaying it on upstream main conflicts in its only file, which lacks position 221's
+`microvm_options`, so it follows position 221 upstream.
+
 ## PR summary
 
 Each count is of v6.1 commits, which include the fixups that the v3.0, v4.0, v5.0, and v6.0
@@ -2087,7 +2148,7 @@ reorganizations folded into them; see [The v6.0 reorganization](#the-v60-reorgan
 | PR07 | U | Consomme resource bounding | - | all landed upstream | 0 | Current upstream |
 | PR08 | U | Preparatory refactors | - | all landed upstream | 0 | Current upstream |
 | PR09 | U | Fallible VM lifecycle | 011-014; 234-236 (fixups) | `f2a3c2c20..c9777119a`; `dcc3065ad..e1433b346` | 7 | Current upstream |
-| PR10 | U | Portable CPU and clock state | 015-025 | `dbeb3a372..f435f0d20` | 11 | PR09 |
+| PR10 | U | Portable CPU and clock state | 015-025; 271 (fixup) | `dbeb3a372..f435f0d20`; `67ac3e283` | 12 | PR09; its fixup needs positions 261 and 270 |
 | PR11 | U | Snapshot publication protocol | 026-029 | `33d3c96db..6f57af410` | 4 | PR10 |
 | PR12 | U | Immutable private-CoW restore | 030-034 | `46beb573c..42371653d` | 5 | PR10 |
 | PR13 | U | Generic virtio persistence | 035-046; 240 (fixup) | `7294e5c6c..fcb36de78`; `459c28110` | 13 | PR11 + PR12 |
@@ -2112,8 +2173,9 @@ reorganizations folded into them; see [The v6.0 reorganization](#the-v60-reorgan
 Each entry names the v6.0 position of the commit, which it had in v5.0 and v5.1 too, the v4.0
 position, the v3.0 and v2.4 positions that v4.0 recorded, and the v2.4 and v5.1 fixups that it
 folds; "(part)" marks a fixup that split across commits. Positions 234-236 and 240-243, which
-followed the v6.0 reorganization, name their OpenVMM pull request instead of earlier positions. A
-v6.0 position counts in `feature/microvm/dev` at `5ca20ee08`, whose first 220 commits are those of
+followed the v6.0 reorganization, and position 271, which followed the v6.1 rebase, name their
+OpenVMM pull request instead of earlier positions. A v6.0 position counts in
+`feature/microvm/dev` at `5ca20ee08`, whose first 220 commits are those of
 `feature/microvm/release/v6.0`, and a v4.0 position in `feature/microvm/dev` at `e1ca353eb`, whose
 first 210 commits are those of `feature/microvm/release/v4.0`. Landed entries name the commits and
 positions of the branch that the rebase started from, `microvm/v2.1`,
@@ -2304,7 +2366,7 @@ Retired by the v4.0 and v5.0 reorganizations:
 </details>
 
 <details>
-<summary><strong>PR10 - Portable CPU and clock state (U)</strong> - 11 commits</summary>
+<summary><strong>PR10 - Portable CPU and clock state (U)</strong> - 12 commits</summary>
 
 - 015 `dbeb3a372` - vmcore, state_unit: advance guest time across stopped downtime (v6.0 019, v4.0 024, v3.0 033, v2.4 033; folds v2.4 213 (part) and 371 (part))
 - 016 `d90e9402e` - chipset: persist and advance the RTC clock (v6.0 020, v4.0 025, v3.0 034, v2.4 034; folds v2.4 213 (part))
@@ -2317,6 +2379,7 @@ Retired by the v4.0 and v5.0 reorganizations:
 - 023 `347df32a9` - virt_mshv: synchronize restored vCPU clocks and expose the exact TSC frequency (v6.0 027, v4.0 032, v3.0 041, v2.4 041; folds v2.4 373 (part))
 - 024 `5857bd0be` - virt_whp: synchronize restored vCPU clocks and keep SMP TSC reads coherent (v6.0 028, v4.0 033, v3.0 042, v2.4 042; folds v2.4 312 and 324 (part))
 - 025 `f435f0d20` - vmm_core: advance VP TSC and APIC timers across downtime (v6.0 029, v4.0 034, v3.0 043, v2.4 043)
+- 271 `67ac3e283` - chipset: keep the RTC's time and timer phases across a snapshot (microsoft/openvmm#5077; **fold into 016**, after positions 261 and 270, whose `start_at` restores its periodic timers, its saved-state fields' numbering into 193, and its comment on the chipset state unit's time advance and its sentence of the snapshot guide into 248)
 
 </details>
 
