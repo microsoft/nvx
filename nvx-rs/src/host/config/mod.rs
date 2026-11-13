@@ -173,9 +173,12 @@ pub struct Boot {
     /// The caller's own kernel command-line tokens, to which NVX adds those of what it lowers.
     /// The root's tokens, `nvx_hostname`, `nvx_machine_id`, `nvx_maps` and `virtfs_*` are reserved;
     /// every other token, including `nvx_entrypoint`, `nvx_arg` and `nvx_share`, is caller-owned.
-    /// A capture permits only OpenVMM's platform allowlist and refuses caller tokens whose
-    /// tier, processor, console, device or network settings the builder supplies. It requires
-    /// exactly one `nvx_sandbox=1` token, as the guest's init splits the command line.
+    /// A capture permits only OpenVMM's platform allowlist, which admits the kernel tuning
+    /// parameters `mitigations=off`, `mitigations=auto`, `mitigations=auto,nosmt`,
+    /// `no_timer_check`, `quiet`, and `loglevel=0` to `loglevel=7`, each parameter at most once,
+    /// and refuses caller tokens whose tier, processor, console, device or network settings the
+    /// builder supplies. It requires exactly one `nvx_sandbox=1` token, as the guest's init splits
+    /// the command line.
     pub command_line: String,
     /// Memory capacity of a cold VM, in MiB, if it reserves more than its boot memory.
     /// It must be at least [`VmConfig::memory_mib`] and fit a byte count.
@@ -494,6 +497,7 @@ impl VmConfig {
                 capture.memory.boot
             )));
         }
+        let mut tuning = Vec::new();
         for token in boot.command_line.split_ascii_whitespace() {
             let name = token.split_once('=').map_or(token, |(name, _)| name);
             if !platform_command_line_token_is_invariant(token)
@@ -517,6 +521,15 @@ impl VmConfig {
                 return Err(Error::unsupported(format!(
                     "Boot.command_line uses the forbidden platform capture token {name:?}"
                 )));
+            }
+            if KERNEL_TUNING_PARAMETERS.contains(&token) {
+                if tuning.contains(&name) {
+                    return Err(Error::unsupported(format!(
+                        "Boot.command_line repeats the kernel tuning parameter {name:?}, which a \
+                         capture takes at most once"
+                    )));
+                }
+                tuning.push(name);
             }
         }
         let mut sandbox = cmdline::init_tokens(boot.command_line.as_bytes())
@@ -887,6 +900,26 @@ impl VmConfig {
     }
 }
 
+/// The kernel tuning parameters that OpenVMM admits on the command line of a capture of its
+/// platform tier (microsoft/nvx#995). Like the allowlist's other tokens, each is fixed when the
+/// guest's kernel boots, is the same for every restore, and carries no tenant data; a capture takes
+/// each parameter at most once, as OpenVMM does.
+pub(crate) const KERNEL_TUNING_PARAMETERS: [&str; 13] = [
+    "mitigations=off",
+    "mitigations=auto",
+    "mitigations=auto,nosmt",
+    "no_timer_check",
+    "quiet",
+    "loglevel=0",
+    "loglevel=1",
+    "loglevel=2",
+    "loglevel=3",
+    "loglevel=4",
+    "loglevel=5",
+    "loglevel=6",
+    "loglevel=7",
+];
+
 /// OpenVMM's named platform snapshot command-line allowlist.
 fn platform_command_line_token_is_invariant(token: &str) -> bool {
     matches!(
@@ -902,6 +935,7 @@ fn platform_command_line_token_is_invariant(token: &str) -> bool {
             | "nvx_control_tty=hvc2"
     ) || token.starts_with("nr_cpus=")
         || token.starts_with("maxcpus=")
+        || KERNEL_TUNING_PARAMETERS.contains(&token)
         || [
             "virtio_mmio.device=",
             "virtnet_ip=",

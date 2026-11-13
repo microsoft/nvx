@@ -334,8 +334,8 @@ fn capture_creation_records_sparse_disks_devices_and_a_complete_serde_context() 
 #[test]
 fn capture_creation_refuses_nonplatform_tokens_by_name_without_leaving_outputs() {
     for token in [
-        "quiet",
-        "loglevel=0",
+        "nokaslr",
+        "loglevel=8",
         "nvx_entrypoint=/bin/sh",
         "nvx_arg=tenant",
         "nvx_share=/tenant",
