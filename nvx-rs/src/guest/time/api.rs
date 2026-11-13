@@ -678,8 +678,6 @@ pub(crate) struct Restore {
     memory_ranges: Vec<MemoryRange>,
     /// The network settings that the restore packet carries, if any.
     network: Option<RestoreNetwork>,
-    /// The activation record that the restore packet ends with, if any, undecoded.
-    activation: Option<Vec<u8>>,
     /// Whether the call finished the restore.
     finished: bool,
     /// The restore's fresh entropy, in the in-memory mode, until the caller takes it.
@@ -753,16 +751,6 @@ impl Restore {
     /// finishes the restore, or `None` for a restore that carries none.
     pub(crate) fn network(&self) -> Option<RestoreNetwork> {
         self.network
-    }
-
-    /// Returns the activation record that the restore packet ends with: the bytes, 1 to
-    /// [`MAX_RECORD_BYTES`](crate::activation::MAX_RECORD_BYTES) of them, that the host handed a
-    /// platform clone with its restore, which the time ABI does not decode, or `None` for a
-    /// restore that handed over none. A clone's repair hands them to the repaired clone, whose
-    /// activation decodes them with
-    /// [`ActivationRecord::decode`](crate::activation::ActivationRecord::decode).
-    pub fn activation_record(&self) -> Option<&[u8]> {
-        self.activation.as_deref()
     }
 }
 
@@ -1053,12 +1041,15 @@ fn repair_restore(
     };
     let (packet, sample) = packet
         .map_err(|error| repair_failed(runtime, ViolationCode::RepairPacket, error.to_string()))?;
+    // The packet's reads take any activation record that it ends with, which only a host that
+    // hands one over with `--restore-activation-record` sends; NVX's host activates a restored
+    // guest over its control session instead.
     let RestorePacket {
         header,
         ranges,
         entropy,
         network,
-        activation,
+        activation: _,
     } = packet;
     let generation_id = entropy.generation_id();
     if generation_id == target.previous_id {
@@ -1141,7 +1132,6 @@ fn repair_restore(
             .map(|&(start, length)| MemoryRange { start, length })
             .collect(),
         network,
-        activation,
         finished,
         seed,
     }))
