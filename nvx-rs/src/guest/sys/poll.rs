@@ -47,16 +47,6 @@ pub(crate) fn ready(
         .collect())
 }
 
-/// Returns whether `descriptor` hung up, without waiting: for the read end of a pipe, whether
-/// every writer closed it, whatever bytes it still holds.
-pub(crate) fn hung_up(descriptor: BorrowedFd<'_>) -> Result<bool, Errno> {
-    let mut polls = [PollFd::new(descriptor, PollFlags::empty())];
-    nix::poll::poll(&mut polls, PollTimeout::ZERO)?;
-    Ok(polls[0]
-        .revents()
-        .is_some_and(|events| events.contains(PollFlags::POLLHUP)))
-}
-
 /// A descriptor owner and the readiness that [`poll`] waits for.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Pollable<'a> {
