@@ -889,8 +889,8 @@ the activation record.
 
 x86_64: the activation of each clone that a restore of a snapshot starts, once
 `nvx::guest::snapshot::capture` repaired it, for a guest init or agent, whether
-or not it is PID 1. `nvx::guest::clone` remains a compatibility alias.
-Activation itself holds no admission fence and starts no process.
+or not it is PID 1. Activation itself holds no admission fence and starts no
+process.
 
 In a clone, the capture repairs the restore before it returns: it checks that
 the online CPUs are a prefix that the restore's processor target does not

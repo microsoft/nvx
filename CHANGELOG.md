@@ -25,6 +25,7 @@ changed item to its replacement, or to what its caller now does.
 - **No exec.** The exec engine, `nvx::exec`, and the guest's process modules,
   `nvx::guest::{exec, spawn, process, cgroup, entry}`, are gone. A guest's init
   runs its executions itself.
+- **`nvx::guest::clone` is `nvx::guest::activation`.** The old name is gone.
 - **The guest's space is private.** nvx-init's space, `nvx::guest::{root, gpt}`
   and the mapper of `nvx::guest::mappings`, is private to `nvx`.
   `resolve_guest_path` is gone, and `ExportPlan` holds paths only.
