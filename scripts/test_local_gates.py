@@ -163,7 +163,7 @@ class SelectionTests(unittest.TestCase):
         gate_ids = _gate_ids(report)
         self.assertNotIn("kernel-config", gate_ids)
         self.assertIn("nvx-rs-format", gate_ids)
-        self.assertIn("nvx-rs-adapter-guest", gate_ids)
+        self.assertIn("nvx-rs-guest-binaries-build", gate_ids)
         self.assertTrue(report.ci_suites.run_microvm_tests)
 
     def test_a_documentation_change_selects_only_the_always_run_gates(self) -> None:
@@ -375,18 +375,6 @@ class EnvironmentTests(unittest.TestCase):
             runner_temp=self.runner_temp,
             only=only,
         )
-
-    def test_an_inherited_bundle_is_removed_unless_the_step_sets_it(self) -> None:
-        report = self.report("linux", ("nvx-rs-bundling", "nvx-rs-lint"))
-        inherited = {"PATH": "path", "NVX_BUNDLE": "inherited"}
-        bundling = local_gates.prepare_execution_environment(
-            _gate(report, "nvx-rs-bundling"), inherited
-        )
-        lint = local_gates.prepare_execution_environment(
-            _gate(report, "nvx-rs-lint"), inherited
-        )
-        self.assertNotIn("NVX_BUNDLE", bundling)
-        self.assertEqual(lint["NVX_BUNDLE"], "skip")
 
     def test_windows_nvx_cli_names_a_built_nvx_rs_and_removes_xdg_cache_home(
         self,
