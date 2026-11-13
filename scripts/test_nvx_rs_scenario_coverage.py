@@ -149,7 +149,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(build["uses"], "./.github/actions/build-guest-artifacts")
         # The kernel and the Alpine initramfs, which every scenario boots, and
         # the Ubuntu distro layer and the sandbox scratch template, which the
-        # public sandbox scenarios and the runtime adapter's suite read.
+        # public sandbox scenarios read.
         self.assertEqual(
             build["with"], {"components": "kernel alpine ubuntu", "save-cache": "false"}
         )
@@ -170,21 +170,13 @@ class WorkflowTests(unittest.TestCase):
             dict.fromkeys(uploads, "build"),
         )
 
-    def test_the_measurement_runs_with_the_guest_agent_that_the_job_builds(self):
+    def test_the_measurement_execs_the_script_with_its_output_directory(self):
         workflow = _workflow()
-        build = _step(workflow, "measure", "Build the runtime adapter's guest agent")
-        self.assertEqual(build["working-directory"], "tests/runtime-adapter")
-        self.assertIn(
-            "--target x86_64-unknown-linux-musl --bin runtime-adapter-guest",
-            build["run"],
-        )
         # The step execs the measurement, which a cancellation then signals.
         words = shlex.split(_step(workflow, "measure", "Measure")["run"])
         self.assertEqual(
             words[:3], ["exec", "python3", "scripts/nvx_rs_scenario_coverage.py"]
         )
-        guest_agent = words[words.index("--guest-agent") + 1]
-        self.assertEqual(REPO_ROOT / guest_agent, scenario.DEFAULT_GUEST_AGENT)
         output = words[words.index("--output") + 1]
         self.assertEqual(REPO_ROOT / output, scenario.DEFAULT_OUTPUT)
 
@@ -282,8 +274,8 @@ class ShowEnvTests(unittest.TestCase):
             scenario.instrumentation(run), {"RUSTFLAGS": "-C instrument-coverage"}
         )
         self.assertEqual(commands, [scenario.SHOW_ENV])
-        # cargo-llvm-cov's rustc wrapper would leave the runtime adapter's own
-        # crates uninstrumented, and the crate's paths keep their prefix
+        # The scenarios start Cargo themselves, so the flags must instrument
+        # every build that they start; the crate's paths keep their prefix
         # without the remap.
         self.assertIn("--no-rustc-wrapper", scenario.SHOW_ENV)
         self.assertIn("--remap-path-prefix", scenario.SHOW_ENV)
@@ -627,7 +619,7 @@ class ProcessTests(unittest.TestCase):
                 ("debug/deps/vm_restart-0123.d", 0o644),
                 ("debug/deps/data-89ab", 0o644),
                 ("debug/build/nvx-cdef/build-script-build", 0o755),
-                ("debug/runtime-adapter-host", 0o755),
+                ("debug/top-level-host", 0o755),
                 ("release/deps/nvx_rs-0123", 0o755),
             ):
                 path = target / name
@@ -723,7 +715,6 @@ def _measurement(**changes: Any) -> dict[str, Any]:
         "cargo_llvm_cov": "cargo-llvm-cov 1.0.0",
         "runs": {
             "microvm": {"status": 0, "seconds": 1.0},
-            "runtime_adapter": {"status": 0, "seconds": 1.0},
         },
         "crate_tests": {
             "status": 0,
@@ -732,7 +723,7 @@ def _measurement(**changes: Any) -> dict[str, Any]:
             "stray_profiles": [],
         },
         "stray_profiles": [],
-        "profiled_groups": ["`nvx-rs`", "the runtime adapter's tests"],
+        "profiled_groups": ["`nvx-rs`", "the crate's tests that the scenarios run"],
         "scenario_builds": {"lines": 40, "reached": 30},
     }
     measurement.update(changes)
@@ -794,8 +785,8 @@ class SummaryTests(unittest.TestCase):
         )
         self.assertIn(
             "The scenarios reach 10 lines that the crate's tests don't. Their "
-            "profiles include processes of `nvx-rs` and the runtime adapter's "
-            "tests. Of the lines of production code that the builds of the "
+            "profiles include processes of `nvx-rs` and the crate's tests that "
+            "the scenarios run. Of the lines of production code that the builds of the "
             "scenarios compile, they reach 75.0% of 40. These builds leave out "
             "the other lines, among them the guest code, which runs only in "
             "guests.",
@@ -874,7 +865,6 @@ class ProblemTests(unittest.TestCase):
         measurement = _measurement(
             runs={
                 "microvm": {"status": 1, "seconds": 1.0},
-                "runtime_adapter": {"status": 2, "seconds": 1.0},
             },
             crate_tests={
                 "status": 101,
@@ -882,25 +872,24 @@ class ProblemTests(unittest.TestCase):
                 "retries": retries,
                 "stray_profiles": ["default_1_2.profraw"],
             },
-            stray_profiles=["tests/runtime-adapter/default_3_4.profraw"],
+            stray_profiles=["build/default_3_4.profraw"],
         )
         found = [_process(41, "lifecycle", False, "run")]
         issues = scenario.problems(
-            measurement, found, ["the runtime adapter's tests and host program"]
+            measurement, found, ["the crate's tests that the scenarios run"]
         )
         self.assertEqual(
             issues,
             [
                 "`nvx.py test-microvm` failed with status 1.",
-                "`nvx.py test-runtime-adapter` failed with status 2.",
                 "The crate's tests `b` of `--lib` failed when they ran again.",
                 "The crate's tests of `--test store` failed when they ran again.",
                 "2 processes wrote profiles where the measurement doesn't merge "
                 "them, as processes that start without `LLVM_PROFILE_FILE` do: "
                 "`default_1_2.profraw` and "
-                "`tests/runtime-adapter/default_3_4.profraw`.",
+                "`build/default_3_4.profraw`.",
                 "No `nvx-rs` process wrote a profile, though the scenarios started 1.",
-                "No process of the runtime adapter's tests and host program wrote a "
+                "No process of the crate's tests that the scenarios run wrote a "
                 "profile that reaches the crate's production code.",
             ],
         )
@@ -1079,7 +1068,7 @@ class MarkedProcessTests(unittest.TestCase):
             subprocess.Popen(
                 ["sleep", "60"],
                 env={**os.environ, scenario.RUN_VARIABLE: marker},
-                # As the runtime adapter starts its VMs.
+                # As a process may leave a run's process tree.
                 start_new_session=True,
             )
             for marker in ("1-2", "1-23")
@@ -1109,11 +1098,10 @@ profile=${LLVM_PROFILE_FILE//%p/$$}
 # The profiles of a fake measurement, named as PROFILE_PATTERN names them, by
 # a process's ID and its executable's signature: the end of the names of
 # nvx-rs's, and those of a build script, of the crate's test that a scenario
-# runs, of the adapter, and of the crate's tests.
+# runs, and of the crate's tests.
 NVX_RS_PROFILE = "-1234_0.profraw"
 BUILD_SCRIPT_PROFILE = "13579-9999_0.profraw"
 LIFECYCLE_PROFILE = "24680-4567_0.profraw"
-ADAPTER_PROFILE = "99999-5678_0.profraw"
 CRATE_TESTS_PROFILE = "nvx-rs-1-2.profraw"
 CRATE_TESTS_OUTPUT = (
     "     Running unittests src/lib.rs (deps/nvx-0123)\n"
@@ -1140,13 +1128,12 @@ class FakeHost:
     The build leaves FAKE_NVX_RS as nvx-rs, and a build script's profile.
     test-microvm runs nvx-rs through the wrapper three times, the last time as
     a killed process, writes the duration report of their scenarios, and
-    builds and runs the crate's test that a scenario runs.
-    test-runtime-adapter builds and runs the adapter's executables, as the
-    crate's tests run theirs, which leave a profile in the crate's directory,
-    `crate_dir`, with `crate_stray`. The processes of the executables in
-    `silent` write no profile. llvm-profdata merges by writing the names of
-    the raw profiles that its output holds, and llvm-cov reports what
-    reached() says that they reached of some executables.
+    builds and runs the crate's test that a scenario runs. The crate's tests
+    leave a profile in the crate's directory, `crate_dir`, with `crate_stray`.
+    The processes of the executables in `silent` write no profile.
+    llvm-profdata merges by writing the names of the raw profiles that its
+    output holds, and llvm-cov reports what reached() says that they reached
+    of some executables.
     """
 
     def __init__(
@@ -1155,10 +1142,9 @@ class FakeHost:
         *,
         build_status: int = 0,
         microvm_status: int = 0,
-        adapter_reaches: bool = True,
         silent: Collection[str] = (),
         crate_stray: bool = False,
-        interrupt_adapter: bool = False,
+        interrupt_microvm: bool = False,
     ):
         self.root = root
         self.llvm_profdata = root / "llvm-profdata"
@@ -1168,10 +1154,9 @@ class FakeHost:
         self.crate_dir.mkdir()
         self.build_status = build_status
         self.microvm_status = microvm_status
-        self.adapter_reaches = adapter_reaches
         self.silent = silent
         self.crate_stray = crate_stray
-        self.interrupt_adapter = interrupt_adapter
+        self.interrupt_microvm = interrupt_microvm
         self.detached: subprocess.Popen[bytes] | None = None
         self.commands: list[tuple[str, ...]] = []
         self.streamed: list[tuple[tuple[str, ...], dict[str, str]]] = []
@@ -1223,20 +1208,13 @@ class FakeHost:
             _executable(target / "debug" / "deps" / "managed_lifecycle-4567")
             if "managed_lifecycle" not in self.silent:
                 _profile(environment, LIFECYCLE_PROFILE)
-            return self.microvm_status
-        if "test-runtime-adapter" in command:
-            for name in ("vm_restart-89ab", "runtime_adapter_host-cdef"):
-                _executable(target / "debug" / "deps" / name)
-            if "runtime_adapter_host" not in self.silent:
-                _profile(environment, ADAPTER_PROFILE)
-            if self.interrupt_adapter:
-                # A VM that the host program started in a session of its own,
-                # which outlives the run's process tree.
+            if self.interrupt_microvm:
+                # A process that outlives the run's process tree.
                 self.detached = subprocess.Popen(
                     ["sleep", "60"], env=dict(environment), start_new_session=True
                 )
                 raise KeyboardInterrupt
-            return 0
+            return self.microvm_status
         raise AssertionError(f"streamed {command}")
 
     def _nvx_rs(self, environment: Mapping[str, str], *arguments: str) -> None:
@@ -1248,25 +1226,19 @@ class FakeHost:
     ) -> dict[str, dict[int, int]]:
         """Returns what the raw profiles `profiles` reached of `objects`: the
         crate's tests, lines 1 and 2 of a host file and the guest code; nvx-rs,
-        lines 2 and 3; the adapter, line 4; and the crate's test that a
-        scenario runs, line 5. That test and the adapter's host program hold
-        the function of line 5 under the same symbol, so the adapter's
-        profile reaches it in the test's executable too, as llvm-cov counts
-        a profile for every executable that holds a function."""
+        lines 2 and 3; and the crate's test that a scenario runs, line 4."""
         built = {name.split("-")[0] for name in objects}
         tests = CRATE_TESTS_PROFILE in profiles
         crate = "nvx" in built and tests
         nvx_rs = "nvx_rs" in built and any(
             name.endswith(NVX_RS_PROFILE) for name in profiles
         )
-        adapter = ADAPTER_PROFILE in profiles and self.adapter_reaches
-        shared = bool(built & {"managed_lifecycle", "runtime_adapter_host"})
+        lifecycle = LIFECYCLE_PROFILE in profiles
         hits = {
             1: crate,
             2: crate or nvx_rs,
             3: nvx_rs,
-            4: "runtime_adapter_host" in built and adapter,
-            5: shared and (LIFECYCLE_PROFILE in profiles or adapter),
+            4: "managed_lifecycle" in built and lifecycle,
         }
         files = {"src/host/cli/run.rs": {line: int(hit) for line, hit in hits.items()}}
         if "nvx" in built:
@@ -1344,7 +1316,6 @@ class MeasureTests(unittest.TestCase):
         """Measures with `host` into its root's out/, and returns the status
         and what the measurement printed on standard error."""
         stderr = io.StringIO()
-        guest_agent = host.root / "runtime-adapter-guest"
         with (
             redirect_stderr(stderr),
             redirect_stdout(io.StringIO()),
@@ -1353,7 +1324,6 @@ class MeasureTests(unittest.TestCase):
         ):
             status = scenario.measure(
                 host.root / "out",
-                guest_agent=guest_agent,
                 scenarios=["lifecycle", "run-console-restore"],
                 work=host.root / "work",
                 run=host.run,
@@ -1375,15 +1345,12 @@ class MeasureTests(unittest.TestCase):
                 name: sorted(path.name for path in (output / name).iterdir())
                 for name in scenario.RUNS
             }
-            logs = [
-                (output / name).is_file()
-                for name in ("build.log", "microvm.log", "runtime-adapter.log")
-            ]
+            logs = [(output / name).is_file() for name in ("build.log", "microvm.log")]
         # The build and the runs, with the instrumentation of show-env, of
         # which test-microvm alone takes the interrupts of the measurement to
         # end what it started.
-        build, microvm, adapter = host.streamed
-        self.assertEqual(host.forwarded, [False, True, False])
+        build, microvm = host.streamed
+        self.assertEqual(host.forwarded, [False, True])
         self.assertEqual(build[0], scenario.BUILD)
         python = [sys.executable, str(scenario.NVX_PY)]
         self.assertEqual(
@@ -1392,25 +1359,15 @@ class MeasureTests(unittest.TestCase):
             + [str(output / "microvm"), "--scenario", "lifecycle"]
             + ["--scenario", "run-console-restore"],
         )
-        self.assertEqual(
-            list(adapter[0]),
-            [*python, "test-runtime-adapter", "--backend", "kvm", "--guest-agent"]
-            + [str(host.root / "runtime-adapter-guest")],
-        )
-        for (_, environment), target, profiles in zip(
-            host.streamed,
-            ("target", "target", "adapter-target"),
-            ("microvm", "microvm", "runtime-adapter"),
-            strict=True,
-        ):
+        for _, environment in host.streamed:
             self.assertEqual(environment["RUSTFLAGS"], "-C instrument-coverage")
-            self.assertEqual(environment["CARGO_TARGET_DIR"], str(work / target))
+            self.assertEqual(environment["CARGO_TARGET_DIR"], str(work / "target"))
             self.assertEqual(
                 environment["LLVM_PROFILE_FILE"],
-                str(work / "profiles" / profiles / "%p-%m.profraw"),
+                str(work / "profiles" / "microvm" / "%p-%m.profraw"),
             )
             self.assertEqual(environment["NVX_RS"], str(work / "bin" / "nvx-rs"))
-        # The processes of all three runs, and theirs alone, share a value.
+        # The processes of both streamed commands, and theirs alone, share a value.
         self.assertEqual(
             len(
                 {environment[scenario.RUN_VARIABLE] for _, environment in host.streamed}
@@ -1418,7 +1375,7 @@ class MeasureTests(unittest.TestCase):
             1,
         )
         self.assertNotIn(scenario.RUN_VARIABLE, host.environment)
-        self.assertEqual(logs, [True, True, True])
+        self.assertEqual(logs, [True, True])
         # The crate's tests ran as nvx_rs_coverage.py runs them.
         self.assertIn(
             ("cargo", "llvm-cov", "--no-report", *coverage.RUN_OPTIONS), host.commands
@@ -1431,10 +1388,7 @@ class MeasureTests(unittest.TestCase):
         self.assertTrue(all(name.endswith(NVX_RS_PROFILE) for name in nvx_rs_profiles))
         self.assertEqual(
             host.merged["scenarios"],
-            sorted(
-                [BUILD_SCRIPT_PROFILE, LIFECYCLE_PROFILE, ADAPTER_PROFILE]
-                + nvx_rs_profiles
-            ),
+            sorted([BUILD_SCRIPT_PROFILE, LIFECYCLE_PROFILE] + nvx_rs_profiles),
         )
         self.assertEqual(host.merged["crate-tests"], [CRATE_TESTS_PROFILE])
         self.assertEqual(
@@ -1445,19 +1399,15 @@ class MeasureTests(unittest.TestCase):
         self.assertEqual(
             host.merged["microvm"], [BUILD_SCRIPT_PROFILE, LIFECYCLE_PROFILE]
         )
-        self.assertEqual(host.merged["runtime-adapter"], [ADAPTER_PROFILE])
         for group in (
             ("nvx-rs", ("nvx_rs-0123",)),
             ("microvm", ("managed_lifecycle-4567",)),
-            ("runtime-adapter", ("runtime_adapter_host-cdef", "vm_restart-89ab")),
         ):
             self.assertIn((*group, "summary"), host.exports)
         # Each run's reports read every executable that the runs built.
         every = (
             "nvx_rs-0123",
             "managed_lifecycle-4567",
-            "runtime_adapter_host-cdef",
-            "vm_restart-89ab",
             "nvx-0123",
         )
         for name in scenario.RUNS:
@@ -1477,10 +1427,9 @@ class MeasureTests(unittest.TestCase):
             [
                 "`nvx-rs`",
                 "the crate's tests that the scenarios run",
-                "the runtime adapter's tests and host program",
             ],
         )
-        self.assertEqual(measurement["scenario_builds"], {"lines": 5, "reached": 4})
+        self.assertEqual(measurement["scenario_builds"], {"lines": 4, "reached": 3})
         self.assertEqual(
             [(entry["span"], entry["command"], entry["profile"]) for entry in found],
             [
@@ -1490,13 +1439,13 @@ class MeasureTests(unittest.TestCase):
             ],
         )
         self.assertIn(
-            "| The crate's tests | 50.0% of 6 | 50.0% of 6 |\n"
-            "| The scenarios | 66.6% of 6 | 66.6% of 6 |\n"
-            "| Together | 100.0% of 6 | 100.0% of 6 |\n",
+            "| The crate's tests | 60.0% of 5 | 60.0% of 5 |\n"
+            "| The scenarios | 60.0% of 5 | 60.0% of 5 |\n"
+            "| Together | 100.0% of 5 | 100.0% of 5 |\n",
             summary,
         )
         self.assertIn(
-            "The scenarios reach 3 lines that the crate's tests don't.", summary
+            "The scenarios reach 2 lines that the crate's tests don't.", summary
         )
         self.assertIn("| `run-console-restore` | `nvx-rs run` | 1 | 0 |\n", summary)
         self.assertNotIn("misses", summary)
@@ -1528,53 +1477,21 @@ class MeasureTests(unittest.TestCase):
         )
         self.assertEqual(measurement["stray_profiles"], [])
 
-    def test_executables_whose_processes_reach_nothing_fail_the_measurement(self):
+    def test_executables_that_write_no_profile_fail_the_measurement(self):
         with tempfile.TemporaryDirectory() as directory:
-            host = FakeHost(Path(directory).resolve(), adapter_reaches=False)
+            host = FakeHost(Path(directory).resolve(), silent={"managed_lifecycle"})
             status, stderr = self._measure(host)
         self.assertEqual(status, 1)
         self.assertIn(
-            "No process of the runtime adapter's tests and host program wrote a "
+            "No process of the crate's tests that the scenarios run wrote a "
             "profile that reaches the crate's production code.",
             stderr,
         )
-
-    def test_executables_that_write_no_profile_fail_the_measurement(self):
-        # The crate's test and the adapter's host program hold a function
-        # under the same symbol, so the profile of either reaches it in the
-        # other's executable, though that executable's processes wrote none.
-        for executable, group, profiles, merged in (
-            (
-                "managed_lifecycle",
-                "the crate's tests that the scenarios run",
-                "microvm",
-                [BUILD_SCRIPT_PROFILE],
-            ),
-            (
-                "runtime_adapter_host",
-                "the runtime adapter's tests and host program",
-                "runtime-adapter",
-                None,
-            ),
-        ):
-            with (
-                self.subTest(executable=executable),
-                tempfile.TemporaryDirectory() as directory,
-            ):
-                host = FakeHost(Path(directory).resolve(), silent={executable})
-                status, stderr = self._measure(host)
-                self.assertEqual(status, 1)
-                self.assertIn(
-                    f"No process of {group} wrote a profile that reaches the "
-                    "crate's production code.",
-                    stderr,
-                )
-                # The other groups' processes wrote theirs.
-                self.assertEqual(stderr.count("No process of"), 1)
-                # The build's profile, which the crate's test's directory holds
-                # too, reaches nothing of the test, and a directory without
-                # profiles needs no merge.
-                self.assertEqual(host.merged.get(profiles), merged)
+        # The other group's processes wrote theirs.
+        self.assertEqual(stderr.count("No process of"), 1)
+        # The build's profile, which the crate's test's directory holds too,
+        # reaches nothing of the test.
+        self.assertEqual(host.merged["microvm"], [BUILD_SCRIPT_PROFILE])
 
     def test_a_failed_build_ends_the_measurement(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1586,7 +1503,7 @@ class MeasureTests(unittest.TestCase):
     def test_interrupts_end_the_processes_that_left_the_runs(self):
         sigkill = cast(int, getattr(signal, "SIGKILL"))  # noqa: B009
         with tempfile.TemporaryDirectory() as directory:
-            host = FakeHost(Path(directory).resolve(), interrupt_adapter=True)
+            host = FakeHost(Path(directory).resolve(), interrupt_microvm=True)
             try:
                 with self.assertRaises(KeyboardInterrupt):
                     self._measure(host)
@@ -1629,44 +1546,25 @@ class CommandTests(unittest.TestCase):
         return status, calls, stderr.getvalue()
 
     def test_the_measurement_writes_to_the_build_directory_by_default(self):
-        with tempfile.TemporaryDirectory() as directory:
-            guest_agent = Path(directory) / "runtime-adapter-guest"
-            guest_agent.write_bytes(b"")
-            status, calls, _ = self._main(
-                ["--guest-agent", str(guest_agent), "--scenario", "smp"]
-            )
+        status, calls, _ = self._main(["--scenario", "smp"])
         self.assertEqual(status, 0)
         self.assertEqual(
             calls,
-            [
-                {
-                    "output": scenario.DEFAULT_OUTPUT,
-                    "guest_agent": guest_agent.resolve(),
-                    "scenarios": ["smp"],
-                }
-            ],
+            [{"output": scenario.DEFAULT_OUTPUT, "scenarios": ["smp"]}],
         )
 
-    def test_measurements_run_on_linux_with_a_guest_agent(self):
+    def test_measurements_run_on_linux_only(self):
         status, calls, stderr = self._main([], system="win32")
         self.assertEqual((status, calls), (1, []))
         self.assertIn("on Linux only", stderr)
-        missing = str(Path(tempfile.gettempdir()) / "no-runtime-adapter-guest")
-        status, calls, stderr = self._main(["--guest-agent", missing])
-        self.assertEqual((status, calls), (1, []))
-        self.assertIn("the runtime adapter's guest agent is missing", stderr)
 
     def test_errors_and_interrupts_end_the_measurement(self):
-        with tempfile.TemporaryDirectory() as directory:
-            guest_agent = Path(directory) / "runtime-adapter-guest"
-            guest_agent.write_bytes(b"")
-            arguments = ["--guest-agent", str(guest_agent)]
-            status, _, stderr = self._main(
-                arguments, raised=coverage.MeasurementError("no profile")
-            )
-            self.assertEqual((status, stderr), (1, "error: no profile\n"))
-            status, _, stderr = self._main(arguments, raised=KeyboardInterrupt())
-            self.assertEqual((status, stderr), (130, "Interrupted\n"))
+        status, _, stderr = self._main(
+            [], raised=coverage.MeasurementError("no profile")
+        )
+        self.assertEqual((status, stderr), (1, "error: no profile\n"))
+        status, _, stderr = self._main([], raised=KeyboardInterrupt())
+        self.assertEqual((status, stderr), (130, "Interrupted\n"))
 
 
 if __name__ == "__main__":
