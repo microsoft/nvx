@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 #[cfg(not(windows))]
 use std::process::{Child, Command, Stdio};
 #[cfg(not(windows))]

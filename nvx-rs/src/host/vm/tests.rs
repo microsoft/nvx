@@ -1586,7 +1586,7 @@ fn a_command_moves_the_checked_launch_and_the_same_opened_resources() {
 
     let mut command = prepared.into_command();
     assert_eq!(command.program, program);
-    assert_eq!(command.working_dir, vm.path());
+    assert_eq!(command.working_dir, vmm_working_dir(vm.path()).unwrap());
     assert!(command.breakaway_from_job);
     assert_eq!(command.arguments.as_ptr(), arguments);
     assert_eq!(command.inherit.as_ptr(), resources);
@@ -1712,6 +1712,53 @@ fn stand_in(dir: &VmDir) -> Prepared {
 
 #[cfg(any(target_os = "linux", windows))]
 struct RunningVm(Launched);
+
+#[test]
+fn vmms_start_in_the_system_directory_on_windows_and_in_their_vm_directory_elsewhere() {
+    let (_directory, vm) = vm_dir();
+    #[cfg(not(windows))]
+    assert_eq!(vmm_working_dir(vm.path()).unwrap(), vm.path());
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        let system = Path::new(&std::env::var_os("SystemRoot").unwrap()).join("System32");
+        assert!(system.is_dir());
+        assert!(system.as_os_str().encode_wide().count() <= 258);
+        let working_dir = vmm_working_dir(vm.path()).unwrap();
+        assert!(
+            working_dir
+                .as_os_str()
+                .eq_ignore_ascii_case(system.as_os_str()),
+            "{}",
+            working_dir.display()
+        );
+    }
+}
+
+/// A VM directory whose path exceeds the 258 UTF-16 code units of the working directory in which
+/// Windows starts a process still creates and spawns its VMM, which starts in the system
+/// directory.
+#[cfg(windows)]
+#[test]
+fn a_vm_directory_beyond_the_windows_working_directory_limit_spawns_its_vmm() {
+    use std::os::windows::ffi::OsStrExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let mut parent = root.path().to_path_buf();
+    while parent.as_os_str().encode_wide().count() < 320 {
+        parent.push("long-vm-directory-component");
+    }
+    fs::create_dir_all(&parent).unwrap();
+    let path = parent.join("vm");
+    create_private_dir(&path).unwrap();
+    let vm = VmDir::open(&path).unwrap();
+    assert!(vm.path().as_os_str().encode_wide().count() > 258);
+    let prepared = stand_in(&vm);
+    assert_eq!(prepared.working_dir, vmm_working_dir(vm.path()).unwrap());
+    let launched = RunningVm(spawn(prepared).unwrap());
+    assert!(!launched.0.process.has_exited().unwrap());
+}
 
 #[cfg(any(target_os = "linux", windows))]
 impl Drop for RunningVm {
