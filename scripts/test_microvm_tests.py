@@ -17645,8 +17645,8 @@ class MicrovmTests(unittest.TestCase):
             stack.enter_context(redirect_stdout(stdout))
             self.assertEqual(microvm_tests.run(args), 0)
 
-        # Boot, managed lifecycle, console exit and both SMP variants honor the explicit VPs.
-        self.assertEqual(len(progress), len(scenarios) + 5)
+        # On default x86, only console exit and both SMP variants expand the VPs.
+        self.assertEqual(len(progress), len(scenarios) + 3)
         for line in progress:
             self.assertRegex(line, r"^Running .+ on OpenVMM/kvm$")
 
@@ -17700,14 +17700,10 @@ class MicrovmTests(unittest.TestCase):
         # Each execution names the processor counts that it covers, if any.
         expected: list[tuple[str, list[int] | None]] = []
         for scenario in scenarios:
-            if scenario in (
-                "guest-boot",
-                "managed-lifecycle",
-                "console-exit",
-                "smp",
-                "smp-lapic",
-            ):
+            if scenario in ("console-exit", "smp", "smp-lapic"):
                 expected.extend((scenario, [processors]) for processors in (2, 1))
+            elif scenario in ("guest-boot", "managed-lifecycle"):
+                expected.append((scenario, [1]))
             elif scenario in (
                 "smp-snapshot",
                 "restore-processors",

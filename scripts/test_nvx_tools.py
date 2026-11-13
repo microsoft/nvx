@@ -10701,6 +10701,7 @@ python3() {
                 "!inputs.shard": not sharded,
                 "(steps.correctness.outputs.workload-artifacts || steps.correctness-linux.outputs.workload-artifacts) == 'true'": True,
                 "(inputs.guests-and-sandboxes || inputs.guest == 'ubuntu')": guests,
+                "(inputs.guests-and-sandboxes || inputs.guest == 'azurelinux')": guests,
             }
             chosen: list[str] = []
             for step in steps:
