@@ -164,27 +164,23 @@ impl Fixture {
             .find(|pair| pair[0] == "--restore-ready-path")
             .map(|pair| pair[1].to_str().unwrap().to_owned())
             .unwrap();
+        let recipe_path = state_dir.with_extension("json");
         let recipe = json!({
             "endpoint": prepared.outputs().endpoint, "ready": ready, "behavior": behavior,
             "trace": state_dir.with_extension("trace"), "outcome": prepared.outputs().outcome,
         });
-        fs::write(
-            state_dir.with_extension("json"),
-            serde_json::to_vec(&recipe).unwrap(),
-        )
-        .unwrap();
+        fs::write(&recipe_path, serde_json::to_vec(&recipe).unwrap()).unwrap();
         let mut spawned = self.spawned.lock().unwrap();
         let exited = spawned
             .iter()
             .all(|(reference, ..)| matches!(Process::open(reference), Ok(Opened::Exited(_))));
-        let launched = vm::spawn(
-            prepared.run_instead(
-                std::env::current_exe().unwrap(),
-                ["--exact", HELPER, "--ignored", "--nocapture"]
-                    .map(OsString::from)
-                    .to_vec(),
-            ),
-        )?;
+        // The helper starts where a VMM starts, which is not its VM directory on Windows, so its
+        // recipe's path follows libtest's own arguments, as a filter that names no test.
+        let mut helper = ["--exact", HELPER, "--ignored", "--nocapture"]
+            .map(OsString::from)
+            .to_vec();
+        helper.push(recipe_path.into_os_string());
+        let launched = vm::spawn(prepared.run_instead(std::env::current_exe().unwrap(), helper))?;
         spawned.push((launched.process.reference().clone(), arguments, exited));
         Ok(launched)
     }
@@ -1064,7 +1060,7 @@ fn serve(stream: &mut (impl Read + Write), capability: &[u8], epoch: u64, recipe
 fn restore_helper() {
     let mut capability = Vec::new();
     std::io::stdin().read_to_end(&mut capability).unwrap();
-    let recipe = std::env::current_dir().unwrap().with_extension("json");
+    let recipe = PathBuf::from(std::env::args_os().last().unwrap());
     let recipe: Value = serde_json::from_slice(&fs::read(recipe).unwrap()).unwrap();
     let field = |name: &str| recipe[name].as_str().unwrap().to_owned();
     if recipe["behavior"] == "exit" {

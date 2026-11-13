@@ -279,7 +279,8 @@ pub struct VmmCommand {
     pub program: PathBuf,
     /// The complete, checked arguments, without the executable.
     pub arguments: Vec<OsString>,
-    /// The VM directory in which OpenVMM runs.
+    /// The directory in which OpenVMM runs: on Windows, the system directory, and on other hosts,
+    /// the VM directory. Every path in `arguments` is absolute.
     pub working_dir: PathBuf,
     /// The control credential, never written to disk by the library.
     pub capability: Capability,
@@ -305,7 +306,7 @@ pub struct VmmCommand {
 pub struct Prepared {
     /// The executable checked during creation.
     program: PathBuf,
-    /// The private VM directory in which the child starts.
+    /// The directory in which the child starts, as [`vmm_working_dir`] chooses it.
     working_dir: PathBuf,
     /// Whether the child leaves the caller's Windows job.
     windows_breakaway: bool,
@@ -548,7 +549,7 @@ pub fn create(
         runtime.identity.check()?;
     }
     VmDir::open(dir.path())?;
-    platform::check_working_dir(dir.path())?;
+    let working_dir = vmm_working_dir(dir.path())?;
     let outputs = dir.outputs(config.console == ConsoleAttachment::Listener)?;
     let ready_endpoint = if from.is_some() && !cfg!(windows) {
         Some(dir.restore_ready_endpoint()?)
@@ -722,7 +723,7 @@ pub fn create(
     match checked {
         Ok((capability, arguments, nic, capture_context)) => Ok(Prepared {
             program: runtime.openvmm.clone(),
-            working_dir: dir.path().to_owned(),
+            working_dir,
             windows_breakaway: runtime.windows_breakaway,
             foreground: false,
             capability,
@@ -898,6 +899,31 @@ impl Launched {
             .as_mut()
             .ok_or_else(|| io::Error::other("the VM has no child owned by this caller"))
     }
+}
+
+/// Returns the directory in which the VMM of the VM directory `dir` starts: on Windows, the
+/// system directory, such as `C:\Windows\System32`, and on other hosts, `dir`.
+///
+/// Windows starts no process in a directory whose absolute path exceeds 258 UTF-16 code units,
+/// whatever its prefix and whether the host enables long paths, while a VM directory's path may
+/// be longer. OpenVMM uses its working directory only to resolve the relative paths of its
+/// arguments, and [`create`] gives it absolute ones, so a VMM on Windows starts in the system
+/// directory, which every host has, whose path is short, and which only administrators may
+/// change: a relative path that a caller lets through names no file that another user could have
+/// placed there, and OpenVMM cannot create a file there. On other hosts, which have no such
+/// limit, the VMM starts in its VM directory.
+///
+/// Fails on Windows as `GetSystemDirectoryW` fails.
+fn vmm_working_dir(dir: &Path) -> Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        let _ = dir;
+        platform::system_directory().map_err(|error| {
+            Error::io("cannot read the system directory in which the VMM starts").with_source(error)
+        })
+    }
+    #[cfg(not(windows))]
+    Ok(dir.to_owned())
 }
 
 /// Starts a prepared launch and returns its verified, detached process and any ready listener.
