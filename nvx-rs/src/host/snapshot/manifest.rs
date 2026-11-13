@@ -20,8 +20,8 @@ use crate::contract;
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::platform;
 use crate::host::process::BootId;
+use crate::host::runtime::Hypervisor;
 pub use crate::host::sandbox::geometry::BlockGeometry;
-use crate::hypervisor::Hypervisor;
 
 /// Name of the manifest in a snapshot's directory.
 pub const MANIFEST_NAME: &str = "manifest.bin";

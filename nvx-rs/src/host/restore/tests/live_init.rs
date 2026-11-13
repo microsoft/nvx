@@ -7,12 +7,12 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::Hypervisor;
 use crate::activation::{
     ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image, MachineIdMode,
     Network, OverlayMode, Publication, ReadyActivation, RestoreSection, TransactionId, Upper, View,
 };
 use crate::host::nvxs::HostConnection;
+use crate::host::runtime::Hypervisor;
 use crate::host::session;
 use crate::host::snapshot::SnapshotManifest;
 use crate::host::spawn::{Launched, VmmCommand, spawn_vm_with_mode};

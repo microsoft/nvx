@@ -18,11 +18,11 @@ use std::path::PathBuf;
 #[cfg(windows)]
 use std::process::{Command, Stdio};
 
+use nvx::ErrorKind;
 use nvx::activation::{MachineIdMode, View};
 use nvx::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
-use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
+use nvx::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity};
 use nvx::host::{snapshot, vm};
-use nvx::{ErrorKind, Hypervisor};
 
 /// Returns a new private directory below a temporary one, which the caller keeps.
 fn private_directory() -> (tempfile::TempDir, vm::VmDir) {

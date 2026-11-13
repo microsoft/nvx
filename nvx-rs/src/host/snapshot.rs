@@ -52,10 +52,10 @@ use crate::host::config::{
     VmConfig,
 };
 use crate::host::paths::{absolute, normalized};
-use crate::host::runtime::{Runtime, RuntimeIdentity};
+use crate::host::runtime::{Hypervisor, Runtime, RuntimeIdentity};
 use crate::host::{filesystem, platform, sandbox, seal};
 use crate::net::Ipv4Cidr;
-use crate::{Error, Hypervisor, Result};
+use crate::{Error, Result};
 
 pub(super) use self::capture::check_snapshot;
 pub use self::capture::{CapturedSnapshot, finish_capture};

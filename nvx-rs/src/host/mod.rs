@@ -4,8 +4,8 @@
 //!
 //! - [`runtime`] holds what every launch shares: the paths of the OpenVMM executable and the
 //!   guest kernel and initramfs, and their [`RuntimeIdentity`](runtime::RuntimeIdentity), the
-//!   hypervisor, which [`probe_hypervisor`](runtime::probe_hypervisor) checks, and the
-//!   [`LaunchOptions`](runtime::LaunchOptions).
+//!   [`Hypervisor`](runtime::Hypervisor), which [`probe_hypervisor`](runtime::probe_hypervisor)
+//!   checks, and the [`LaunchOptions`](runtime::LaunchOptions).
 //! - [`config`] holds the configuration of a VM as one value, a [`VmConfig`](config::VmConfig),
 //!   which it checks without reading the host: the VM's processors and memory, its root, the view
 //!   that its workload has of it, its network, its export, its boot console, and what only its

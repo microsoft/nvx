@@ -39,14 +39,13 @@ workspace.
 | --- | --- |
 | `host` (default) | The `host` module. It enables `serde` |
 | `guest` | The `guest` module, for Linux guests, and the [guest binaries](#guest-binaries), which the `guest` profile builds as static `x86_64-unknown-linux-musl` executables |
-| `serde` | The serde forms of `Hypervisor` and `net::Ipv4Cidr` |
+| `serde` | The serde form of `net::Ipv4Cidr` |
 | `cli` | NVX's own `nvx-rs` binary; it adds no API, and enables `host`. See [The nvx-rs CLI](#the-nvx-rs-cli) |
 | `testing` | NVX's own `nvx-fake-openvmm` binary, a fake OpenVMM for tests; see [Test hooks](#test-hooks). It adds no API |
 
 Without default features, the crate has only `protocol`, `activation`,
-`contract`, `net`, `uuid`, `Hypervisor`, and `Error`, and depends on
-nothing but `serde` when `serde` is enabled and `nix` and `getrandom` when
-`guest` is.
+`contract`, `net`, `uuid`, and `Error`, and depends on nothing but `serde` when
+`serde` is enabled and `nix` and `getrandom` when `guest` is.
 
 ## Layout
 
@@ -64,7 +63,6 @@ nvx-rs/
 │   ├── net/         CIDR networks and their subtraction, hostnames, guest addresses, and gateways
 │   ├── gpt/         strict reading of GPT disks for NVX's guest programs, private to the crate
 │   ├── uuid.rs      UUIDs in their canonical text and in GPT's layout
-│   ├── hypervisor.rs
 │   ├── error.rs     nvx::Error, its ErrorKind, and the stable codes that the CLI prints
 │   ├── host/        feature `host` (default): runtimes, VM configurations, VM directories and
 │   │                their launches, snapshots, restores, network and export lowering, verified
@@ -109,7 +107,6 @@ changes only when the module's purpose does.
 | [`nvx::contract`](#nvxcontract) | The versions of the contracts that the crate speaks with OpenVMM and the guest, and the compatibility of releases with them |
 | [`nvx::net`](#nvxnet) | Network primitives that do not depend on the host: CIDR networks, hostnames, guest addresses, and gateways |
 | [`nvx::uuid`](#nvxuuid) | UUIDs, such as those of GPT disks and filesystems, in their canonical text and in GPT's layout |
-| [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
 | [`nvx::Error`](#nvxerror) | `Error`, `ErrorKind`, and `Result`: the crate's error, which only `nvx` makes, and whose kinds callers act on |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold, capture and restore preparation, owned launch commands, verified detached launch, confirmed stop, and caller-saved reattachment |
@@ -361,10 +358,6 @@ joined by hyphens. `from_bytes_le` and `to_bytes_le` convert the layout in which
 GPT and other EFI GUIDs store their first three groups little-endian. It has no
 dependencies, so the host and the guest share it.
 
-### `nvx::Hypervisor`
-
-KVM, MSHV, or WHP, with its serde form behind the `serde` feature.
-
 ### `nvx::Error`
 
 `Error`, `ErrorKind`, and `Result`. The crate's fallible calls return an
@@ -396,6 +389,14 @@ NVX compares and never computes, and adds the versions of the contracts that the
 crate speaks; `differences` names the `IdentityPart`s in which two identities
 differ. A caller saves it with each VM, in a `SavedVm`, which `vm::verify`
 checks against the current one.
+
+`Hypervisor` names the hypervisor that OpenVMM runs a VM on: KVM or MSHV on
+Linux, or WHP on Windows. It displays, parses, and serializes as its OpenVMM
+spelling, `kvm`, `mshv`, or `whp`. `Hypervisor::from_env_or_default` reads one
+from `NVX_HYPERVISOR`, `Hypervisor::ENV`, and otherwise takes the host's
+`platform_default`, KVM on Linux and WHP on Windows; `supported_on_host` tells
+whether the host's operating system can have one. The crate root does not
+export it.
 
 `probe_hypervisor` checks that the host has the hypervisor: its device on Linux,
 and the Windows Hypervisor Platform on Windows.
