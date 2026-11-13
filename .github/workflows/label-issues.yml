@@ -6,6 +6,12 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: label-issues
+  cancel-in-progress: false
+  # Each run labels a different issue, so retain waiting runs.
+  queue: max
+
 jobs:
   label:
     name: Label the newly opened issue

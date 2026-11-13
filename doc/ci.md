@@ -2115,30 +2115,22 @@ rerun can re-add a label that a maintainer removed. Issues that
 The job runs the default branch's code with a token that can read repository
 contents and write issues, without keeping the checkout's credentials.
 It reads the title from the event JSON, not from a shell command.
+Runs share one concurrency group and queue rather than cancel one another,
+so only one issue is labeled at a time. The queue uses GitHub's maximum
+pending-run capacity; it is not unbounded.
 
 Matching ignores case and uses whole keywords, with whitespace allowed
-between words in a phrase. A title can match several labels; an unmatched
-title gets none. The labels are initial sorting hints, not verified impact,
-and Windows or Linux alone does not imply a backend.
-
-| Label | Title keywords |
-| --- | --- |
-| `area: openvmm` | openvmm, microvm |
-| `area: guest` | guest, nvx-init |
-| `area: kernel` | kernel |
-| `area: nvx-rs` | nvx-rs |
-| `area: userland` | userland, alpine, ubuntu, azure linux, azurelinux |
-| `area: networking` | network, networking |
-| `area: snapshot` | snapshot, snapshots |
-| `area: ci` | ci |
-| `area: docs` | docs, documentation |
-| `area: security` | security |
-| `platform: kvm` | kvm |
-| `platform: mshv` | mshv |
-| `platform: whp` | whp |
+between words in a phrase. The rules are stored in
+[`issue-labels.json`](../scripts/issue-labels.json). A title can match several
+labels; an unmatched title gets `needs triage` if the issue has no existing
+labels. The labels are initial sorting hints,
+not verified impact, and Windows or Linux alone does not imply a backend.
 
 For the one-time backfill, authenticate `gh` with access to the repository
-and preview the labels for all open issues:
+or set `GH_TOKEN` or `GITHUB_TOKEN`, and preview the labels for all open
+issues. An environment token takes precedence over the local `gh` login.
+The script uses the [nightly reporter's](#nightly-failure-reports) GitHub
+client for requests, pagination and API errors.
 
 ```console
 python scripts/label_issues.py --repository microsoft/nvx backfill
