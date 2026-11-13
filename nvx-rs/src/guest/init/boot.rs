@@ -29,13 +29,6 @@ use crate::{Error, Result};
 mod account;
 
 /// The real switched root and the descriptors and account defaults its control caller inherits.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "SL7.6b takes the initialized layered control handoff"
-    )
-)]
 pub(super) struct Layered {
     pub(super) root: Root,
     pub(super) command_line: Vec<u8>,
