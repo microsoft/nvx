@@ -50,18 +50,6 @@ use crate::{Error, Result};
 
 /// OpenVMM's snapshot files: a capture's destination and a restore's snapshot view.
 const OPENVMM: &str = "openvmm";
-/// A finished capture's key.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "SL2.12b and SL2.14 use it (#1102)")
-)]
-const KEY: &str = "key.bin";
-/// A finished capture's informational snapshot description.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "SL2.12b and SL2.14 use it (#1102)")
-)]
-const DESCRIPTION: &str = "snapshot.json";
 /// The sparse placeholder image that a capture VM attaches.
 const CAPTURE_IMAGE: &str = "capture-image.raw";
 /// The dormant scratch that a capture VM attaches.

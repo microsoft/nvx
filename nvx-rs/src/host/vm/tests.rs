@@ -19,6 +19,7 @@ use crate::host::network::{
 #[cfg(any(target_os = "linux", windows))]
 use crate::host::process::Opened;
 use crate::host::runtime::{ArtifactIdentity, LaunchOptions, RuntimeIdentity};
+use crate::host::snapshot::{DESCRIPTION_FILE, KEY_FILE};
 use crate::host::vm_directory::{LOG, OUTCOME, RESTORE_READY, tests::vm_dir};
 use crate::hypervisor::Hypervisor;
 use crate::net::Ipv4Cidr;
@@ -69,8 +70,8 @@ fn the_reserved_names_are_the_documented_ones_and_leave_the_openvmm_prefix_to_op
         CONSOLE,
         RESTORE_READY,
         OPENVMM,
-        KEY,
-        DESCRIPTION,
+        KEY_FILE,
+        DESCRIPTION_FILE,
         CAPTURE_IMAGE,
         CAPTURE_SCRATCH,
     ];
@@ -323,7 +324,7 @@ fn capture_creation_records_sparse_disks_devices_and_a_complete_serde_context() 
                 assert!(argument_values(arguments, option).is_empty(), "{option}");
             }
             assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 3);
-            for name in [OPENVMM, KEY, DESCRIPTION] {
+            for name in [OPENVMM, KEY_FILE, DESCRIPTION_FILE] {
                 assert!(!vm.path().join(name).exists(), "{name}");
             }
         }
