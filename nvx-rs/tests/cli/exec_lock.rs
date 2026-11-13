@@ -128,7 +128,11 @@ fn exec_processes_contend_but_other_sandboxes_and_stop_proceed() {
     ));
     let process = crate::recorded_process(&root, "first").unwrap();
     let stop_started = Instant::now();
-    let stopped = operate(&root, "stop", "first", &["--timeout", "0.1"]);
+    // The fake serves one control session at a time, so the exec's session keeps the stop's
+    // request from the guest, and the stop forces the VM once its grace of `--timeout` has passed.
+    // It then waits up to `--timeout` again for the terminated OpenVMM to exit, which a loaded
+    // Windows host can take over a second to confirm.
+    let stopped = operate(&root, "stop", "first", &["--timeout", "5"]);
     assert_eq!(stopped.status, Some(0), "{}", stopped.describe());
     assert!(stopped.stdout().is_empty(), "{}", stopped.describe());
     assert!(
@@ -182,8 +186,9 @@ fn exec_processes_contend_but_other_sandboxes_and_stop_proceed() {
 
 #[test]
 fn a_retry_that_waits_for_the_lifecycle_lock_past_the_deadline_is_busy() {
-    // The `--wait` of the waiting exec.
-    const WAIT: Duration = Duration::from_secs(4);
+    // The `--wait` of the waiting exec, whose first half leaves a loaded host the seconds that it
+    // can take to start the exec and to let the test find one of its tries.
+    const WAIT: Duration = Duration::from_secs(8);
     let root = Root::new();
     start(&root, "state");
     operate(
@@ -208,13 +213,15 @@ fn a_retry_that_waits_for_the_lifecycle_lock_past_the_deadline_is_busy() {
     let wait = WAIT.as_secs().to_string();
     // The race needs an exec whose retry waits for the lifecycle lock until after its deadline. The
     // exec holds the lifecycle lock only while it tries the exec lock, so the test polls that lock
-    // until it finds a try, and then takes it. When it takes it within the first half of `--wait`,
-    // the deadline, at least `--wait` after the spawn, is still half of it away, so the exec tries
-    // again and waits for the lifecycle lock: the precondition holds, and the round must end in
-    // `sandbox-busy` once the test frees the exec lock and then, past the deadline, the lifecycle
-    // lock. Only a round that misses every try, or finds one too late, gives way to another, once
-    // its exec has waited out `--wait` and failed with `sandbox-busy` too, and the test fails if no
-    // round reaches the precondition.
+    // until it finds a try, and then takes it. It polls without yielding: on a loaded host, a yield
+    // lets every other thread that waits for the processor run first, while the tries come and go.
+    // When it takes the lock within the first half of `--wait`, the deadline, at least `--wait`
+    // after the spawn, is still half of it away, so the exec tries again and waits for the
+    // lifecycle lock: the precondition holds, and the round must end in `sandbox-busy` once the
+    // test frees the exec lock and then, past the deadline, the lifecycle lock. Only a round that
+    // misses every try, or finds one too late, gives way to another, once its exec has waited out
+    // `--wait` and failed with `sandbox-busy` too, and the test fails if no round reaches the
+    // precondition.
     let reached = (0..5).any(|_| {
         let spawned = Instant::now();
         let mut waiting = Pending::spawn(
@@ -231,7 +238,6 @@ fn a_retry_that_waits_for_the_lifecycle_lock_past_the_deadline_is_busy() {
                 break false;
             }
             assert!(spawned.elapsed() < Duration::from_secs(60), "the exec hung");
-            thread::yield_now();
         };
         let reached = seen && {
             lifecycle.lock().unwrap();
