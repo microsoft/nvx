@@ -47,11 +47,15 @@
 //!   [`Publication`] of the workload's listeners, and the endpoint of its proxy, if any, which
 //!   holds no credentials;
 //! - the [`View`]: the hostname and the [`MachineIdMode`], the image's own machine ID or one that
-//!   the guest generates. Each execution names its own identity;
-//! - the root's settings: the [`OverlayMode`], the [`Journal`] policy of a scratch upper, and the
-//!   bound of a GPT disk's first partition;
+//!   the guest generates. Each execution names its own identity. A cold boot's view is the same
+//!   [`View`], which [`protocol::view`](crate::protocol::view) defines for both;
+//! - the root's settings: the [`OverlayMode`], the [`Journal`] policy of a scratch upper, which
+//!   [`protocol::root`](crate::protocol::root) defines for cold boots too, and the bound of a GPT
+//!   disk's first partition;
 //! - the [`ExpectedResources`]: the CPU count and the memory size that the guest must have, as a
 //!   clone's repair produces them.
+//!
+//! [`MachineIdMode`]: crate::protocol::view::MachineIdMode
 //!
 //! The guest takes the other inputs of its root's assembly from its own configuration, which a
 //! template captures, so that they are invariants of the template: the runtime directory, the
@@ -129,9 +133,11 @@
 //!
 //! ```
 //! use nvx::activation::{
-//!     ActivationRecord, Configuration, ExpectedResources, Image, MachineIdMode,
-//!     OverlayMode, RestoreSection, TransactionId, Upper, View,
+//!     ActivationRecord, Configuration, ExpectedResources, Image, RestoreSection, TransactionId,
+//!     Upper,
 //! };
+//! use nvx::protocol::root::OverlayMode;
+//! use nvx::protocol::view::{MachineIdMode, View};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let configuration = Configuration {
@@ -169,7 +175,8 @@ use std::fmt;
 use std::net::IpAddr;
 
 use crate::protocol::MAX_HOST_MAPPINGS;
-use crate::protocol::root::ImageFormat;
+use crate::protocol::root::{ImageFormat, Journal, OverlayMode};
+use crate::protocol::view::{MAX_HOSTNAME_BYTES, View, is_hostname};
 use crate::uuid::Uuid;
 
 mod codec;
@@ -189,9 +196,6 @@ pub const MAX_RECORD_BYTES: usize = 1024;
 /// The most host mappings that a configuration announces: as many as a host mapping table holds,
 /// [`MAX_HOST_MAPPINGS`].
 pub const MAX_MAPPINGS: usize = MAX_HOST_MAPPINGS;
-
-/// The longest hostname, in bytes: Linux's `HOST_NAME_MAX`, which the guest's entry applies.
-pub const MAX_HOSTNAME_BYTES: usize = 64;
 
 /// The longest proxy endpoint, in bytes.
 pub const MAX_PROXY_ENDPOINT_BYTES: usize = 255;
@@ -291,25 +295,6 @@ pub enum Upper {
     },
 }
 
-/// Whether an ext4 scratch may have a journal: the guest's assembly refuses a scratch with one
-/// when the policy [forbids](Self::Forbidden) it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Journal {
-    /// The scratch may have a journal or none.
-    Allowed,
-    /// The scratch may not have a journal.
-    Forbidden,
-}
-
-/// The overlay's mode, which selects its one option set, as the guest's assembly names it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum OverlayMode {
-    /// `metacopy=on,xino=on`, for lowers whose overlay xattrs the guest trusts.
-    TrustedLowers,
-    /// `metacopy=off,redirect_dir=nofollow`, for lowers that may carry untrusted overlay xattrs.
-    UntrustedLowers,
-}
-
 /// The shape of an export.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ExportKind {
@@ -347,25 +332,6 @@ pub struct Network {
     /// sees it, such as `http://10.0.0.1:3128`, if any: 1 to [`MAX_PROXY_ENDPOINT_BYTES`] visible
     /// ASCII characters, without an `@`, so that it holds no credentials.
     pub proxy: Option<String>,
-}
-
-/// The machine ID that the workload sees at `/etc/machine-id`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum MachineIdMode {
-    /// The image's own machine ID, which the guest leaves untouched.
-    Image,
-    /// A machine ID that the guest generates for the activation.
-    Generated,
-}
-
-/// The view that a VM's workload has of it: its hostname and its machine ID, without an identity
-/// of the executions, which each execution names.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct View {
-    /// The hostname: 1 to [`MAX_HOSTNAME_BYTES`] bytes, without a NUL.
-    pub hostname: Vec<u8>,
-    /// The machine ID that the workload sees.
-    pub machine_id: MachineIdMode,
 }
 
 /// The resources that the guest must have, as a clone's repair produces them.
@@ -629,12 +595,6 @@ impl fmt::Display for ActivationError {
 }
 
 impl std::error::Error for ActivationError {}
-
-/// Returns whether `hostname` is a hostname that a record or a VM's [`View`] holds: 1 to
-/// [`MAX_HOSTNAME_BYTES`] bytes without a NUL, since the guest's entry sets any other.
-pub(crate) fn is_hostname(hostname: &[u8]) -> bool {
-    !hostname.is_empty() && hostname.len() <= MAX_HOSTNAME_BYTES && !hostname.contains(&0)
-}
 
 /// Returns whether `endpoint` is a proxy endpoint that a record holds: 1 to
 /// [`MAX_PROXY_ENDPOINT_BYTES`] visible ASCII characters, without an `@`, which would start a

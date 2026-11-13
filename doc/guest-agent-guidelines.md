@@ -141,12 +141,13 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::time::Instant;
 
-use crate::activation::{ActivationRecord, View};
+use crate::activation::ActivationRecord;
 use crate::guest::activation::{self, Applied, RootTemplate};
 use crate::guest::mappings::{Mapper, Reserved, SourceRoot, TargetRoot};
 use crate::guest::root::{self, Assembly, Root};
 use crate::guest::view;
 use crate::protocol::export::HostExport;
+use crate::protocol::view::View;
 
 // A cold boot, as `boot::cold_boot` builds it.
 let _cold = |assembly: &Assembly,

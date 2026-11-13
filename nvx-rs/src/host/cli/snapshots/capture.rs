@@ -10,7 +10,6 @@ use std::time::Instant;
 
 use super::{Name, Store};
 use crate::ErrorCode;
-use crate::activation::{MachineIdMode, View};
 use crate::host::cli::args::{Parser, Receiver, Spec, Syntax, choice, integer};
 use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
 use crate::host::cli::sandbox::{
@@ -30,6 +29,7 @@ use crate::host::snapshot::{DESCRIPTION_FILE, KEY_FILE, OPENVMM_DIR, finish_capt
 use crate::host::transport;
 use crate::host::vm::{self, Prepared, VmDir, VmOutputs};
 use crate::net::Ipv4Cidr;
+use crate::protocol::view::{MachineIdMode, View};
 
 /// The capture command parser.
 const CAPTURE_SYNTAX: Syntax = Syntax {

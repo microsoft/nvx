@@ -7,7 +7,8 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::activation::tests::{configuration, maximal, restore};
-use crate::activation::{MAX_HOSTNAME_BYTES, MAX_MAPPINGS, MAX_PROXY_ENDPOINT_BYTES};
+use crate::activation::{MAX_MAPPINGS, MAX_PROXY_ENDPOINT_BYTES};
+use crate::protocol::view::MAX_HOSTNAME_BYTES;
 
 mod vectors;
 

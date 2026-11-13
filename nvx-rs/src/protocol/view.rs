@@ -1,5 +1,6 @@
-//! A cold boot's view: `nvx_hostname=HEX`, the hostname's bytes as lowercase hexadecimal, two
-//! digits per byte, and `nvx_machine_id=image` or `nvx_machine_id=generated`.
+//! A VM's [`View`], its hostname and its [`MachineIdMode`], which cold boots and restores share,
+//! and a cold boot's tokens of it: `nvx_hostname=HEX`, the hostname's bytes as lowercase
+//! hexadecimal, two digits per byte, and `nvx_machine_id=image` or `nvx_machine_id=generated`.
 //!
 //! The hostname holds 1 to [`MAX_HOSTNAME_BYTES`] bytes without a NUL, as [`View`] specifies,
 //! without a UTF-8 or DNS restriction. It is always encoded, even for an ASCII hostname:
@@ -9,7 +10,34 @@
 
 use super::cmdline::{self, Token};
 use super::{ProtocolError, violation};
-use crate::activation::{self, MAX_HOSTNAME_BYTES, MachineIdMode, View};
+
+/// The longest hostname, in bytes: Linux's `HOST_NAME_MAX`, which the guest's entry applies.
+pub const MAX_HOSTNAME_BYTES: usize = 64;
+
+/// The machine ID that the workload sees at `/etc/machine-id`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MachineIdMode {
+    /// The image's own machine ID, which the guest leaves untouched.
+    Image,
+    /// A machine ID that the guest generates when it boots or restores.
+    Generated,
+}
+
+/// The view that a VM's workload has of it: its hostname and its machine ID, without an identity
+/// of the executions, which each execution names.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct View {
+    /// The hostname: 1 to [`MAX_HOSTNAME_BYTES`] bytes, without a NUL.
+    pub hostname: Vec<u8>,
+    /// The machine ID that the workload sees.
+    pub machine_id: MachineIdMode,
+}
+
+/// Returns whether `hostname` is a hostname that a VM's [`View`] holds: 1 to
+/// [`MAX_HOSTNAME_BYTES`] bytes without a NUL, since the guest's entry sets any other.
+pub(crate) fn is_hostname(hostname: &[u8]) -> bool {
+    !hostname.is_empty() && hostname.len() <= MAX_HOSTNAME_BYTES && !hostname.contains(&0)
+}
 
 /// Prefix of the token that encodes the hostname's bytes as lowercase hexadecimal.
 pub const HOSTNAME_TOKEN: &str = "nvx_hostname=";
@@ -21,7 +49,7 @@ pub const MACHINE_ID_TOKEN: &str = "nvx_machine_id=";
 /// Fails with a [`ProtocolError`] if the hostname is not 1 to [`MAX_HOSTNAME_BYTES`] non-NUL
 /// bytes. Its hexadecimal value needs no quoting or escaping on the kernel command line.
 pub fn tokens(view: &View) -> Result<[String; 2], ProtocolError> {
-    if !activation::is_hostname(&view.hostname) {
+    if !is_hostname(&view.hostname) {
         return Err(violation(format!(
             "the view's hostname must be 1 to {MAX_HOSTNAME_BYTES} bytes without a NUL"
         )));
@@ -119,7 +147,7 @@ fn parse_hostname(value: &[u8]) -> Result<Vec<u8>, ProtocolError> {
         .chunks_exact(2)
         .map(|pair| digit(pair[0]) * 16 + digit(pair[1]))
         .collect();
-    if !activation::is_hostname(&hostname) {
+    if !is_hostname(&hostname) {
         return Err(violation("the nvx_hostname kernel parameter encodes a NUL"));
     }
     Ok(hostname)

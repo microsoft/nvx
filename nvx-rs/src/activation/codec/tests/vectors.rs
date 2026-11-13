@@ -5,9 +5,10 @@ use std::net::IpAddr;
 
 use crate::activation::{
     ActivationError, ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image,
-    Journal, MachineIdMode, Network, OverlayMode, Publication, RestoreSection, TransactionId,
-    Upper, View,
+    Network, Publication, RestoreSection, TransactionId, Upper,
 };
+use crate::protocol::root::{Journal, OverlayMode};
+use crate::protocol::view::{MachineIdMode, View};
 use crate::tests::{ACTIVATION_V2, Values, Vector, of_kind};
 use crate::uuid::Uuid;
 

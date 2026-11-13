@@ -18,7 +18,6 @@ use std::env;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use nvx::activation::{Journal, MachineIdMode, OverlayMode, View};
 use nvx::host::config::{Boot, ConsoleAttachment, LayeredRoot, RootConfig, UpperConfig, VmConfig};
 use nvx::host::process::{Opened, Process, ProcessRef};
 use nvx::host::report::Report;
@@ -27,7 +26,8 @@ use nvx::host::runtime::{
 };
 use nvx::host::transport::HostConnection;
 use nvx::host::vm::{self, SavedVm, VmDir, VmOutputs};
-use nvx::protocol::root::RootImage;
+use nvx::protocol::root::{Journal, OverlayMode, RootImage};
+use nvx::protocol::view::{MachineIdMode, View};
 use nvx::uuid::Uuid;
 
 /// The caller's kernel command-line tokens, which `nvx-rs sandbox start` gives nvx-init too: it
