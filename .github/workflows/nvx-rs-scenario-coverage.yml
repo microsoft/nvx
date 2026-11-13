@@ -1,10 +1,10 @@
 name: nvx-rs scenario coverage
 
-# Measures which host code of the nvx crate the KVM microVM scenarios and the
-# runtime adapter's suite reach on Linux/KVM, alone and together with the
-# crate's own tests, with scripts/nvx_rs_scenario_coverage.py (doc/ci.md,
-# "nvx-rs scenario coverage"). It runs every week and on demand, never for
-# pull requests, pushes, or merge groups, so no required check depends on it.
+# Measures which host code of the nvx crate the KVM microVM scenarios reach
+# on Linux/KVM, alone and together with the crate's own tests, with
+# scripts/nvx_rs_scenario_coverage.py (doc/ci.md, "nvx-rs scenario coverage").
+# It runs every week and on demand, never for pull requests, pushes, or merge
+# groups, so no required check depends on it.
 on:
   schedule:
     - cron: "41 7 * * 0"
@@ -24,10 +24,10 @@ env:
   NVX_AUTO_DOWNLOAD: "0"
 
 jobs:
-  # The guest artifacts that the scenarios and the runtime adapter's suite
-  # boot or read: the kernel, the Alpine initramfs, and the Ubuntu distro
-  # layer with the sandbox scratch template, from the caches that CI's runs
-  # save, or built, without saving them.
+  # The guest artifacts that the scenarios boot or read: the kernel, the
+  # Alpine initramfs, and the Ubuntu distro layer with the sandbox scratch
+  # template, from the caches that CI's runs save, or built, without saving
+  # them.
   artifacts:
     name: Guest artifacts
     if: github.repository == 'microsoft/nvx'
@@ -147,15 +147,6 @@ jobs:
             exit 1
           fi
 
-      # A static musl executable that runs in the guest, which the
-      # measurement doesn't instrument.
-      - name: Build the runtime adapter's guest agent
-        shell: bash
-        working-directory: tests/runtime-adapter
-        run: >-
-          cargo build --locked --release --features guest
-          --target x86_64-unknown-linux-musl --bin runtime-adapter-guest
-
       # The runner signals only a step's shell when the job is cancelled, so
       # the step execs the measurement, which then ends its runs and their
       # microVMs (doc/ci.md#cancellation). It fails when the measurement misses
@@ -165,7 +156,6 @@ jobs:
         run: >-
           exec python3 scripts/nvx_rs_scenario_coverage.py
           --output build/nvx-rs-scenario-coverage
-          --guest-agent tests/runtime-adapter/target/x86_64-unknown-linux-musl/release/runtime-adapter-guest
 
       - name: Write the summary
         if: ${{ !cancelled() && hashFiles('build/nvx-rs-scenario-coverage/summary.md') != '' }}
