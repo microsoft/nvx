@@ -1,0 +1,36 @@
+name: Label new issues
+
+on:
+  issues:
+    types: [opened]
+
+permissions: {}
+
+concurrency:
+  group: label-issues
+  cancel-in-progress: false
+  # Each run labels a different issue, so retain waiting runs.
+  queue: max
+
+jobs:
+  label:
+    name: Label the newly opened issue
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout trusted default-branch code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Apply title keyword labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/label_issues.py
+          --repository "${GITHUB_REPOSITORY}"
+          opened --event "${GITHUB_EVENT_PATH}"

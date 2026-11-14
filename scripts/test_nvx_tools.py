@@ -27649,6 +27649,66 @@ class PositiveFloatTests(unittest.TestCase):
                     benchmark.positive_float(value)
 
 
+class JsonValidationTests(unittest.TestCase):
+    def test_valid_containers_preserve_contents(self):
+        self.assertEqual(
+            common.require_object({"labels": ["guest"]}, "Issue"),
+            {"labels": ["guest"]},
+        )
+        self.assertEqual(common.require_object({}, "Issue"), {})
+        self.assertEqual(
+            common.require_array(["guest", None], "Labels"), ["guest", None]
+        )
+        self.assertEqual(common.require_array([], "Labels"), [])
+
+    def test_wrong_container_types_include_context(self):
+        invalid_objects: tuple[object, ...] = (None, "text", 1, [])
+        invalid_arrays: tuple[object, ...] = (None, "text", 1, {})
+        for value in invalid_objects:
+            with self.subTest(helper="object", value=value):
+                with self.assertRaisesRegex(
+                    common.ScriptError, "^Issue is not a JSON object$"
+                ):
+                    common.require_object(value, "Issue")
+        for value in invalid_arrays:
+            with self.subTest(helper="array", value=value):
+                with self.assertRaisesRegex(
+                    common.ScriptError, "^Labels is not a JSON array$"
+                ):
+                    common.require_array(value, "Labels")
+
+    def test_object_rejects_non_string_keys(self):
+        with self.assertRaisesRegex(
+            common.ScriptError, "^Issue has non-string JSON keys$"
+        ):
+            common.require_object({1: "guest"}, "Issue")
+
+
+class RepositoryValidationTests(unittest.TestCase):
+    def test_valid_repository_is_returned_unchanged(self):
+        for value in ("microsoft/nvx", "Owner_1/repo.name-2"):
+            with self.subTest(value=value):
+                self.assertEqual(common.require_repository(value), value)
+
+    def test_malformed_and_non_ascii_names_are_rejected(self):
+        for value in (
+            "",
+            "nvx",
+            "/nvx",
+            "microsoft/",
+            "microsoft/nvx/extra",
+            "microsoft/nvx ",
+            "microsoft/nvx\n",
+            "micro\u00f6soft/nvx",
+            "microsoft/nvx\u0661",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    common.ScriptError, "^Repository must have the form owner/repo$"
+                ):
+                    common.require_repository(value)
+
+
 class GitOutputTests(unittest.TestCase):
     def test_runs_git_from_repository_root_and_strips_output(self):
         completed = MagicMock(stdout=" output \n")
@@ -27663,6 +27723,47 @@ class GitOutputTests(unittest.TestCase):
             errors="strict",
             timeout=30.0,
         )
+
+
+class GitHubTokenTests(unittest.TestCase):
+    def test_explicit_tokens_take_precedence_without_gh(self):
+        cases: tuple[tuple[dict[str, str], str | None], ...] = (
+            ({"GH_TOKEN": "first", "GITHUB_TOKEN": "second"}, "first"),
+            ({"GITHUB_TOKEN": "second"}, "second"),
+            ({"GH_TOKEN": "", "GITHUB_TOKEN": "second"}, "second"),
+            ({}, None),
+        )
+        for environment, expected in cases:
+            with self.subTest(environment=environment):
+                with patch.object(common, "run_capture") as run:
+                    self.assertEqual(common.github_token(environment), expected)
+                    run.assert_not_called()
+
+    def test_local_login_is_opt_in_and_failures_are_explicit(self):
+        for status, output in ((0, b"test-token\n"), (1, b""), (0, b"")):
+            with self.subTest(status=status, output=output):
+                result = common.CommandResult(
+                    ("gh", "auth", "token"), status, output, b""
+                )
+                with patch.object(common, "run_capture", return_value=result) as run:
+                    if status or not output:
+                        with self.assertRaisesRegex(
+                            common.ScriptError, "authentication required"
+                        ):
+                            common.github_token({}, use_gh_login=True)
+                    else:
+                        self.assertEqual(
+                            common.github_token({}, use_gh_login=True), "test-token"
+                        )
+                    run.assert_called_once_with(["gh", "auth", "token"], env={})
+
+    def test_opt_in_still_prefers_environment_token(self):
+        with patch.object(common, "run_capture") as run:
+            self.assertEqual(
+                common.github_token({"GH_TOKEN": "explicit"}, use_gh_login=True),
+                "explicit",
+            )
+        run.assert_not_called()
 
 
 class SharedCommandTests(unittest.TestCase):

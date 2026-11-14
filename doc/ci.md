@@ -2100,6 +2100,62 @@ owner triages a new report within a working day:
 To hand triage over or to rotate it, change the workflow's `--assignee`
 options, and reassign the open report.
 
+## New issue labels
+
+The [`label-issues.yml`](../.github/workflows/label-issues.yml) workflow runs
+only when an issue opens.
+[`label_issues.py`](../scripts/label_issues.py) matches its title against the
+area and platform keywords, creates labels that the repository lacks, and
+adds them without removing existing labels or changing their descriptions
+or colors. Editing or reopening an issue does not run it again; a manual
+rerun can re-add a label that a maintainer removed. Issues that
+`GITHUB_TOKEN` creates, such as the
+[nightly failure reports](#nightly-failure-reports), do not trigger it.
+
+Existing label names are compared without case sensitivity, matching GitHub's
+behavior, without renaming them.
+
+The job runs the default branch's code with a token that can read repository
+contents and write issues, without keeping the checkout's credentials.
+It reads the title from the event JSON, not from a shell command.
+Runs share one concurrency group and queue rather than cancel one another,
+so only one issue is labeled at a time. The queue uses GitHub's maximum
+pending-run capacity; it is not unbounded.
+
+Matching ignores case and uses whole keywords, with whitespace allowed
+between words in a phrase. The rules are stored in
+[`issue-labels.json`](../scripts/issue-labels.json), under `rules`. A title can
+match several labels; an unmatched title gets the configured `fallback_label`
+if the issue has no existing labels. The labels are initial sorting hints,
+not verified impact, and Windows or Linux alone does not imply a backend.
+
+For the one-time backfill, authenticate `gh` with access to the repository
+or set `GH_TOKEN` or `GITHUB_TOKEN`, and preview the labels for all open
+issues. An environment token takes precedence over the local `gh` login.
+The script uses the [nightly reporter's](#nightly-failure-reports) GitHub
+client for requests, pagination and API errors.
+
+Explicit rate-limit rejections retry with one-minute waits within a
+three-minute budget per operation, without an attempt-count limit. No retry
+starts at or after the deadline; in-progress requests may finish after it.
+Other write failures are not retried because the write may have succeeded.
+
+```console
+python scripts/label_issues.py --repository microsoft/nvx backfill
+```
+
+The preview makes no writes, including label creation. To apply it:
+
+```console
+python scripts/label_issues.py --repository microsoft/nvx backfill --apply
+```
+
+Both modes exclude pull requests; apply rechecks each issue and skips ones
+that closed. GitHub failures stop the command with an error; earlier writes
+are not rolled back. Do not repeat apply after manual corrections, since
+it can re-add removed matching labels. On Windows, use
+`scripts\label_issues.py` in these commands.
+
 ## Test changes
 
 The [`test-changes.yml`](../.github/workflows/test-changes.yml) workflow flags
@@ -2127,8 +2183,10 @@ from Git's objects: it parses Rust and Python without running them and
 compares the merge base of the pull request's base branch and head with the
 head. A head that moved on since the event exits, since the push starts
 another run. The token can read the repository's contents and write pull
-requests, with which GitHub labels and comments on them, but not issues, which
-only the [nightly failure report](#nightly-failure-reports) writes. A change
+requests, with which GitHub labels and comments on them, but not issues.
+The [nightly failure report](#nightly-failure-reports) and
+[new issue labeling](#new-issue-labels) instead have `issues: write`
+permission, which permits changing issues and their labels. A change
 to the workflow or to the script takes effect once it merges into `dev`, and
 the script itself counts as test policy, so a pull request that changes it is
 flagged once it does.
