@@ -1,5 +1,5 @@
 //! A broker that relays NVXS records between one host and the guest as OpenVMM's broker does,
-//! built on the public record API.
+//! for the tests of the session and of its drivers.
 //!
 //! It resets the guest when the guest attaches and when an attached host's connection drops,
 //! answers a host's attachment with WAIT until the guest acknowledges the reset, then READY, and
@@ -9,8 +9,9 @@
 
 use std::collections::VecDeque;
 
-use nvx::protocol::CAPABILITY_LEN;
-use nvx::protocol::nvxs::{ErrorCode, Identity, Record, RecordParser, RecordType, encode_record};
+use super::record;
+use crate::protocol::CAPABILITY_LEN;
+use crate::protocol::nvxs::{ErrorCode, Identity, Record, RecordParser, RecordType};
 
 /// Instance ID of the test broker.
 pub(crate) const INSTANCE: [u8; 16] = [0x5c; 16];
@@ -21,27 +22,6 @@ pub(crate) const IDENTITY: Identity = Identity {
 };
 /// Launch capability that the test broker accepts.
 pub(crate) const CAPABILITY: [u8; CAPABILITY_LEN] = [0xa5; CAPABILITY_LEN];
-
-/// Encodes a valid record.
-pub(crate) fn record(
-    record_type: RecordType,
-    identity: Identity,
-    sequence: u64,
-    payload: &[u8],
-) -> Vec<u8> {
-    let mut output = Vec::new();
-    let (instance, epoch) = (identity.instance_id, identity.epoch);
-    encode_record(
-        record_type,
-        &instance,
-        epoch,
-        sequence,
-        payload,
-        &mut output,
-    )
-    .unwrap();
-    output
-}
 
 /// State of the guest's leg.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -8,6 +8,8 @@ use std::process::{Child, Command, Stdio};
 use super::*;
 use crate::host::process::BootId;
 
+mod connection;
+
 #[cfg(target_os = "linux")]
 type Server = std::os::unix::net::UnixListener;
 #[cfg(windows)]
