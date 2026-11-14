@@ -107,7 +107,7 @@ nvx/
 |   |   |-- gpt/                 Strict reading of GPT disks for NVX's guest programs, private to the crate
 |   |   |-- uuid.rs              UUIDs in their canonical text and in GPT's layout, shared by the host and the guest
 |   |   |-- error.rs             `nvx::Error` and its `ErrorKind`, and the crate's private `ErrorCode`
-|   |   |-- host/                Feature `host`: the runtime and its hypervisor, VMs and their configuration, snapshots, restores, the transport, process references, outcome reports, and the lowering of network postures and host export plans; private to the crate, the platform layer and what only NVX's CLI uses, such as the export planner, the sandbox launch profile, and the egress policy compiler; with feature `cli`, NVX's hidden `nvx-rs` CLI
+|   |   |-- host/                Feature `host`: the runtime and its hypervisor, VMs, their configuration and control connections, snapshots, restores, process references, outcome reports, and the lowering of network postures and host export plans; private to the crate, the platform layer and what only NVX's CLI uses, such as the export planner, the sandbox launch profile, and the egress policy compiler; with feature `cli`, NVX's hidden `nvx-rs` CLI
 |   |   |-- testing/             Feature `testing`: NVX's hidden fake OpenVMM
 |   |   |-- guest/               Feature `guest`, on Linux: the libraries on which a guest init builds, such as its NVXS session, terminal, host mappings, time ABI steps, reseed, snapshot capture, and guest restore; NVX's hidden guest programs; and NVX's guest space, private to the crate
 |   |   `-- bin/                 One file per binary, which calls its program's hidden `main`: nvx-rs, nvx-fake-openvmm, and the ten guest binaries

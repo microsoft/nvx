@@ -1,6 +1,7 @@
 //! The host's side of the library: a VM's runtime and configuration, its launch in a private
-//! directory that its caller owns, for a cold boot, a capture, or a restore, its stop and its
-//! reattachment, its snapshots and their restores, and verified connections to it.
+//! directory that its caller owns, for a cold boot, a capture, or a restore, its stop and the
+//! attachment to it again, its snapshots and their restores, and its control connection and boot
+//! console.
 //!
 //! - [`runtime`] holds what every launch shares: the paths of the OpenVMM executable and the
 //!   guest kernel and initramfs, and their [`RuntimeIdentity`](runtime::RuntimeIdentity), the
@@ -16,8 +17,12 @@
 //!   launch with its opened log and control credential, which the library never writes. A
 //!   restore from a [`Snapshot`](snapshot::Snapshot) hard-links the snapshot's OpenVMM files into
 //!   the VM directory and binds its restore-ready listener before any spawn. [`vm::spawn`]
-//!   starts OpenVMM, detached, [`vm::stop`] ends a VM, and [`vm::verify`] and [`vm::reattach`]
-//!   find one again from the [`SavedVm`](vm::SavedVm) that its caller saved.
+//!   starts OpenVMM, detached, [`vm::stop`] ends a VM, and [`vm::verify`] and [`vm::attach`]
+//!   find one again from the [`SavedVm`](vm::SavedVm) that its caller saved. A
+//!   [`Connection`](vm::Connection), which [`Launched::connect`](vm::Launched::connect) and
+//!   [`vm::attach`] open, carries the bytes of the caller's own protocol to and from the guest
+//!   over the VM's authenticated control endpoint, and a [`Console`](vm::Console) those of its
+//!   boot console.
 //! - [`snapshot`] holds the strict snapshot directory, [`Snapshot`](snapshot::Snapshot), the
 //!   finish of a capture, [`finish_capture`](snapshot::finish_capture), the compatibility key,
 //!   [`SnapshotKey`](snapshot::SnapshotKey), derived from a capture's context and
@@ -25,9 +30,6 @@
 //!   capture's public time and eligibility information.
 //! - [`restore`] orders a caller-driven guest restore to Ready without I/O or a clock, and listens
 //!   for OpenVMM's restore-ready event from the held VM process.
-//! - [`transport`] verifies a VM's endpoint and runs the host's role of the NVXS session for it,
-//!   for any application protocol, over a platform transport. [`nvxs`] retains compatibility
-//!   paths to it.
 //! - [`process`] names processes by verified references: their ID, start time, and host boot,
 //!   through which a pidfd or a process handle holds them, so that waits sleep until a process
 //!   exits and termination reaches only it, whether or not the caller started it.
@@ -47,7 +49,9 @@
 //! beneath it, as [`vm`] does on the private `spawn`, which starts a VMM, detached, passing it
 //! only the descriptors or handles that the caller allows, and `spawn` on the private
 //! `platform`, which holds the primitives of Linux and Windows hosts. An item that a lower child
-//! needs from a higher one moves down, and the higher child re-exports it where it was.
+//! needs from a higher one moves down, and the higher child re-exports it where it was. The
+//! private `transport` verifies a VM's endpoint and runs the host's role of the NVXS session over
+//! it, beneath [`vm`]'s [`Connection`](vm::Connection), which hides that protocol.
 //! `tests/host_modules.rs` reads the crate's sources and fails on a cycle, which it lists with a
 //! reference for each of its dependencies.
 //!
@@ -65,7 +69,6 @@ pub mod cli;
 pub mod config;
 pub mod filesystem;
 pub mod network;
-pub mod nvxs;
 pub(crate) mod paths;
 pub(crate) mod platform;
 pub mod process;
@@ -85,6 +88,6 @@ mod spawn;
 mod sys;
 #[cfg(test)]
 pub(crate) mod tests;
-pub mod transport;
+pub(crate) mod transport;
 pub mod vm;
 mod vm_directory;

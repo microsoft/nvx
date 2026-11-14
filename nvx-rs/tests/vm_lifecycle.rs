@@ -1,8 +1,9 @@
 //! A cold VM's lifecycle through the public API alone, on a real hypervisor.
 //!
-//! [`vm::create`] checks the launch and prepares it without starting it, and [`vm::spawn`] starts
-//! it. The caller then saves the values of [`SavedVm`] and the VM's [`VmOutputs`], and lets the
-//! launch go. [`vm::reattach`] finds the VM again from those saved values alone, as a caller does
+//! [`vm::create`] checks the launch and prepares it without starting it, [`vm::spawn`] starts it,
+//! and [`Launched::connect`](vm::Launched::connect) opens its control connection. The caller then
+//! saves the values of [`SavedVm`] and the VM's [`VmOutputs`], and lets the launch and the
+//! connection go. [`vm::attach`] finds the VM again from those saved values alone, as a caller does
 //! after it restarts, once for each of two connections, as each command of a CLI connects anew,
 //! and [`vm::stop`] stops the VM through a request to its guest: the VM must exit on its own,
 //! before any forced termination, and report its success and a complete teardown. The guest is
@@ -25,8 +26,7 @@ use nvx::host::runtime::{
     ArtifactIdentity, CompatibilityIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity,
     probe_hypervisor,
 };
-use nvx::host::transport::HostConnection;
-use nvx::host::vm::{self, SavedVm, VmDir, VmOutputs};
+use nvx::host::vm::{self, Connection, SavedVm, VmDir, VmOutputs};
 use nvx::protocol::root::{Journal, OverlayMode, RootImage};
 use nvx::protocol::view::{MachineIdMode, View};
 use nvx::uuid::Uuid;
@@ -120,17 +120,11 @@ fn frame(kind: u8, request: u64, payload: &[u8]) -> Vec<u8> {
 /// acknowledges it with `reply` by `deadline`; a `READY` names the protocol version, 2.
 ///
 /// `nvx` carries the bytes of whatever protocol a caller speaks with its guest over the
-/// `HostConnection` that `vm::reattach` returns, and leaves the protocol to the caller. This
-/// caller's guest is nvx-init, which speaks NVX's own protocol, NVXC; NVXC is private to `nvx`,
-/// so the caller encodes the few frames that it sends and expects itself, as any caller of a
-/// guest of its own would.
-fn acknowledged(
-    connection: &mut HostConnection,
-    kind: u8,
-    request: u64,
-    reply: u8,
-    deadline: Instant,
-) {
+/// [`Connection`] that `vm::attach` returns, and leaves the protocol to the caller. This caller's
+/// guest is nvx-init, which speaks NVX's own protocol, NVXC; NVXC is private to `nvx`, so the
+/// caller encodes the few frames that it sends and expects itself, as any caller of a guest of its
+/// own would.
+fn acknowledged(connection: &mut Connection, kind: u8, request: u64, reply: u8, deadline: Instant) {
     connection
         .send(&frame(kind, request, &[]), Some(deadline))
         .expect("the guest takes the request");
@@ -147,7 +141,7 @@ fn acknowledged(
 
 #[test]
 #[ignore = "boots a VM; run scripts/nvx.py test-microvm --scenario vm-lifecycle"]
-fn a_cold_vm_is_reattached_from_saved_values_and_stopped() {
+fn a_cold_vm_is_attached_from_saved_values_and_stopped() {
     let inputs = env::var("NVX_VM_LIFECYCLE")
         .expect("NVX_VM_LIFECYCLE is set: run scripts/nvx.py test-microvm --scenario vm-lifecycle");
     let inputs: Inputs = serde_json::from_str(&inputs).expect("the inputs are a JSON object");
@@ -214,6 +208,11 @@ fn a_cold_vm_is_reattached_from_saved_values_and_stopped() {
         "no VM runs before the spawn"
     );
     let launched = vm::spawn(prepared).expect("the public API spawns the cold VM");
+    let mut connection = launched
+        .connect(Instant::now() + timeout)
+        .expect("the launched VM accepts its control connection");
+    acknowledged(&mut connection, PING, 1, READY, Instant::now() + timeout);
+    drop(connection);
     let saved = SavedVm {
         vm_dir: dir,
         endpoint: launched.outputs.endpoint.clone(),
@@ -229,32 +228,32 @@ fn a_cold_vm_is_reattached_from_saved_values_and_stopped() {
     // The caller keeps only what it saved.
     drop(launched);
 
-    let mut reattached = vm::reattach(&saved, &runtime, Instant::now() + timeout)
-        .expect("the saved values reattach the VM");
-    assert_eq!(reattached.process.reference(), &saved.process);
+    let mut attached = vm::attach(&saved, &runtime, Instant::now() + timeout)
+        .expect("the saved values attach the VM");
+    assert_eq!(attached.process.reference(), &saved.process);
     acknowledged(
-        &mut reattached.connection,
-        PING,
-        1,
-        READY,
-        Instant::now() + timeout,
-    );
-    drop(reattached);
-    let mut reattached = vm::reattach(&saved, &runtime, Instant::now() + timeout)
-        .expect("the saved values reattach the VM again, with a new connection");
-    acknowledged(
-        &mut reattached.connection,
+        &mut attached.connection,
         PING,
         2,
         READY,
         Instant::now() + timeout,
     );
+    drop(attached);
+    let mut attached = vm::attach(&saved, &runtime, Instant::now() + timeout)
+        .expect("the saved values attach the VM again, with a new connection");
+    acknowledged(
+        &mut attached.connection,
+        PING,
+        3,
+        READY,
+        Instant::now() + timeout,
+    );
     let grace = Instant::now() + timeout;
     let stopped = vm::stop(
-        &reattached.process,
+        &attached.process,
         &started.outputs,
         |deadline| {
-            acknowledged(&mut reattached.connection, STOP, 3, STOPPED, deadline);
+            acknowledged(&mut attached.connection, STOP, 4, STOPPED, deadline);
             true
         },
         grace,

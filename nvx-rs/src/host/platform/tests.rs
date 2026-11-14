@@ -114,7 +114,7 @@ fn a_directory_sync_fails_for_a_missing_directory_only_on_unix() {
     synced.unwrap();
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(any(target_os = "linux", windows), feature = "cli"))]
 #[test]
 fn a_transport_without_a_native_handle_needs_no_clone_implementation() {
     struct CustomTransport;

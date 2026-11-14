@@ -9,7 +9,10 @@
 //! The library reserves the names documented below, and every name that starts with `.openvmm`,
 //! which OpenVMM gives its temporary files. [`Capability`] holds the credential of a VM's control
 //! endpoint, which the library never writes to a file. A caller keeps its own [`SavedVm`] values
-//! for [`verify`] and [`reattach`] after a restart, without a library-owned store.
+//! for [`verify`] and [`attach`] after a restart, without a library-owned store.
+//!
+//! A [`Connection`], which [`Launched::connect`] and [`attach`] open, carries the bytes of the
+//! caller's own protocol to and from the guest, and a [`Console`] those of a VM's boot console.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -38,6 +41,7 @@ use crate::host::restore::ReadyListener;
 use crate::host::runtime::{Hypervisor, Runtime, RuntimeIdentity};
 use crate::host::snapshot::{CaptureContext, HostTime, Snapshot};
 use crate::host::spawn;
+#[cfg(feature = "cli")]
 use crate::host::transport::{self, HostConnection};
 use crate::host::vm_directory::{CONSOLE, CONTROL, RESTORE_READY, io_error};
 pub use crate::host::vm_directory::{VmDir, VmOutputs, create_private_dir};
@@ -47,6 +51,10 @@ use crate::host::{
 };
 use crate::protocol::CAPABILITY_LEN;
 use crate::{Error, Result};
+
+mod connection;
+
+pub use connection::{Connection, ConnectionError, ConnectionErrorKind, Console};
 
 /// OpenVMM's snapshot files: a capture's destination and a restore's snapshot view.
 const OPENVMM: &str = "openvmm";
@@ -85,7 +93,7 @@ pub(crate) fn generate_capability() -> Result<[u8; CAPABILITY_LEN]> {
     Ok(capability)
 }
 
-/// Launch values that the caller saves and reloads to verify or reattach its VM.
+/// Launch values that the caller saves and reloads to verify or attach to its VM.
 ///
 /// The library never serializes, stores or locates them. The endpoint is the name chosen at
 /// launch, not one newly generated from the directory. The `Debug` form hides the capability.
@@ -152,40 +160,47 @@ pub fn verify(saved: &SavedVm, runtime: &RuntimeIdentity) -> Result<Process> {
 }
 
 /// A verified held VM process and its authenticated control connection.
-pub struct Reattached {
+#[derive(Debug)]
+pub struct Attached {
     /// The process that matched the saved identity.
     pub process: Process,
     /// The connection attached with the saved launch capability.
-    pub connection: HostConnection,
+    pub connection: Connection,
 }
 
-/// Verifies the saved VM, peer-verifies its endpoint and authenticates with its saved capability.
+/// Verifies the saved VM, peer-verifies its endpoint and authenticates with its saved capability
+/// by `deadline`.
 ///
-/// Uses `runtime`'s identity without reading its artifacts. Failures retain the kinds and sources
-/// of [`verify`], [`transport::connect_verified`] and [`HostConnection::attach`], and a failure
-/// neither signals the VM nor changes the caller's saved values.
-pub fn reattach(
-    saved: &SavedVm,
-    runtime: &Runtime,
-    deadline: std::time::Instant,
-) -> Result<Reattached> {
-    reattach_with_transport(saved, runtime, deadline, transport::connect_verified)
-}
-
-/// Lets the CLI observe its verified transport before the single authenticated attachment.
-pub(crate) fn reattach_with_transport(
-    saved: &SavedVm,
-    runtime: &Runtime,
-    deadline: std::time::Instant,
-    connect: impl FnOnce(&str, &ProcessRef, std::time::Instant) -> Result<Box<dyn transport::Transport>>,
-) -> Result<Reattached> {
+/// Uses `runtime`'s identity without reading its artifacts. Failures of [`verify`] keep their
+/// kinds and sources. A failure to connect has the kind that converting its [`ConnectionError`]
+/// into an [`Error`] gives, and that `ConnectionError` as its source, which tells, for example, a
+/// refused capability. A failure neither signals the VM nor changes the caller's saved values.
+pub fn attach(saved: &SavedVm, runtime: &Runtime, deadline: Instant) -> Result<Attached> {
     let process = verify(saved, &runtime.identity)?;
-    let transport = connect(&saved.endpoint, &saved.process, deadline)?;
-    let connection = HostConnection::attach(transport, &saved.capability, deadline)?;
-    Ok(Reattached {
+    let connection =
+        Connection::connect(&saved.endpoint, &saved.process, &saved.capability, deadline)?;
+    Ok(Attached {
         process,
         connection,
     })
+}
+
+/// Verifies the saved VM, connects to its endpoint with `connect`, which lets the CLI observe the
+/// verified transport, and authenticates once with the saved capability.
+#[cfg(feature = "cli")]
+pub(crate) fn attach_with_transport(
+    saved: &SavedVm,
+    runtime: &Runtime,
+    deadline: Instant,
+    connect: impl FnOnce(&str, &ProcessRef, Instant) -> Result<Box<dyn transport::Transport>>,
+) -> Result<HostConnection> {
+    verify(saved, &runtime.identity)?;
+    let transport = connect(&saved.endpoint, &saved.process, deadline)?;
+    Ok(HostConnection::attach(
+        transport,
+        &saved.capability,
+        deadline,
+    )?)
 }
 
 /// An owned descriptor on Unix.
@@ -871,6 +886,29 @@ pub struct Launched {
 #[cfg(feature = "cli")]
 #[derive(Debug)]
 struct ForegroundChild(Option<spawn::Launched>);
+
+impl Launched {
+    /// Opens the VM's control connection by `deadline`, once its own process serves the control
+    /// endpoint, and authenticates with the launch capability.
+    ///
+    /// Returns once the VM accepted the capability and the guest acknowledged the session, which
+    /// tells nothing of whether the guest's application is ready. Fails as [`Connection`]
+    /// describes: with [`ConnectionErrorKind::Exited`] when the VM's process exits first, for
+    /// example.
+    pub fn connect(&self, deadline: Instant) -> Result<Connection, ConnectionError> {
+        Connection::connect(
+            &self.outputs.endpoint,
+            self.process.reference(),
+            self.capability.as_bytes(),
+            deadline,
+        )
+    }
+
+    /// Connects to the VM's boot console by `deadline`, as [`Console::connect`] does.
+    pub fn console(&self, deadline: Instant) -> Result<Console> {
+        Console::connect(&self.outputs, self.process.reference(), deadline)
+    }
+}
 
 #[cfg(feature = "cli")]
 impl Drop for ForegroundChild {

@@ -5,9 +5,8 @@ use std::thread;
 
 use super::*;
 use crate::host::process::BootId;
-use crate::host::transport::HostConnectionError;
 use crate::protocol::OUTER_HEADER_LEN;
-use crate::protocol::nvxs::{ErrorCode, HostState, Identity, RecordType, encode_record};
+use crate::protocol::nvxs::{ErrorCode, Identity, RecordType, encode_record};
 
 const CREDENTIAL: [u8; CAPABILITY_LEN] = [0x5a; CAPABILITY_LEN];
 const IDENTITY: Identity = Identity {
@@ -41,6 +40,20 @@ fn saved(vm: &VmDir, process: ProcessRef) -> SavedVm {
     }
 }
 
+/// Returns the connection failure that `error` keeps as its source.
+fn connection_error(error: &Error) -> &ConnectionError {
+    error
+        .source()
+        .unwrap()
+        .downcast_ref::<ConnectionError>()
+        .unwrap()
+}
+
+/// Returns the I/O cause of a connection failure.
+fn io_cause(error: &ConnectionError) -> &io::Error {
+    error.source().unwrap().downcast_ref::<io::Error>().unwrap()
+}
+
 #[test]
 fn verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint() {
     let (_directory, vm) = vm_dir();
@@ -63,7 +76,7 @@ fn verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint
     assert_eq!(error.kind(), ErrorKind::RuntimeMismatch);
     assert!(error.to_string().contains("kernel, compatibility"));
     assert_eq!(
-        reattach(
+        attach(
             &saved,
             &Runtime {
                 identity: other,
@@ -103,12 +116,12 @@ fn verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint
 }
 
 #[test]
-fn reattaching_refuses_an_endpoint_served_by_another_owned_process() {
+fn attaching_refuses_an_endpoint_served_by_another_owned_process() {
     let (_directory, vm) = vm_dir();
     let launched = RunningVm(spawn(stand_in(&vm)).unwrap());
     let saved = saved(&vm, launched.0.process.reference().clone());
     let _server = bind(&saved.endpoint);
-    let error = reattach(
+    let error = attach(
         &saved,
         &cold_runtime(),
         Instant::now() + Duration::from_secs(10),
@@ -116,24 +129,32 @@ fn reattaching_refuses_an_endpoint_served_by_another_owned_process() {
     .err()
     .unwrap();
     assert_eq!(error.kind(), ErrorKind::Protocol);
-    assert_eq!(
-        error
-            .source()
-            .unwrap()
-            .downcast_ref::<io::Error>()
-            .unwrap()
-            .kind(),
-        io::ErrorKind::PermissionDenied,
-    );
+    let connection = connection_error(&error);
+    assert_eq!(connection.kind(), ConnectionErrorKind::PeerMismatch);
+    assert_eq!(io_cause(connection).kind(), io::ErrorKind::PermissionDenied);
     assert!(!launched.0.process.has_exited().unwrap());
 }
 
 #[test]
-fn reattaching_keeps_the_actual_unavailable_endpoint_error() {
+fn connecting_to_a_launched_vm_refuses_an_endpoint_that_another_process_serves() {
+    let (_directory, vm) = vm_dir();
+    let launched = RunningVm(spawn(stand_in(&vm)).unwrap());
+    let _server = bind(&launched.0.outputs.endpoint);
+    let error = launched
+        .0
+        .connect(Instant::now() + Duration::from_secs(10))
+        .unwrap_err();
+    assert_eq!(error.kind(), ConnectionErrorKind::PeerMismatch);
+    assert_eq!(io_cause(&error).kind(), io::ErrorKind::PermissionDenied);
+    assert!(!launched.0.process.has_exited().unwrap());
+}
+
+#[test]
+fn attaching_keeps_the_actual_unavailable_endpoint_error() {
     let (_directory, vm) = vm_dir();
     let launched = RunningVm(spawn(stand_in(&vm)).unwrap());
     let saved = saved(&vm, launched.0.process.reference().clone());
-    let error = reattach(
+    let error = attach(
         &saved,
         &cold_runtime(),
         Instant::now() + Duration::from_millis(80),
@@ -141,10 +162,46 @@ fn reattaching_keeps_the_actual_unavailable_endpoint_error() {
     .err()
     .unwrap();
     assert_eq!(error.kind(), ErrorKind::TimedOut);
-    let source = error.source().unwrap().downcast_ref::<io::Error>().unwrap();
+    let connection = connection_error(&error);
+    assert_eq!(connection.kind(), ConnectionErrorKind::TimedOut);
+    let source = io_cause(connection);
     assert_eq!(source.kind(), io::ErrorKind::NotFound);
     assert!(source.raw_os_error().is_some());
+    let error = launched
+        .0
+        .connect(Instant::now() + Duration::from_millis(80))
+        .unwrap_err();
+    assert_eq!(error.kind(), ConnectionErrorKind::TimedOut);
     assert!(!launched.0.process.has_exited().unwrap());
+}
+
+#[test]
+fn connecting_to_a_launched_vm_whose_process_exited_tells_so() {
+    let (_directory, vm) = vm_dir();
+    let launched = RunningVm(spawn(stand_in(&vm)).unwrap());
+    launched.0.process.kill().unwrap();
+    assert!(
+        launched
+            .0
+            .process
+            .wait(Instant::now() + Duration::from_secs(10))
+            .unwrap()
+            .is_some()
+    );
+    let error = launched
+        .0
+        .connect(Instant::now() + Duration::from_secs(10))
+        .unwrap_err();
+    assert_eq!(error.kind(), ConnectionErrorKind::Exited);
+    assert!(!error.is_lost());
+    assert_eq!(
+        launched
+            .0
+            .console(Instant::now() + Duration::from_secs(10))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Exited
+    );
 }
 
 struct ServerChild {
@@ -162,7 +219,7 @@ impl ServerChild {
         command
             .args([
                 "--exact",
-                "host::vm::tests::reattach::owned_endpoint_child",
+                "host::vm::tests::attach::owned_endpoint_child",
                 "--ignored",
                 "--nocapture",
             ])
@@ -226,33 +283,35 @@ impl Drop for ServerChild {
 }
 
 #[test]
-fn reattaching_returns_the_held_owned_child_and_authenticated_connection() {
+fn attaching_returns_the_held_owned_child_and_authenticated_connection() {
     let (_directory, vm) = vm_dir();
     let (mut owner, saved) = ServerChild::start(&vm, false);
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut attached = reattach(&saved, &cold_runtime(), deadline).unwrap();
+    let mut attached = attach(&saved, &cold_runtime(), deadline).unwrap();
     assert_eq!(attached.process.reference(), &saved.process);
     assert!(!attached.process.has_exited().unwrap());
-    assert_eq!(attached.connection.identity(), IDENTITY);
-    assert_eq!(attached.connection.session().state(), HostState::Attached);
     attached
         .connection
         .send(b"request", Some(deadline))
         .unwrap();
-    assert_eq!(
-        attached.connection.receive(Some(deadline)).unwrap(),
-        b"response"
-    );
+    let mut response = Vec::new();
+    while response.len() < b"response".len() {
+        response.extend(attached.connection.receive(Some(deadline)).unwrap());
+    }
+    assert_eq!(response, b"response");
     owner.wait();
+    let error = attached.connection.receive(Some(deadline)).unwrap_err();
+    assert_eq!(error.kind(), ConnectionErrorKind::Closed);
+    assert!(error.is_lost());
     assert!(attached.process.wait(deadline).unwrap().is_some());
 }
 
 #[test]
-fn reattaching_keeps_the_brokers_authentication_refusal() {
+fn attaching_keeps_the_brokers_authentication_refusal() {
     let (_directory, vm) = vm_dir();
     let (mut owner, mut saved) = ServerChild::start(&vm, false);
     saved.capability[0] ^= 1;
-    let error = reattach(
+    let error = attach(
         &saved,
         &cold_runtime(),
         Instant::now() + Duration::from_secs(10),
@@ -260,24 +319,24 @@ fn reattaching_keeps_the_brokers_authentication_refusal() {
     .err()
     .unwrap();
     assert_eq!(error.kind(), ErrorKind::Protocol);
-    assert!(matches!(
-        error
-            .source()
-            .unwrap()
-            .downcast_ref::<HostConnectionError>(),
-        Some(HostConnectionError::Rejected(ErrorCode::Authentication)),
-    ));
+    let connection = connection_error(&error);
+    assert_eq!(connection.kind(), ConnectionErrorKind::Rejected);
+    assert!(
+        connection
+            .to_string()
+            .contains(&ErrorCode::Authentication.to_string())
+    );
     owner.wait();
 }
 
 #[test]
-fn reattaching_keeps_the_callers_deadline_while_the_broker_is_silent() {
+fn attaching_keeps_the_callers_deadline_while_the_broker_is_silent() {
     let (_directory, vm) = vm_dir();
     let (mut owner, saved) = ServerChild::start(&vm, true);
     let (sender, receiver) = std::sync::mpsc::channel();
     let worker = thread::spawn(move || {
         let started = Instant::now();
-        let result = reattach(
+        let result = attach(
             &saved,
             &cold_runtime(),
             started + Duration::from_millis(300),
@@ -291,7 +350,7 @@ fn reattaching_keeps_the_callers_deadline_while_the_broker_is_silent() {
         owner.child.wait().unwrap();
     }
     worker.join().unwrap();
-    let (result, elapsed) = completed.expect("reattach did not honor the attach deadline");
+    let (result, elapsed) = completed.expect("attach did not honor the attach deadline");
     assert_eq!(result.unwrap_err().kind(), ErrorKind::TimedOut);
     assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
     owner.wait();
@@ -312,7 +371,7 @@ fn record(record_type: RecordType, sequence: u64, payload: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "invoked as an owned endpoint child by the reattach tests"]
+#[ignore = "invoked as an owned endpoint child by the attach tests"]
 fn owned_endpoint_child() {
     let endpoint = std::env::var("NVX_SAVED_VM_ENDPOINT").unwrap();
     let ready = PathBuf::from(std::env::var_os("NVX_SAVED_VM_READY").unwrap());
@@ -382,7 +441,7 @@ impl IdleChild {
         command
             .args([
                 "--exact",
-                "host::vm::tests::reattach::idle_child",
+                "host::vm::tests::attach::idle_child",
                 "--ignored",
                 "--test-threads=1",
             ])
@@ -450,24 +509,18 @@ fn a_saved_vm_runs_until_its_process_exits_and_another_runtime_is_refused_withou
 }
 
 #[test]
-fn reattaching_refuses_an_endpoint_that_another_process_serves_and_keeps_the_vm_and_its_values() {
+fn attaching_refuses_an_endpoint_that_another_process_serves_and_keeps_the_vm_and_its_values() {
     let (_directory, vm) = vm_dir();
     let child = IdleChild::start();
     let saved = saved(&vm, child.reference());
     let before = saved.clone();
     let _server = bind(&saved.endpoint);
     let deadline = Instant::now() + Duration::from_secs(10);
-    let error = reattach(&saved, &cold_runtime(), deadline).err().unwrap();
+    let error = attach(&saved, &cold_runtime(), deadline).err().unwrap();
     assert_eq!(error.kind(), ErrorKind::Protocol);
-    assert_eq!(
-        error
-            .source()
-            .unwrap()
-            .downcast_ref::<io::Error>()
-            .unwrap()
-            .kind(),
-        io::ErrorKind::PermissionDenied
-    );
+    let connection = connection_error(&error);
+    assert_eq!(connection.kind(), ConnectionErrorKind::PeerMismatch);
+    assert_eq!(io_cause(connection).kind(), io::ErrorKind::PermissionDenied);
     assert!(
         !verify(&saved, &saved.runtime)
             .unwrap()
