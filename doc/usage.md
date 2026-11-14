@@ -1487,7 +1487,13 @@ development only:
   host, and the fallback's warning reports what each cold boot's fingerprint
   took.
 - A snapshot records its host profile, and restores only on a host with the
-  same CPU model and stepping whose hypervisor supports the profile.
+  same CPU model and stepping whose hypervisor supports the profile. It also
+  restores only if OpenVMM's derivation policy leaves the recorded profile
+  unchanged: OpenVMM refuses a recorded profile that the policy would change
+  (`E_PROFILE_DIGEST`), such as an edited one that gives the guest VMX or SVM.
+  It applies its own policy, whatever policy the profile's provenance names, so
+  this also refuses a snapshot of a profile that an OpenVMM with another policy
+  derived, if its policy would change the profile; recapture such a snapshot.
 - `doctor` never qualifies it, so CI hosts need a built-in profile, and
   `benchmark` refuses a CPU that no built-in profile serves.
 
