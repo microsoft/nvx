@@ -350,7 +350,7 @@ When the call returns:
   the restored broker has a fresh instance, restarts at its first epoch with a
   reset queued, and ignores the guest's records until the guest acknowledges
   it. nvx-init waits for the reset, within the guest restore's deadline, fails
-  on anything else, and acknowledges it with `GuestConnection::acknowledge`
+  on anything else, and acknowledges it, as `Connection::acknowledge` does,
   before it takes the guest-restore record.
 
 The guidelines quote this excerpt of the

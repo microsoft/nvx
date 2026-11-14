@@ -70,8 +70,8 @@ nvx-rs/
 │   │                such as the platform layer and, with feature `cli`, the control session, the
 │   │                restore driver, and the `nvx-rs` CLI
 │   ├── testing/     feature `testing`: NVX's fake OpenVMM
-│   ├── guest/       feature `guest`: the guest's NVXS connection and terminal, the host's mapping
-│   │                table, the time ABI's steps, a capture, a guest restore, and the
+│   ├── guest/       feature `guest`: the guest's control connection and terminal, the host's
+│   │                mapping table, the time ABI's steps, a capture, a guest restore, and the
 │   │                reseed; and, private to the crate, NVX's guest programs and nvx-init's space
 │   └── bin/         nvx-rs, nvx-fake-openvmm, and the guest binaries, each of which calls the
 │                    hidden `main` of its program
@@ -118,7 +118,7 @@ changes only when the module's purpose does.
 | [`nvx::host::report`](#nvxhostreport) | OpenVMM's outcome report |
 | [`nvx::guest`](#nvxguest) | The guest's side of the library, for any guest init or agent, and NVX's guest programs; see [Guest binaries](#guest-binaries) |
 | [`nvx::guest::mappings`](#nvxguestmappings) | `Mapping` and `MappingTable`: host mappings, and the account of a host's mapping table, for any guest init or agent |
-| [`nvx::guest::nvxs`](#nvxguestnvxs) | `GuestConnection`: the guest's role of the NVXS session over a byte stream, such as the control console |
+| [`nvx::guest::control`](#nvxguestcontrol) | `Connection`: the guest's end of its VM's control connection, ordered bytes to and from the host's program, over a stream such as the control console |
 | [`nvx::guest::terminal`](#nvxguestterminal) | `Terminal`: the terminal on which a guest agent serves its session, such as the VM's control console |
 | [`nvx::guest::time`](#nvxguesttime) | x86_64: the boot steps of NVX time ABI v1 as typed calls in the caller's process, for any guest init or agent |
 | [`nvx::guest::snapshot`](#nvxguestsnapshot) | x86_64: bounded Fresh capture with inline restore repair and staged failure dispositions, without execution control |
@@ -787,12 +787,20 @@ agent applies its table beneath `/` in direct mode, and the table refuses an
 empty source, since the export is an aggregate, whose root lists its children,
 and NVX's hosts, whose exports are all aggregates, send none.
 
-### `nvx::guest::nvxs`
+### `nvx::guest::control`
 
-`GuestConnection`: the guest's role of the NVXS session over a byte stream, such
-as the control console, on which NVX's managed agent and other guest agents run
-their sessions. It never reads past the record in progress, so a caller that
-polls the stream between records sees every record that it has not returned.
+`Connection`: the guest's end of its VM's control connection over a byte
+stream, such as the control console: an ordered stream of bytes in each
+direction between the guest and the host's program, which speak a protocol of
+their own over it. `Connection::receive` returns the session's resets,
+`Event::Reset`, which the guest acknowledges with `Connection::acknowledge` once
+it abandoned the earlier session's work, and the program's bytes,
+`Event::Data`; `Connection::send` sends the guest's. The connection keeps the
+session's framing, checks, and flow control to itself, and fails with a
+`ConnectionError` of a `ConnectionErrorKind`. It never reads past what it
+returns next, so a guest that polls the stream, through `Connection::get_ref`,
+before it receives sees everything that the connection has not returned. NVX's
+managed agent runs its sessions on the same crate-private driver.
 
 ### `nvx::guest::terminal`
 
@@ -860,9 +868,9 @@ otherwise empty network policy is explicitly refused.
 
 The caller owns its transport. After answering the capture request, send
 nothing until `capture` returns. After `Continued` or a `Resumed` failure,
-report on the same session. After `Restored`, take the session's RESET, then
-call `GuestConnection::acknowledge(window)` on that session before receiving
-the guest-restore record.
+report on the same session. After `Restored`, take the session's reset,
+`Event::Reset`, then call `Connection::acknowledge` on that connection before
+receiving the guest-restore record.
 
 ### `nvx::guest::restore`
 
