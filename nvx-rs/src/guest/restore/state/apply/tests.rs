@@ -5,14 +5,14 @@ use std::error::Error as _;
 use std::path::Path;
 
 use super::*;
-use crate::activation::{
-    ExpectedResources, Export, ExportKind, Network, RestoreSection, TransactionId,
-};
-use crate::guest::activation::{
-    Activation, ActivationAction, ActivationCause, ActivationInput, ActivationState,
+use crate::guest::restore::{
+    GuestRestore, GuestRestoreAction, GuestRestoreCause, GuestRestoreInput, GuestRestoreState,
 };
 use crate::guest::root::tests::assembly_failure;
 use crate::guest::sys::Errno;
+use crate::guest_restore::{
+    ExpectedResources, Export, ExportKind, Network, RestoreSection, TransactionId,
+};
 use crate::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
 use crate::protocol::view::{MachineIdMode, View};
 use crate::uuid::Uuid;
@@ -209,10 +209,10 @@ fn template() -> RootTemplate {
 /// Returns the tests' basic configuration, without an export or network.
 fn configuration() -> Configuration {
     Configuration {
-        image: activation::Image::Erofs {
+        image: guest_restore::Image::Erofs {
             uuid: Some(IMAGE_UUID),
         },
-        upper: activation::Upper::Tmpfs {
+        upper: guest_restore::Upper::Tmpfs {
             max_memory_percent: 50,
         },
         overlay: OverlayMode::UntrustedLowers,
@@ -228,8 +228,8 @@ fn configuration() -> Configuration {
 }
 
 /// Returns a clone's activation record.
-fn clone_record(configuration: Configuration) -> ActivationRecord {
-    ActivationRecord::new(
+fn clone_record(configuration: Configuration) -> GuestRestoreRecord {
+    GuestRestoreRecord::new(
         Some(RestoreSection {
             transaction: TRANSACTION,
         }),
@@ -239,12 +239,12 @@ fn clone_record(configuration: Configuration) -> ActivationRecord {
 }
 
 /// Returns the tests' basic accepted record.
-fn accepted() -> ActivationRecord {
+fn accepted() -> GuestRestoreRecord {
     clone_record(configuration())
 }
 
 /// Returns a record with every optional application input.
-fn with_everything() -> ActivationRecord {
+fn with_everything() -> GuestRestoreRecord {
     let mut configuration = configuration();
     configuration.view.machine_id = MachineIdMode::Generated;
     configuration.export = Some(Export {
@@ -276,12 +276,12 @@ fn accepted_assembly() -> Assembly {
 }
 
 /// Returns an activation whose transport is restricted and ready for one Activate.
-fn restricted(now: Instant) -> Activation {
+fn restricted(now: Instant) -> GuestRestore {
     let mut activation =
-        Activation::with_resources(RESOURCES, Some(now), Duration::from_secs(10), now);
+        GuestRestore::with_resources(RESOURCES, Some(now), Duration::from_secs(10), now);
     assert_eq!(
-        activation.input(now, ActivationInput::Reset).unwrap(),
-        ActivationAction::Acknowledge,
+        activation.input(now, GuestRestoreInput::Reset).unwrap(),
+        GuestRestoreAction::Acknowledge,
     );
     activation
 }
@@ -290,7 +290,7 @@ fn restricted(now: Instant) -> Activation {
 fn no_mount_spawn_or_id_generation_happens_before_the_gate() {
     let now = Instant::now();
     let bytes = with_everything().encode();
-    let cold = ActivationRecord::new(None, configuration())
+    let cold = GuestRestoreRecord::new(None, configuration())
         .unwrap()
         .encode();
     let mut wrong = configuration();
@@ -300,21 +300,21 @@ fn no_mount_spawn_or_id_generation_happens_before_the_gate() {
         let mut activation = restricted(now);
         assert!(
             activation
-                .input(now, ActivationInput::Activate(offered))
+                .input(now, GuestRestoreInput::Activate(offered))
                 .is_err()
         );
-        assert_eq!(activation.state(), ActivationState::Failed);
+        assert_eq!(activation.state(), GuestRestoreState::Failed);
     }
     let mut activation = restricted(now);
     assert!(matches!(
         activation
             .input(
                 now + Duration::from_secs(10),
-                ActivationInput::Activate(&bytes)
+                GuestRestoreInput::Activate(&bytes)
             )
             .unwrap_err()
             .cause(),
-        ActivationCause::Expired,
+        GuestRestoreCause::Expired,
     ));
 }
 
@@ -324,8 +324,8 @@ fn a_valid_activate_activates_the_root_and_the_workload_once_before_ready() {
     let record = with_everything();
     let bytes = record.encode();
     let mut activation = restricted(now);
-    let ActivationAction::Apply(accepted) = activation
-        .input(now, ActivationInput::Activate(&bytes))
+    let GuestRestoreAction::Apply(accepted) = activation
+        .input(now, GuestRestoreInput::Activate(&bytes))
         .unwrap()
     else {
         panic!("a valid record was not accepted")
@@ -342,23 +342,23 @@ fn a_valid_activate_activates_the_root_and_the_workload_once_before_ready() {
     assert_eq!(applied.publication, Publication::Published);
     assert_eq!(applied.gateway, Some(GATEWAY));
     let ready = activation.complete(now, Ok(())).unwrap();
-    assert_eq!(ready, crate::activation::ReadyActivation::of(&record));
+    assert_eq!(ready, crate::guest_restore::GuestRestoreReady::of(&record));
     for _ in 0..2 {
         assert_eq!(
-            activation.input(now, ActivationInput::Reset).unwrap(),
-            ActivationAction::Acknowledge
+            activation.input(now, GuestRestoreInput::Reset).unwrap(),
+            GuestRestoreAction::Acknowledge
         );
         assert_eq!(
             activation
-                .input(now, ActivationInput::Activate(&bytes))
+                .input(now, GuestRestoreInput::Activate(&bytes))
                 .unwrap(),
-            ActivationAction::Ready(ready)
+            GuestRestoreAction::Ready(ready)
         );
     }
     assert_eq!(system.effects, expected);
     assert_eq!(
-        activation.input(now, ActivationInput::Request).unwrap(),
-        ActivationAction::Serve
+        activation.input(now, GuestRestoreInput::Request).unwrap(),
+        GuestRestoreAction::Serve
     );
 }
 
@@ -366,12 +366,12 @@ fn a_valid_activate_activates_the_root_and_the_workload_once_before_ready() {
 fn assembly_inputs_are_taken_exactly_from_the_record() {
     let images = [
         (
-            activation::Image::Erofs { uuid: None },
+            guest_restore::Image::Erofs { uuid: None },
             root::Image::Erofs { uuid: None },
             false,
         ),
         (
-            activation::Image::Erofs {
+            guest_restore::Image::Erofs {
                 uuid: Some(IMAGE_UUID),
             },
             root::Image::Erofs {
@@ -380,7 +380,7 @@ fn assembly_inputs_are_taken_exactly_from_the_record() {
             false,
         ),
         (
-            activation::Image::Gpt {
+            guest_restore::Image::Gpt {
                 disk_guid: None,
                 first_partition_bound: 4096,
             },
@@ -391,7 +391,7 @@ fn assembly_inputs_are_taken_exactly_from_the_record() {
             true,
         ),
         (
-            activation::Image::Gpt {
+            guest_restore::Image::Gpt {
                 disk_guid: Some(DISK_GUID),
                 first_partition_bound: 4096,
             },
@@ -404,7 +404,7 @@ fn assembly_inputs_are_taken_exactly_from_the_record() {
     ];
     let uppers = [
         (
-            activation::Upper::Tmpfs {
+            guest_restore::Upper::Tmpfs {
                 max_memory_percent: 1,
             },
             root::Upper::Tmpfs {
@@ -412,7 +412,7 @@ fn assembly_inputs_are_taken_exactly_from_the_record() {
             },
         ),
         (
-            activation::Upper::Tmpfs {
+            guest_restore::Upper::Tmpfs {
                 max_memory_percent: 90,
             },
             root::Upper::Tmpfs {
@@ -420,7 +420,7 @@ fn assembly_inputs_are_taken_exactly_from_the_record() {
             },
         ),
         (
-            activation::Upper::Scratch {
+            guest_restore::Upper::Scratch {
                 journal: Journal::Allowed,
             },
             root::Upper::Scratch {
@@ -429,7 +429,7 @@ fn assembly_inputs_are_taken_exactly_from_the_record() {
             },
         ),
         (
-            activation::Upper::Scratch {
+            guest_restore::Upper::Scratch {
                 journal: Journal::Forbidden,
             },
             root::Upper::Scratch {
@@ -483,7 +483,7 @@ fn assembly_inputs_are_taken_exactly_from_the_record() {
         cpus: 8,
         memory: 1 << 33,
     };
-    let other = ActivationRecord::new(None, other).unwrap();
+    let other = GuestRestoreRecord::new(None, other).unwrap();
     let (mut first_system, mut other_system) = (FakeSystem::new(), FakeSystem::new());
     apply_with(&mut first_system, &first, &template(), None).unwrap();
     apply_with(&mut other_system, &other, &template(), None).unwrap();
@@ -501,7 +501,7 @@ fn assembly_inputs_are_taken_exactly_from_the_record() {
 #[test]
 fn a_gpt_disk_s_partition_table_is_reread_before_its_root_is_assembled() {
     let record = clone_record(Configuration {
-        image: activation::Image::Gpt {
+        image: guest_restore::Image::Gpt {
             disk_guid: Some(DISK_GUID),
             first_partition_bound: 4096,
         },
@@ -566,7 +566,7 @@ fn a_failed_assembly_is_final_and_reads_and_tears_down_nothing() {
     let mut activation = restricted(now);
     let bytes = accepted().encode();
     activation
-        .input(now, ActivationInput::Activate(&bytes))
+        .input(now, GuestRestoreInput::Activate(&bytes))
         .unwrap();
     let mut system = FakeSystem {
         failing: true,
@@ -577,10 +577,10 @@ fn a_failed_assembly_is_final_and_reads_and_tears_down_nothing() {
         assembly_failure(error), root::Error::Runtime { path } if path == Path::new("run/nvx")
     )));
     let failure = activation.complete(now, Err(error.into())).unwrap_err();
-    assert!(matches!(failure.cause(), ActivationCause::Failed(_)));
+    assert!(matches!(failure.cause(), GuestRestoreCause::Failed(_)));
     assert!(
         activation
-            .input(now, ActivationInput::Activate(&bytes))
+            .input(now, GuestRestoreInput::Activate(&bytes))
             .is_err()
     );
     assert_eq!(system.effects, [Effect::Assemble(accepted_assembly())]);
@@ -781,7 +781,7 @@ fn the_application_refuses_without_privileges_what_it_cannot_assemble() {
         root::Error::Runtime { path } if path == Path::new("run/nvx")
     ));
     let disk = clone_record(Configuration {
-        image: activation::Image::Gpt {
+        image: guest_restore::Image::Gpt {
             disk_guid: None,
             first_partition_bound: 4096,
         },

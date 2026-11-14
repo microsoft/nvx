@@ -96,8 +96,8 @@ A restore then:
    snapshot, with `Snapshot::accepts`, at the host's current time, hard-links
    the snapshot's OpenVMM files into the VM directory's `openvmm/`, and binds
    the listener of OpenVMM's restore-ready event;
-3. builds the `ActivationRecord` that the guest applies with
-   `Prepared::activation_record` and a `TransactionId`, 16 random bytes that
+3. builds the `GuestRestoreRecord` that the guest applies with
+   `Prepared::guest_restore_record` and a `TransactionId`, 16 random bytes that
    the program picks for the restore, and starts the VM with `vm::spawn`,
    whose `Launched::ready` holds the listener;
 4. drives a `host::restore::RestoreMachine` of the record, which says what to
@@ -106,7 +106,7 @@ A restore then:
    with `ReadyListener::receive`, connects and authenticates, sends the
    record's bytes in its protocol, and reports the guest's Ready, until the
    machine is `Done` or fails. In the guest, the init activates the restore
-   with a `guest::activation::Activation`, applies the record in its space,
+   with a `guest::restore::GuestRestore`, applies the record in its space,
    and reports Ready;
 5. sends the guest its mapping table, if it holds any mapping, and its
    workload in its own protocol once the restore is `Done`, or stops the VM

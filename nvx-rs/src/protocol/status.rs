@@ -10,11 +10,11 @@
 //!   violation instead, whose status is one of these, and the caller ends the VM with it.
 //! - [`REPAIR_RESTORE`] to [`REPAIR_FINISH`], 40 to 45: the other failures of a clone's repair, one
 //!   status for each class.
-//! - [`ACTIVATION_DEADLINE`] to [`ACTIVATION_ORDER`], 50 to 58: the failures of a clone's
-//!   activation, which follows its repair, one status reserved for each class: the deadline, the
-//!   host's session, the Activate's record and the resources that it expects, the activation of
-//!   the root, of the workload, of the host export, and of the network settings, and the guest's
-//!   own order.
+//! - [`GUEST_RESTORE_DEADLINE`] to [`GUEST_RESTORE_ORDER`], 50 to 58: the failures of a clone's
+//!   guest restore, which follows its repair, one status reserved for each class: the deadline,
+//!   the host's session, the Activate's record and the resources that it expects, the activation
+//!   of the root, of the workload, of the host export, and of the network settings, and the
+//!   guest's own order.
 //!
 //! The guest ends the VM with a status after a diagnostic that names the failure, such as a
 //! violation event of the time ABI, or an error line. A status alone does not tell the cause, nor
@@ -55,40 +55,41 @@ pub const REPAIR_FINISH: u8 = 45;
 
 /// The clone was not activated before its deadline, which starts at its repair's
 /// acknowledgement.
-pub const ACTIVATION_DEADLINE: u8 = 50;
-/// The host broke the session of a repaired clone's activation: before the clone was ready, it
-/// reset the session again, or sent a request before the activation, and, before or after, it
-/// sent an Activate of another transaction, or one that changes the accepted record.
-pub const ACTIVATION_PROTOCOL: u8 = 51;
+pub const GUEST_RESTORE_DEADLINE: u8 = 50;
+/// The host broke the session of a repaired clone's guest restore: before the clone was ready,
+/// it reset the session again, or sent a request before the guest restore, and, before or after,
+/// it sent an Activate of another transaction, or one that changes the accepted record.
+pub const GUEST_RESTORE_PROTOCOL: u8 = 51;
 /// The Activate's record is refused: it does not decode, breaks a limit, or is a cold boot's,
 /// without the restore section of a clone's.
-pub const ACTIVATION_RECORD: u8 = 52;
+pub const GUEST_RESTORE_RECORD: u8 = 52;
 /// The Activate's record expects other resources than the repaired clone has: another number of
 /// online CPUs, or another memory size.
-pub const ACTIVATION_RESOURCES: u8 = 53;
+pub const GUEST_RESTORE_RESOURCES: u8 = 53;
 /// The clone's root cannot be activated with the record's settings: its image does not assemble
 /// over its upper, a GPT image's partition table is refused, or its scratch is not fresh.
-pub const ACTIVATION_ROOT: u8 = 54;
+pub const GUEST_RESTORE_ROOT: u8 = 54;
 /// The clone's workload cannot be activated with the record's settings: its account is missing
 /// or invalid in the image, or its hostname or its machine ID cannot be set.
-pub const ACTIVATION_WORKLOAD: u8 = 55;
+pub const GUEST_RESTORE_WORKLOAD: u8 = 55;
 /// The host export cannot be mounted in the clone.
-pub const ACTIVATION_EXPORT: u8 = 56;
+pub const GUEST_RESTORE_EXPORT: u8 = 56;
 /// The record's network settings cannot be applied in the clone: its resolver or its proxy
 /// endpoint, or the announcer of the workload's listeners, which its network publishes, cannot
 /// start, or ended.
-pub const ACTIVATION_NETWORK: u8 = 57;
-/// The guest's own order misused the activation: it completed an activation that did not run,
-/// or started the sandbox before the clone was ready.
-pub const ACTIVATION_ORDER: u8 = 58;
+pub const GUEST_RESTORE_NETWORK: u8 = 57;
+/// The guest's own order misused the guest restore: it completed a guest restore that did not
+/// run, or started the sandbox before the clone was ready.
+pub const GUEST_RESTORE_ORDER: u8 = 58;
 
 /// The time ABI's statuses, from [`TIME_CONFORMANCE`] to [`TIME_REPAIR`].
 pub const TIME_STATUSES: RangeInclusive<u8> = TIME_CONFORMANCE..=TIME_REPAIR;
 /// The statuses of a clone's repair besides the time ABI's, from [`REPAIR_RESTORE`] to
 /// [`REPAIR_FINISH`].
 pub const REPAIR_STATUSES: RangeInclusive<u8> = REPAIR_RESTORE..=REPAIR_FINISH;
-/// The statuses of a clone's activation, from [`ACTIVATION_DEADLINE`] to [`ACTIVATION_ORDER`].
-pub const ACTIVATION_STATUSES: RangeInclusive<u8> = ACTIVATION_DEADLINE..=ACTIVATION_ORDER;
+/// The statuses of a clone's guest restore, from [`GUEST_RESTORE_DEADLINE`] to
+/// [`GUEST_RESTORE_ORDER`].
+pub const GUEST_RESTORE_STATUSES: RangeInclusive<u8> = GUEST_RESTORE_DEADLINE..=GUEST_RESTORE_ORDER;
 
 /// Returns what `status` means, as the module tells, such as `a clone's memory activation failed`,
 /// or `None` for a status that the module does not name.
@@ -103,15 +104,15 @@ pub fn describe(status: u8) -> Option<&'static str> {
         REPAIR_MEMORY => "a clone's memory activation failed",
         REPAIR_RESEED => "a clone's reseed failed",
         REPAIR_FINISH => "a clone's restore finish failed",
-        ACTIVATION_DEADLINE => "a clone was not activated before its deadline",
-        ACTIVATION_PROTOCOL => "the host broke a repaired clone's restricted session",
-        ACTIVATION_RECORD => "a clone's Activate record is refused",
-        ACTIVATION_RESOURCES => "a clone's Activate record expects other resources",
-        ACTIVATION_ROOT => "a clone's root activation failed",
-        ACTIVATION_WORKLOAD => "a clone's workload activation failed",
-        ACTIVATION_EXPORT => "a clone's host export cannot be mounted",
-        ACTIVATION_NETWORK => "a clone's network settings cannot be applied",
-        ACTIVATION_ORDER => "a guest's order misused a clone's activation",
+        GUEST_RESTORE_DEADLINE => "a clone was not activated before its deadline",
+        GUEST_RESTORE_PROTOCOL => "the host broke a repaired clone's restricted session",
+        GUEST_RESTORE_RECORD => "a clone's Activate record is refused",
+        GUEST_RESTORE_RESOURCES => "a clone's Activate record expects other resources",
+        GUEST_RESTORE_ROOT => "a clone's root activation failed",
+        GUEST_RESTORE_WORKLOAD => "a clone's workload activation failed",
+        GUEST_RESTORE_EXPORT => "a clone's host export cannot be mounted",
+        GUEST_RESTORE_NETWORK => "a clone's network settings cannot be applied",
+        GUEST_RESTORE_ORDER => "a guest's order misused a clone's activation",
         _ => return None,
     })
 }

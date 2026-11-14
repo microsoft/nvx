@@ -18,7 +18,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use nvx::ErrorKind;
-use nvx::activation::{ActivationRecord, ReadyActivation, TransactionId};
+use nvx::guest_restore::{GuestRestoreReady, GuestRestoreRecord, TransactionId};
 use nvx::host::config::VmConfig;
 use nvx::host::process::{Opened, Process};
 use nvx::host::report;
@@ -176,8 +176,8 @@ where
 /// needs none. The caller holds it through this call, which ends the VM when the restore fails,
 /// or fails with an [`Unstopped`] error, after which the caller keeps holding it.
 ///
-/// `activate` sends the activation record's bytes as the first request of the caller's own
-/// protocol with its guest, and returns the activation that the guest's Ready reports. The
+/// `activate` sends the guest-restore record's bytes as the first request of the caller's own
+/// protocol with its guest, and returns the guest restore that the guest's Ready reports. The
 /// caller then sends the guest its mappings and workload in that protocol.
 pub fn restore<A>(
     runtime: &Runtime,
@@ -189,12 +189,12 @@ pub fn restore<A>(
     deadline: Instant,
 ) -> Result<(Launched, HostConnection), Box<dyn Error>>
 where
-    A: FnMut(&mut HostConnection, &[u8], Instant) -> nvx::Result<ReadyActivation>,
+    A: FnMut(&mut HostConnection, &[u8], Instant) -> nvx::Result<GuestRestoreReady>,
 {
     vm::create_private_dir(directory)?;
     let dir = VmDir::open(directory)?;
     let prepared = vm::create(runtime, config, Some(snapshot), &dir)?;
-    let record = prepared.activation_record(transaction)?;
+    let record = prepared.guest_restore_record(transaction)?;
     let mut launched = start(prepared)?;
     match drive(&mut launched, &record, activate, deadline) {
         Ok(connection) => Ok((launched, connection)),
@@ -210,12 +210,12 @@ where
 /// transaction. A lost connection is replaced, with the same record, until the deadline.
 fn drive<A>(
     launched: &mut Launched,
-    record: &ActivationRecord,
+    record: &GuestRestoreRecord,
     mut activate: A,
     deadline: Instant,
 ) -> Result<HostConnection, Box<dyn Error>>
 where
-    A: FnMut(&mut HostConnection, &[u8], Instant) -> nvx::Result<ReadyActivation>,
+    A: FnMut(&mut HostConnection, &[u8], Instant) -> nvx::Result<GuestRestoreReady>,
 {
     let mut machine = RestoreMachine::new(record);
     machine.input(RestoreInput::Spawned(launched.process.reference().clone()));

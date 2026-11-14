@@ -14,9 +14,9 @@ use super::manifest::{
     MAX_PROCESSORS, MAX_TEXT_LEN, Machine, Memory, MemoryRange, Nic, PolicyIdentity, Rates,
     SnapshotManifest, TimeContract, Topology, parse_profile_id,
 };
-use crate::activation;
 use crate::contract;
 use crate::error::{Error, Result};
+use crate::guest_restore;
 use crate::host::config::{DiskCapture, check_setting};
 use crate::host::platform::parse_hex32;
 use crate::host::process::BootId;
@@ -44,7 +44,7 @@ struct Contracts {
     time: u64,
     /// [`contract::RESTORE_PACKET_VERSION`].
     restore_packet: u64,
-    /// [`activation::VERSION`], as a `u64`, as the other versions are.
+    /// [`guest_restore::VERSION`], as a `u64`, as the other versions are.
     activation: u64,
 }
 
@@ -56,7 +56,7 @@ impl Contracts {
         time: contract::TIME_ABI_VERSION,
         restore_packet: contract::RESTORE_PACKET_VERSION,
         // `u64::from` is not `const`, and widening a `u16` is lossless.
-        activation: activation::VERSION as u64,
+        activation: guest_restore::VERSION as u64,
     };
 
     /// Writes the versions.

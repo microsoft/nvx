@@ -3,7 +3,7 @@
 //! capture, or a restore; one snapshot type, with a strict directory format; a restore that the
 //! program drives with its own I/O; verified connections to a running VM, and reattachment to
 //! one; the contracts that a guest's space reads; and the guest's side of a capture and of a
-//! restore's activation.
+//! guest restore.
 //!
 //! The library keeps no durable state, runs no workload, and builds no guest space. On the host,
 //! it starts OpenVMM, and no other process, and supervises no VM: the program stops each VM that
@@ -19,10 +19,11 @@
 //!   command-line tokens of a guest's root, view, and export; the guest targets that live shares
 //!   may not take; and the exit statuses with which a clone's guest fails fast. It has no
 //!   dependencies, so the host and the guest share it.
-//! - [`activation`]: the activation record of a layered root, the bounded, versioned, non-secret
-//!   record of the settings that its activation applies, which a clone restored from a snapshot
-//!   reads in place of its captured configuration, and what Ready reports about the activation.
-//!   It needs no features, so the host, the guest, and every adapter's framing share it.
+//! - [`guest_restore`]: the guest-restore record of a layered root, the bounded, versioned,
+//!   non-secret record of the settings that its guest restore applies, which a clone restored
+//!   from a snapshot reads in place of its captured configuration, and what Ready reports about
+//!   the guest restore. It needs no features, so the host, the guest, and every adapter's framing
+//!   share it.
 //! - [`contract`]: the versions of the contracts that this crate speaks with OpenVMM and the
 //!   guest, and the compatibility of NVX releases with them, with the versions of the contracts
 //!   through which OpenVMM restores a snapshot.
@@ -42,7 +43,7 @@
 //!   connection and the terminal on which it serves it (`guest::nvxs`, `guest::terminal`), the
 //!   account of a host's mapping table (`guest::mappings`), the time ABI's steps in its own
 //!   process (`guest::time`), a capture that repairs each restore of its snapshot
-//!   (`guest::snapshot`), a restore's activation (`guest::activation`), and its reseed
+//!   (`guest::snapshot`), a clone's guest restore (`guest::restore`), and its reseed
 //!   (`guest::reseed`).
 //!
 //! NVX's own programs, its `nvx-rs` command-line interface, its guest binaries, and the fake
@@ -52,7 +53,7 @@
 //!
 //! GPT parsing is internal to NVX's guest programs, not a public image-checking API. The control
 //! plane owns producing, checking, and staging its images; each guest init owns interpreting
-//! them. [`uuid`], [`protocol::root::ImageFormat::Gpt`], and [`activation::Image::Gpt`] remain
+//! them. [`uuid`], [`protocol::root::ImageFormat::Gpt`], and [`guest_restore::Image::Gpt`] remain
 //! public, independently of the parser.
 //!
 //! ```compile_fail
@@ -154,11 +155,11 @@
 //! - `guest`: the `guest` module and the guest binaries, which the `guest` profile builds as
 //!   static `x86_64-unknown-linux-musl` executables.
 
-pub mod activation;
 pub mod contract;
 mod error;
 #[cfg(any(test, all(feature = "guest", target_os = "linux")))]
 mod gpt;
+pub mod guest_restore;
 pub mod net;
 pub mod protocol;
 pub mod uuid;

@@ -481,8 +481,8 @@ fn init_refuses_activation_without_a_restore_and_keeps_serving() {
 
 #[test]
 fn restored_ready_maps_and_first_exec_share_the_existing_start_transition() -> TestResult {
-    use crate::guest::activation::{ActivationAction, ActivationState};
     use crate::guest::init::Capture;
+    use crate::guest::restore::{GuestRestoreAction, GuestRestoreState};
     if super::super::tests::isolate_process_test(
         "NVX_RESTORED_DISPATCH_TEST",
         "guest::managed_agent::dispatch::tests::restored_ready_maps_and_first_exec_share_the_existing_start_transition",
@@ -509,7 +509,7 @@ fn restored_ready_maps_and_first_exec_share_the_existing_start_transition() -> T
     let activation = capture.restored.as_mut().unwrap();
     assert!(matches!(
         activation.accept(&payload, std::time::Instant::now())?.0,
-        ActivationAction::Apply(_)
+        GuestRestoreAction::Apply(_)
     ));
     let ready = activation
         .activation
@@ -522,7 +522,7 @@ fn restored_ready_maps_and_first_exec_share_the_existing_start_transition() -> T
         let outcome = run(&mut system, &mut session, &config, &mut mappings);
         assert_eq!(
             session.activation_state_for_test(),
-            Some(ActivationState::Started)
+            Some(GuestRestoreState::Started)
         );
         (outcome, system)
     });
@@ -573,7 +573,7 @@ fn restored_ready_maps_and_first_exec_share_the_existing_start_transition() -> T
 /// accepted, and starts a workload that runs until it is cancelled. Returns the harness, that
 /// request, what Ready reports, and the workload's process.
 fn running_restored_workload(system: TestSystem) -> (Harness, Vec<u8>, Vec<u8>, sys::ProcessId) {
-    use crate::guest::activation::ActivationAction;
+    use crate::guest::restore::GuestRestoreAction;
     let config = AgentConfig::for_test();
     let mappings = HostMappings::announced(0);
     let (mut capture, payload) = Capture::activation_fixture();
@@ -581,7 +581,7 @@ fn running_restored_workload(system: TestSystem) -> (Harness, Vec<u8>, Vec<u8>, 
     let now = std::time::Instant::now();
     assert!(matches!(
         restored.accept(&payload, now).unwrap().0,
-        ActivationAction::Apply(_)
+        GuestRestoreAction::Apply(_)
     ));
     let ready = restored.activation.complete(now, Ok(())).unwrap().encode();
     let mut harness = Harness::spawn_with_capture(system, config, mappings, Some(capture));
@@ -639,7 +639,7 @@ fn restored_activation_retries_during_a_workload_get_cached_ready_or_end_the_ses
     let mut configuration = record.configuration().clone();
     configuration.view.hostname = b"changed".to_vec();
     let record =
-        crate::activation::ActivationRecord::new(record.restore().copied(), configuration)?;
+        crate::guest_restore::GuestRestoreRecord::new(record.restore().copied(), configuration)?;
     harness.send(
         44,
         APP_ACTIVATE,

@@ -905,7 +905,7 @@ fn activate_sends_its_payload_and_returns_the_activation_that_ready_reports() {
     let ready = session.activate(b"activation", deadline()).unwrap();
     assert_eq!(
         ready.transaction,
-        Some(crate::activation::TransactionId::from_bytes([9; 16]))
+        Some(crate::guest_restore::TransactionId::from_bytes([9; 16]))
     );
     assert_eq!(
         *requests.lock().unwrap(),

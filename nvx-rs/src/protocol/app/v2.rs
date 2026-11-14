@@ -17,10 +17,10 @@
 //! | `CANCEL` | `0x04` | Host | None |
 //! | `MAPS` | `0x06` | Host | A `MAPS` payload |
 //! | `CAPTURE` | `0x07` | Host | The capture request's flag |
-//! | `ACTIVATE` | `0x08` | Host | The activate request's workload identity and activation record |
+//! | `ACTIVATE` | `0x08` | Host | The activate request's workload identity and guest-restore record |
 //! | `STDIN` | `0x09` | Host | 1 or more bytes of an execution's standard input |
 //! | `STDIN_END` | `0x0a` | Host | None |
-//! | `READY` | `0x81` | Guest | The protocol version, one byte, then, in answer to `ACTIVATE`, what Ready reports about the activation |
+//! | `READY` | `0x81` | Guest | The protocol version, one byte, then, in answer to `ACTIVATE`, what Ready reports about the guest restore |
 //! | `STDOUT` | `0x82` | Guest | 1 or more bytes of an execution's standard output |
 //! | `STDERR` | `0x83` | Guest | 1 or more bytes of an execution's standard error |
 //! | `EXIT` | `0x84` | Guest | How the execution ended, an [`Outcome`], as text |
@@ -33,10 +33,10 @@
 //! agent is ready, and `READY` answers with the protocol version, which the host checks. `MAPS`,
 //! `CAPTURE` and `ACTIVATE` carry the payloads that their codecs encode and decode, as in
 //! version 1, and `READY` acknowledges them; in answer to `ACTIVATE`, it also carries what Ready
-//! reports about the activation, in the canonical encoding of
-//! [`ReadyActivation`](crate::activation::ReadyActivation). `ERROR` refuses a request, and `BUSY`
-//! refuses one while an execution runs. `STOP` shuts the VM down, also while an execution runs,
-//! and `STOPPED` acknowledges it.
+//! reports about the guest restore, in the canonical encoding of
+//! [`GuestRestoreReady`](crate::guest_restore::GuestRestoreReady). `ERROR` refuses a request, and
+//! `BUSY` refuses one while an execution runs. `STOP` shuts the VM down, also while an execution
+//! runs, and `STOPPED` acknowledges it.
 //!
 //! An `EXEC` starts an execution, which its `EXEC` payload describes as in version 1, and which
 //! its request ID names until the `EXIT` that ends it, or the `ERROR` that refuses it. Its
@@ -128,7 +128,7 @@ pub(crate) enum Frame<'a> {
     Ready {
         /// The protocol version that the guest agent speaks.
         version: u8,
-        /// What Ready reports about the activation, in answer to `ACTIVATE`; empty otherwise.
+        /// What Ready reports about the guest restore, in answer to `ACTIVATE`; empty otherwise.
         activation: &'a [u8],
     },
     /// `STDOUT`: bytes of the execution's standard output.

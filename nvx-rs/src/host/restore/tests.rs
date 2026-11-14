@@ -10,9 +10,9 @@ use std::time::Instant;
 
 use super::*;
 use crate::ErrorKind;
-use crate::activation::{
-    ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image, ReadyActivation,
-    RestoreSection, TransactionId, Upper,
+use crate::guest_restore::{
+    Configuration, ExpectedResources, Export, ExportKind, GuestRestoreReady, GuestRestoreRecord,
+    Image, RestoreSection, TransactionId, Upper,
 };
 use crate::host::process::{BootId, Opened};
 use crate::host::tests::spawn_locked;
@@ -576,8 +576,8 @@ fn read_native_pipe(pipe: std::os::windows::io::OwnedHandle, process: &Process) 
     data
 }
 
-fn restore_record() -> ActivationRecord {
-    ActivationRecord::new(
+fn restore_record() -> GuestRestoreRecord {
+    GuestRestoreRecord::new(
         Some(RestoreSection {
             transaction: TransactionId::from_bytes([1; 16]),
         }),
@@ -672,7 +672,7 @@ fn restore_machine_resends_canonical_bytes_and_stops_at_ready() {
         Some(RestoreAction::SendActivate(_))
     ));
     machine.input(RestoreInput::ActivateSent);
-    machine.input(RestoreInput::GuestReady(ReadyActivation::of(&record)));
+    machine.input(RestoreInput::GuestReady(GuestRestoreReady::of(&record)));
     assert!(matches!(machine.next_action(), Some(RestoreAction::Done)));
     machine.input(RestoreInput::SessionLost);
     machine.input(RestoreInput::Cancelled);
@@ -683,7 +683,7 @@ fn restore_machine_resends_canonical_bytes_and_stops_at_ready() {
 fn restore_machine_checks_the_transaction_and_refuses_a_cold_record() {
     for transaction in [None, Some(TransactionId::from_bytes([2; 16]))] {
         let mut machine = restore_machine_at(RestorePhase::Ready);
-        machine.input(RestoreInput::GuestReady(ReadyActivation { transaction }));
+        machine.input(RestoreInput::GuestReady(GuestRestoreReady { transaction }));
         let error = restore_failure(&mut machine);
         assert_eq!(error.phase, RestorePhase::Ready);
         assert_eq!(error.evidence, RestoreEvidence::Malformed);
@@ -691,7 +691,7 @@ fn restore_machine_checks_the_transaction_and_refuses_a_cold_record() {
         assert!(error.guest_may_have_run);
         assert!(error.source.is_some());
     }
-    let cold = ActivationRecord::new(None, restore_record().configuration().clone()).unwrap();
+    let cold = GuestRestoreRecord::new(None, restore_record().configuration().clone()).unwrap();
     let error = restore_failure(&mut RestoreMachine::new(&cold));
     assert_eq!(error.phase, RestorePhase::ReadyEvent);
     assert_eq!(error.evidence, RestoreEvidence::InvalidActivate);
@@ -723,7 +723,7 @@ fn restore_machine_session_loss_invalidates_each_session_phase() {
             panic!("the replacement session received no activation");
         };
         assert_eq!(bytes, restore_record().encode());
-        machine.input(RestoreInput::GuestReady(ReadyActivation::of(
+        machine.input(RestoreInput::GuestReady(GuestRestoreReady::of(
             &restore_record(),
         )));
         assert!(matches!(machine.next_action(), Some(RestoreAction::Done)));
@@ -812,7 +812,7 @@ fn restore_machine_expiry_cancellation_and_exit_fail_every_pending_phase() {
             let mut machine = restore_machine_at(phase);
             machine.input(input);
             machine.input(RestoreInput::Connected);
-            machine.input(RestoreInput::GuestReady(ReadyActivation::of(
+            machine.input(RestoreInput::GuestReady(GuestRestoreReady::of(
                 &restore_record(),
             )));
             let error = restore_failure(&mut machine);
@@ -909,47 +909,47 @@ fn restore_failures_attribute_the_existing_policy_free_evidence_classes() {
 fn restore_exit_reports_keep_guest_status_classification_and_actual_details() {
     let classes = [
         (
-            status::ACTIVATION_DEADLINE,
+            status::GUEST_RESTORE_DEADLINE,
             RestoreEvidence::Expired,
             Attribution::Unknown,
         ),
         (
-            status::ACTIVATION_PROTOCOL,
+            status::GUEST_RESTORE_PROTOCOL,
             RestoreEvidence::Malformed,
             Attribution::Unknown,
         ),
         (
-            status::ACTIVATION_ORDER,
+            status::GUEST_RESTORE_ORDER,
             RestoreEvidence::Malformed,
             Attribution::Unknown,
         ),
         (
-            status::ACTIVATION_RECORD,
+            status::GUEST_RESTORE_RECORD,
             RestoreEvidence::InvalidActivate,
             Attribution::Request,
         ),
         (
-            status::ACTIVATION_RESOURCES,
+            status::GUEST_RESTORE_RESOURCES,
             RestoreEvidence::InvalidTargets,
             Attribution::Request,
         ),
         (
-            status::ACTIVATION_ROOT,
+            status::GUEST_RESTORE_ROOT,
             RestoreEvidence::UnusableRoot,
             Attribution::Request,
         ),
         (
-            status::ACTIVATION_WORKLOAD,
+            status::GUEST_RESTORE_WORKLOAD,
             RestoreEvidence::InvalidSettings,
             Attribution::Request,
         ),
         (
-            status::ACTIVATION_NETWORK,
+            status::GUEST_RESTORE_NETWORK,
             RestoreEvidence::InvalidSettings,
             Attribution::Request,
         ),
         (
-            status::ACTIVATION_EXPORT,
+            status::GUEST_RESTORE_EXPORT,
             RestoreEvidence::InvalidMappings,
             Attribution::Request,
         ),
@@ -1128,7 +1128,7 @@ fn restore_machine_refuses_malformed_events_and_out_of_order_progress() {
     );
     let mut machine = restore_machine_at(RestorePhase::Connect);
     machine.input(RestoreInput::Connected);
-    machine.input(RestoreInput::GuestReady(ReadyActivation::of(
+    machine.input(RestoreInput::GuestReady(GuestRestoreReady::of(
         &restore_record(),
     )));
     assert_eq!(

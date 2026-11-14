@@ -1,9 +1,9 @@
-//! The canonical encoding of an activation record, which the [module](super#encoding) describes:
-//! [`ActivationRecord::encode`] writes it, and [`ActivationRecord::decode`] reads it back.
+//! The canonical encoding of a guest-restore record, which the [module](super#encoding) describes:
+//! [`GuestRestoreRecord::encode`] writes it, and [`GuestRestoreRecord::decode`] reads it back.
 
 use super::{
-    ActivationError, ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image,
-    MAX_RECORD_BYTES, Network, Publication, RestoreSection, TransactionId, Upper, VERSION,
+    Configuration, ExpectedResources, Export, ExportKind, GuestRestoreError, GuestRestoreRecord,
+    Image, MAX_RECORD_BYTES, Network, Publication, RestoreSection, TransactionId, Upper, VERSION,
 };
 use crate::protocol::root::{ImageFormat, Journal, OverlayMode};
 use crate::protocol::view::{MachineIdMode, View};
@@ -174,11 +174,11 @@ codes!(MachineIdMode {
     MachineIdMode::Generated => 2,
 });
 
-impl ActivationRecord {
+impl GuestRestoreRecord {
     /// Returns the record's canonical encoding, as the [module](super#encoding) describes it: at
     /// most [`MAX_RECORD_BYTES`] bytes, which [`decode`](Self::decode) reads back to this record.
     ///
-    /// It never fails: a record keeps every limit, as [`ActivationRecord::new`] and
+    /// It never fails: a record keeps every limit, as [`GuestRestoreRecord::new`] and
     /// [`decode`](Self::decode) check them, so the encoder never writes what the decoder refuses.
     pub fn encode(&self) -> Vec<u8> {
         let configuration = &self.configuration;
@@ -252,33 +252,33 @@ impl ActivationRecord {
     /// DNS server or a proxy without a network; then the first limit that [`Configuration::check`]
     /// finds broken, such as an export without mappings, or mappings without an export. So it reads
     /// exactly the bytes that [`encode`](Self::encode) writes.
-    pub fn decode(bytes: &[u8]) -> Result<Self, ActivationError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, GuestRestoreError> {
         if bytes.len() > MAX_RECORD_BYTES {
-            return Err(ActivationError::TooLong(bytes.len()));
+            return Err(GuestRestoreError::TooLong(bytes.len()));
         }
         let (version, mut rest) = bytes
             .split_first_chunk::<VERSION_LEN>()
-            .ok_or(ActivationError::Truncated)?;
+            .ok_or(GuestRestoreError::Truncated)?;
         let version = u16::from_le_bytes(*version);
         if version != VERSION {
-            return Err(ActivationError::Version(version));
+            return Err(GuestRestoreError::Version(version));
         }
         let mut draft = Draft::default();
         let mut seen = Vec::with_capacity(Field::ALL.len());
         while !rest.is_empty() {
             let (&[tag, length], tail) = rest
                 .split_first_chunk::<FIELD_HEADER_LEN>()
-                .ok_or(ActivationError::Truncated)?;
-            let field = Field::from_tag(tag).ok_or(ActivationError::UnknownField(tag))?;
+                .ok_or(GuestRestoreError::Truncated)?;
+            let field = Field::from_tag(tag).ok_or(GuestRestoreError::UnknownField(tag))?;
             if seen.contains(&field) {
-                return Err(ActivationError::DuplicateField(field));
+                return Err(GuestRestoreError::DuplicateField(field));
             }
             if seen.last().is_some_and(|last: &Field| last.tag() > tag) {
-                return Err(ActivationError::FieldOrder(field));
+                return Err(GuestRestoreError::FieldOrder(field));
             }
             let (value, tail) = tail
                 .split_at_checked(usize::from(length))
-                .ok_or(ActivationError::Truncated)?;
+                .ok_or(GuestRestoreError::Truncated)?;
             draft.read(field, value)?;
             seen.push(field);
             rest = tail;
@@ -351,7 +351,7 @@ struct Draft {
 
 impl Draft {
     /// Reads `field`'s value, `bytes`.
-    fn read(&mut self, field: Field, bytes: &[u8]) -> Result<(), ActivationError> {
+    fn read(&mut self, field: Field, bytes: &[u8]) -> Result<(), GuestRestoreError> {
         let mut value = Value::new(field, bytes);
         match field {
             Field::Restore => {
@@ -377,7 +377,7 @@ impl Draft {
                     [SCRATCH] => Upper::Scratch {
                         journal: value.code()?,
                     },
-                    _ => return Err(ActivationError::FieldValue(field)),
+                    _ => return Err(GuestRestoreError::FieldValue(field)),
                 });
             }
             Field::Overlay => self.overlay = Some(value.code()?),
@@ -387,7 +387,7 @@ impl Draft {
             }
             Field::Mappings => match u16::from_le_bytes(value.take()?) {
                 // A record without mappings leaves the field out.
-                0 => return Err(ActivationError::FieldValue(field)),
+                0 => return Err(GuestRestoreError::FieldValue(field)),
                 mappings => self.mappings = Some(usize::from(mappings)),
             },
             Field::Network => self.network = Some(value.code()?),
@@ -401,7 +401,7 @@ impl Draft {
             }
             Field::Proxy => {
                 let proxy = String::from_utf8(value.rest().to_vec())
-                    .map_err(|_| ActivationError::ProxyEndpoint)?;
+                    .map_err(|_| GuestRestoreError::ProxyEndpoint)?;
                 self.proxy = Some(proxy);
             }
             Field::Hostname => self.hostname = Some(value.rest().to_vec()),
@@ -417,8 +417,8 @@ impl Draft {
 
     /// Returns the record of the fields: the fields that every record holds must be there, a DNS
     /// server and a proxy only with a network, and the configuration must keep every limit.
-    fn into_record(self) -> Result<ActivationRecord, ActivationError> {
-        let missing = ActivationError::MissingField;
+    fn into_record(self) -> Result<GuestRestoreRecord, GuestRestoreError> {
+        let missing = GuestRestoreError::MissingField;
         let mut image = self.image.ok_or(missing(Field::Image))?;
         let upper = self.upper.ok_or(missing(Field::Upper))?;
         let overlay = self.overlay.ok_or(missing(Field::Overlay))?;
@@ -438,10 +438,10 @@ impl Draft {
                 proxy: self.proxy,
             }),
             None if self.dns.is_some() => {
-                return Err(ActivationError::WithoutNetwork(Field::Dns));
+                return Err(GuestRestoreError::WithoutNetwork(Field::Dns));
             }
             None if self.proxy.is_some() => {
-                return Err(ActivationError::WithoutNetwork(Field::Proxy));
+                return Err(GuestRestoreError::WithoutNetwork(Field::Proxy));
             }
             None => None,
         };
@@ -458,7 +458,7 @@ impl Draft {
             },
             resources,
         };
-        ActivationRecord::new(self.restore, configuration)
+        GuestRestoreRecord::new(self.restore, configuration)
     }
 }
 
@@ -484,12 +484,12 @@ impl<'a> Value<'a> {
     }
 
     /// Returns the refusal of a value of another length than its parts take.
-    fn length_error(&self) -> ActivationError {
-        ActivationError::FieldLength(self.field, self.length)
+    fn length_error(&self) -> GuestRestoreError {
+        GuestRestoreError::FieldLength(self.field, self.length)
     }
 
     /// Reads the next `N` bytes.
-    fn take<const N: usize>(&mut self) -> Result<[u8; N], ActivationError> {
+    fn take<const N: usize>(&mut self) -> Result<[u8; N], GuestRestoreError> {
         let (part, rest) = self
             .rest
             .split_first_chunk::<N>()
@@ -499,9 +499,9 @@ impl<'a> Value<'a> {
     }
 
     /// Reads the next byte, the code of a choice.
-    fn code<T: Code>(&mut self) -> Result<T, ActivationError> {
+    fn code<T: Code>(&mut self) -> Result<T, GuestRestoreError> {
         let [code] = self.take()?;
-        T::from_code(code).ok_or(ActivationError::FieldValue(self.field))
+        T::from_code(code).ok_or(GuestRestoreError::FieldValue(self.field))
     }
 
     /// Returns what remains of the value, which the caller reads whole.
@@ -510,7 +510,7 @@ impl<'a> Value<'a> {
     }
 
     /// Checks that nothing remains of the value.
-    fn end(self) -> Result<(), ActivationError> {
+    fn end(self) -> Result<(), GuestRestoreError> {
         if self.rest.is_empty() {
             Ok(())
         } else {

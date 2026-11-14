@@ -20,9 +20,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::activation::{
-    ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image, RestoreSection,
-    TransactionId, Upper,
+use crate::guest_restore::{
+    Configuration, ExpectedResources, Export, ExportKind, GuestRestoreRecord, Image,
+    RestoreSection, TransactionId, Upper,
 };
 use crate::host::config::{
     BlockGeometry, CaptureConfig, ConsoleAttachment, DiskCapture, NetworkConfig, NicConfig,
@@ -342,16 +342,16 @@ impl Prepared {
         self.nic
     }
 
-    /// Builds a layered root's activation record from this launch's checked, owned settings,
+    /// Builds a layered root's guest-restore record from this launch's checked, owned settings,
     /// preserving `tx` as its transaction. Reads no host path and opens no snapshot.
     ///
     /// The effective NIC supplies the network's presence and IPv4 and derived IPv6 gateways;
     /// this launch's policy supplies its DNS, publication and proxy, rather than a capture's.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a blockless
-    /// root, which activation records do not represent, memory that cannot fit in the record's
+    /// root, which guest-restore records do not represent, memory that cannot fit in the record's
     /// byte count, or settings that [`Configuration::check`] refuses.
-    pub fn activation_record(&self, tx: TransactionId) -> Result<ActivationRecord> {
+    pub fn guest_restore_record(&self, tx: TransactionId) -> Result<GuestRestoreRecord> {
         let RootConfig::Layered(root) = &self.configuration.root else {
             return Err(Error::unsupported(
                 "an activation record needs a layered root",
@@ -403,7 +403,7 @@ impl Prepared {
             .memory_mib
             .checked_mul(1 << 20)
             .ok_or_else(|| Error::unsupported("VM memory does not fit the record's byte count"))?;
-        ActivationRecord::new(
+        GuestRestoreRecord::new(
             Some(RestoreSection { transaction: tx }),
             Configuration {
                 image,
@@ -475,7 +475,8 @@ impl Prepared {
     /// putting it in the child's inheritance allowlist. Starts no process or new listener. The
     /// caller follows [`VmmCommand`]'s launch contract and may retain its capability and outputs
     /// for recovery. Read [`nic`](Self::nic) or [`capture_context`](Self::capture_context), or
-    /// build an [`activation_record`](Self::activation_record), before consuming the preparation.
+    /// build a [`guest_restore_record`](Self::guest_restore_record), before consuming the
+    /// preparation.
     pub fn into_command(self) -> VmmCommand {
         VmmCommand {
             program: self.program,

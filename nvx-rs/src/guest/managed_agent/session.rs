@@ -3,9 +3,9 @@ use std::io::{self, Read, Write};
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
-use crate::guest::activation::{ActivationAction, ActivationInput, ActivationState};
 use crate::guest::init::{self, Capture, CaptureStep, RestoreHandoff, Restored, Runtime};
 use crate::guest::nvxs::{GuestConnection, GuestConnectionError};
+use crate::guest::restore::{GuestRestoreAction, GuestRestoreInput, GuestRestoreState};
 use crate::guest::snapshot::{Captured, Disposition};
 use crate::guest::sys::{self, Errno, FileDescriptor, Pollable};
 use crate::protocol::nvxs::{GuestEvent, RecordError, RecordType, SessionError};
@@ -473,7 +473,7 @@ impl<'r> Session<'r> {
         apply: impl FnOnce(
             &mut Restored,
             &mut Self,
-            &crate::activation::ActivationRecord,
+            &crate::guest_restore::GuestRestoreRecord,
             protocol::workload::WorkloadIdentity,
         ) -> crate::Result<R>,
     ) -> Result<Option<R>, Errno> {
@@ -484,7 +484,7 @@ impl<'r> Session<'r> {
                 .accept(request.payload, Instant::now())
                 .map_err(activation_failure)?;
             let (retained, ready, replies) = match action {
-                ActivationAction::Apply(record) => {
+                GuestRestoreAction::Apply(record) => {
                     let retained = match apply(restored, self, &record, workload) {
                         Ok(retained) => retained,
                         Err(error) => {
@@ -520,7 +520,7 @@ impl<'r> Session<'r> {
                                         return Err(activation_failure(
                                             restored
                                                 .activation
-                                                .input(Instant::now(), ActivationInput::Request)
+                                                .input(Instant::now(), GuestRestoreInput::Request)
                                                 .expect_err("an activation takes no request yet"),
                                         ));
                                     }
@@ -530,7 +530,7 @@ impl<'r> Session<'r> {
                                         .accept(retry.payload, Instant::now())
                                         .map_err(activation_failure)?
                                         .0,
-                                    ActivationAction::Join
+                                    GuestRestoreAction::Join
                                 ) {
                                     return Err(Errno::EPROTO);
                                 }
@@ -544,7 +544,7 @@ impl<'r> Session<'r> {
                         .map_err(activation_failure)?;
                     (Some(retained), ready, replies)
                 }
-                ActivationAction::Ready(ready) => (None, ready, vec![request.request_id]),
+                GuestRestoreAction::Ready(ready) => (None, ready, vec![request.request_id]),
                 _ => return Err(Errno::EPROTO),
             };
             for id in replies {
@@ -563,7 +563,7 @@ impl<'r> Session<'r> {
             .capture
             .as_mut()
             .and_then(|capture| capture.restored.as_mut())
-            && restored.activation.state() != ActivationState::Started
+            && restored.activation.state() != GuestRestoreState::Started
         {
             restored.activation.start().map_err(activation_failure)?;
         }

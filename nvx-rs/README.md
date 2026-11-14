@@ -6,7 +6,7 @@ caller owns, for a cold boot, a capture, or a restore; one snapshot type, with
 a strict directory format; a restore that its caller drives with its own I/O;
 verified connections to a running VM, and reattachment to one; the contracts
 that a guest's space reads; and the guest's side of a capture and of a
-restore's activation. It keeps no durable state, runs no workload, and builds
+guest restore. It keeps no durable state, runs no workload, and builds
 no guest space: each of its users keeps its own state and policy. The
 [library guide](../doc/library.md) gives the cold-boot, restore, and reattach
 workflows, and what their caller owns, and the
@@ -43,7 +43,7 @@ workspace.
 | `cli` | NVX's own `nvx-rs` binary; it adds no API, and enables `host`. See [The nvx-rs CLI](#the-nvx-rs-cli) |
 | `testing` | NVX's own `nvx-fake-openvmm` binary, a fake OpenVMM for tests; see [Test hooks](#test-hooks). It adds no API |
 
-Without default features, the crate has only `protocol`, `activation`,
+Without default features, the crate has only `protocol`, `guest_restore`,
 `contract`, `net`, `uuid`, and `Error`, and depends on nothing but `serde` when
 `serde` is enabled and `nix` and `getrandom` when `guest` is.
 
@@ -56,7 +56,8 @@ nvx-rs/
 │   │                kernel command line and the boot tokens of a guest's root, view, and export,
 │   │                and the guest targets that live shares may not take; no dependencies, shared
 │   │                by the host and the guest; and NVXC, NVX's own protocol, private to the crate
-│   ├── activation/  the activation record of a layered root, its canonical encoding, and what
+│   ├── guest_restore/
+│   │                the guest-restore record of a layered root, its canonical encoding, and what
 │   │                Ready reports about it; no dependencies, shared by the host and the guest
 │   ├── contract.rs  the versions of the contracts that the crate speaks with OpenVMM and the
 │   │                guest, and the compatibility of releases with them
@@ -71,7 +72,7 @@ nvx-rs/
 │   │                restore driver, and the `nvx-rs` CLI
 │   ├── testing/     feature `testing`: NVX's fake OpenVMM
 │   ├── guest/       feature `guest`: the guest's NVXS connection and terminal, the host's mapping
-│   │                table, the time ABI's steps, a capture, a restore's activation, and the
+│   │                table, the time ABI's steps, a capture, a guest restore, and the
 │   │                reseed; and, private to the crate, NVX's guest programs and nvx-init's space
 │   └── bin/         nvx-rs, nvx-fake-openvmm, and the guest binaries, each of which calls the
 │                    hidden `main` of its program
@@ -103,7 +104,7 @@ changes only when the module's purpose does.
 | [`nvx::protocol::share`](#nvxprotocolshare) | The guest targets that a sandbox's live shares may not take, which the host and the guest both refuse |
 | [`nvx::protocol::status`](#nvxprotocolstatus) | The exit statuses with which a clone's guest ends its VM once it fails fast, and what each means |
 | [`nvx::protocol::view`](#nvxprotocolview) | The `View`, hostname and machine-ID mode that cold boots and restores share, with a cold boot's renderer and strict parser of their tokens |
-| [`nvx::activation`](#nvxactivation) | The activation record of a layered root, which a clone reads in place of its captured configuration, and what Ready reports |
+| [`nvx::guest_restore`](#nvxguest_restore) | The guest-restore record of a layered root, which a clone reads in place of its captured configuration, and what Ready reports |
 | [`nvx::contract`](#nvxcontract) | The versions of the contracts that the crate speaks with OpenVMM and the guest, and the compatibility of releases with them |
 | [`nvx::net`](#nvxnet) | Network primitives that do not depend on the host: CIDR networks, hostnames, guest addresses, and gateways |
 | [`nvx::uuid`](#nvxuuid) | UUIDs, such as those of GPT disks and filesystems, in their canonical text and in GPT's layout |
@@ -125,7 +126,7 @@ changes only when the module's purpose does.
 | [`nvx::guest::terminal`](#nvxguestterminal) | `Terminal`: the terminal on which a guest agent serves its session, such as the VM's control console |
 | [`nvx::guest::time`](#nvxguesttime) | x86_64: the boot steps of NVX time ABI v1 as typed calls in the caller's process, for any guest init or agent |
 | [`nvx::guest::snapshot`](#nvxguestsnapshot) | x86_64: bounded Fresh capture with inline restore repair and staged failure dispositions, without execution control |
-| [`nvx::guest::activation`](#nvxguestactivation) | x86_64: fence-free activation of each clone that its capture repaired |
+| [`nvx::guest::restore`](#nvxguestrestore) | x86_64: fence-free guest restore of each clone that its capture repaired |
 | [`nvx::guest::reseed`](#nvxguestreseed) | A restore's fresh entropy, and the reseed of the kernel's random number generator with it |
 
 ### `nvx::protocol`
@@ -205,8 +206,8 @@ at most `MAX_MAP_PATH_BYTES` bytes, and the decoders of a payload,
 `decode_guest_maps_payload`, which reads them as a Linux guest's bytes. The
 `nvx_maps=` boot token, `nvx::protocol::MAPS_TOKEN`, announces how many
 mappings the host sends after a cold boot, which
-`nvx::protocol::parse_host_mapping_count` reads, as a restore's activation
-record does after a restore, and the guest's `MappingTable` keeps the account
+`nvx::protocol::parse_host_mapping_count` reads, as a guest-restore record
+does after a restore, and the guest's `MappingTable` keeps the account
 of them, as [`nvx::guest::mappings`](#nvxguestmappings) describes.
 
 ### `nvx::protocol::nvxs`
@@ -266,9 +267,9 @@ from which the host classifies a clone's end, with the diagnostic that precedes
 each: the time ABI's own, `TIME_CONFORMANCE`, 193, `TIME_VIOLATION`, 194, and
 `TIME_REPAIR`, 195, which keep their meanings; one for each other class of a
 clone's repair's failures, `REPAIR_RESTORE` to `REPAIR_FINISH`, 40 to 45, which
-`nvx::guest::activation::RepairError::status` selects; and one reserved for
-each class of a clone's activation's failures, `ACTIVATION_DEADLINE` to
-`ACTIVATION_ORDER`, 50 to 58.
+`nvx::guest::restore::RepairError::status` selects; and one reserved for each
+class of a clone's guest restore's failures, `GUEST_RESTORE_DEADLINE` to
+`GUEST_RESTORE_ORDER`, 50 to 58.
 
 `describe` tells what a status means.
 
@@ -291,15 +292,15 @@ sandbox's raw `nvx_hostname=box`; consumers use the decoded bytes.
 and returns a `View`, or `None` when neither token is present. A partial pair,
 duplicate, missing value, malformed hexadecimal, overlong hostname, decoded
 NUL, or unknown machine-ID mode fails with `ProtocolError`. Restores receive
-their view through the activation record instead.
+their view through the guest-restore record instead.
 
-### `nvx::activation`
+### `nvx::guest_restore`
 
-The activation record of a layered root: one bounded, versioned, non-secret
-record of the settings that its activation applies, which a clone restored from
-a template reads in place of its captured configuration.
+The guest-restore record of a layered root: one bounded, versioned, non-secret
+record of the settings that its guest restore applies, which a clone restored
+from a template reads in place of its captured configuration.
 
-An `ActivationRecord` holds the schema's `VERSION`, 2, a clone's
+A `GuestRestoreRecord` holds the schema's `VERSION`, 2, a clone's
 `RestoreSection`, only the restore's `TransactionId`, and the `Configuration`:
 the `Image`, EROFS or GPT, with the UUID or disk GUID that the guest expects;
 the `Upper`, a tmpfs with its cap in percent of the VM's memory or the scratch
@@ -313,22 +314,22 @@ those of [`nvx::protocol::root`](#nvxprotocolroot), which cold boots share.
 Store, binding, plan, policy and execution identities never enter a record. The
 other inputs of the root's assembly are invariants of the template.
 
-`ActivationRecord::new` refuses a configuration that `Configuration::check`
+`GuestRestoreRecord::new` refuses a configuration that `Configuration::check`
 finds past a public limit, `MAX_MAPPINGS`, `MAX_HOSTNAME_BYTES`, or
 `MAX_PROXY_ENDPOINT_BYTES`, which keep every record within `MAX_RECORD_BYTES`,
 or with an export without mappings, mappings without an export, a tmpfs cap
 outside 1 to 90 percent, a proxy endpoint with credentials, or a zero size.
 
-`ActivationRecord::encode` writes a record's canonical encoding, its version,
+`GuestRestoreRecord::encode` writes a record's canonical encoding, its version,
 then a tagged, length-prefixed field for each part in the order of their tags,
-424 bytes at most, and `ActivationRecord::decode` reads exactly those bytes back
-and refuses any others, naming the `Field` at fault. Version 1 is refused.
+424 bytes at most, and `GuestRestoreRecord::decode` reads exactly those bytes
+back and refuses any others, naming the `Field` at fault. Version 1 is refused.
 
-`ReadyActivation` is what Ready reports once the activation applied: a clone's
-transaction ID, which `ReadyActivation::of` takes from a record, and nothing
-more for a cold boot, in a canonical encoding of `COLD_LEN` or `CLONE_LEN`
-bytes, 1 or 17, that `ReadyActivation::encode` writes and
-`ReadyActivation::decode` reads.
+`GuestRestoreReady` is what Ready reports about the guest restore once it
+applied: a clone's transaction ID, which `GuestRestoreReady::of` takes from a
+record, and nothing more for a cold boot, in a canonical encoding of `COLD_LEN`
+or `CLONE_LEN` bytes, 1 or 17, that `GuestRestoreReady::encode` writes and
+`GuestRestoreReady::decode` reads.
 
 The records and both encodings need no features.
 
@@ -372,7 +373,7 @@ the `HostConnectionError` of a session. Its codes and constructors are private
 to the crate. The calls whose failures carry facts of their own return errors
 of their own instead: the restore's `RestoreError`, the guest's, such as its
 `CaptureFailure` and `RepairError`, the codecs', such as `ProtocolError` and
-`ActivationError`, and the I/O errors of most calls of `nvx::host::process`.
+`GuestRestoreError`, and the I/O errors of most calls of `nvx::host::process`.
 See [Errors](#errors) for what each kind means.
 
 ### `nvx::host::runtime`
@@ -455,9 +456,9 @@ failed creation removes only the files that it created.
 
 `Prepared` gives what a caller inspects or records before a spawn: its
 arguments, capability, and outputs; its effective NIC; a capture's checked
-`snapshot::CaptureContext`; and, for a layered root, the `ActivationRecord` of a
-restore, which `Prepared::activation_record` builds from the launch's own
-resolved settings. `spawn` starts OpenVMM detached and returns a `Launched`
+`snapshot::CaptureContext`; and, for a layered root, the `GuestRestoreRecord`
+of a restore, which `Prepared::guest_restore_record` builds from the launch's
+own resolved settings. `spawn` starts OpenVMM detached and returns a `Launched`
 VM: its verified `Process`, its outputs, its capability, which reaches OpenVMM
 only on its standard input, and a restore's `ReadyListener`. Dropping
 `Launched` closes the handle of the process, not the VM. A caller with a
@@ -598,12 +599,12 @@ tells captures apart, from the values alone.
 
 ### `nvx::host::restore`
 
-`RestoreMachine::new(&ActivationRecord)` orders a restore to its guest's Ready
-without I/O, a clock, or a retry budget. Once the caller reports
+`RestoreMachine::new(&GuestRestoreRecord)` orders a restore to its guest's
+Ready without I/O, a clock, or a retry budget. Once the caller reports
 `RestoreInput::Spawned`, its `RestoreAction`s ask for the restore-ready event,
-a verified control session, and the sending of the same canonical activation
-bytes in every session, and it checks that the guest's Ready echoes the
-record's transaction. The caller performs each action with its own I/O and
+a verified control session, and the sending of the same canonical record bytes
+in every session, and it checks that the guest's Ready echoes the record's
+transaction. The caller performs each action with its own I/O and
 protocol and reports what it observed, such as a lost session, after which
 `Connect` comes again, the VM's verified exit, with its outcome report, or its
 own expired deadline or cancellation. A matching Ready ends at `Done`, before
@@ -865,14 +866,14 @@ The caller owns its transport. After answering the capture request, send
 nothing until `capture` returns. After `Continued` or a `Resumed` failure,
 report on the same session. After `Restored`, take the session's RESET, then
 call `GuestConnection::acknowledge(window)` on that session before receiving
-the activation record.
+the guest-restore record.
 
-### `nvx::guest::activation`
+### `nvx::guest::restore`
 
-x86_64: the activation of each clone that a restore of a snapshot starts, once
-`nvx::guest::snapshot::capture` repaired it, for a guest init or agent, whether
-or not it is PID 1. Activation itself holds no admission fence and starts no
-process.
+x86_64: the guest restore of each clone that a restore of a snapshot starts,
+once `nvx::guest::snapshot::capture` repaired it, for a guest init or agent,
+whether or not it is PID 1. The guest restore itself holds no admission fence
+and starts no process.
 
 In a clone, the capture repairs the restore before it returns: it checks that
 the online CPUs are a prefix that the restore's processor target does not
@@ -900,46 +901,46 @@ The capture and the repair take the time ABI in strict mode, so that a violation
 of it fails them, with its status, rather than stopping the VM, and only the
 time daemon enforces it.
 
-An `Activation` of the `Repaired` clone, or, with `Activation::with_resources`,
-of the resources and the instant of the acknowledgement that a repair reports,
-as in an adapter's tests, then takes the clone's own configuration from the
-host, in one Activate, on a restricted control session: a state machine without
-I/O, independent of any framing, to which the adapter passes what its session
-receives, as an `ActivationInput`, and which returns the `ActivationAction`
-that the adapter takes.
+A `GuestRestore` of the `Repaired` clone, or, with
+`GuestRestore::with_resources`, of the resources and the instant of the
+acknowledgement that a repair reports, as in an adapter's tests, then takes the
+clone's own configuration from the host, in one Activate, on a restricted
+control session: a state machine without I/O, independent of any framing, to
+which the adapter passes what its session receives, as a `GuestRestoreInput`,
+and which returns the `GuestRestoreAction` that the adapter takes.
 
-`Activation::accept` decodes the record with `ActivationRecord::decode`, and
+`GuestRestore::accept` decodes the record with `GuestRestoreRecord::decode`, and
 accepts only a clone's, with a restore section, that expects the CPU count and
 the memory size that the repair reports, before any side effect, while an
 Activate whose record the adapter's framing refused unread, as longer than a
 record can be, fails as a record that long does; the adapter applies the record
-in its own space, by the activation's deadline, as nvx-init applies it with
+in its own space, by the guest restore's deadline, as nvx-init applies it with
 [its space](#nvx-inits-space). `MACHINE_ID_FILE` and `RESOLVER_FILE` name the
 generated machine ID's file and the resolver file in a root's runtime
 directory.
 
-Once the adapter passed the activation what the session received while the
-application ran, which came before Ready, `Activation::complete` returns the
-`ReadyActivation` that Ready reports beside the adapter's own
-identities, that the activation applied, with the record's transaction ID, after
-which the host's mapping table and start follow in the adapter's order, as after
-a cold boot, and `Activation::start` records the start.
+Once the adapter passed the guest restore what the session received while the
+application ran, which came before Ready, `GuestRestore::complete` returns the
+`GuestRestoreReady` that Ready reports beside the adapter's own identities, that
+the guest restore applied, with the record's transaction ID, after which the
+host's mapping table and start follow in the adapter's order, as after a cold
+boot, and `GuestRestore::start` records the start.
 
-The clone's session runs beside the activation: the adapter acknowledges each
+The clone's session runs beside the guest restore: the adapter acknowledges each
 reset, the one that the restore queued for the NVXS session and any later one,
 and answers the host's request for Ready, the first request of each of its
 sessions, with Ready, since OpenVMM's broker refuses the guest's records while
 no host is attached, which the guest cannot tell. A request for Ready while the
-record applies joins the activation, and gets what its completion returns unless
-a reset abandoned it, one once the record applied makes the activation ready,
-and one once the clone is ready gets the cached result, also in a later session;
-any other request before Ready, or a failed activation, is final.
+record applies joins the guest restore, and gets what its completion returns
+unless a reset abandoned it, one once the record applied makes the guest restore
+ready, and one once the clone is ready gets the cached result, also in a later
+session; any other request before Ready, or a failed guest restore, is final.
 
 Its deadline, which the caller chooses, and which nothing extends, starts at the
 restore's acknowledgement, and the adapter ticks it however its input trickles
-and its output blocks. Each failure is an
-`ActivationFailure`, with its `ActivationState` and `ActivationCause`, and never
-powers the VM off: the adapter ends it.
+and its output blocks. Each failure is a
+`GuestRestoreFailure`, with its `GuestRestoreState` and `GuestRestoreCause`, and
+never powers the VM off: the adapter ends it.
 
 ### `nvx::guest::reseed`
 
@@ -1983,23 +1984,23 @@ as `nvx-snapshot` does.
 | `nvx-ingress [inherit\|start] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that the caller bound to one after the clone's process-free application; `start` binds such a socket and starts `inherit` on it in a session of its own, then exits once its program runs, or with status 1 if it does not start, for a guest agent that cannot hold the announcer; `test DIRECTORY` runs synthetic procfs snapshots |
 | `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v1: runs its conformance checks, repairs the wall clock after a restore, publishes the time state, and runs the discipline and violation-watcher daemon; `test NAME ...` runs its decoder and process test hooks (x86_64) |
 | `nvx-time-probe latency\|warp\|clock ...` | Diagnoses clock-read latency, cross-CPU TSC warp and offset, the clocks, CPUID, clock events, kernel messages, and optionally MSRs (x86_64) |
-| `nvx-init TIME_DAEMON [ANNOUNCER]` | Takes PID 1 over from a layered root's early boot, with its time daemon and optional announcer: gives itself and them an out-of-memory score adjustment of -1000 and a nice value of -10, collects every child's status, and, after `sync`, ends the VM with status 125 when a helper ends, 0 on `SIGTERM`, or the status of a failed restored activation's class; elsewhere it exits with 2 (x86_64) |
+| `nvx-init TIME_DAEMON [ANNOUNCER]` | Takes PID 1 over from a layered root's early boot, with its time daemon and optional announcer: gives itself and them an out-of-memory score adjustment of -1000 and a nice value of -10, collects every child's status, and, after `sync`, ends the VM with status 125 when a helper ends, 0 on `SIGTERM`, or the status of a failed guest restore's class; elsewhere it exits with 2 (x86_64) |
 
 Each binary's command line, exit statuses, and byte output are compatibility
 contracts; the [`nvx::guest`](src/guest/mod.rs) documentation describes each
-program. After a restored platform capture, `nvx-init` keeps one activation
+program. After a restored platform capture, `nvx-init` keeps one guest restore
 across control-session replacements, with its deadline anchored to the repair
 acknowledgement. It applies the restore's root and network, mounts the runtime,
 starts and retains an announcer only for published listeners, switches once,
 then completes and reports Ready. The host supplies the complete mapping table
 before the first valid EXEC starts the restored workload; later executions and
-byte-identical activation retries, also those that arrive while a workload
-runs, reuse the retained state, and an activation with other bytes ends the VM
-as a failure. A failed activation, which a deadline that passes before Ready
-and a refused activate request also are, ends the VM with the status of the
+byte-identical Activate retries, also those that arrive while a workload runs,
+reuse the retained state, and an Activate with other bytes ends the VM as a
+failure. A failed guest restore, which a deadline that passes before Ready and
+a refused activate request also are, ends the VM with the status of the
 failure's class, which [`nvx::protocol::status`](#nvxprotocolstatus) defines,
-such as 54, `ACTIVATION_ROOT`, for a root that does not assemble over its
-upper, or 51, `ACTIVATION_PROTOCOL`, for an activation with other bytes.
+such as 54, `GUEST_RESTORE_ROOT`, for a root that does not assemble over its
+upper, or 51, `GUEST_RESTORE_PROTOCOL`, for an Activate with other bytes.
 The accepted proxy replaces the four HTTP(S) proxy defaults, or clears them when
 the restore has no proxy. Per-EXEC layered entries still win, and exact
 environments still replace every default.
@@ -2043,8 +2044,8 @@ hostname, machine ID, and resolver file, whose binds the root owns;
 `guest::gpt` reads the partition table of a GPT disk through its block device,
 with the internal `gpt` parser; the mapper of `guest::mappings` mounts host
 mappings beneath the descriptors of the roots that its caller names; and the
-application of `guest::activation` assembles a restored VM's root and applies
-its view from its activation record, without starting a process. The
+application of `guest::restore` assembles a restored VM's root and applies its
+view from its guest-restore record, without starting a process. The
 [guest-agent guidelines](../doc/guest-agent-guidelines.md#build-the-space)
 give its interface and the rules that it keeps, which another init's space may
 adapt.
@@ -2065,8 +2066,8 @@ The parser, its types, and its constants are not public API. The control plane
 owns producing, selecting, checking, and staging its images, and the chosen
 guest init owns interpreting and mounting them. NVX's bundled init and managed
 agent continue to share this parser internally. `nvx::uuid`,
-`protocol::root::ImageFormat::Gpt`, and `activation::Image::Gpt` remain public:
-UUID utilities and image-format selectors do not expose the parser.
+`protocol::root::ImageFormat::Gpt`, and `guest_restore::Image::Gpt` remain
+public: UUID utilities and image-format selectors do not expose the parser.
 
 GPT lower layers use `noload,errors=remount-ro`: the kernel neither loads nor
 replays their journals, because even a journal whose file system does not
@@ -2098,11 +2099,12 @@ sides of every record and payload: the codecs decode each record and each
 encode them to its bytes, version 2's codec refuses its frames, the codecs
 accept or refuse OpenVMM's vectors and cases of the `NVXS` session as they
 say, and, on Linux, the guest's listener announcements match
-`tests/vectors/nvxl-v1.txt`. The activation codecs decode each record and
-Ready activation of `tests/vectors/activation-v2.txt` to its values, encode
-them to its bytes, and refuse its invalid bytes. Property tests check that
-records and activation records round-trip, that the activation record and
-Ready activation decoders accept only canonical encodings, and that the
+`tests/vectors/nvxl-v1.txt`. The guest-restore codecs decode each record and
+each `GuestRestoreReady` of `tests/vectors/activation-v2.txt` to its values,
+encode them to its bytes, and refuse its invalid bytes. Property tests check
+that records and guest-restore records round-trip, that the decoders of
+guest-restore records and of `GuestRestoreReady` accept only canonical
+encodings, and that the
 `NVXS` record parser, those decoders, and the host's and the guest's `EXEC`
 and `MAPS` decoders return, never panic, on arbitrary bytes; those of the
 egress policy compiler compare it with a reference model of the format
@@ -2161,9 +2163,9 @@ Two examples compile the documented workflows through the public API alone,
 and nothing runs them: [`host-workflows`](examples/host-workflows.rs), a cold
 boot, a capture into a snapshot, a restore from it, finding a VM again after its
 caller restarts, and a stop; and [`guest-workflows`](examples/guest-workflows.rs),
-for Linux guests, an init's time daemon, control session, capture, activation
-of a restore, and mapping table. The guest example leaves the guest's space to
-its caller: the steps of NVX's reference space, as nvx-init takes them, compile
+for Linux guests, an init's time daemon, control session, capture, guest
+restore, and mapping table. The guest example leaves the guest's space to its
+caller: the steps of NVX's reference space, as nvx-init takes them, compile
 in `guest::init::boot::tests::the_reference_space_steps_compile`. Clippy
 compiles the examples with the rest of the crate's targets, and
 [`external-launch`](examples/external-launch.rs) runs a cold boot end to end,
@@ -2229,10 +2231,10 @@ cargo test --locked --all-features --lib -- \
 OpenVMM's vectors in `tests/vectors/openvmm/` with the files of the OpenVMM
 submodule, which the `nvx-rs` job cannot check out, the versions of
 OpenVMM's snapshot format, saved-state schema, time ABI, and restore packets in
-`nvx::contract` with the submodule's, and the bound of an activation record,
-`nvx::activation::MAX_RECORD_BYTES`, with that of the restore packet's. The NVX
-CLI jobs run it once they check the submodule out, and so does an OpenVMM pin
-promotion; see
+`nvx::contract` with the submodule's, and the bound of a guest-restore record,
+`nvx::guest_restore::MAX_RECORD_BYTES`, with that of the restore packet's. The
+NVX CLI jobs run it once they check the submodule out, and so does an OpenVMM
+pin promotion; see
 [OpenVMM's vectors](tests/vectors/README.md#openvmms-vectors).
 `tests/openvmm_cpu_profiles.rs` is an ignored test that compares
 `src/host/cli/cpu_generations.json`, the identities of the built-in CPU
