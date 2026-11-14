@@ -32,22 +32,27 @@ struct Pipe {
 
 /// In-memory stream whose reads end at the end of the input that the test supplied.
 #[derive(Clone, Default)]
-struct Stream(Arc<Mutex<Pipe>>);
+pub(crate) struct Stream(Arc<Mutex<Pipe>>);
 
 impl Stream {
     /// Supplies bytes for the guest to read.
-    fn supply(&self, bytes: &[u8]) {
+    pub(crate) fn supply(&self, bytes: &[u8]) {
         self.0.lock().unwrap().input.extend(bytes);
     }
 
     /// Takes the bytes that the guest wrote.
-    fn take_output(&self) -> Vec<u8> {
+    pub(crate) fn take_output(&self) -> Vec<u8> {
         std::mem::take(&mut self.0.lock().unwrap().output)
     }
 
     /// Returns the number of supplied bytes that the guest has not read.
-    fn unread(&self) -> usize {
+    pub(crate) fn unread(&self) -> usize {
         self.0.lock().unwrap().input.len()
+    }
+
+    /// Makes every later write fail.
+    pub(crate) fn break_writes(&self) {
+        self.0.lock().unwrap().broken = true;
     }
 }
 

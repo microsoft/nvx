@@ -1,6 +1,7 @@
 //! The guest's I/O driver of an NVXS session: [`GuestConnection`] runs the guest's role of
 //! [`protocol::nvxs`](crate::protocol::nvxs) over a byte stream, such as the control console that a
-//! guest agent opened, for NVX's control protocol or any other application protocol.
+//! guest agent opened. The public [`control::Connection`](super::control::Connection) and NVX's
+//! managed agent run their sessions through it.
 //!
 //! [`attach`](GuestConnection::attach) sends the guest's attachment, and
 //! [`next_event`](GuestConnection::next_event) blocks until the broker's next RESET or DATA
@@ -16,33 +17,6 @@
 //! A failure of the stream or of a received record ends the connection, and every later call
 //! fails with [`GuestConnectionError::Ended`]. So does a send that fails after it wrote anything,
 //! because the rest of a record or of a message cannot follow.
-//!
-//! # Example
-//!
-//! ```no_run
-//! use std::fs::File;
-//!
-//! use nvx::guest::nvxs::{GuestConnection, GuestConnectionError};
-//! use nvx::protocol::OUTER_RECEIVE_WINDOW;
-//! use nvx::protocol::nvxs::GuestEvent;
-//!
-//! /// Serves the session on `console`, a control console that the caller opened for reading and
-//! /// writing, in raw mode.
-//! fn serve(console: File) -> Result<(), GuestConnectionError> {
-//!     let mut connection = GuestConnection::new(console);
-//!     connection.attach()?;
-//!     loop {
-//!         match connection.next_event()? {
-//!             // Abandon the earlier epoch's work here, then take the new epoch's DATA.
-//!             GuestEvent::Reset(_) => connection.acknowledge(OUTER_RECEIVE_WINDOW)?,
-//!             GuestEvent::Data(payload) => {
-//!                 // Consume the payload here, then return its bytes to the receive window.
-//!                 connection.credit(payload.len() as u32)?;
-//!             }
-//!         }
-//!     }
-//! }
-//! ```
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -54,8 +28,7 @@ const READ_CHUNK: usize = 16 * 1024;
 
 /// Failure of a [`GuestConnection`].
 #[derive(Debug)]
-#[non_exhaustive]
-pub enum GuestConnectionError {
+pub(crate) enum GuestConnectionError {
     /// The broker closed the stream at a record boundary.
     Closed,
     /// The broker violated the protocol, or the stream ended inside a record, which ended the
@@ -90,7 +63,7 @@ impl std::error::Error for GuestConnectionError {
 }
 
 /// The guest's end of an NVXS session over a byte stream.
-pub struct GuestConnection<S> {
+pub(crate) struct GuestConnection<S> {
     /// Stream connected to the broker's guest leg.
     stream: S,
     /// The guest's role of the session.
@@ -105,7 +78,7 @@ pub struct GuestConnection<S> {
 
 impl<S: Read + Write> GuestConnection<S> {
     /// Creates an unattached connection over `stream`.
-    pub fn new(stream: S) -> Self {
+    pub(crate) fn new(stream: S) -> Self {
         Self {
             stream,
             session: GuestSession::new(),
@@ -116,28 +89,23 @@ impl<S: Read + Write> GuestConnection<S> {
     }
 
     /// Returns the guest's role of the session, for its state, identity, and receive window.
-    pub fn session(&self) -> &GuestSession {
+    pub(crate) fn session(&self) -> &GuestSession {
         &self.session
     }
 
     /// Returns the stream, for example to poll it for readiness. Reading or writing it directly
     /// would corrupt the session.
-    pub fn get_ref(&self) -> &S {
+    pub(crate) fn get_ref(&self) -> &S {
         &self.stream
     }
 
-    /// Returns the stream, consuming the connection.
-    pub fn into_inner(self) -> S {
-        self.stream
-    }
-
     /// Sends the guest's attachment, which the broker answers with a RESET.
-    pub fn attach(&mut self) -> Result<(), GuestConnectionError> {
+    pub(crate) fn attach(&mut self) -> Result<(), GuestConnectionError> {
         self.send_record(GuestSession::attach)
     }
 
     /// Blocks until the broker's next record completes, and returns its event.
-    pub fn next_event(&mut self) -> Result<GuestEvent, GuestConnectionError> {
+    pub(crate) fn next_event(&mut self) -> Result<GuestEvent, GuestConnectionError> {
         self.check()?;
         if !matches!(
             self.session.state(),
@@ -176,7 +144,7 @@ impl<S: Read + Write> GuestConnection<S> {
     /// [`OUTER_MIN_RECEIVE_WINDOW`](crate::protocol::OUTER_MIN_RECEIVE_WINDOW) through
     /// [`OUTER_MAX_RECEIVE_WINDOW`](crate::protocol::OUTER_MAX_RECEIVE_WINDOW), once the guest
     /// abandoned the work of the earlier epoch.
-    pub fn acknowledge(&mut self, window: u32) -> Result<(), GuestConnectionError> {
+    pub(crate) fn acknowledge(&mut self, window: u32) -> Result<(), GuestConnectionError> {
         self.send_record(|session, output| session.acknowledge(window, output))
     }
 
@@ -185,7 +153,7 @@ impl<S: Read + Write> GuestConnection<S> {
     ///
     /// Data that fits one record travels in one, so an application protocol that needs one frame
     /// per record sends frames that fit. Empty data sends nothing.
-    pub fn send(&mut self, data: &[u8]) -> Result<(), GuestConnectionError> {
+    pub(crate) fn send(&mut self, data: &[u8]) -> Result<(), GuestConnectionError> {
         self.check()?;
         let mut rest = data;
         let mut wrote = false;
@@ -205,7 +173,7 @@ impl<S: Read + Write> GuestConnection<S> {
 
     /// Returns `bytes` consumed DATA bytes to the receive window, from 1 through the session's
     /// [`outstanding`](GuestSession::outstanding) bytes.
-    pub fn credit(&mut self, bytes: u32) -> Result<(), GuestConnectionError> {
+    pub(crate) fn credit(&mut self, bytes: u32) -> Result<(), GuestConnectionError> {
         self.send_record(|session, output| session.credit(bytes, output))
     }
 
@@ -248,4 +216,4 @@ impl<S: Read + Write> GuestConnection<S> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

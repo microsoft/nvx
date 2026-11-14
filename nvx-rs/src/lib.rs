@@ -36,11 +36,11 @@
 //!   capture's finish, and the restores that their caller drives; the lowering of network and
 //!   filesystem policies; and a VM's authenticated control connection and boot console,
 //!   verified process references, and OpenVMM's outcome reports.
-//! - `guest` (feature `guest`, Linux): the guest's side, for any guest init or agent: its NVXS
-//!   connection and the terminal on which it serves it (`guest::nvxs`, `guest::terminal`), the
-//!   account of a host's mapping table (`guest::mappings`), the time ABI's steps in its own
-//!   process (`guest::time`), a capture that repairs each restore of its snapshot
-//!   (`guest::snapshot`), a clone's guest restore (`guest::restore`), and its reseed
+//! - `guest` (feature `guest`, Linux): the guest's side, for any guest init or agent: its end of
+//!   the control connection and the terminal on which it serves it (`guest::control`,
+//!   `guest::terminal`), the account of a host's mapping table (`guest::mappings`), the time
+//!   ABI's steps in its own process (`guest::time`), a capture that repairs each restore of its
+//!   snapshot (`guest::snapshot`), a clone's guest restore (`guest::restore`), and its reseed
 //!   (`guest::reseed`).
 //!
 //! NVX's own programs, its `nvx-rs` command-line interface, its guest binaries, and the fake

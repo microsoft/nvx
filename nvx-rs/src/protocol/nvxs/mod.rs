@@ -16,8 +16,8 @@
 //!   encode the records that their role sends.
 //!
 //! The state machines do no I/O: callers hand them the bytes that they receive and write the
-//! bytes that they encode. The host's `nvx::host::vm::Connection` (feature `host`) and
-//! `nvx::guest::nvxs` (feature `guest`, Linux) drive them over a transport.
+//! bytes that they encode. The host's `nvx::host::vm::Connection` (feature `host`) and the
+//! guest's `nvx::guest::control::Connection` (feature `guest`, Linux) drive them over a transport.
 //!
 //! # Protocol
 //!
