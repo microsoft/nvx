@@ -145,8 +145,7 @@ pub(super) fn with_owner_only_attributes<T>(
     let mut acl = vec![0u32; acl_len.div_ceil(mem::size_of::<u32>())];
     let acl_len = (acl.len() * mem::size_of::<u32>()) as u32;
     let acl_ptr = acl.as_mut_ptr().cast::<ACL>();
-    // SAFETY: SECURITY_DESCRIPTOR is plain data for which all-zero bytes are valid.
-    let mut descriptor: SECURITY_DESCRIPTOR = unsafe { mem::zeroed() };
+    let mut descriptor = SECURITY_DESCRIPTOR::default();
     let descriptor_ptr: PSECURITY_DESCRIPTOR = (&raw mut descriptor).cast();
     // SAFETY: the list's buffer holds `acl_len` bytes, aligned for it, and the descriptor and the
     // identifier are valid. The descriptor points at the identifier and the list, which outlive
@@ -283,8 +282,7 @@ fn vm_dir_problem(
             "inherits access control entries from its parent".to_owned(),
         ));
     }
-    // SAFETY: ACL_SIZE_INFORMATION is plain data with a valid all-zero representation.
-    let mut size: ACL_SIZE_INFORMATION = unsafe { mem::zeroed() };
+    let mut size = ACL_SIZE_INFORMATION::default();
     // SAFETY: the list is valid, and the output holds an ACL_SIZE_INFORMATION.
     if unsafe {
         GetAclInformation(
@@ -392,8 +390,7 @@ pub(super) fn privacy_problem(
     if present == 0 || acl.is_null() {
         return Ok(Some("allows every user".to_owned()));
     }
-    // SAFETY: ACL_SIZE_INFORMATION is plain data for which all-zero bytes are valid.
-    let mut size: ACL_SIZE_INFORMATION = unsafe { mem::zeroed() };
+    let mut size = ACL_SIZE_INFORMATION::default();
     // SAFETY: the list is valid, and the output holds an ACL_SIZE_INFORMATION.
     let sized = unsafe {
         GetAclInformation(
