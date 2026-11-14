@@ -66,9 +66,9 @@ COLORS = {
 }
 # What each top-level module of the public API holds, in the overview.
 DESCRIPTIONS = {
-    "activation": "Layered root activation",
     "contract": "Contract versions",
     "guest": "Guest side",
+    "guest_restore": "Guest-restore records",
     "host": "VMs, snapshots, restores",
     "net": "IP networks",
     "protocol": "NVXS and boot tokens",

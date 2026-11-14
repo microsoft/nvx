@@ -5,7 +5,7 @@ crates.io published from commit
 [`e42b1795`](https://github.com/microsoft/nvx/commit/e42b17959360c1738a99cb3036137dfbf3d5bf96).
 It makes `nvx` a library of mechanisms and value types for the microVMs that
 OpenVMM runs: a VM's configuration and launch, its snapshots and restores, its
-transport, and the guest's capture and activation. The stores, the
+transport, and the guest's capture and guest restore. The stores, the
 supervisor, the templates and clones, the exec engine, and the guest's process
 modules are gone, and NVX's own programs, its control protocol, NVXC, the
 guest space that nvx-init builds, and the code that only they use are private
@@ -95,8 +95,8 @@ does not match it.
 | `guest` | The `guest` module, with the guest's space, executions, and processes, and nine guest binaries | The `guest` module, without the guest's space and executions, and ten guest binaries: `nvx-init` is new |
 
 Without default features, the crate holds what the host and the guest share:
-`protocol`, `activation`, `contract`, `net`, `uuid`, and the errors. alpha.7's
-also held `exec`, which is gone, and `Hypervisor`, which moved to
+`protocol`, `guest_restore`, `contract`, `net`, `uuid`, and the errors.
+alpha.7's also held `exec`, which is gone, and `Hypervisor`, which moved to
 `host::runtime`.
 
 ### Hidden program entry points
@@ -195,7 +195,7 @@ keeps its path and its signature.
 | `host::template`'s `CaptureClass`, `ClassIdentity`, `TemplatePlan`, and `TemplateResources` | A `VmConfig` whose `Boot::capture` holds a `host::config::CaptureConfig`, whose `CaptureConfig::identity` is a `CaptureIdentity` |
 | `host::template::Capture`, `host::template::Created`, and the captures of a template store, `CAPTURES_NAME`, `CAPTURE_RECORD_NAME`, and `TRANSACTION_NAME` | `vm::create` of a capture, whose `Prepared::capture_context` the caller keeps, then `host::snapshot::finish_capture` once the VM exited, which checks the capture and writes `key.bin` and `snapshot.json` beside the VM directory's `openvmm/`, and returns the checked key in a `CapturedSnapshot`. The caller moves only those three entries into a private directory of its own, and keeps them immutable |
 | `host::template`'s `Store`, `StoreId`, `Index`, `Generation`, `StorageGeneration`, `Lease`, `LeaseId`, `Acquired`, `Retirement`, and `Teardown`, and a store's `INDEX_NAME`, `INDEX_LOCK_NAME`, `LEASES_NAME`, `TOMBSTONES_NAME`, `GENERATIONS_NAME`, `STORE_RECORD_NAME`, `STORE_FORMAT`, `MAX_GENERATIONS`, and `SCRATCH_NAME` | Removed: the caller names, keeps, and locks its snapshots, as NVX's CLI does in a snapshot store of its own |
-| `host::template`'s `CloneRequest`, `ClonePlan`, and `CloneUpper` | `vm::create(&runtime, &config, Some(&snapshot), &dir)`, of a `Snapshot` that `Snapshot::open` opened, for a `VmConfig` without a `Boot`, and `Prepared::activation_record` |
+| `host::template`'s `CloneRequest`, `ClonePlan`, and `CloneUpper` | `vm::create(&runtime, &config, Some(&snapshot), &dir)`, of a `Snapshot` that `Snapshot::open` opened, for a `VmConfig` without a `Boot`, and `Prepared::guest_restore_record` |
 | `host::template`'s `CloneControl`, `Restoring`, `Activated`, `Started`, `RestoreDeadlines`, `READY_TO_START_TIMEOUT`, `RESTORE_TO_READY_TIMEOUT`, and `MAX_ACTIVATION_SESSIONS` | `host::restore::RestoreMachine`, which the caller drives with its own I/O, clock, and retries, through `RestoreInput` and `RestoreAction` |
 | `host::template::RESTORE_READY_EVENT` | `host::restore::ReadyListener`, which `vm::Launched::ready` holds, and `protocol::restore_ready::parse_ready_event` |
 | `host::template`'s `Evidence`, `Outcome`, `Progress`, `Stage`, `status_evidence`, `CloneFailure`, `FailureRecord`, `FAILURE_FORMAT`, `CloneRecords`, `reattach_clone`, and `ReattachedClone` | A failed restore's `host::restore::RestoreError`, with its `RestorePhase`, `RestoreEvidence`, and `Attribution`. The caller records what it keeps of a failure, and reattaches with `vm::reattach` |
@@ -220,6 +220,7 @@ keeps its path and its signature.
 | `host::nvxs::HostConnection`, `host::nvxs::HostConnectionError` | `host::transport::HostConnection` and `HostConnectionError`, which the old paths still name. `HostConnection::attach`, `send`, and `receive` fail with an `nvx::Error`, where they failed with a `HostConnectionError` |
 | NVXC in `protocol`: `AppFrame`, `encode_app`, `decode_app`, the `APP_*` constants, `ExecPayload`, `encode_exec_payload`, `decode_exec_payload`, `GuestExecPayload`, `decode_guest_exec_payload`, `Workload`, `WorkloadEnvironment`, `ExitCategory`, `GuestFeatures`, the `EXEC_*` flags, the limits `MAX_ARGUMENTS`, `MAX_ARGUMENT_BYTES`, `MAX_CWD_BYTES`, `MAX_ENVIRONMENT`, `MAX_GUEST_CWD_BYTES`, `MAX_OUTPUT_BYTES`, and `MAX_TIMEOUT_MS`, and the refusals `BUSY`, `CWD_FAILED`, `INVALID_REQUEST`, `LAUNCH_FAILED`, `MAPPINGS_INCOMPLETE`, `MAPPING_FAILED`, and `UNSUPPORTED_OPERATION` | No longer public: NVXC v1 and its FEATURES exchange are gone, and NVX's programs speak NVXC v2 among themselves. A caller speaks a protocol of its own over `protocol::nvxs` |
 | `protocol::WORKLOAD_ACCOUNT_TOKEN` | No longer public: NVX's guests still read `nvx_workload_account=create`, which the caller writes itself |
+| `protocol::status`'s `ACTIVATION_DEADLINE`, `ACTIVATION_PROTOCOL`, `ACTIVATION_RECORD`, `ACTIVATION_RESOURCES`, `ACTIVATION_ROOT`, `ACTIVATION_WORKLOAD`, `ACTIVATION_EXPORT`, `ACTIVATION_NETWORK`, `ACTIVATION_ORDER`, and `ACTIVATION_STATUSES` | `GUEST_RESTORE_DEADLINE`, `GUEST_RESTORE_PROTOCOL`, `GUEST_RESTORE_RECORD`, `GUEST_RESTORE_RESOURCES`, `GUEST_RESTORE_ROOT`, `GUEST_RESTORE_WORKLOAD`, `GUEST_RESTORE_EXPORT`, `GUEST_RESTORE_NETWORK`, `GUEST_RESTORE_ORDER`, and `GUEST_RESTORE_STATUSES`, with the same values, 50 to 58 |
 | `protocol::root::RootLayout`, `RootLayout::tokens` | `RootLayout` also holds `overlay`, `journal`, `gpt_first_partition_bound`, and `max_memory_percent`, and `tokens` returns a `Vec<String>`, where it returned two tokens |
 
 ### Processes and reports
@@ -230,10 +231,11 @@ keeps its path and its signature.
 | `host::process::Process::open(&reference)`, which returned `Result<Option<Process>>` | Returns `Result<Opened>`: `Opened::Running`, with the process, or `Opened::Exited`, when the reference proves that it exited |
 | `host::report::read(path)`, which returned `Option<Report>` | Returns `Result<Option<Report>>`: `Ok(None)` for a missing report, and an error for one that cannot be read or parsed |
 
-### The activation record
+### The guest-restore record
 
 | alpha.7 | The release |
 | --- | --- |
+| `activation`, with `ActivationRecord`, `ActivationError`, and `ReadyActivation` | `guest_restore`, with `GuestRestoreRecord`, `GuestRestoreError`, and `GuestRestoreReady`. The module's other items keep their names, but for those that the rows below name |
 | `activation::VERSION`, 1 | 2: the record's decoder refuses version 1, and alpha.7 cannot read version 2 |
 | `activation::WorkloadView`, `Configuration::workload` | `protocol::view::View`, which holds no identity, and `Configuration::view` |
 | `activation::MachineIdMode`, `activation::MAX_HOSTNAME_BYTES` | `protocol::view::MachineIdMode` and `protocol::view::MAX_HOSTNAME_BYTES`, beside `View`, which cold boots share |
@@ -242,7 +244,7 @@ keeps its path and its signature.
 | `activation::Identity`, `Image::binding`, and the `binding` of `Image::Erofs`, `Image::Gpt`, and `Upper::Scratch` | Removed: the caller checks its images before it launches them |
 | `activation::StoreGeneration`, `activation::TemplateReference`, `RestoreSection::template` | Removed: the record names no store or template |
 | `Network::policy`, `Export::plan` | Removed: the record carries the restore's DNS, proxy, and publication, and the export's kind, but no identity of a policy or a plan |
-| `Upper::Tmpfs` | `Upper::Tmpfs { max_memory_percent }`, the cap of a RAM upper, from 1 to 90 percent, which `ActivationError::TmpfsMemoryPercent` refuses otherwise |
+| `Upper::Tmpfs` | `Upper::Tmpfs { max_memory_percent }`, the cap of a RAM upper, from 1 to 90 percent, which `GuestRestoreError::TmpfsMemoryPercent` refuses otherwise |
 
 ### Executions
 
@@ -256,14 +258,15 @@ keeps its path and its signature.
 
 | alpha.7 | The release |
 | --- | --- |
-| `guest::clone` | `guest::activation`: the old name is gone. Its `CaptureCause` and `CaptureStage` have a new `Repair` variant |
+| `guest::clone` | `guest::restore`: the old name is gone. Its `CaptureCause` and `CaptureStage` have a new `Repair` variant |
 | `guest::clone`'s `CapturePreparation`, `CaptureBarrier`, `AdmissionFence`, `CaptureError`, `Captured`, `Devices`, `Repair`, `Restored`, and `repair` | `guest::snapshot::capture(&devices, disks, deadline)`, one call that checks the devices, captures, and, in a VM that a restore started, repairs the restore before it returns `Captured::Restored`. A `CaptureFailure` says whether the guest resumed or must end. The init stops its own executions first, as [Coordinate a capture](guest-agent-guidelines.md#coordinate-a-capture) describes |
-| `guest::clone::Activation::new`, `guest::clone::Activation::with_resources` | Take no admission fence: `guest::activation::Activation::new(&repaired, timeout, now)` |
-| `guest::clone`'s `apply`, `Applied`, `ApplyError`, `AppliedTeardownError`, `NetworkError`, and `RootTemplate` | No longer public: the init applies a restore's activation record in its own space, as [Complete a restore before Ready](guest-agent-guidelines.md#complete-a-restore-before-ready) describes |
-| `guest::root` | No longer public: nvx-init's own space. Each init builds its own from the tokens of `protocol::root`, `protocol::view`, `protocol::export`, and `protocol::share`, and the records of `activation`, as [Build the space](guest-agent-guidelines.md#build-the-space) describes |
+| `guest::clone`'s `Activation`, `ActivationInput`, `ActivationAction`, `ActivationState`, `ActivationCause`, and `ActivationFailure` | `guest::restore`'s `GuestRestore`, `GuestRestoreInput`, `GuestRestoreAction`, `GuestRestoreState`, `GuestRestoreCause`, and `GuestRestoreFailure` |
+| `guest::clone::Activation::new`, `guest::clone::Activation::with_resources` | Take no admission fence: `guest::restore::GuestRestore::new(&repaired, timeout, now)` |
+| `guest::clone`'s `apply`, `Applied`, `ApplyError`, `AppliedTeardownError`, `NetworkError`, and `RootTemplate` | No longer public: the init applies a restore's guest-restore record in its own space, as [Complete a restore before Ready](guest-agent-guidelines.md#complete-a-restore-before-ready) describes |
+| `guest::root` | No longer public: nvx-init's own space. Each init builds its own from the tokens of `protocol::root`, `protocol::view`, `protocol::export`, and `protocol::share`, and the records of `guest_restore`, as [Build the space](guest-agent-guidelines.md#build-the-space) describes |
 | `guest::mappings`'s `Mapper`, `bind`, `ApplyError`, `MappingError`, `Reserved`, `SourceRoot`, `TargetRoot`, `Step`, `TeardownError`, and `UnmountFailure` | No longer public: the init mounts the mappings itself. `guest::mappings::MappingTable` keeps the account of the host's mapping table, beside `Mapping`, `Access`, `Kind`, and `InvalidMapping` |
-| `nvx::gpt`, `guest::gpt::read_disk`, `guest::gpt::DeviceError` | No longer public: GPT parsing is internal to NVX's guest programs. The control plane checks and stages its own images, and each init interprets them. `nvx::uuid`, `protocol::root::ImageFormat::Gpt`, and `activation::Image::Gpt` remain public |
-| `guest::ingress`'s `Announcer`, `PROGRAM`, and `StartError` | Removed: the activation reports the publication and the gateway, and the init runs `/sbin/nvx-ingress` itself, or has `nvx-ingress start` run it |
+| `nvx::gpt`, `guest::gpt::read_disk`, `guest::gpt::DeviceError` | No longer public: GPT parsing is internal to NVX's guest programs. The control plane checks and stages its own images, and each init interprets them. `nvx::uuid`, `protocol::root::ImageFormat::Gpt`, and `guest_restore::Image::Gpt` remain public |
+| `guest::ingress`'s `Announcer`, `PROGRAM`, and `StartError` | Removed: the guest restore reports the publication and the gateway, and the init runs `/sbin/nvx-ingress` itself, or has `nvx-ingress start` run it |
 | `guest::time`'s `CaptureRequest`, `CaptureOutcome`, `Restore`, `RestoreFinish`, `CpuSet`, `MemoryRange`, and `ScratchPolicy`, and `TimeAbi::capture` and `TimeAbi::restore_finish` | No longer public: `guest::snapshot::capture` runs the time ABI's capture and restore finish. `TimeError` has a new `Deadline` variant |
 
 ## What the caller owns
@@ -303,7 +306,8 @@ starts from fresh state.
   [Snapshot compatibility](design/1.5-compatibility-and-versioning-model.md#152-snapshot-compatibility)
   and
   [Runtime identity](design/1.5-compatibility-and-versioning-model.md#154-runtime-identity).
-- **Activation records.** The release reads and writes version 2 alone.
+- **Guest-restore records**, alpha.7's activation records. The release reads
+  and writes version 2 alone.
 - **NVXC.** NVXC v1 and its FEATURES exchange are gone, and NVX's hosts and
   guests speak NVXC v2 alone, which keeps no compatibility with v1: run NVX's
   guest images and guest programs of the same release as its host.

@@ -3,9 +3,9 @@
 
 use std::net::IpAddr;
 
-use crate::activation::{
-    ActivationError, ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image,
-    Network, Publication, RestoreSection, TransactionId, Upper,
+use crate::guest_restore::{
+    Configuration, ExpectedResources, Export, ExportKind, GuestRestoreError, GuestRestoreRecord,
+    Image, Network, Publication, RestoreSection, TransactionId, Upper,
 };
 use crate::protocol::root::{Journal, OverlayMode};
 use crate::protocol::view::{MachineIdMode, View};
@@ -45,7 +45,7 @@ fn choice<T: Copy>(values: &mut Values<'_>, choices: &[(&str, T)]) -> T {
 }
 
 /// Returns the record that a `RECORD` vector's values give.
-fn record_of(vector: &Vector) -> ActivationRecord {
+fn record_of(vector: &Vector) -> GuestRestoreRecord {
     let mut values = vector.values();
     let restore = values.optional(|values| RestoreSection {
         transaction: TransactionId::from_bytes(array(values)),
@@ -139,7 +139,7 @@ fn record_of(vector: &Vector) -> ActivationRecord {
         },
         resources,
     };
-    ActivationRecord::new(restore, configuration)
+    GuestRestoreRecord::new(restore, configuration)
         .unwrap_or_else(|error| panic!("RECORD {}: {error}", vector.name))
 }
 
@@ -150,7 +150,7 @@ fn records_match_their_vectors() {
         let record = record_of(&vector);
         assert_eq!(record.encode(), vector.bytes, "{name}");
         assert_eq!(
-            ActivationRecord::decode(&vector.bytes).as_ref(),
+            GuestRestoreRecord::decode(&vector.bytes).as_ref(),
             Ok(&record),
             "{name}"
         );
@@ -212,7 +212,7 @@ fn invalid_records_are_refused() {
         "ZERO_MEMORY",
     ];
     for vector in of_kind(ACTIVATION_V2, "INVALID_RECORD", &names) {
-        let refusal: Result<_, ActivationError> = ActivationRecord::decode(&vector.bytes);
+        let refusal: Result<_, GuestRestoreError> = GuestRestoreRecord::decode(&vector.bytes);
         assert!(refusal.is_err(), "{} is admitted", vector.name);
     }
 }

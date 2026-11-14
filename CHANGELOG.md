@@ -25,10 +25,20 @@ changed item to its replacement, or to what its caller now does.
 - **No exec.** The exec engine, `nvx::exec`, and the guest's process modules,
   `nvx::guest::{exec, spawn, process, cgroup, entry}`, are gone. A guest's init
   runs its executions itself.
-- **`nvx::guest::clone` is `nvx::guest::activation`.** The old name is gone.
+- **`nvx::guest::clone` is `nvx::guest::restore`.** The old name is gone.
 - **`nvx::Hypervisor` is `nvx::host::runtime::Hypervisor`.** The crate root no
   longer exports it, so it needs the `host` feature, and the `serde` feature
   alone now covers only `net::Ipv4Cidr`.
+- **Guest restore.** `nvx::activation` is `nvx::guest_restore`, whose
+  `ActivationRecord`, `ActivationError` and `ReadyActivation` are
+  `GuestRestoreRecord`, `GuestRestoreError` and `GuestRestoreReady`. The guest's
+  `Activation`, `ActivationInput`, `ActivationAction`, `ActivationState`,
+  `ActivationCause` and `ActivationFailure` are `GuestRestore`,
+  `GuestRestoreInput`, `GuestRestoreAction`, `GuestRestoreState`,
+  `GuestRestoreCause` and `GuestRestoreFailure`, and the statuses
+  `ACTIVATION_DEADLINE` to `ACTIVATION_ORDER` and `ACTIVATION_STATUSES` of
+  `nvx::protocol::status` are `GUEST_RESTORE_DEADLINE` to `GUEST_RESTORE_ORDER`
+  and `GUEST_RESTORE_STATUSES`, with the same values.
 - **Shared settings.** The settings that cold boots and restores share leave
   `nvx::activation`: `View`, `MachineIdMode` and `MAX_HOSTNAME_BYTES` are in
   `nvx::protocol::view`, and `OverlayMode` and `Journal` in

@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::activation::{
-    ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image, Network,
-    Publication, ReadyActivation, RestoreSection, TransactionId, Upper,
+use crate::guest_restore::{
+    Configuration, ExpectedResources, Export, ExportKind, GuestRestoreReady, GuestRestoreRecord,
+    Image, Network, Publication, RestoreSection, TransactionId, Upper,
 };
 use crate::host::nvxs::HostConnection;
 use crate::host::runtime::Hypervisor;
@@ -368,11 +368,11 @@ fn run() -> Result<(), AnyError> {
             "ORIGINAL_ACK_DEADLINE_ELAPSED_MS={}",
             native_ready.elapsed().as_millis()
         );
-        expected_status = i64::from(crate::protocol::status::ACTIVATION_DEADLINE);
+        expected_status = i64::from(crate::protocol::status::GUEST_RESTORE_DEADLINE);
     } else {
         let published = case != "unpublished";
         let transaction = TransactionId::from_bytes([0x77; 16]);
-        let record = ActivationRecord::new(
+        let record = GuestRestoreRecord::new(
             Some(RestoreSection { transaction }),
             Configuration {
                 image: Image::Erofs { uuid: None },
@@ -409,7 +409,7 @@ fn run() -> Result<(), AnyError> {
         activation.push(1);
         activation.extend(record.encode());
         fs::write(root.join("activate.bin"), &activation)?;
-        let expected_ready = ReadyActivation {
+        let expected_ready = GuestRestoreReady {
             transaction: Some(transaction),
         }
         .encode();
@@ -425,7 +425,7 @@ fn run() -> Result<(), AnyError> {
                     .is_some(),
                 "changed identity replay did not end VM",
             )?;
-            expected_status = i64::from(crate::protocol::status::ACTIVATION_PROTOCOL);
+            expected_status = i64::from(crate::protocol::status::GUEST_RESTORE_PROTOCOL);
             println!("CHANGED_IDENTITY_REPLAY_FATAL");
         } else {
             connection.send(

@@ -6,7 +6,7 @@
 //! without a UTF-8 or DNS restriction. It is always encoded, even for an ASCII hostname:
 //! `box` is `nvx_hostname=626f78`, not the legacy sandbox's raw `nvx_hostname=box`.
 //! Consumers of this codec use the decoded bytes, not the legacy raw-hostname reader.
-//! Restores receive their view through an activation record instead.
+//! Restores receive their view through a guest-restore record instead.
 
 use super::cmdline::{self, Token};
 use super::{ProtocolError, violation};

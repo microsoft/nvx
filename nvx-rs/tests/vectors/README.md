@@ -11,15 +11,16 @@ yet breaks those peers. Only bytes that no codec produced catch such a change.
 | --- | --- |
 | [`nvxc-v1.txt`](nvxc-v1.txt) | Version 1 of the control protocol, which no peer speaks any longer: `NVXC` frames, which version 2 refuses, their `EXEC` and `MAPS` payloads, which version 2 carries unchanged, their features payloads, and `NVXS` records of NVX's host and guest |
 | [`nvxl-v1.txt`](nvxl-v1.txt) | Version 1 of the `NVXL` listener announcement |
-| [`activation-v2.txt`](activation-v2.txt) | Version 2 of the activation record of a layered root, and what Ready reports about an activation |
+| [`activation-v2.txt`](activation-v2.txt) | Version 2 of the guest-restore record of a layered root, and what Ready reports about a guest restore |
 | [`snapshot-key-v1.txt`](snapshot-key-v1.txt) | Version 1 of the canonical encoding of a snapshot's compatibility key, with its identity |
 | [`openvmm/`](openvmm) | OpenVMM's vectors and cases of the `NVXS` session, and the excerpts of its sources that define the kernel command-line tokens of its platform tier, unchanged |
 
 [4.4 Host-Guest Control Interface](../../../doc/design/4.4-host-guest-control-interface.md)
 and
 [3.5.4 Host-Local Access and Ingress](../../../doc/design/3.5-network.md#354-host-local-access-and-ingress)
-describe the protocols, and the documentation of `nvx::activation`, in
-[`src/activation/mod.rs`](../../src/activation/mod.rs), the activation record.
+describe the protocols, and the documentation of `nvx::guest_restore`, in
+[`src/guest_restore/mod.rs`](../../src/guest_restore/mod.rs), the guest-restore
+record.
 
 ## Line format
 
@@ -109,8 +110,9 @@ read the copies instead, and the ignored test `tests/openvmm_vectors.rs`
 compares the copies with the submodule's files, and finds each excerpt among
 the lines of its file. It also checks that the versions of OpenVMM's snapshot
 format, saved-state schema, time ABI, and restore packets in `nvx::contract` are
-the submodule's, and that the bound of an activation record,
-`nvx::activation::MAX_RECORD_BYTES`, is that of the submodule's restore packet.
+the submodule's, and that the bound of a guest-restore record,
+`nvx::guest_restore::MAX_RECORD_BYTES`, is that of the submodule's restore
+packet.
 The NVX CLI jobs, which check out the submodule, run it, and so does an OpenVMM
 pin promotion, from the repository's root:
 

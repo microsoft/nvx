@@ -7,17 +7,17 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::activation;
 use crate::gpt::Expected;
-use crate::guest::activation::{
-    self as guest_activation, Activation, ActivationAction, ActivationCause, ActivationFailure,
-    ActivationInput, ActivationState, Applied, ApplyError, RootTemplate,
-};
 use crate::guest::mappings::{Access, Mapper, MappingTable, Reserved, SourceRoot, TargetRoot};
+use crate::guest::restore::{
+    self, Applied, ApplyError, GuestRestore, GuestRestoreAction, GuestRestoreCause,
+    GuestRestoreFailure, GuestRestoreInput, GuestRestoreState, RootTemplate,
+};
 use crate::guest::root::{self, Assembly, Device, Root, ShareChild, ShareKind};
 use crate::guest::sys::FileDescriptor;
 use crate::guest::terminal::Terminal;
 use crate::guest::view;
+use crate::guest_restore;
 use crate::protocol::cmdline::{self, Token};
 use crate::protocol::export::{EXPORT_DIRECTORY, HostExport};
 use crate::protocol::root::{
@@ -322,11 +322,11 @@ fn share_child(value: &[u8]) -> Result<ShareChild> {
     })
 }
 
-/// One repaired activation and the space it owns across control epochs.
+/// One repaired clone's guest restore and the space it owns across control epochs.
 pub(crate) struct Restored {
-    pub(crate) activation: Activation,
+    pub(crate) activation: GuestRestore,
     payload: Option<Vec<u8>>,
-    /// The status of the class of an activate request that this refused before its activation
+    /// The status of the class of an activate request that this refused before its guest restore
     /// took the request, which ends the VM.
     refused: Option<u8>,
     _applied: Option<Applied>,
@@ -344,10 +344,10 @@ pub(crate) struct RestoreHandoff {
 }
 
 impl Restored {
-    /// Anchors the activation once, even when the next session attaches later.
+    /// Anchors the guest restore once, even when the next session attaches later.
     pub(crate) fn new(repaired: &crate::guest::snapshot::Repaired, now: Instant) -> Self {
         Self {
-            activation: Activation::new(repaired, Duration::from_secs(30), now),
+            activation: GuestRestore::new(repaired, Duration::from_secs(30), now),
             payload: None,
             refused: None,
             _applied: None,
@@ -356,9 +356,9 @@ impl Restored {
 
     /// Takes the first bootstrap reset or checks the same deadline on a replacement session.
     pub(crate) fn reset(&mut self, now: Instant) -> Result<()> {
-        if self.activation.state() == ActivationState::Bootstrap {
+        if self.activation.state() == GuestRestoreState::Bootstrap {
             self.activation
-                .input(now, ActivationInput::Reset)
+                .input(now, GuestRestoreInput::Reset)
                 .map_err(activation_error)?;
         } else {
             self.activation.tick(now).map_err(activation_error)?;
@@ -373,41 +373,41 @@ impl Restored {
         &mut self,
         payload: &[u8],
         now: Instant,
-    ) -> Result<(ActivationAction, protocol::workload::WorkloadIdentity)> {
+    ) -> Result<(GuestRestoreAction, protocol::workload::WorkloadIdentity)> {
         if self
             .payload
             .as_deref()
             .is_some_and(|accepted| accepted != payload)
         {
-            self.refused = Some(status::ACTIVATION_PROTOCOL);
+            self.refused = Some(status::GUEST_RESTORE_PROTOCOL);
             return Err(Error::unsupported(
                 "the activate request changed after acceptance",
             ));
         }
         let (_, workload) = protocol::decode_activate_payload(payload).map_err(|error| {
-            self.refused = Some(status::ACTIVATION_RECORD);
+            self.refused = Some(status::GUEST_RESTORE_RECORD);
             protocol_error(error)
         })?;
         let action = self
             .activation
-            .input(now, ActivationInput::Activate(&payload[9..]))
+            .input(now, GuestRestoreInput::Activate(&payload[9..]))
             .map_err(activation_error)?;
-        if matches!(action, ActivationAction::Apply(_)) {
+        if matches!(action, GuestRestoreAction::Apply(_)) {
             self.payload = Some(payload.to_vec());
         }
         Ok((action, workload))
     }
 
-    /// Returns the status with which nvx-init ends the VM once this activation has failed: that
-    /// of a request that this refused, or else the one that [`class_status`] selects for the
-    /// activation's failure, or `None` while it has not failed. An activation that is not ready
-    /// fails once its deadline has passed at `now`, which this reports, as the session reports
-    /// every other failure where it happens.
+    /// Returns the status with which nvx-init ends the VM once this guest restore has failed:
+    /// that of a request that this refused, or else the one that [`class_status`] selects for
+    /// the guest restore's failure, or `None` while it has not failed. A guest restore that is
+    /// not ready fails once its deadline has passed at `now`, which this reports, as the session
+    /// reports every other failure where it happens.
     pub(crate) fn failure_status(&mut self, now: Instant) -> Option<u8> {
         if self.refused.is_some() {
             return self.refused;
         }
-        let reported = self.activation.state() == ActivationState::Failed;
+        let reported = self.activation.state() == GuestRestoreState::Failed;
         let failure = self.activation.tick(now).err()?;
         if !reported {
             super::report_activation(&failure);
@@ -418,9 +418,9 @@ impl Restored {
     /// Applies and switches one restored space, retaining its root and handing over its mapper.
     pub(crate) fn apply(
         &mut self,
-        record: &activation::ActivationRecord,
+        record: &guest_restore::GuestRestoreRecord,
         workload: protocol::workload::WorkloadIdentity,
-        mut announce: impl FnMut(activation::Publication, Option<std::net::Ipv4Addr>) -> Result<()>,
+        mut announce: impl FnMut(guest_restore::Publication, Option<std::net::Ipv4Addr>) -> Result<()>,
     ) -> Result<RestoreHandoff> {
         let command_line = std::fs::read("/proc/cmdline").map_err(activation_error)?;
         let template = RootTemplate {
@@ -440,7 +440,7 @@ impl Restored {
         let (applied, handoff) = restore_in_order(
             self.activation.deadline(),
             || {
-                guest_activation::apply(record, &template, self.activation.deadline())
+                restore::apply(record, &template, self.activation.deadline())
                     .map_err(activation_error)
             },
             |applied| {
@@ -458,7 +458,7 @@ impl Restored {
                     (workload.uid, workload.gid),
                     workload.create_account,
                 )
-                .map_err(classed(status::ACTIVATION_WORKLOAD))?;
+                .map_err(classed(status::GUEST_RESTORE_WORKLOAD))?;
                 Ok(RestoreHandoff {
                     workload,
                     user,
@@ -475,9 +475,9 @@ impl Restored {
                 })
             },
             |applied| {
-                if applied.publication() == activation::Publication::Published {
+                if applied.publication() == guest_restore::Publication::Published {
                     announce(applied.publication(), applied.gateway())
-                        .map_err(classed(status::ACTIVATION_NETWORK))?;
+                        .map_err(classed(status::GUEST_RESTORE_NETWORK))?;
                 }
                 Ok(())
             },
@@ -489,55 +489,55 @@ impl Restored {
     }
 }
 
-/// Returns the status of `nvx::protocol::status` with which nvx-init ends the VM once its restored
-/// activation failed with `failure`, that of the failure's class:
+/// Returns the status of `nvx::protocol::status` with which nvx-init ends the VM once its
+/// clone's guest restore failed with `failure`, that of the failure's class:
 ///
-/// - [`ACTIVATION_DEADLINE`](status::ACTIVATION_DEADLINE): the deadline passed before the activation
-///   was ready;
-/// - [`ACTIVATION_PROTOCOL`](status::ACTIVATION_PROTOCOL): the host reset the session again, sent a
-///   request before the activation, or an Activate of another transaction, or one that changes
-///   the accepted record;
-/// - [`ACTIVATION_RECORD`](status::ACTIVATION_RECORD): the Activate's record does not decode,
+/// - [`GUEST_RESTORE_DEADLINE`](status::GUEST_RESTORE_DEADLINE): the deadline passed before the
+///   guest restore was ready;
+/// - [`GUEST_RESTORE_PROTOCOL`](status::GUEST_RESTORE_PROTOCOL): the host reset the session again,
+///   sent a request before the guest restore, or an Activate of another transaction, or one that
+///   changes the accepted record;
+/// - [`GUEST_RESTORE_RECORD`](status::GUEST_RESTORE_RECORD): the Activate's record does not decode,
 ///   breaks a limit, or is a cold boot's;
-/// - [`ACTIVATION_RESOURCES`](status::ACTIVATION_RESOURCES): the record expects other resources
-///   than the repaired VM has;
+/// - [`GUEST_RESTORE_RESOURCES`](status::GUEST_RESTORE_RESOURCES): the record expects other
+///   resources than the repaired VM has;
 /// - for a failed application of the record, that of its first cause that names a class: the
 ///   [`ApplyError`] of the record's application, whose GPT disk and root's assembly are the
-///   root's, [`ACTIVATION_ROOT`](status::ACTIVATION_ROOT), whose machine ID and view are the
-///   workload's, [`ACTIVATION_WORKLOAD`](status::ACTIVATION_WORKLOAD), whose host export is
-///   [`ACTIVATION_EXPORT`](status::ACTIVATION_EXPORT), and whose network settings are
-///   [`ACTIVATION_NETWORK`](status::ACTIVATION_NETWORK); the workload's account and hostname,
-///   `ACTIVATION_WORKLOAD`; the announcer of the network's listeners, `ACTIVATION_NETWORK`; or
-///   else the root's, `ACTIVATION_ROOT`, whose runtime file systems and switch the other steps
-///   are;
-/// - [`ACTIVATION_ORDER`](status::ACTIVATION_ORDER): nvx-init's own order completed an activation
-///   that did not run, or started the workload before the activation was ready.
-fn class_status(failure: &ActivationFailure) -> u8 {
+///   root's, [`GUEST_RESTORE_ROOT`](status::GUEST_RESTORE_ROOT), whose machine ID and view are the
+///   workload's, [`GUEST_RESTORE_WORKLOAD`](status::GUEST_RESTORE_WORKLOAD), whose host export is
+///   [`GUEST_RESTORE_EXPORT`](status::GUEST_RESTORE_EXPORT), and whose network settings are
+///   [`GUEST_RESTORE_NETWORK`](status::GUEST_RESTORE_NETWORK); the workload's account and hostname,
+///   `GUEST_RESTORE_WORKLOAD`; the announcer of the network's listeners, `GUEST_RESTORE_NETWORK`;
+///   or else the root's, `GUEST_RESTORE_ROOT`, whose runtime file systems and switch the other
+///   steps are;
+/// - [`GUEST_RESTORE_ORDER`](status::GUEST_RESTORE_ORDER): nvx-init's own order completed a guest
+///   restore that did not run, or started the workload before the guest restore was ready.
+fn class_status(failure: &GuestRestoreFailure) -> u8 {
     match failure.cause() {
-        ActivationCause::Expired => status::ACTIVATION_DEADLINE,
-        ActivationCause::Reset
-        | ActivationCause::Request
-        | ActivationCause::Transaction { .. }
-        | ActivationCause::Changed => status::ACTIVATION_PROTOCOL,
-        ActivationCause::Record(_) | ActivationCause::Cold => status::ACTIVATION_RECORD,
-        ActivationCause::Resources { .. } => status::ACTIVATION_RESOURCES,
-        ActivationCause::Failed(error) => {
+        GuestRestoreCause::Expired => status::GUEST_RESTORE_DEADLINE,
+        GuestRestoreCause::Reset
+        | GuestRestoreCause::Request
+        | GuestRestoreCause::Transaction { .. }
+        | GuestRestoreCause::Changed => status::GUEST_RESTORE_PROTOCOL,
+        GuestRestoreCause::Record(_) | GuestRestoreCause::Cold => status::GUEST_RESTORE_RECORD,
+        GuestRestoreCause::Resources { .. } => status::GUEST_RESTORE_RESOURCES,
+        GuestRestoreCause::Failed(error) => {
             let error: &(dyn std::error::Error + 'static) = &**error;
             std::iter::successors(Some(error), |error| error.source())
                 .find_map(|error| match error.downcast_ref::<ApplyError>() {
                     Some(ApplyError::Gpt(_) | ApplyError::Assembly(_)) => {
-                        Some(status::ACTIVATION_ROOT)
+                        Some(status::GUEST_RESTORE_ROOT)
                     }
-                    Some(ApplyError::View { .. }) => Some(status::ACTIVATION_WORKLOAD),
-                    Some(ApplyError::Export { .. }) => Some(status::ACTIVATION_EXPORT),
-                    Some(ApplyError::Network { .. }) => Some(status::ACTIVATION_NETWORK),
+                    Some(ApplyError::View { .. }) => Some(status::GUEST_RESTORE_WORKLOAD),
+                    Some(ApplyError::Export { .. }) => Some(status::GUEST_RESTORE_EXPORT),
+                    Some(ApplyError::Network { .. }) => Some(status::GUEST_RESTORE_NETWORK),
                     None => error
                         .downcast_ref::<Classed>()
                         .map(|classed| classed.status),
                 })
-                .unwrap_or(status::ACTIVATION_ROOT)
+                .unwrap_or(status::GUEST_RESTORE_ROOT)
         }
-        ActivationCause::Completion | ActivationCause::Start => status::ACTIVATION_ORDER,
+        GuestRestoreCause::Completion | GuestRestoreCause::Start => status::GUEST_RESTORE_ORDER,
     }
 }
 

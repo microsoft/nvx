@@ -1,7 +1,7 @@
-//! Application of an accepted activation record, without starting a process.
+//! Application of an accepted guest-restore record, without starting a process.
 //!
 //! This module is part of the guest's space, nvx-init's internal reference code, private to the
-//! crate, which applies the record that the [activation](crate::guest::activation#activation)
+//! crate, which applies the record that the [guest restore](crate::guest::restore#guest-restore)
 //! accepted, as the adapter's own space. The root owns the VM-wide view's binds; the caller owns
 //! ingress and the admission of its workloads.
 //!
@@ -12,8 +12,8 @@
 //! its own configuration, which its template captured, a [`RootTemplate`]: the runtime directory,
 //! the block devices, the host filesystem device's virtio-fs tag, the gateway of the template's
 //! NIC, if it has one, and how long the assembly waits for each block device, but never past the
-//! activation's deadline, so that the application ends by then. For a GPT disk, it first asks the
-//! kernel to reread the disk's partition table, once the distro device appeared, by the same
+//! guest restore's deadline, so that the application ends by then. For a GPT disk, it first asks
+//! the kernel to reread the disk's partition table, once the distro device appeared, by the same
 //! deadline: the kernel created the block devices of partitions from the template's placeholder,
 //! when it found it, and creates those of the clone's disk then, from the same read-only bytes
 //! that the assembly reads and checks, as at a cold boot. The upper must be fresh: the assembly
@@ -53,14 +53,14 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 #[cfg(doc)]
-use super::Activation;
-use crate::activation::{self, ActivationRecord, Configuration, Publication};
+use super::GuestRestore;
 use crate::gpt::Expected;
 use crate::guest::mappings::{Access, SourceRoot};
 use crate::guest::root::{self, Assembly, AssemblyError, Device, Root, TeardownError};
 #[cfg(doc)]
 use crate::guest::snapshot::Devices;
 use crate::guest::view::{self, MachineId};
+use crate::guest_restore::{self, Configuration, GuestRestoreRecord, Publication};
 use crate::protocol::root::{Journal, OverlayMode};
 use crate::protocol::view::View;
 
@@ -75,7 +75,7 @@ pub(crate) struct RootTemplate {
     pub(crate) distro: Device,
     /// The scratch device, unused by a record with a RAM upper.
     pub(crate) scratch: Device,
-    /// How long assembly waits for each device, never past the activation's deadline.
+    /// How long assembly waits for each device, never past the guest restore's deadline.
     pub(crate) timeout: Duration,
     /// The virtio-fs tag of the host filesystem device, as [`Devices::filesystem_tag`] names it.
     pub(crate) filesystem_tag: String,
@@ -160,7 +160,7 @@ impl fmt::Display for AppliedTeardownError {
 
 impl std::error::Error for AppliedTeardownError {}
 
-/// Applies the record accepted by a clone's [`Activation`], without starting any process.
+/// Applies the record accepted by a clone's [`GuestRestore`], without starting any process.
 ///
 /// Rereads a GPT image's partition table, assembles a fresh root, mounts the optional export,
 /// and applies the record's VM-wide view through [`view::apply`], with the record's DNS server.
@@ -171,7 +171,7 @@ impl std::error::Error for AppliedTeardownError {}
 /// require a gateway, but the caller, not this application, starts and supervises ingress.
 /// Each execution supplies its own identity; application reads no account database.
 pub(crate) fn apply(
-    record: &ActivationRecord,
+    record: &GuestRestoreRecord,
     template: &RootTemplate,
     deadline: Option<Instant>,
 ) -> Result<Applied, ApplyError> {
@@ -185,7 +185,7 @@ pub(crate) fn apply(
     })
 }
 
-/// Why applying an activation record failed.
+/// Why applying a guest-restore record failed.
 #[derive(Debug)]
 #[non_exhaustive]
 pub(crate) enum ApplyError {
@@ -259,7 +259,7 @@ impl std::error::Error for ApplyError {
     }
 }
 
-/// Why an activation's network settings could not be applied.
+/// Why a guest restore's network settings could not be applied.
 #[derive(Debug)]
 #[non_exhaustive]
 pub(crate) enum NetworkError {
@@ -406,7 +406,7 @@ type ActivatedBy<S> = Activated<<S as System>::Root, <S as System>::Export>;
 /// Applies an accepted record through the system seam.
 fn apply_with<S: System>(
     system: &mut S,
-    record: &ActivationRecord,
+    record: &GuestRestoreRecord,
     template: &RootTemplate,
     deadline: Option<Instant>,
 ) -> Result<ActivatedBy<S>, ApplyError> {
@@ -492,8 +492,8 @@ fn teardown_with<S: System>(
 /// Combines the record's root settings with the template's devices and runtime directory.
 fn assembly(template: &RootTemplate, configuration: &Configuration) -> Assembly {
     let image = match configuration.image {
-        activation::Image::Erofs { uuid } => root::Image::Erofs { uuid },
-        activation::Image::Gpt {
+        guest_restore::Image::Erofs { uuid } => root::Image::Erofs { uuid },
+        guest_restore::Image::Gpt {
             disk_guid,
             first_partition_bound,
         } => root::Image::Gpt {
@@ -505,10 +505,10 @@ fn assembly(template: &RootTemplate, configuration: &Configuration) -> Assembly 
         },
     };
     let upper = match configuration.upper {
-        activation::Upper::Tmpfs { max_memory_percent } => root::Upper::Tmpfs {
+        guest_restore::Upper::Tmpfs { max_memory_percent } => root::Upper::Tmpfs {
             max_memory_percent: Some(max_memory_percent),
         },
-        activation::Upper::Scratch { journal } => root::Upper::Scratch {
+        guest_restore::Upper::Scratch { journal } => root::Upper::Scratch {
             device: template.scratch,
             journal: match journal {
                 Journal::Allowed => root::Journal::Allowed,

@@ -1,4 +1,4 @@
-//! Templates and clones in the guest: the activation of each clone that a restore of a
+//! Templates and clones in the guest: the guest restore of each clone that a restore of a
 //! template's snapshot starts, once its capture repaired it, for a guest init or agent, whether
 //! or not it is PID 1.
 //!
@@ -47,7 +47,7 @@
 //!    unless the ABI is report-only, since the daemon enforces it.
 //!
 //! It returns the [`Repaired`] clone: its new VM generation ID, its number of online CPUs, the
-//! size of its online memory blocks, and when it acknowledged the restore, which an activation
+//! size of its online memory blocks, and when it acknowledged the restore, which a guest restore
 //! checks against the resources that it expects. The repair never brings a CPU online twice nor
 //! adds a memory block twice, and runs the reseed and the finish at most once. A failure is a
 //! [`RepairError`], which names the [`RepairStage`] that failed, its [`RepairCause`], and the
@@ -67,56 +67,58 @@
 //! [`RepairError::status`] tells. The time daemon enforces the ABI all the same: a violation that
 //! it reports stops the VM, unless the ABI is report-only.
 //!
-//! # Activation
+//! # Guest restore
 //!
 //! A repaired clone then takes its own configuration from the host, in one Activate, on a
-//! restricted control session, through an [`Activation`] of the [`Repaired`] clone. Activation
-//! holds no admission fence and makes no system call. It is independent of any framing: the adapter
-//! passes it what it receives on the clone's NVXS session, each an [`ActivationInput`], and does
-//! what each [`ActivationAction`] that it returns says. Its [`ActivationState`]s, in order, are:
+//! restricted control session, through a [`GuestRestore`] of the [`Repaired`] clone, which
+//! holds no admission fence and makes no system call. It is independent of any framing: the
+//! adapter passes it what it receives on the clone's NVXS session, each a [`GuestRestoreInput`],
+//! and does what each [`GuestRestoreAction`] that it returns says. Its [`GuestRestoreState`]s, in
+//! order, are:
 //!
 //! 1. the transport bootstrap: the clone awaits the reset that the restore queued for the session
 //!    that the guest attached before the capture, which the adapter acknowledges;
 //! 2. restricted: the session takes only flow control and one Activate, and anything else, a
-//!    request or another reset, fails the activation. The activation decodes the Activate's
-//!    record with [`ActivationRecord::decode`](crate::activation::ActivationRecord::decode), and
-//!    accepts it only as a clone's, with a restore section, that expects the CPU count and the
+//!    request or another reset, fails the guest restore. The guest restore decodes the Activate's
+//!    record with [`GuestRestoreRecord::decode`](crate::guest_restore::GuestRestoreRecord::decode),
+//!    and accepts it only as a clone's, with a restore section, that expects the CPU count and the
 //!    memory size that the repair reports, before anything has a side effect. An Activate whose
 //!    record the adapter's framing refused unread, as longer than a record can be, fails as a
 //!    record that long does;
 //! 3. activating: the adapter applies the accepted record in its own space, which
-//!    activates the root and the workload with its settings, as below, passes the activation
+//!    activates the root and the workload with its settings, as below, passes the guest restore
 //!    what the session received meanwhile, which came before Ready, then reports the result to
-//!    [`Activation::complete`];
-//! 4. ready, with the mappings pending: the activation completed and returned
+//!    [`GuestRestore::complete`];
+//! 4. ready, with the mappings pending: the guest restore completed and returned
 //!    what Ready reports beside the adapter's own identities, such as its build, a
-//!    [`ReadyActivation`](crate::activation::ReadyActivation): that the activation applied, with
-//!    the record's transaction ID. The host's mapping table, which the record announced, and the
-//!    start of the sandbox follow in the adapter's order, as after a cold boot;
-//! 5. started: the adapter's order started the sandbox, which [`Activation::start`] records.
+//!    [`GuestRestoreReady`](crate::guest_restore::GuestRestoreReady): that the guest restore
+//!    applied, with the record's transaction ID. The host's mapping table, which the record
+//!    announced, and the start of the sandbox follow in the adapter's order, as after a cold boot;
+//! 5. started: the adapter's order started the sandbox, which [`GuestRestore::start`] records.
 //!
 //! The host retries an Activate with the same transaction ID and a byte-equal record, and such a
-//! retry joins the activation while it runs, or gets its cached result afterwards, without
+//! retry joins the guest restore while it runs, or gets its cached result afterwards, without
 //! activating again, also in a later session, such as once the host's attachment ended, whose
 //! reset a ready clone takes. A changed record, another transaction, another reset before the
-//! clone is ready, and an activation that failed, wholly or partway, are final. The activation's
-//! deadline, which the caller chooses, starts at the restore's acknowledgement, or, for a restore
-//! that the host did not gate until one, when the caller makes the activation, and neither input
-//! nor retries extend it: the adapter wakes by it, and [ticks](Activation::tick) the activation
-//! then, however slowly its input trickles in, and whether or not its output drains. A failure
-//! is an [`ActivationFailure`], which names the [`ActivationState`] in which the activation failed
-//! and its [`ActivationCause`], and which every later call returns again. The activation never
-//! powers the VM off: the adapter reports the failure, and ends the VM.
+//! clone is ready, and a guest restore that failed, wholly or partway, are final. The guest
+//! restore's deadline, which the caller chooses, starts at the restore's acknowledgement, or, for
+//! a restore that the host did not gate until one, when the caller makes the guest restore, and
+//! neither input nor retries extend it: the adapter wakes by it, and
+//! [ticks](GuestRestore::tick) the guest restore then, however slowly its input trickles in, and
+//! whether or not its output drains. A failure is a [`GuestRestoreFailure`], which names the
+//! [`GuestRestoreState`] in which the guest restore failed and its [`GuestRestoreCause`], and
+//! which every later call returns again. The guest restore never powers the VM off: the adapter
+//! reports the failure, and ends the VM.
 //!
-//! The [guest-agent guidelines] give the order of a restore around the activation, from
-//! [`Activation::new`] to Ready, with nvx-init as the worked example, and the obligations of
-//! its caller, which the activation enforces none of.
+//! The [guest-agent guidelines] give the order of a restore around the guest restore, from
+//! [`GuestRestore::new`] to Ready, with nvx-init as the worked example, and the obligations of
+//! its caller, which the guest restore enforces none of.
 //!
 //! [guest-agent guidelines]: https://github.com/microsoft/nvx/blob/dev/doc/guest-agent-guidelines.md
 //!
 //! Each adapter applies the record in its own space, and the library applies none of it.
 //! nvx-init applies it with NVX's own space, internal reference code private to the crate, as a
-//! cold boot assembles its root, by the activation's deadline, and starts no process. The
+//! cold boot assembles its root, by the guest restore's deadline, and starts no process. The
 //! guidelines give the interface of that space and the rules that it keeps, which another init's
 //! space may adapt, under [Build the space].
 //!
@@ -127,7 +129,7 @@
 //! ```no_run
 //! use std::time::{Duration, Instant};
 //!
-//! use nvx::guest::activation::Activation;
+//! use nvx::guest::restore::GuestRestore;
 //! use nvx::guest::snapshot::{self, Captured, Devices, Disks, Disposition};
 //! use nvx::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
 //!
@@ -143,10 +145,10 @@
 //!         // A clone continues here, repaired: its memory activated, its kernel reseeded, and its
 //!         // restore acknowledged.
 //!         println!("{} CPUs, {} bytes of memory", repaired.cpus(), repaired.memory());
-//!         // Its fence-free activation takes the host's Activate: the agent drives it with
+//!         // Its fence-free guest restore takes the host's Activate: the agent drives it with
 //!         // what its control session receives and admits executions only after Ready.
-//!         let activation = Activation::new(&repaired, timeout, Instant::now());
-//!         println!("activate by {:?}", activation.deadline());
+//!         let restore = GuestRestore::new(&repaired, timeout, Instant::now());
+//!         println!("activate by {:?}", restore.deadline());
 //!     }
 //!     Ok(Captured::Continued) => println!("the VM continued without a restore"),
 //!     Err(failure) => match failure.disposition {
@@ -175,7 +177,7 @@
 //! start no thread, and they start no process and collect no child's status, except a
 //! report-only finish without a running time daemon, which runs the deferred time work itself,
 //! in a child that it waits for. They never power the VM off, so a caller that is not PID 1 keeps
-//! its own reaping, transport, and shutdown. The activation needs no privilege, and
+//! its own reaping, transport, and shutdown. The guest restore needs no privilege, and
 //! makes no system call and changes no admission fence: a record's application needs the
 //! privileges of the adapter's own space.
 
@@ -195,11 +197,11 @@ use super::snapshot::DeviceNumber;
 use super::sys;
 use super::time::{CaptureOutcome, CaptureRequest, PreCaptureError, TimeAbi, TimeError};
 
-pub use self::state::{
-    Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput,
-    ActivationState, MACHINE_ID_FILE, RESOLVER_FILE,
-};
 pub(crate) use self::state::{Applied, ApplyError, RootTemplate, apply};
+pub use self::state::{
+    GuestRestore, GuestRestoreAction, GuestRestoreCause, GuestRestoreFailure, GuestRestoreInput,
+    GuestRestoreState, MACHINE_ID_FILE, RESOLVER_FILE,
+};
 pub use super::snapshot::{MOUNT_TABLE_LIMIT, Mounted, Origin};
 pub use super::snapshot::{
     RangeFault, RepairCause, RepairError, RepairProgress, RepairStage, Repaired,

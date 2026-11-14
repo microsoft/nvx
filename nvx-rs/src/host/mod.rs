@@ -23,8 +23,8 @@
 //!   [`SnapshotKey`](snapshot::SnapshotKey), derived from a capture's context and
 //!   [`SnapshotManifest`](snapshot::SnapshotManifest), the strict manifest reader, and the
 //!   capture's public time and eligibility information.
-//! - [`restore`] orders caller-driven activation to Ready without I/O or a clock, and listens for
-//!   OpenVMM's restore-ready event from the held VM process.
+//! - [`restore`] orders a caller-driven guest restore to Ready without I/O or a clock, and listens
+//!   for OpenVMM's restore-ready event from the held VM process.
 //! - [`transport`] verifies a VM's endpoint and runs the host's role of the NVXS session for it,
 //!   for any application protocol, over a platform transport. [`nvxs`] retains compatibility
 //!   paths to it.

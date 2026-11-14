@@ -6,8 +6,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use proptest::prelude::*;
 
 use super::*;
-use crate::activation::tests::{configuration, maximal, restore};
-use crate::activation::{MAX_MAPPINGS, MAX_PROXY_ENDPOINT_BYTES};
+use crate::guest_restore::tests::{configuration, maximal, restore};
+use crate::guest_restore::{MAX_MAPPINGS, MAX_PROXY_ENDPOINT_BYTES};
 use crate::protocol::view::MAX_HOSTNAME_BYTES;
 
 mod vectors;
@@ -77,8 +77,8 @@ fn with_network() -> Vec<RawField> {
 }
 
 /// Returns what the decoder makes of `fields`.
-fn decode(fields: &[RawField]) -> Result<ActivationRecord, ActivationError> {
-    ActivationRecord::decode(&encoding(fields))
+fn decode(fields: &[RawField]) -> Result<GuestRestoreRecord, GuestRestoreError> {
+    GuestRestoreRecord::decode(&encoding(fields))
 }
 
 /// Returns the fields of an encoding, as tag and value, and checks the encoding's version, and
@@ -155,20 +155,20 @@ fn the_codes_of_the_choices_keep_their_values() {
 
 #[test]
 fn a_cold_record_encodes_to_the_bytes_of_its_definition() {
-    let record = ActivationRecord::new(None, configuration()).unwrap();
+    let record = GuestRestoreRecord::new(None, configuration()).unwrap();
     let bytes = encoding(&cold_fields());
     assert_eq!(record.encode(), bytes);
-    assert_eq!(ActivationRecord::decode(&bytes), Ok(record));
+    assert_eq!(GuestRestoreRecord::decode(&bytes), Ok(record));
 }
 
 #[test]
 fn a_clone_record_holds_its_restore_section_first() {
-    let record = ActivationRecord::new(Some(restore()), configuration()).unwrap();
+    let record = GuestRestoreRecord::new(Some(restore()), configuration()).unwrap();
     // Nothing besides the transaction ID belongs to the restore section.
     let section = [0x22; 16];
     let bytes = encoding(&with(cold_fields(), 0x01, &section));
     assert_eq!(record.encode(), bytes);
-    assert_eq!(ActivationRecord::decode(&bytes), Ok(record));
+    assert_eq!(GuestRestoreRecord::decode(&bytes), Ok(record));
 }
 
 #[test]
@@ -219,21 +219,21 @@ fn every_part_of_a_configuration_encodes_to_the_bytes_of_its_definition() {
         (0x61, vec![2]),
         (0x70, vec![4, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1]),
     ];
-    let record = ActivationRecord::new(None, configuration.clone()).unwrap();
+    let record = GuestRestoreRecord::new(None, configuration.clone()).unwrap();
     assert_eq!(record.encode(), encoding(&fields));
     assert_eq!(decode(&fields), Ok(record));
     // An IPv6 DNS server takes 16 bytes.
     let address = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0xa00, 1);
     configuration.network.as_mut().unwrap().dns = Some(IpAddr::V6(address));
     let fields = with(fields, 0x51, &address.octets());
-    let record = ActivationRecord::new(None, configuration).unwrap();
+    let record = GuestRestoreRecord::new(None, configuration).unwrap();
     assert_eq!(record.encode(), encoding(&fields));
     assert_eq!(decode(&fields), Ok(record));
 }
 
 #[test]
 fn a_maximal_record_holds_424_bytes_within_the_limit() {
-    let record = ActivationRecord::new(Some(restore()), maximal()).unwrap();
+    let record = GuestRestoreRecord::new(Some(restore()), maximal()).unwrap();
     let bytes = record.encode();
     assert_eq!(bytes.len(), 424);
     assert!(bytes.len() <= MAX_RECORD_BYTES);
@@ -244,38 +244,38 @@ fn a_maximal_record_holds_424_bytes_within_the_limit() {
             .collect::<Vec<_>>(),
         Field::ALL.map(Field::tag)
     );
-    assert_eq!(ActivationRecord::decode(&bytes), Ok(record));
+    assert_eq!(GuestRestoreRecord::decode(&bytes), Ok(record));
 }
 
 #[test]
 fn every_prefix_of_an_encoding_is_refused() {
     for record in [
-        ActivationRecord::new(None, configuration()).unwrap(),
-        ActivationRecord::new(Some(restore()), maximal()).unwrap(),
+        GuestRestoreRecord::new(None, configuration()).unwrap(),
+        GuestRestoreRecord::new(Some(restore()), maximal()).unwrap(),
     ] {
         let bytes = record.encode();
         for length in 0..bytes.len() {
-            let error = ActivationRecord::decode(&bytes[..length]).unwrap_err();
+            let error = GuestRestoreRecord::decode(&bytes[..length]).unwrap_err();
             assert!(
                 matches!(
                     error,
-                    ActivationError::Truncated | ActivationError::MissingField(_)
+                    GuestRestoreError::Truncated | GuestRestoreError::MissingField(_)
                 ),
                 "{length}: {error:?}"
             );
         }
     }
     assert_eq!(
-        ActivationRecord::decode(&[]),
-        Err(ActivationError::Truncated)
+        GuestRestoreRecord::decode(&[]),
+        Err(GuestRestoreError::Truncated)
     );
     assert_eq!(
-        ActivationRecord::decode(&[2]),
-        Err(ActivationError::Truncated)
+        GuestRestoreRecord::decode(&[2]),
+        Err(GuestRestoreError::Truncated)
     );
     assert_eq!(
-        ActivationRecord::decode(&[2, 0]),
-        Err(ActivationError::MissingField(Field::Image))
+        GuestRestoreRecord::decode(&[2, 0]),
+        Err(GuestRestoreError::MissingField(Field::Image))
     );
 }
 
@@ -284,19 +284,19 @@ fn bytes_past_the_limit_are_refused_before_anything_else() {
     let mut bytes = encoding(&cold_fields());
     bytes.resize(MAX_RECORD_BYTES + 1, 0);
     assert_eq!(
-        ActivationRecord::decode(&bytes),
-        Err(ActivationError::TooLong(MAX_RECORD_BYTES + 1))
+        GuestRestoreRecord::decode(&bytes),
+        Err(GuestRestoreError::TooLong(MAX_RECORD_BYTES + 1))
     );
     let mut bytes = vec![0xff; MAX_RECORD_BYTES * 2];
     assert_eq!(
-        ActivationRecord::decode(&bytes),
-        Err(ActivationError::TooLong(MAX_RECORD_BYTES * 2))
+        GuestRestoreRecord::decode(&bytes),
+        Err(GuestRestoreError::TooLong(MAX_RECORD_BYTES * 2))
     );
     // At the limit, the bytes are read: these hold another version.
     bytes.truncate(MAX_RECORD_BYTES);
     assert_eq!(
-        ActivationRecord::decode(&bytes),
-        Err(ActivationError::Version(0xffff))
+        GuestRestoreRecord::decode(&bytes),
+        Err(GuestRestoreError::Version(0xffff))
     );
 }
 
@@ -304,8 +304,8 @@ fn bytes_past_the_limit_are_refused_before_anything_else() {
 fn other_versions_are_refused() {
     for version in [0, 1, 0x0100, u16::MAX] {
         assert_eq!(
-            ActivationRecord::decode(&encoding_of(version, &cold_fields())),
-            Err(ActivationError::Version(version)),
+            GuestRestoreRecord::decode(&encoding_of(version, &cold_fields())),
+            Err(GuestRestoreError::Version(version)),
             "{version}"
         );
     }
@@ -319,7 +319,7 @@ fn unknown_fields_are_refused() {
         }
         assert_eq!(
             decode(&with(cold_fields(), tag, &[1])),
-            Err(ActivationError::UnknownField(tag)),
+            Err(GuestRestoreError::UnknownField(tag)),
             "{tag:#04x}"
         );
     }
@@ -333,7 +333,7 @@ fn repeated_fields_are_refused() {
         fields.insert(index + 1, (tag, value.clone()));
         assert_eq!(
             decode(&fields),
-            Err(ActivationError::DuplicateField(field)),
+            Err(GuestRestoreError::DuplicateField(field)),
             "{field}"
         );
         // A repetition after other fields is a repetition too.
@@ -341,7 +341,7 @@ fn repeated_fields_are_refused() {
         fields.push((tag, value));
         assert_eq!(
             decode(&fields),
-            Err(ActivationError::DuplicateField(field)),
+            Err(GuestRestoreError::DuplicateField(field)),
             "{field}"
         );
     }
@@ -356,7 +356,7 @@ fn fields_out_of_order_are_refused() {
         let field = Field::from_tag(swapped[index].0).unwrap();
         assert_eq!(
             decode(&swapped),
-            Err(ActivationError::FieldOrder(field)),
+            Err(GuestRestoreError::FieldOrder(field)),
             "{field}"
         );
     }
@@ -365,7 +365,7 @@ fn fields_out_of_order_are_refused() {
     fields.push((0x01, vec![0x22; 16]));
     assert_eq!(
         decode(&fields),
-        Err(ActivationError::FieldOrder(Field::Restore))
+        Err(GuestRestoreError::FieldOrder(Field::Restore))
     );
 }
 
@@ -374,12 +374,12 @@ fn a_dns_server_or_a_proxy_without_a_network_is_refused() {
     let dns = with(cold_fields(), 0x51, &[10, 0, 0, 1]);
     assert_eq!(
         decode(&dns),
-        Err(ActivationError::WithoutNetwork(Field::Dns))
+        Err(GuestRestoreError::WithoutNetwork(Field::Dns))
     );
     let proxy = with(cold_fields(), 0x52, b"http://10.0.0.1:3128");
     assert_eq!(
         decode(&proxy),
-        Err(ActivationError::WithoutNetwork(Field::Proxy))
+        Err(GuestRestoreError::WithoutNetwork(Field::Proxy))
     );
     // With the network, both are read.
     let fields = with(
@@ -455,7 +455,7 @@ fn values_of_another_length_are_refused() {
     for (field, fields, length) in cases {
         assert_eq!(
             decode(&fields),
-            Err(ActivationError::FieldLength(field, length)),
+            Err(GuestRestoreError::FieldLength(field, length)),
             "{field} of {length} bytes"
         );
     }
@@ -476,7 +476,7 @@ fn unknown_codes_are_refused() {
         for (field, fields) in cases {
             assert_eq!(
                 decode(&fields),
-                Err(ActivationError::FieldValue(field)),
+                Err(GuestRestoreError::FieldValue(field)),
                 "{field} of code {code}"
             );
         }
@@ -487,11 +487,11 @@ fn unknown_codes_are_refused() {
 fn a_mapping_count_of_zero_is_refused() {
     assert_eq!(
         decode(&with_export([0, 0])),
-        Err(ActivationError::FieldValue(Field::Mappings))
+        Err(GuestRestoreError::FieldValue(Field::Mappings))
     );
     assert_eq!(
         decode(&with(cold_fields(), 0x41, &[0, 0])),
-        Err(ActivationError::FieldValue(Field::Mappings))
+        Err(GuestRestoreError::FieldValue(Field::Mappings))
     );
 }
 
@@ -511,11 +511,14 @@ fn a_tmpfs_cap_round_trips_in_its_upper_field() {
 #[test]
 fn an_export_without_mappings_and_mappings_without_an_export_are_refused() {
     let export = without(with_export([1, 0]), 0x41);
-    assert_eq!(decode(&export), Err(ActivationError::ExportWithoutMappings));
+    assert_eq!(
+        decode(&export),
+        Err(GuestRestoreError::ExportWithoutMappings)
+    );
     let mappings = without(with_export([1, 0]), 0x40);
     assert_eq!(
         decode(&mappings),
-        Err(ActivationError::MappingsWithoutExport)
+        Err(GuestRestoreError::MappingsWithoutExport)
     );
     for (count, mappings) in [([1, 0], 1), ([0, 0x10], MAX_MAPPINGS)] {
         let record = decode(&with_export(count)).unwrap();
@@ -527,16 +530,16 @@ fn an_export_without_mappings_and_mappings_without_an_export_are_refused() {
 fn values_past_a_limit_are_refused() {
     assert_eq!(
         decode(&with_export([1, 0x10])),
-        Err(ActivationError::TooManyMappings(MAX_MAPPINGS + 1))
+        Err(GuestRestoreError::TooManyMappings(MAX_MAPPINGS + 1))
     );
     assert_eq!(
         decode(&with_export([0xff, 0xff])),
-        Err(ActivationError::TooManyMappings(usize::from(u16::MAX)))
+        Err(GuestRestoreError::TooManyMappings(usize::from(u16::MAX)))
     );
     let hostname = vec![b'a'; MAX_HOSTNAME_BYTES + 1];
     assert_eq!(
         decode(&with(cold_fields(), 0x60, &hostname)),
-        Err(ActivationError::Hostname)
+        Err(GuestRestoreError::Hostname)
     );
     let hostname = vec![b'a'; MAX_HOSTNAME_BYTES];
     decode(&with(cold_fields(), 0x60, &hostname)).unwrap();
@@ -549,52 +552,52 @@ fn values_that_a_configuration_refuses_are_refused() {
     let cases = [
         (
             with(cold_fields(), 0x10, &[&[2][..], &[0; 8]].concat()),
-            ActivationError::FirstPartitionBound,
+            GuestRestoreError::FirstPartitionBound,
         ),
         (
             with(cold_fields(), 0x20, &[1, 0]),
-            ActivationError::TmpfsMemoryPercent(0),
+            GuestRestoreError::TmpfsMemoryPercent(0),
         ),
         (
             with(cold_fields(), 0x20, &[1, 91]),
-            ActivationError::TmpfsMemoryPercent(91),
+            GuestRestoreError::TmpfsMemoryPercent(91),
         ),
         (
             with(cold_fields(), 0x20, &[1, 255]),
-            ActivationError::TmpfsMemoryPercent(255),
+            GuestRestoreError::TmpfsMemoryPercent(255),
         ),
         (
             with(with_network(), 0x52, b""),
-            ActivationError::ProxyEndpoint,
+            GuestRestoreError::ProxyEndpoint,
         ),
         (
             with(with_network(), 0x52, b"http://user:secret@10.0.0.1:3128"),
-            ActivationError::ProxyEndpoint,
+            GuestRestoreError::ProxyEndpoint,
         ),
         (
             with(with_network(), 0x52, b"http://10.0.0.1:3128 "),
-            ActivationError::ProxyEndpoint,
+            GuestRestoreError::ProxyEndpoint,
         ),
         (
             with(with_network(), 0x52, b"http://proxy\xff:3128"),
-            ActivationError::ProxyEndpoint,
+            GuestRestoreError::ProxyEndpoint,
         ),
         (
             with(with_network(), 0x52, "http://\u{e1}:3128".as_bytes()),
-            ActivationError::ProxyEndpoint,
+            GuestRestoreError::ProxyEndpoint,
         ),
-        (with(cold_fields(), 0x60, b""), ActivationError::Hostname),
+        (with(cold_fields(), 0x60, b""), GuestRestoreError::Hostname),
         (
             with(cold_fields(), 0x60, b"nvx\0sandbox"),
-            ActivationError::Hostname,
+            GuestRestoreError::Hostname,
         ),
         (
             with(cold_fields(), 0x70, &[0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]),
-            ActivationError::Cpus,
+            GuestRestoreError::Cpus,
         ),
         (
             with(cold_fields(), 0x70, &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-            ActivationError::Memory,
+            GuestRestoreError::Memory,
         ),
     ];
     for (fields, error) in cases {
@@ -608,7 +611,7 @@ fn missing_fields_are_refused() {
         let field = Field::from_tag(tag).unwrap();
         assert_eq!(
             decode(&without(cold_fields(), tag)),
-            Err(ActivationError::MissingField(field)),
+            Err(GuestRestoreError::MissingField(field)),
             "{field}"
         );
     }
@@ -620,45 +623,45 @@ fn refusals_follow_the_order_of_their_rules() {
     let mut bytes = encoding(&cold_fields());
     bytes.extend_from_slice(&[0xff, 1]);
     assert_eq!(
-        ActivationRecord::decode(&bytes),
-        Err(ActivationError::UnknownField(0xff))
+        GuestRestoreRecord::decode(&bytes),
+        Err(GuestRestoreError::UnknownField(0xff))
     );
     // A field whose tag and length end past the bytes is truncated, whatever its tag.
     bytes.truncate(bytes.len() - 1);
     assert_eq!(
-        ActivationRecord::decode(&bytes),
-        Err(ActivationError::Truncated)
+        GuestRestoreRecord::decode(&bytes),
+        Err(GuestRestoreError::Truncated)
     );
     // A known field whose value ends past the bytes is truncated.
     let mut bytes = encoding(&without(cold_fields(), 0x70));
     bytes.extend_from_slice(&[0x70, 12, 1, 0, 0, 0]);
     assert_eq!(
-        ActivationRecord::decode(&bytes),
-        Err(ActivationError::Truncated)
+        GuestRestoreRecord::decode(&bytes),
+        Err(GuestRestoreError::Truncated)
     );
     // A field's own refusal comes before the record's missing fields.
     let fields = with(without(cold_fields(), 0x10), 0x61, &[3]);
     assert_eq!(
         decode(&fields),
-        Err(ActivationError::FieldValue(Field::MachineId))
+        Err(GuestRestoreError::FieldValue(Field::MachineId))
     );
     // Of the missing fields, the first in the order of the tags.
     let fields = without(without(cold_fields(), 0x70), 0x20);
     assert_eq!(
         decode(&fields),
-        Err(ActivationError::MissingField(Field::Upper))
+        Err(GuestRestoreError::MissingField(Field::Upper))
     );
     // A missing field comes before a DNS server without a network.
     let fields = with(without(cold_fields(), 0x60), 0x51, &[10, 0, 0, 1]);
     assert_eq!(
         decode(&fields),
-        Err(ActivationError::MissingField(Field::Hostname))
+        Err(GuestRestoreError::MissingField(Field::Hostname))
     );
     // A DNS server without a network comes before a broken limit.
     let fields = with(with(cold_fields(), 0x51, &[10, 0, 0, 1]), 0x70, &[0; 12]);
     assert_eq!(
         decode(&fields),
-        Err(ActivationError::WithoutNetwork(Field::Dns))
+        Err(GuestRestoreError::WithoutNetwork(Field::Dns))
     );
 }
 
@@ -666,43 +669,43 @@ fn refusals_follow_the_order_of_their_rules() {
 fn refusals_name_the_rule_that_they_break() {
     for (error, message) in [
         (
-            ActivationError::TooLong(1025),
+            GuestRestoreError::TooLong(1025),
             "the record's 1025 bytes are more than the 1024 that a record holds",
         ),
         (
-            ActivationError::Truncated,
+            GuestRestoreError::Truncated,
             "the record ends inside its version or one of its fields",
         ),
         (
-            ActivationError::Version(1),
+            GuestRestoreError::Version(1),
             "the record's version is 1, not 2",
         ),
         (
-            ActivationError::UnknownField(0x0f),
+            GuestRestoreError::UnknownField(0x0f),
             "the record holds a field of the unknown tag 0x0f",
         ),
         (
-            ActivationError::DuplicateField(Field::Hostname),
+            GuestRestoreError::DuplicateField(Field::Hostname),
             "the record repeats its hostname field",
         ),
         (
-            ActivationError::FieldOrder(Field::Upper),
+            GuestRestoreError::FieldOrder(Field::Upper),
             "the record's upper field is out of order",
         ),
         (
-            ActivationError::FieldLength(Field::Dns, 5),
+            GuestRestoreError::FieldLength(Field::Dns, 5),
             "the record's DNS field holds 5 bytes, which its value never takes",
         ),
         (
-            ActivationError::FieldValue(Field::MachineId),
+            GuestRestoreError::FieldValue(Field::MachineId),
             "the record's machine ID field holds a value that no record takes",
         ),
         (
-            ActivationError::MissingField(Field::Resources),
+            GuestRestoreError::MissingField(Field::Resources),
             "the record has no resources field",
         ),
         (
-            ActivationError::WithoutNetwork(Field::Proxy),
+            GuestRestoreError::WithoutNetwork(Field::Proxy),
             "the record has a proxy field but no network",
         ),
     ] {
@@ -790,12 +793,13 @@ fn configurations() -> impl Strategy<Value = Configuration> {
 }
 
 /// Returns arbitrary valid records, of cold boots and of clones.
-fn records() -> impl Strategy<Value = ActivationRecord> {
+fn records() -> impl Strategy<Value = GuestRestoreRecord> {
     let restore = prop::option::of(any::<[u8; 16]>().prop_map(|transaction| RestoreSection {
         transaction: TransactionId::from_bytes(transaction),
     }));
-    (restore, configurations())
-        .prop_map(|(restore, configuration)| ActivationRecord::new(restore, configuration).unwrap())
+    (restore, configurations()).prop_map(|(restore, configuration)| {
+        GuestRestoreRecord::new(restore, configuration).unwrap()
+    })
 }
 
 /// Returns bytes that a decoder may meet: arbitrary bytes, arbitrary fields after the version,
@@ -848,15 +852,15 @@ proptest! {
         let bytes = record.encode();
         prop_assert!(bytes.len() <= MAX_RECORD_BYTES);
         fields_of(&bytes);
-        prop_assert_eq!(ActivationRecord::decode(&bytes), Ok(record));
-        prop_assert!(ActivationRecord::decode(&bytes[..cut.index(bytes.len())]).is_err());
+        prop_assert_eq!(GuestRestoreRecord::decode(&bytes), Ok(record));
+        prop_assert!(GuestRestoreRecord::decode(&bytes[..cut.index(bytes.len())]).is_err());
     }
 
     /// The decoder returns, never panics, on any bytes, and accepts only the one encoding of the
     /// record that it returns.
     #[test]
     fn the_decoder_accepts_only_canonical_encodings(bytes in inputs()) {
-        if let Ok(record) = ActivationRecord::decode(&bytes) {
+        if let Ok(record) = GuestRestoreRecord::decode(&bytes) {
             prop_assert_eq!(record.encode(), bytes);
         }
     }

@@ -44,8 +44,8 @@
 //!
 //! Each of these four must match the pinned OpenVMM's, which the ignored test
 //! `tests/openvmm_vectors.rs` checks in the jobs that check out the OpenVMM submodule. The key
-//! also holds the version of the activation contract,
-//! [`activation::VERSION`](crate::activation::VERSION), through which each clone receives the
+//! also holds the version of the guest-restore contract,
+//! [`guest_restore::VERSION`](crate::guest_restore::VERSION), through which each clone receives the
 //! settings of its own launch.
 
 /// OpenVMM microVM ABI version this crate drives.
@@ -88,7 +88,7 @@ pub const TIME_ABI_VERSION: u64 = 1;
 /// Version 1 carries no host UTC: the guest takes a time sample to set its clock. A restore that
 /// replaces the network policy of a snapshot without a tier flags the packet's network: the new
 /// policy's DNS server, and whether the guest announces its listeners under it. A platform
-/// restore may flag an activation record, which then ends the packet: the settings of the clone's
+/// restore may flag a guest-restore record, which then ends the packet: the settings of the clone's
 /// own launch, which its launcher supplied. The flag was a reserved bit, which a guest that
 /// predates it refuses, so a packet that sets it fails on such a guest, and a packet that does not
 /// keeps the version's layout and meaning.

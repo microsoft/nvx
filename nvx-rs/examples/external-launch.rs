@@ -4,7 +4,7 @@
 //! Run the compiled example with a backend, OpenVMM, kernel, initramfs, new VM directory, and
 //! the three artifact SHA-256 digests from their installation metadata, in that order.
 //! Append SNAPSHOT-DIR IMAGE.erofs for a restore-ready demonstration: it verifies the ready
-//! event, then intentionally stops and verifies the VM's exit without driving guest activation.
+//! event, then intentionally stops and verifies the VM's exit without driving a guest restore.
 //! The snapshot must have captured a disconnected boot console, as `nvx-rs snapshot capture`
 //! does.
 //!

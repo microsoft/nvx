@@ -14,7 +14,7 @@
 //!   which repairs each clone that a restore of the snapshot starts before it returns: it
 //!   activates the restore's memory target, reseeds the kernel's random number generator, and
 //!   finishes the restore, with its acknowledgement.
-//! - On x86-64, `activation`: the activation through which each repaired clone then takes its own
+//! - On x86-64, `restore`: the guest restore through which each repaired clone then takes its own
 //!   configuration from the host, in one Activate on a restricted control session.
 //!
 //! The library builds no space and runs no execution: the guest's space, the root that an init
@@ -23,7 +23,7 @@
 //! capture, and a restore, with nvx-init, NVX's PID 1 for layered roots, as the worked example;
 //! the library enforces none of it. The contracts that every space reads stay public: the mapping
 //! values and [`MappingTable`](mappings::MappingTable), and the tokens and records of
-//! [`protocol`](crate::protocol) and [`activation`](crate::activation).
+//! [`protocol`](crate::protocol) and [`guest_restore`](crate::guest_restore).
 //!
 //! [guest-agent guidelines]: https://github.com/microsoft/nvx/blob/dev/doc/guest-agent-guidelines.md
 //!
@@ -63,8 +63,6 @@ mod kernel_text;
 
 pub use generation::GenerationId;
 
-#[cfg(target_arch = "x86_64")]
-pub mod activation;
 #[doc(hidden)]
 pub mod console_pending;
 #[cfg(target_arch = "x86_64")]
@@ -88,6 +86,8 @@ pub mod mappings;
 pub mod mmio_write;
 pub mod nvxs;
 pub mod reseed;
+#[cfg(target_arch = "x86_64")]
+pub mod restore;
 pub(crate) mod root;
 #[cfg(target_arch = "x86_64")]
 pub mod snapshot;

@@ -74,8 +74,8 @@ const PACKET_KNOWN_FLAGS: u8 = 0x3f;
 /// aligned to the guest's four-byte reads.
 pub(crate) const PACKET_ACTIVATION_LENGTH_SIZE: usize = 4;
 /// The most bytes of a packet's activation record: as many as a record's encoding holds,
-/// [`MAX_RECORD_BYTES`](crate::activation::MAX_RECORD_BYTES).
-pub(crate) const PACKET_ACTIVATION_MAX: usize = crate::activation::MAX_RECORD_BYTES;
+/// [`MAX_RECORD_BYTES`](crate::guest_restore::MAX_RECORD_BYTES).
+pub(crate) const PACKET_ACTIVATION_MAX: usize = crate::guest_restore::MAX_RECORD_BYTES;
 /// The online VP counts that a restore packet may give.
 const PACKET_ONLINE_VP_COUNTS: [u8; 5] = [0, 1, 2, 4, 8];
 /// The time-sample version.

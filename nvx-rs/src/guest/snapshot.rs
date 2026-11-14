@@ -8,7 +8,7 @@
 //! The caller keeps its executions still. After answering the capture request, its transport
 //! sends nothing until this call returns. After [`Captured::Continued`] or a failure with
 //! [`Disposition::Resumed`], it reports on the same session. After [`Captured::Restored`], it
-//! takes RESET and calls `GuestConnection::acknowledge(window)` before receiving activation.
+//! takes RESET and calls `GuestConnection::acknowledge(window)` before the guest restore.
 //!
 //! On a restore, the existing repair runs before this call returns: it checks the restore and
 //! its seed, activates its processor target and then its memory target, reseeds the kernel's
@@ -25,15 +25,15 @@
 //! ```no_run
 //! use std::time::{Duration, Instant};
 //!
-//! use nvx::guest::activation::Activation;
+//! use nvx::guest::restore::GuestRestore;
 //! use nvx::guest::snapshot::{self, Captured, Devices, Disks, Disposition};
 //!
 //! /// What the caller does next; it sent nothing on its transport while `capture` ran.
 //! enum Next {
 //!     /// Thaw the workspaces in reverse, where they exist, and report on the same session.
 //!     Report,
-//!     /// Take the session's reset and acknowledge it, then drive this activation to Ready.
-//!     Activate(Activation),
+//!     /// Take the session's reset and acknowledge it, then drive this guest restore to Ready.
+//!     Activate(GuestRestore),
 //!     /// Start nothing, and power the VM off with this status.
 //!     PowerOff(u8),
 //! }
@@ -42,7 +42,7 @@
 //!     match snapshot::capture(devices, Disks::Fresh, deadline) {
 //!         Ok(Captured::Continued) => Next::Report,
 //!         Ok(Captured::Restored(repaired)) => {
-//!             Next::Activate(Activation::new(&repaired, timeout, Instant::now()))
+//!             Next::Activate(GuestRestore::new(&repaired, timeout, Instant::now()))
 //!         }
 //!         Err(failure) => match failure.disposition {
 //!             Disposition::Resumed => Next::Report,
@@ -74,7 +74,7 @@ use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use super::activation::{self, System};
+use super::restore::{System, capture_system};
 use super::sys;
 use super::time::{CaptureOutcome, CaptureRequest, PreCaptureError, ScratchPolicy, TimeError};
 use crate::guest::parse::parse_decimal;
@@ -83,7 +83,7 @@ use crate::protocol::status;
 pub use self::repair::{
     RangeFault, RepairCause, RepairError, RepairProgress, RepairStage, Repaired,
 };
-pub use super::activation::{CaptureCause, CaptureStage};
+pub use super::restore::{CaptureCause, CaptureStage};
 
 /// The most bytes of the caller's mount table that capture accepts: 1 MiB.
 pub const MOUNT_TABLE_LIMIT: usize = 1 << 20;
@@ -225,7 +225,7 @@ pub fn capture(
     })?;
     before(CaptureStage::Mounts, deadline)?;
     capture_with(
-        activation::capture_system(Some(deadline)).as_mut(),
+        capture_system(Some(deadline)).as_mut(),
         devices,
         deadline,
         repair::live_system(),

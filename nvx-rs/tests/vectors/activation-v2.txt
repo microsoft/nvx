@@ -1,5 +1,6 @@
-# Conformance vectors of version 2 of the activation record of a layered root, and of what Ready
-# reports about an activation. The documentation of nvx::activation defines the encodings.
+# Conformance vectors of version 2 of the guest-restore record of a layered root, and of what
+# Ready reports about a guest restore. The documentation of nvx::guest_restore defines the
+# encodings.
 # README.md describes the line format and the rules that the vectors follow.
 #
 # RECORD|NAME|BYTES|RESTORE|IMAGE|UPPER|OVERLAY|EXPORT|NETWORK|HOSTNAME|MACHINE_ID|CPUS|MEMORY

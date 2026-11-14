@@ -26,42 +26,45 @@ fn transaction() -> TransactionId {
 #[test]
 fn the_lengths_keep_their_values() {
     assert_eq!(
-        (ReadyActivation::COLD_LEN, ReadyActivation::CLONE_LEN),
+        (GuestRestoreReady::COLD_LEN, GuestRestoreReady::CLONE_LEN),
         (1, 17)
     );
 }
 
 #[test]
 fn a_cold_boot_reports_a_zero() {
-    let ready = ReadyActivation { transaction: None };
+    let ready = GuestRestoreReady { transaction: None };
     assert_eq!(ready.encode(), [0]);
-    assert_eq!(ready.encode().len(), ReadyActivation::COLD_LEN);
-    assert_eq!(ReadyActivation::decode(&[0]), Ok(ready));
+    assert_eq!(ready.encode().len(), GuestRestoreReady::COLD_LEN);
+    assert_eq!(GuestRestoreReady::decode(&[0]), Ok(ready));
 }
 
 #[test]
 fn a_clone_reports_a_one_then_its_transaction() {
-    let ready = ReadyActivation {
+    let ready = GuestRestoreReady {
         transaction: Some(transaction()),
     };
     let bytes = [&[1][..], transaction().as_bytes()].concat();
     assert_eq!(ready.encode(), bytes);
-    assert_eq!(bytes.len(), ReadyActivation::CLONE_LEN);
-    assert_eq!(ReadyActivation::decode(&bytes), Ok(ready));
+    assert_eq!(bytes.len(), GuestRestoreReady::CLONE_LEN);
+    assert_eq!(GuestRestoreReady::decode(&bytes), Ok(ready));
 }
 
 #[test]
 fn every_other_form_is_refused() {
-    assert_eq!(ReadyActivation::decode(&[]), Err(ActivationError::Ready));
+    assert_eq!(
+        GuestRestoreReady::decode(&[]),
+        Err(GuestRestoreError::Ready)
+    );
     for flag in u8::MIN..=u8::MAX {
         for tail in 0..=TransactionId::LEN + 1 {
             let bytes = [&[flag][..], &transaction().as_bytes().repeat(2)[..tail]].concat();
-            let decoded = ReadyActivation::decode(&bytes);
+            let decoded = GuestRestoreReady::decode(&bytes);
             match (flag, tail) {
                 (0, 0) | (1, TransactionId::LEN) => assert!(decoded.is_ok()),
                 _ => assert_eq!(
                     decoded,
-                    Err(ActivationError::Ready),
+                    Err(GuestRestoreError::Ready),
                     "flag {flag}, then {tail} bytes"
                 ),
             }
@@ -72,9 +75,9 @@ fn every_other_form_is_refused() {
 #[test]
 fn ready_reports_a_clone_s_transaction_and_nothing_more_for_a_cold_boot() {
     for name in READY {
-        let record = ActivationRecord::decode(&vector(ACTIVATION_V2, "RECORD", name).bytes)
+        let record = GuestRestoreRecord::decode(&vector(ACTIVATION_V2, "RECORD", name).bytes)
             .unwrap_or_else(|error| panic!("RECORD {name}: {error}"));
-        let ready = ReadyActivation::of(&record);
+        let ready = GuestRestoreReady::of(&record);
         assert_eq!(
             ready.transaction,
             record.restore().map(|restore| restore.transaction),
@@ -95,10 +98,10 @@ fn ready_activations_match_their_vectors() {
         let transaction =
             values.optional(|values| TransactionId::from_bytes(values.bytes().try_into().unwrap()));
         drop(values);
-        let ready = ReadyActivation { transaction };
+        let ready = GuestRestoreReady { transaction };
         assert_eq!(ready.encode(), vector.bytes, "{}", vector.name);
         assert_eq!(
-            ReadyActivation::decode(&vector.bytes),
+            GuestRestoreReady::decode(&vector.bytes),
             Ok(ready),
             "{}",
             vector.name
@@ -119,8 +122,8 @@ fn invalid_ready_activations_are_refused() {
     ];
     for vector in of_kind(ACTIVATION_V2, "INVALID_READY", &names) {
         assert_eq!(
-            ReadyActivation::decode(&vector.bytes),
-            Err(ActivationError::Ready),
+            GuestRestoreReady::decode(&vector.bytes),
+            Err(GuestRestoreError::Ready),
             "{}",
             vector.name
         );
@@ -130,7 +133,7 @@ fn invalid_ready_activations_are_refused() {
 #[test]
 fn the_refusal_names_the_rule() {
     assert_eq!(
-        ActivationError::Ready.to_string(),
+        GuestRestoreError::Ready.to_string(),
         "what Ready reports is neither 0, nor 1 followed by a transaction ID"
     );
 }
@@ -152,21 +155,21 @@ proptest! {
         cut in any::<prop::sample::Index>(),
         extra in any::<u8>(),
     ) {
-        let ready = ReadyActivation {
+        let ready = GuestRestoreReady {
             transaction: transaction.map(TransactionId::from_bytes),
         };
         let mut bytes = ready.encode();
-        prop_assert_eq!(ReadyActivation::decode(&bytes), Ok(ready));
-        prop_assert!(ReadyActivation::decode(&bytes[..cut.index(bytes.len())]).is_err());
+        prop_assert_eq!(GuestRestoreReady::decode(&bytes), Ok(ready));
+        prop_assert!(GuestRestoreReady::decode(&bytes[..cut.index(bytes.len())]).is_err());
         bytes.push(extra);
-        prop_assert!(ReadyActivation::decode(&bytes).is_err());
+        prop_assert!(GuestRestoreReady::decode(&bytes).is_err());
     }
 
     /// The decoder returns, never panics, on any bytes, and accepts only the one encoding of the
     /// activation that it returns.
     #[test]
     fn the_decoder_accepts_only_canonical_encodings(bytes in inputs()) {
-        if let Ok(ready) = ReadyActivation::decode(&bytes) {
+        if let Ok(ready) = GuestRestoreReady::decode(&bytes) {
             prop_assert_eq!(ready.encode(), bytes);
         }
     }

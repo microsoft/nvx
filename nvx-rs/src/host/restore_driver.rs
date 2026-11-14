@@ -5,7 +5,7 @@
 //! workload, whose standard input it ends at once, and returns the live [`ControlSession`], of
 //! NVXC version 2, in which the workload's events arrive. The restore-ready client and the
 //! control server must be the VM's held process. Each session carries the same activate message:
-//! the activation record and the workload's identity. A lost session is replaced, in at most
+//! the guest-restore record and the workload's identity. A lost session is replaced, in at most
 //! [`MAX_SESSIONS`] sessions in all.
 //!
 //! Every pending accept, read and write races the step's deadline, the caller's [`Cancel`] and
@@ -38,7 +38,7 @@ use super::session::{self, ControlSession, SessionError};
 use super::transport::Transport;
 use super::vm::{Capability, Launched, VmOutputs};
 use crate::ErrorKind;
-use crate::activation::ActivationRecord;
+use crate::guest_restore::GuestRestoreRecord;
 use crate::protocol::{self, HostMap, workload::WorkloadIdentity};
 
 /// How long a restore may take, from the driver's start to the guest's Ready.
@@ -111,7 +111,7 @@ impl std::error::Error for ControlRestoreError {
 /// them.
 pub(crate) fn restore(
     launched: &mut Launched,
-    record: &ActivationRecord,
+    record: &GuestRestoreRecord,
     workload: &Workload<'_>,
     maps: &[HostMap],
     cancel: &Cancel,
@@ -159,7 +159,7 @@ fn activate(
     mut listener: Option<&mut ReadyListener>,
     outputs: &VmOutputs,
     capability: &Capability,
-    record: &ActivationRecord,
+    record: &GuestRestoreRecord,
     workload: &Workload<'_>,
     deadline: Instant,
 ) -> Result<ControlSession, ControlRestoreError> {
@@ -221,7 +221,7 @@ fn activate(
 fn start(
     watch: &Watch<'_>,
     mut session: ControlSession,
-    record: &ActivationRecord,
+    record: &GuestRestoreRecord,
     workload: &Workload<'_>,
     maps: &[HostMap],
 ) -> Result<ControlSession, ControlRestoreError> {

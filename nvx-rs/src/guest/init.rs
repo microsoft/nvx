@@ -32,10 +32,10 @@
 //!   data to its storage, with `sync`, and then stops the VM through OpenVMM's control port with a
 //!   status: 0 after a host `STOP` or `SIGTERM`; after its restored activation failed, which a
 //!   deadline that passed before Ready and an activate request that it refused also are, the
-//!   status of `nvx::protocol::status` of the failure's class, such as 54, `ACTIVATION_ROOT`, for
-//!   a root that does not assemble over its upper, or 51, `ACTIVATION_PROTOCOL`, for an activate
-//!   request that changes the accepted one, which an `NVX-INIT-ACTIVATION:` line on the console
-//!   names first; or 125 after another failure, which an
+//!   status of `nvx::protocol::status` of the failure's class, such as 54, `GUEST_RESTORE_ROOT`,
+//!   for a root that does not assemble over its upper, or 51, `GUEST_RESTORE_PROTOCOL`, for an
+//!   activate request that changes the accepted one, which an `NVX-INIT-ACTIVATION:` line on the
+//!   console names first; or 125 after another failure, which an
 //!   `NVX-INIT-ERROR:` line on the console names first.
 //!
 //! Outside PID 1, `nvx-init` changes nothing: it fails with status 2 and a message.
@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus as ProcessStatus};
 use std::time::{Duration, Instant};
 
-use crate::activation::Publication;
+use crate::guest_restore::Publication;
 use crate::protocol::cmdline;
 use crate::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
 
@@ -328,7 +328,7 @@ pub(crate) fn report_capture(failure: impl std::fmt::Display) {
     );
 }
 
-/// Reports an activation failure before PID 1 ends the VM.
+/// Reports a guest restore failure before PID 1 ends the VM.
 pub(crate) fn report_activation(failure: impl std::fmt::Display) {
     write_console(
         kernel::CONSOLE_DEVICE,

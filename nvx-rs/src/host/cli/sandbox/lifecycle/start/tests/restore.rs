@@ -8,7 +8,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::super::*;
-use crate::activation::{ActivationRecord, Image, Network, Publication, ReadyActivation, Upper};
+use crate::guest_restore::{
+    GuestRestoreReady, GuestRestoreRecord, Image, Network, Publication, Upper,
+};
 use crate::host::artifacts::{
     ArtifactDir, Guest, INITRAMFS_PROVENANCE_NAME, KERNEL_PROVENANCE_NAME, OPENVMM_PROVENANCE_NAME,
 };
@@ -62,9 +64,9 @@ fn name() -> Name {
 
 /// Returns the activation record of an activate request's `payload`, after the workload's UID,
 /// GID, and account flag.
-fn activation(payload: &[u8]) -> (ActivationRecord, (u32, u32, u8)) {
+fn activation(payload: &[u8]) -> (GuestRestoreRecord, (u32, u32, u8)) {
     let id = |at: usize| u32::from_le_bytes(payload[at..at + 4].try_into().unwrap());
-    let record = ActivationRecord::decode(&payload[9..]).unwrap();
+    let record = GuestRestoreRecord::decode(&payload[9..]).unwrap();
     (record, (id(0), id(4), payload[8]))
 }
 
@@ -1010,7 +1012,7 @@ fn serve(stream: &mut (impl Read + Write), capability: &[u8], epoch: u64, recipe
                     Some("unusable-root" | "unreadable-report")
                 ) =>
             {
-                let code = status::ACTIVATION_ROOT;
+                let code = status::GUEST_RESTORE_ROOT;
                 let report = json!({
                     "schema_version": 1,
                     "outcome": {"operation": "managed", "category": "guest-exit", "status_code": code},
@@ -1024,7 +1026,7 @@ fn serve(stream: &mut (impl Read + Write), capability: &[u8], epoch: u64, recipe
                 std::process::exit(code.into());
             }
             ACTIVATE => vec![ready(
-                &ReadyActivation::of(&activation(&payload).0).encode(),
+                &GuestRestoreReady::of(&activation(&payload).0).encode(),
             )],
             MAPS => vec![ready(&[])],
             // The workload reads its standard input until its end, which follows the Start,

@@ -15,9 +15,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::guest::GenerationId;
-use crate::guest::activation::{at, live_abi};
 use crate::guest::parse::{parse_decimal, parse_hexadecimal};
 use crate::guest::reseed::{self, ReseedError, Seed};
+use crate::guest::restore::{at, live_abi};
 use crate::guest::root::Paths;
 use crate::guest::sys;
 use crate::guest::time::{CpuSet, MemoryRange, Restore, RestoreFinish, TimeAbi, TimeError};

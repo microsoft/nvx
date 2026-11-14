@@ -73,10 +73,10 @@ pub(super) fn restore() -> RestoreSection {
 }
 
 /// Returns the cold boot's record of the tests' configuration once `change` has changed it.
-fn admit(change: impl FnOnce(&mut Configuration)) -> Result<ActivationRecord, ActivationError> {
+fn admit(change: impl FnOnce(&mut Configuration)) -> Result<GuestRestoreRecord, GuestRestoreError> {
     let mut configuration = configuration();
     change(&mut configuration);
-    ActivationRecord::new(None, configuration)
+    GuestRestoreRecord::new(None, configuration)
 }
 
 /// Gives a configuration an export of `mappings` mappings.
@@ -109,11 +109,11 @@ fn the_limits_keep_their_values() {
 
 #[test]
 fn a_cold_boot_record_has_no_restore_section_and_a_clone_record_has_one() {
-    let cold = ActivationRecord::new(None, configuration()).unwrap();
+    let cold = GuestRestoreRecord::new(None, configuration()).unwrap();
     assert_eq!(cold.version(), VERSION);
     assert_eq!(cold.restore(), None);
     assert_eq!(cold.configuration(), &configuration());
-    let clone = ActivationRecord::new(Some(restore()), configuration()).unwrap();
+    let clone = GuestRestoreRecord::new(Some(restore()), configuration()).unwrap();
     assert_eq!(clone.version(), VERSION);
     assert_eq!(clone.restore(), Some(&restore()));
     assert_eq!(clone.configuration(), &configuration());
@@ -124,7 +124,7 @@ fn a_cold_boot_record_has_no_restore_section_and_a_clone_record_has_one() {
 fn a_configuration_with_every_part_at_its_limit_is_admitted() {
     let configuration = maximal();
     assert_eq!(configuration.check(), Ok(()));
-    let record = ActivationRecord::new(Some(restore()), configuration.clone()).unwrap();
+    let record = GuestRestoreRecord::new(Some(restore()), configuration.clone()).unwrap();
     assert_eq!(record.configuration(), &configuration);
 }
 
@@ -137,7 +137,7 @@ fn mappings_are_admitted_up_to_the_limit_with_an_export() {
     for mappings in [MAX_MAPPINGS + 1, usize::MAX] {
         assert_eq!(
             admit(|configuration| export(configuration, mappings)),
-            Err(ActivationError::TooManyMappings(mappings))
+            Err(GuestRestoreError::TooManyMappings(mappings))
         );
     }
 }
@@ -146,7 +146,7 @@ fn mappings_are_admitted_up_to_the_limit_with_an_export() {
 fn an_export_without_mappings_is_refused() {
     assert_eq!(
         admit(|configuration| export(configuration, 0)),
-        Err(ActivationError::ExportWithoutMappings)
+        Err(GuestRestoreError::ExportWithoutMappings)
     );
 }
 
@@ -155,7 +155,7 @@ fn mappings_without_an_export_are_refused() {
     for mappings in [1, MAX_MAPPINGS, MAX_MAPPINGS + 1] {
         assert_eq!(
             admit(|configuration| configuration.mappings = mappings),
-            Err(ActivationError::MappingsWithoutExport),
+            Err(GuestRestoreError::MappingsWithoutExport),
             "{mappings}"
         );
     }
@@ -179,7 +179,7 @@ fn hostnames_are_admitted_up_to_the_limit_without_a_nul() {
     ] {
         assert_eq!(
             admit(|configuration| configuration.view.hostname = hostname.clone()),
-            Err(ActivationError::Hostname),
+            Err(GuestRestoreError::Hostname),
             "{hostname:?}"
         );
     }
@@ -212,7 +212,7 @@ fn proxy_endpoints_are_admitted_up_to_the_limit_without_credentials() {
     ] {
         assert_eq!(
             admit(|configuration| proxy(configuration, &endpoint)),
-            Err(ActivationError::ProxyEndpoint),
+            Err(GuestRestoreError::ProxyEndpoint),
             "{endpoint:?}"
         );
     }
@@ -236,7 +236,7 @@ fn a_tmpfs_cap_is_admitted_only_from_1_to_90_percent() {
             admit(|configuration| {
                 configuration.upper = Upper::Tmpfs { max_memory_percent };
             }),
-            Err(ActivationError::TmpfsMemoryPercent(max_memory_percent)),
+            Err(GuestRestoreError::TmpfsMemoryPercent(max_memory_percent)),
             "{max_memory_percent}"
         );
     }
@@ -246,11 +246,11 @@ fn a_tmpfs_cap_is_admitted_only_from_1_to_90_percent() {
 fn zero_resources_are_refused() {
     assert_eq!(
         admit(|configuration| configuration.resources.cpus = 0),
-        Err(ActivationError::Cpus)
+        Err(GuestRestoreError::Cpus)
     );
     assert_eq!(
         admit(|configuration| configuration.resources.memory = 0),
-        Err(ActivationError::Memory)
+        Err(GuestRestoreError::Memory)
     );
 }
 
@@ -265,7 +265,7 @@ fn a_zero_first_partition_bound_is_refused() {
     }
     assert_eq!(
         admit(|configuration| configuration.image = gpt(0)),
-        Err(ActivationError::FirstPartitionBound)
+        Err(GuestRestoreError::FirstPartitionBound)
     );
 }
 
@@ -273,29 +273,29 @@ fn a_zero_first_partition_bound_is_refused() {
 fn the_first_broken_limit_is_reported_in_the_order_of_the_fields() {
     let mut configuration = maximal();
     configuration.resources.memory = 0;
-    assert_eq!(configuration.check(), Err(ActivationError::Memory));
+    assert_eq!(configuration.check(), Err(GuestRestoreError::Memory));
     configuration.resources.cpus = 0;
-    assert_eq!(configuration.check(), Err(ActivationError::Cpus));
+    assert_eq!(configuration.check(), Err(GuestRestoreError::Cpus));
     configuration.view.hostname.clear();
-    assert_eq!(configuration.check(), Err(ActivationError::Hostname));
+    assert_eq!(configuration.check(), Err(GuestRestoreError::Hostname));
     configuration.network.as_mut().unwrap().proxy = Some(String::new());
-    assert_eq!(configuration.check(), Err(ActivationError::ProxyEndpoint));
+    assert_eq!(configuration.check(), Err(GuestRestoreError::ProxyEndpoint));
     configuration.mappings = MAX_MAPPINGS + 1;
     assert_eq!(
         configuration.check(),
-        Err(ActivationError::TooManyMappings(MAX_MAPPINGS + 1))
+        Err(GuestRestoreError::TooManyMappings(MAX_MAPPINGS + 1))
     );
     configuration.mappings = 0;
     assert_eq!(
         configuration.check(),
-        Err(ActivationError::ExportWithoutMappings)
+        Err(GuestRestoreError::ExportWithoutMappings)
     );
     configuration.upper = Upper::Tmpfs {
         max_memory_percent: 0,
     };
     assert_eq!(
         configuration.check(),
-        Err(ActivationError::TmpfsMemoryPercent(0))
+        Err(GuestRestoreError::TmpfsMemoryPercent(0))
     );
     configuration.image = Image::Gpt {
         disk_guid: None,
@@ -303,7 +303,7 @@ fn the_first_broken_limit_is_reported_in_the_order_of_the_fields() {
     };
     assert_eq!(
         configuration.check(),
-        Err(ActivationError::FirstPartitionBound)
+        Err(GuestRestoreError::FirstPartitionBound)
     );
 }
 
@@ -311,35 +311,35 @@ fn the_first_broken_limit_is_reported_in_the_order_of_the_fields() {
 fn errors_name_the_limits_that_they_break() {
     for (error, message) in [
         (
-            ActivationError::FirstPartitionBound,
+            GuestRestoreError::FirstPartitionBound,
             "the bound of a GPT disk's first partition is 0",
         ),
         (
-            ActivationError::TmpfsMemoryPercent(91),
+            GuestRestoreError::TmpfsMemoryPercent(91),
             "the tmpfs cap of 91% of the VM's memory is not 1 to 90%",
         ),
         (
-            ActivationError::ExportWithoutMappings,
+            GuestRestoreError::ExportWithoutMappings,
             "the export has no mappings",
         ),
         (
-            ActivationError::MappingsWithoutExport,
+            GuestRestoreError::MappingsWithoutExport,
             "the mappings have no export",
         ),
         (
-            ActivationError::TooManyMappings(4097),
+            GuestRestoreError::TooManyMappings(4097),
             "4097 mappings are more than the 4096 that a record announces",
         ),
         (
-            ActivationError::ProxyEndpoint,
+            GuestRestoreError::ProxyEndpoint,
             "the proxy endpoint is not 1 to 255 visible ASCII characters without an @",
         ),
         (
-            ActivationError::Hostname,
+            GuestRestoreError::Hostname,
             "the hostname is not 1 to 64 bytes without a NUL",
         ),
-        (ActivationError::Cpus, "the expected CPU count is 0"),
-        (ActivationError::Memory, "the expected memory size is 0"),
+        (GuestRestoreError::Cpus, "the expected CPU count is 0"),
+        (GuestRestoreError::Memory, "the expected memory size is 0"),
     ] {
         assert_eq!(error.to_string(), message);
     }
@@ -375,8 +375,8 @@ fn an_image_reports_its_format_and_expected_identity() {
 
 #[test]
 fn ready_reports_a_transaction_only_for_a_clone() {
-    let cold = ReadyActivation { transaction: None };
-    let clone = ReadyActivation {
+    let cold = GuestRestoreReady { transaction: None };
+    let clone = GuestRestoreReady {
         transaction: Some(restore().transaction),
     };
     assert_eq!(

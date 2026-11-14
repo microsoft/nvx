@@ -1,9 +1,9 @@
 # Guest-agent guidelines
 
-`nvx` parses the contracts, captures the guest and drives a restore's
-activation, but builds no space and runs no executions: each init agent does
-both, and `nvx` enforces none of the obligations below. The one exception is
-the time daemon, which `TimeAbi::start_daemon` forks.
+`nvx` parses the contracts, captures the guest and drives a guest restore, but
+builds no space and runs no executions: each init agent does both, and `nvx`
+enforces none of the obligations below. The one exception is the time daemon,
+which `TimeAbi::start_daemon` forks.
 
 These guidelines give an init agent's contract: how it builds its guest's
 space, runs its executions, coordinates a capture with its host and completes
@@ -14,28 +14,27 @@ and [Isolation and Resource Model](design/4.3-isolation-and-resource-model.md)
 give the architecture and its boundaries, and the rustdoc of
 [`guest`](../nvx-rs/src/guest/mod.rs),
 [`guest::snapshot`](../nvx-rs/src/guest/snapshot.rs),
-[`guest::activation`](../nvx-rs/src/guest/activation.rs) and
-[`activation`](../nvx-rs/src/activation/mod.rs) the public mechanisms. The
-[`guest-workflows`](../nvx-rs/examples/guest-workflows.rs) example compiles an
-init's calls of them, through the public API alone: its time daemon, its
-control session, a capture, a restore's activation and the host's mapping
-table.
+[`guest::restore`](../nvx-rs/src/guest/restore.rs) and
+[`guest_restore`](../nvx-rs/src/guest_restore/mod.rs) the public mechanisms.
+The [`guest-workflows`](../nvx-rs/examples/guest-workflows.rs) example compiles
+an init's calls of them, through the public API alone: its time daemon, its
+control session, a capture, a guest restore and the host's mapping table.
 
 ## Ownership
 
 An init reads the public boot contracts at a cold boot, or a restore's
-activation record, and builds the VM's one space from them. It owns the root,
-with its runtime mounts and view binds; the mapper and the descriptors of the
-mappings' source and target roots; its helpers; its control session; and
+guest-restore record, and builds the VM's one space from them. It owns the
+root, with its runtime mounts and view binds; the mapper and the descriptors of
+the mappings' source and target roots; its helpers; its control session; and
 every execution. It keeps each owner for as long as what it owns is in use: a
-reset of the transport is neither a new root nor a new activation.
+reset of the transport is neither a new root nor a new guest restore.
 
 The library's calls leave all of this to the init:
 
 - `guest::snapshot::capture` stops no execution, drives no transport and never
   powers the VM off: it returns how the capture ended, or a failure with its
   disposition.
-- `guest::activation::Activation` holds no workspace or admission fence, makes
+- `guest::restore::GuestRestore` holds no workspace or admission fence, makes
   no system call and starts no process: the init feeds it what its session
   receives, and does what it returns.
 - `TimeAbi::start_daemon` forks the time daemon, which the init supervises as
@@ -60,7 +59,7 @@ nvx-init's time daemon runs for the VM's life.
 
 NVX's space is internal reference code that nvx-init implements, not public
 API: the modules that hold it, `guest::root`, `guest::view`, `guest::gpt`, the
-mapper of `guest::mappings`, and `guest::activation::apply` with its types,
+mapper of `guest::mappings`, and `guest::restore::apply` with its types,
 are private to the crate. Another init builds its own space, or adapts this
 code; it builds on no space module of `nvx`.
 
@@ -73,7 +72,7 @@ The space's inputs are public contracts:
   whose targets `protocol::share` restricts; the DNS server, which
   `protocol::cmdline::dns_server` reads; and the number of host mappings,
   which `MappingTable::announced` reads.
-- After a restore, the accepted `activation::ActivationRecord` holds the
+- After a restore, the accepted `guest_restore::GuestRestoreRecord` holds the
   launch's settings, and the configuration that the snapshot captured, the
   same for each restore, holds the assembly's fixed inputs: the runtime
   directory, the block devices, the host filesystem device's tag, the NIC's
@@ -130,7 +129,7 @@ These excerpts are nvx-init's unit test
 [`the_reference_space_steps_compile`](../nvx-rs/src/guest/init/boot/tests.rs),
 which compiles them without mounting anything or switching the developer
 host's root. They use the space's own names, of `root`, `view`, the mapper and
-`activation::{apply, Applied, RootTemplate}`, which are NVX's internal
+`restore::{apply, Applied, RootTemplate}`, which are NVX's internal
 reference code, not public API. A cold boot's space takes these steps in the
 order of [`boot::cold_boot`](../nvx-rs/src/guest/init/boot.rs), which also
 mounts the live shares of NVX's CLI after the runtime file systems:
@@ -141,11 +140,11 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::time::Instant;
 
-use crate::activation::ActivationRecord;
-use crate::guest::activation::{self, Applied, RootTemplate};
 use crate::guest::mappings::{Mapper, Reserved, SourceRoot, TargetRoot};
+use crate::guest::restore::{self, Applied, RootTemplate};
 use crate::guest::root::{self, Assembly, Root};
 use crate::guest::view;
+use crate::guest_restore::GuestRestoreRecord;
 use crate::protocol::export::HostExport;
 use crate::protocol::view::View;
 
@@ -175,11 +174,11 @@ announcer when the record publishes the workload's listeners, and switches:
 
 ```rust
 // A restore, as `boot::Restored::apply` builds it from the accepted record.
-let _restored = |record: &ActivationRecord,
+let _restored = |record: &GuestRestoreRecord,
                  template: &RootTemplate,
                  deadline: Option<Instant>|
  -> Result<(Applied, Mapper, Option<SourceRoot>), Box<dyn Error>> {
-    let mut applied = activation::apply(record, template, deadline)?;
+    let mut applied = restore::apply(record, template, deadline)?;
     applied
         .root_mut()
         .mount_runtime(Some(Path::new("/run/nvx/time")))?;
@@ -329,9 +328,9 @@ When the call returns:
 - After `Captured::Restored`, it takes the session's reset and attaches again:
   the restored broker has a fresh instance, restarts at its first epoch with a
   reset queued, and ignores the guest's records until the guest acknowledges
-  it. nvx-init waits for the reset, within the activation's deadline, fails on
-  anything else, and acknowledges it with `GuestConnection::acknowledge`
-  before it takes the activation.
+  it. nvx-init waits for the reset, within the guest restore's deadline, fails
+  on anything else, and acknowledges it with `GuestConnection::acknowledge`
+  before it takes the guest-restore record.
 
 The guidelines quote this excerpt of the
 [`guest::snapshot`](../nvx-rs/src/guest/snapshot.rs) rustdoc, where it
@@ -340,15 +339,15 @@ compiles as a public-API doc test:
 ```rust
 use std::time::{Duration, Instant};
 
-use nvx::guest::activation::Activation;
+use nvx::guest::restore::GuestRestore;
 use nvx::guest::snapshot::{self, Captured, Devices, Disks, Disposition};
 
 /// What the caller does next; it sent nothing on its transport while `capture` ran.
 enum Next {
     /// Thaw the workspaces in reverse, where they exist, and report on the same session.
     Report,
-    /// Take the session's reset and acknowledge it, then drive this activation to Ready.
-    Activate(Activation),
+    /// Take the session's reset and acknowledge it, then drive this guest restore to Ready.
+    Activate(GuestRestore),
     /// Start nothing, and power the VM off with this status.
     PowerOff(u8),
 }
@@ -357,7 +356,7 @@ fn capture(devices: &Devices, deadline: Instant, timeout: Duration) -> Next {
     match snapshot::capture(devices, Disks::Fresh, deadline) {
         Ok(Captured::Continued) => Next::Report,
         Ok(Captured::Restored(repaired)) => {
-            Next::Activate(Activation::new(&repaired, timeout, Instant::now()))
+            Next::Activate(GuestRestore::new(&repaired, timeout, Instant::now()))
         }
         Err(failure) => match failure.disposition {
             Disposition::Resumed => Next::Report,
@@ -376,15 +375,15 @@ fn capture(devices: &Devices, deadline: Instant, timeout: Duration) -> Next {
 `capture` repairs a restored guest before it returns
 `Captured::Restored(repaired)`: it activates the restore's processor and
 memory targets, reseeds the kernel's random number generator, and finishes
-the restore with its acknowledgement. The init makes one `Activation` of that
+the restore with its acknowledgement. The init makes one `GuestRestore` of that
 `Repaired`, whose deadline counts from the repair's acknowledgement, or from
 when the init makes it for a restore that the host did not gate on one, and
 never from a session or a retry. A restore then takes these steps, in this
 order:
 
-1. `Activation::new`. nvx-init makes it when `capture` returns, with a
+1. `GuestRestore::new`. nvx-init makes it when `capture` returns, with a
    30-second timeout, takes the session's reset, and accepts the activate
-   request: the activation decodes its record, and checks its restore section
+   request: the guest restore decodes its record, and checks its restore section
    and the CPUs and memory that the repair reports, before anything has a side
    effect.
 2. The space: the application of the record, with this restore's own network
@@ -397,27 +396,27 @@ order:
    it at a cold boot. nvx-init also tells the record's proxy to the executions
    that keep their default environment.
 3. `after_restore()` on each workspace, where workspaces exist.
-4. `Activation::complete`, with the result.
+4. `GuestRestore::complete`, with the result.
 5. The thaw of the workspaces, in reverse, where they exist.
 6. Ready. nvx-init answers the activate request, and each retry that joined
    it, with Ready, which carries the record's transaction ID.
 
 nvx-init has no workspace, so it skips the third and fifth steps, not the
 order around them. It keeps the applied root, the mapper and its
-`MappingTable`, the export's source root, its helpers and the `Activation`
+`MappingTable`, the export's source root, its helpers and the `GuestRestore`
 for the VM's life. The host then sends the mapping table, unless it is empty,
 and nvx-init records its first execution, once the table is complete, with
-`Activation::start`.
+`GuestRestore::start`.
 
-A byte-equal retry joins the activation in progress, or gets its cached
+A byte-equal retry joins the guest restore in progress, or gets its cached
 Ready, on a later session too, and never applies or switches again: nvx-init
-keeps the activation and its original deadline across sessions, and a reset
+keeps the guest restore and its original deadline across sessions, and a reset
 on a later session only checks that deadline. A changed request, another
 transaction, and an application that failed, wholly or partly, are final.
 
 The packet with which a platform restore resumes the Fresh boot carries no
-network settings, and `capture` refuses one that does: the activation record
-gives the restore its network.
+network settings, and `capture` refuses one that does: the guest-restore
+record gives the restore its network.
 
 ## Failures
 
@@ -427,11 +426,11 @@ gives the restore its network.
   and powers the VM off with that status: the library returns the disposition
   rather than power the VM off itself. nvx-init writes the failure to the
   console, then syncs and powers off with the status.
-- A failed activation, wholly or partly applied, never reports Ready: the init
-  reports the failure and ends the VM. nvx-init writes it to the console,
+- A failed guest restore, wholly or partly applied, never reports Ready: the
+  init reports the failure and ends the VM. nvx-init writes it to the console,
   after `NVX-INIT-ACTIVATION:`, and powers off with the status of the
   failure's class, which `nvx::protocol::status` defines, such as 54,
-  `ACTIVATION_ROOT`, for a root that does not assemble over its upper, from
+  `GUEST_RESTORE_ROOT`, for a root that does not assemble over its upper, from
   which the host attributes the failure.
 
 ## Replay

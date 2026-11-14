@@ -18,7 +18,7 @@ use super::{
     CONFIG_NAME, Found, ProvisionConfig, connect, find_vm, mismatched, require_config, running_vm,
     runtime_for,
 };
-use crate::activation::{ActivationRecord, TransactionId};
+use crate::guest_restore::{GuestRestoreRecord, TransactionId};
 use crate::host::cli::artifacts::locate;
 use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
 use crate::host::cli::download::Hold;
@@ -237,7 +237,7 @@ fn launch_locked(
     let activation = match &snapshot {
         Some(_) => Some(
             prepared
-                .activation_record(TransactionId::from_bytes(random_bytes()?))
+                .guest_restore_record(TransactionId::from_bytes(random_bytes()?))
                 .map_err(error_with_cause)?,
         ),
         None => None,
@@ -425,7 +425,7 @@ fn check_ready(saved: &SavedVm, runtime: &Runtime, timeout: f64) -> Result<Sessi
     Ok(session)
 }
 
-/// Restores the guest of `launched` from its activation `record` and runs the workload of
+/// Restores the guest of `launched` from its guest-restore `record` and runs the workload of
 /// `restore` after the mapping table `maps`, through the blocking restore driver, within its own
 /// budgets, which `timeout` seconds and Ctrl-C cut short, then forwards the workload's output
 /// until it exits, which it must do with status 0 in those `timeout` seconds. Another status ends
@@ -434,7 +434,7 @@ fn check_ready(saved: &SavedVm, runtime: &Runtime, timeout: f64) -> Result<Sessi
 /// and keeps the restore driver's error in `failure`.
 fn restore_guest(
     launched: &mut Launched,
-    record: &ActivationRecord,
+    record: &GuestRestoreRecord,
     restore: &Restore<'_>,
     maps: &[HostMap],
     timeout: f64,

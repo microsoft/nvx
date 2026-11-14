@@ -19,7 +19,7 @@ use super::{ProtocolError, violation};
     feature = "cli",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
-use crate::activation::ActivationRecord;
+use crate::guest_restore::GuestRestoreRecord;
 
 #[cfg(any(
     feature = "cli",
@@ -213,13 +213,13 @@ pub(crate) fn decode_capture_payload(payload: &[u8]) -> Result<bool, ProtocolErr
     }
 }
 
-/// Encodes the persistent workload identity, then the existing activation record.
+/// Encodes the persistent workload identity, then the existing guest-restore record.
 ///
 /// The prefix is the UID and GID as little-endian `u32`s, then the account-creation flag as
-/// exactly 0 or 1. The remainder is the activation record's unchanged encoding.
+/// exactly 0 or 1. The remainder is the guest-restore record's unchanged encoding.
 #[cfg(feature = "cli")]
 pub(crate) fn encode_activate_payload(
-    record: &ActivationRecord,
+    record: &GuestRestoreRecord,
     workload: &WorkloadIdentity,
 ) -> Result<Vec<u8>, ProtocolError> {
     check_workload_identity(workload)?;
@@ -232,11 +232,11 @@ pub(crate) fn encode_activate_payload(
     Ok(payload)
 }
 
-/// Decodes the persistent workload identity and the activation record that follows it.
+/// Decodes the persistent workload identity and the guest-restore record that follows it.
 #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) fn decode_activate_payload(
     payload: &[u8],
-) -> Result<(ActivationRecord, WorkloadIdentity), ProtocolError> {
+) -> Result<(GuestRestoreRecord, WorkloadIdentity), ProtocolError> {
     let prefix = payload
         .get(..9)
         .ok_or_else(|| violation("the activate request is truncated"))?;
@@ -254,7 +254,7 @@ pub(crate) fn decode_activate_payload(
         },
     };
     check_workload_identity(&workload)?;
-    let record = ActivationRecord::decode(&payload[9..])
+    let record = GuestRestoreRecord::decode(&payload[9..])
         .map_err(|error| violation(format!("invalid activation record: {error}")))?;
     Ok((record, workload))
 }

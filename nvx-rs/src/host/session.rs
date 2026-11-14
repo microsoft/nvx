@@ -191,20 +191,20 @@ impl ControlSession {
         self.acknowledged(Frame::Capture(&payload), "capture", deadline)
     }
 
-    /// Sends nvx-init's activate message, whose `payload` carries a restore's activation record
-    /// and workload identity, and returns the activation that the guest's Ready reports.
+    /// Sends nvx-init's activate message, whose `payload` carries a restore's guest-restore record
+    /// and workload identity, and returns the guest restore that the guest's Ready reports.
     pub(crate) fn activate(
         &mut self,
         payload: &[u8],
         deadline: Instant,
-    ) -> Result<crate::activation::ReadyActivation, SessionError> {
+    ) -> Result<crate::guest_restore::GuestRestoreReady, SessionError> {
         let request_id = request_id()?;
         self.send(request_id, Frame::Activate(payload), Some(deadline))?;
         let reply = self.reply(request_id, Some(deadline))?;
         let ready = ready(Frame::decode(&reply)?.1)?.ok_or_else(|| {
             SessionError::Protocol("the guest agent did not activate the restore".to_owned())
         })?;
-        crate::activation::ReadyActivation::decode(ready).map_err(|error| {
+        crate::guest_restore::GuestRestoreReady::decode(ready).map_err(|error| {
             SessionError::Protocol(format!("the guest's Ready is invalid: {error}"))
         })
     }
@@ -417,7 +417,7 @@ impl ControlSession {
     }
 }
 
-/// Returns what a `READY` reports about an activation, once it checked that the `READY` carries
+/// Returns what a `READY` reports about a guest restore, once it checked that the `READY` carries
 /// the protocol version, or `None` for another frame.
 fn ready(frame: Frame<'_>) -> Result<Option<&[u8]>, SessionError> {
     match frame {

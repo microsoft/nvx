@@ -27,7 +27,7 @@
 //! A template's capture attaches its NIC under the complete deny-all policy instead, whatever the
 //! network's own: egress denied without rules, ingress and host-loopback access denied, without a
 //! proxy or forwards. It is the one policy of a snapshot that OpenVMM lets a restore replace, so
-//! each restore of the template installs its clone's own policy, and the clone's activation
+//! each restore of the template installs its clone's own policy, and the clone's guest restore
 //! record gives the guest what OpenVMM gives a VM that boots with the policy on its kernel command
 //! line: its DNS server, and whether its listeners are published.
 
@@ -42,7 +42,7 @@ mod rule;
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use crate::activation::{Network, Publication};
+use crate::guest_restore::{Network, Publication};
 
 pub use self::arguments::openvmm_arguments;
 pub(crate) use self::arguments::{dns_server, template_arguments};
