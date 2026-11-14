@@ -3,9 +3,9 @@
 //! a reset in the middle of a message, and a refused host.
 
 use super::broker::{Broker, CAPABILITY, IDENTITY};
-use super::{Reassembler, framed, messages};
+use super::{HostState, Reassembler, framed, messages};
 use crate::protocol::nvxs::{
-    ErrorCode, GuestEvent, GuestSession, GuestState, HostEvent, HostSession, HostState,
+    ErrorCode, GuestEvent, GuestSession, GuestState, HostEvent, HostSession,
 };
 use crate::protocol::{
     CAPABILITY_LEN, OUTER_HEADER_LEN, OUTER_MAX_PAYLOAD, OUTER_MIN_RECEIVE_WINDOW,

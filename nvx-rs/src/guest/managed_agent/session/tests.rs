@@ -585,10 +585,7 @@ fn restored_capture_consumes_reset_and_acknowledges_the_existing_connection() {
     peer.guest_sequence = 0;
     let (header, payload) = peer.read();
     assert_eq!((header.record_type, header.epoch), (OUTER_ACK, 2));
-    assert_eq!(
-        protocol::decode_ack_payload(&payload).unwrap(),
-        OUTER_RECEIVE_WINDOW
-    );
+    assert_eq!(payload, OUTER_RECEIVE_WINDOW.to_le_bytes());
     let (mut session, result) = worker.join().unwrap();
     assert!(result.unwrap().is_none());
     assert!(session.rootless());

@@ -1,5 +1,6 @@
 //! The NVXS session: the authenticated record stream that OpenVMM's broker relays between one host
-//! client and the guest, without I/O and without an application protocol.
+//! client and the guest, without I/O and without an application protocol. It is private to the
+//! crate, whose callers exchange an application's bytes over the VM's control connection instead.
 //!
 //! Application frames travel in the session's DATA records: NVX's own (`NVXC`) and those of any
 //! other application protocol. The session carries application bytes in and out, and depends on
@@ -16,8 +17,9 @@
 //!   encode the records that their role sends.
 //!
 //! The state machines do no I/O: callers hand them the bytes that they receive and write the
-//! bytes that they encode. The host's `nvx::host::vm::Connection` (feature `host`) and the
-//! guest's `nvx::guest::control::Connection` (feature `guest`, Linux) drive them over a transport.
+//! bytes that they encode. The host's transport, under `nvx::host::vm::Connection` (feature
+//! `host`), and the guest's `GuestConnection`, under `nvx::guest::control::Connection` (feature
+//! `guest`, Linux), drive them over a stream.
 //!
 //! # Protocol
 //!
@@ -63,35 +65,6 @@
 //! The receive window and credits count DATA payload bytes from the host to the guest. They belong
 //! to the session and are separate from any flow control of an application protocol.
 //!
-//! # Example
-//!
-//! ```
-//! use nvx::protocol::CAPABILITY_LEN;
-//! use nvx::protocol::nvxs::{HostEvent, HostSession, Identity, RecordType, encode_record};
-//!
-//! let mut host = HostSession::new();
-//! let mut to_broker = Vec::new();
-//! host.attach(&[7; CAPABILITY_LEN], &mut to_broker)?;
-//!
-//! // The broker attaches the host at its sequence 0, with the session's identity.
-//! let identity = Identity { instance_id: [9; 16], epoch: 1 };
-//! let mut from_broker = Vec::new();
-//! encode_record(RecordType::Ready, &identity.instance_id, identity.epoch, 0, &[], &mut from_broker)?;
-//! let (consumed, event) = host.receive(&from_broker)?;
-//! assert_eq!(consumed, from_broker.len());
-//! assert_eq!(event, Some(HostEvent::Attached(identity)));
-//!
-//! // A message of 100,000 bytes spans two DATA records.
-//! let message = vec![0x5a; 100_000];
-//! let mut sent = 0;
-//! while sent < message.len() {
-//!     to_broker.clear();
-//!     sent += host.send(&message[sent..], &mut to_broker)?;
-//!     // Write `to_broker` to the transport here.
-//! }
-//! # Ok::<(), Box<dyn std::error::Error>>(())
-//! ```
-//!
 //! [`OUTER_MAX_PAYLOAD`]: crate::protocol::OUTER_MAX_PAYLOAD
 
 use std::fmt;
@@ -104,17 +77,17 @@ mod record;
 #[cfg(test)]
 pub(crate) mod tests;
 
-pub use guest::{GuestEvent, GuestSession, GuestState};
-pub use host::{HostEvent, HostSession, HostState};
-pub use record::{ErrorCode, Record, RecordError, RecordParser, RecordType, encode_record};
+pub(crate) use guest::{GuestEvent, GuestSession, GuestState};
+pub(crate) use host::{HostEvent, HostSession};
+pub(crate) use record::{ErrorCode, Record, RecordError, RecordParser, RecordType, encode_record};
 
 /// Identity of an established session, which every record after the bootstrap repeats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Identity {
+pub(crate) struct Identity {
     /// ID of the broker instance. A broker restored from a snapshot has a new one.
-    pub instance_id: [u8; 16],
+    pub(crate) instance_id: [u8; 16],
     /// Epoch of the session, which each reset advances. It is never zero.
-    pub epoch: u64,
+    pub(crate) epoch: u64,
 }
 
 /// Failure of an NVXS session.
@@ -122,9 +95,10 @@ pub struct Identity {
 /// A failure in a received record ends the session; see [`HostState::Failed`] and
 /// [`GuestState::Failed`]. An operation that the caller asks for and that the session refuses,
 /// such as a credit of more bytes than the guest received, changes nothing.
+///
+/// [`HostState::Failed`]: host::HostState::Failed
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum SessionError {
+pub(crate) enum SessionError {
     /// A malformed record, or a record to send that would be one.
     Record(RecordError),
     /// A record that the session's state does not allow.

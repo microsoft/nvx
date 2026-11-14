@@ -57,7 +57,11 @@ changed item to its replacement, or to what its caller now does.
   `BootContract`, `ControlContract` and `ControlSession`.
   `RuntimeIdentity::check` and `SnapshotKey::speaks_current_contracts` are gone.
 - **One control connection.** `nvx::host::nvxs`, `nvx::host::transport`, and
-  `nvx::guest::nvxs` are private. `nvx::host::vm::Launched::connect` and
+  `nvx::guest::nvxs` are private, and so is the NVXS session that they speak:
+  `nvx::protocol::nvxs`, and `nvx::protocol`'s `CAPABILITY_LEN`, `OUTER_*`
+  constants, `OuterHeader`, `encode_outer`, and `decode_outer_header`. The
+  codecs of the payloads of acknowledgements and credits are gone.
+  `nvx::host::vm::Launched::connect` and
   `nvx::host::vm::attach`, which replaces `vm::reattach`, open a
   `vm::Connection`: an authenticated, ordered stream of bytes, whose
   `ConnectionError` tells a timeout, an exit, and a lost session apart.

@@ -9,8 +9,7 @@ use crate::protocol::{
     APP_ERROR, APP_EXIT, APP_HEADER_LEN, APP_STDERR, APP_STDOUT, OUTER_ACK, OUTER_CREDIT,
     OUTER_DATA, OUTER_GUEST_ATTACH, OUTER_HEADER_LEN, OUTER_MAX_PAYLOAD, OUTER_RECEIVE_WINDOW,
     OUTER_RESET, OUTER_WAIT, OuterHeader, ProtocolError, Workload, WorkloadEnvironment,
-    decode_ack_payload, decode_credit_payload, decode_outer_header, encode_exec_payload,
-    encode_outer, v2,
+    decode_outer_header, encode_exec_payload, encode_outer, v2,
 };
 
 use super::super::seam::Paths;
@@ -107,7 +106,7 @@ impl Harness {
             (header.record_type, header.epoch, header.sequence),
             (OUTER_ACK, epoch, 0)
         );
-        assert_eq!(decode_ack_payload(&payload).unwrap(), OUTER_RECEIVE_WINDOW);
+        assert_eq!(payload, OUTER_RECEIVE_WINDOW.to_le_bytes());
         self.epoch = epoch;
         self.host_sequence = sequence + 1;
         self.guest_sequence = 1;
@@ -146,7 +145,7 @@ impl Harness {
             (credit.record_type, credit.epoch, credit.sequence),
             (OUTER_CREDIT, self.epoch, self.guest_sequence)
         );
-        assert_eq!(decode_credit_payload(&payload).unwrap(), frame.len() as u32);
+        assert_eq!(payload, (frame.len() as u32).to_le_bytes());
         self.guest_sequence += 1;
     }
 

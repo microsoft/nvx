@@ -1,11 +1,12 @@
-//! Codec of the OpenVMM control-console protocol.
+//! The wire formats and boot tokens that the host and the guest share.
 //!
-//! OpenVMM brokers an authenticated stream of outer records (magic `NVXS`) between one host
-//! client and the guest's agent. Data records carry the bytes of an application protocol, which
-//! the host and its guest choose: NVX's own is private to this crate. All integers are
-//! little-endian.
+//! OpenVMM brokers an authenticated stream of records (magic `NVXS`) between one host client and
+//! the guest's agent. Data records carry the bytes of an application protocol, which the host and
+//! its guest choose. The records, their session, and NVX's own application protocol are private
+//! to this crate: a program speaks its protocol over the bytes of the VM's control connection, the
+//! host's `nvx::host::vm::Connection` (feature `host`) and the guest's
+//! `nvx::guest::control::Connection` (feature `guest`, Linux). All integers are little-endian.
 //!
-//! - Outer records: [`encode_outer`] and [`decode_outer_header`], and the `OUTER_*` record types.
 //! - `MAPS` payloads: the [`HostMap`] table that the host encodes with [`encode_maps_payloads`],
 //!   and the [`MapsPayload`] that the guest agent decodes with [`decode_maps_payload`].
 //! - The kernel command-line tokens through which the host configures the guest agent at boot,
@@ -21,9 +22,6 @@
 //!   guest maps host paths, and the guest's strict parser of them.
 //! - [`share`]: the guest targets that a sandbox's live shares may not take, which the host and
 //!   the guest both refuse.
-//! - [`nvxs`]: the NVXS session without I/O: validated records, incremental parsing, and the
-//!   state machines of the host's and the guest's roles, which carry application bytes of any
-//!   protocol.
 //! - [`status`]: the exit statuses with which a clone's guest ends its VM once its repair or its
 //!   guest restore failed, the time ABI's included, from which the host classifies a clone's end.
 //!
@@ -45,7 +43,34 @@ pub mod cmdline;
 pub(crate) mod exec;
 pub mod export;
 pub mod maps;
-pub mod nvxs;
+#[cfg_attr(
+    not(all(
+        feature = "host",
+        feature = "testing",
+        feature = "guest",
+        target_os = "linux",
+        target_arch = "x86_64"
+    )),
+    allow(
+        dead_code,
+        unused_imports,
+        reason = "the host, the fake OpenVMM, and the guest each use part of NVXS"
+    )
+)]
+pub(crate) mod nvxs;
+#[cfg_attr(
+    not(all(
+        feature = "host",
+        feature = "testing",
+        feature = "guest",
+        target_os = "linux",
+        target_arch = "x86_64"
+    )),
+    allow(
+        dead_code,
+        reason = "the host, the fake OpenVMM, and the guest each use part of NVXS"
+    )
+)]
 mod outer;
 pub mod restore_ready;
 pub mod root;
@@ -117,12 +142,24 @@ pub use maps::{
     MAX_HOST_MAPPINGS, MAX_MAP_PATH_BYTES, MapsPayload, decode_guest_maps_payload,
     decode_maps_payload, encode_maps_payloads,
 };
-pub use outer::{
+#[cfg_attr(
+    not(all(
+        feature = "host",
+        feature = "testing",
+        feature = "guest",
+        target_os = "linux",
+        target_arch = "x86_64"
+    )),
+    allow(
+        unused_imports,
+        reason = "the host, the fake OpenVMM, and the guest each use part of NVXS"
+    )
+)]
+pub(crate) use outer::{
     CAPABILITY_LEN, OUTER_ACK, OUTER_CREDIT, OUTER_DATA, OUTER_ERROR, OUTER_GUEST_ATTACH,
     OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_MAGIC, OUTER_MAX_PAYLOAD, OUTER_MAX_RECEIVE_WINDOW,
     OUTER_MIN_RECEIVE_WINDOW, OUTER_READY, OUTER_RECEIVE_WINDOW, OUTER_RESET, OUTER_VERSION,
-    OUTER_WAIT, OuterHeader, decode_ack_payload, decode_credit_payload, decode_outer_header,
-    encode_ack_payload, encode_credit_payload, encode_outer,
+    OUTER_WAIT, OuterHeader, decode_outer_header, encode_outer,
 };
 
 /// Protocol violation detected while encoding or decoding.

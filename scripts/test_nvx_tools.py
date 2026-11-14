@@ -2397,7 +2397,7 @@ class NvxRsTests(unittest.TestCase):
             for index, line in enumerate(lines)
             if line.startswith("### ")
         }
-        self.assertGreater(len(rows), 30)
+        self.assertGreater(len(rows), 25)
         for row in rows:
             link = row.split(" | ")[0].removeprefix("| ")
             with self.subTest(module=link):

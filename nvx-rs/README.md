@@ -53,10 +53,11 @@ and `nix` and `getrandom` when `guest` is.
 ```text
 nvx-rs/
 ├── src/
-│   ├── protocol/    the NVXS session and its records, the host's mapping table on the wire, the
-│   │                kernel command line and the boot tokens of a guest's root, view, and export,
-│   │                and the guest targets that live shares may not take; no dependencies, shared
-│   │                by the host and the guest; and NVXC, NVX's own protocol, private to the crate
+│   ├── protocol/    the host's mapping table on the wire, the kernel command line and the boot
+│   │                tokens of a guest's root, view, and export, and the guest targets that live
+│   │                shares may not take; no dependencies, shared by the host and the guest; and,
+│   │                private to the crate, the NVXS session and its records, and NVXC, NVX's own
+│   │                protocol
 │   ├── guest_restore/
 │   │                the guest-restore record of a layered root, its canonical encoding, and what
 │   │                Ready reports about it; no dependencies, shared by the host and the guest
@@ -93,11 +94,10 @@ changes only when the module's purpose does.
 
 | Module | Purpose |
 | --- | --- |
-| [`nvx::protocol`](#nvxprotocol) | The codec of the control console's `NVXS` records and the payloads that the host, the guest agent, and the fake OpenVMM share |
+| [`nvx::protocol`](#nvxprotocol) | The payloads and boot tokens that the host and the guest share, such as the mapping table's `MAPS` payloads; the console's NVXS records and NVXC stay private |
 | [`nvx::protocol::cmdline`](#nvxprotocolcmdline) | The kernel command line as Linux and the guest's init read it, with the virtio-mmio devices and the guest's DNS server that it names |
 | [`nvx::protocol::export`](#nvxprotocolexport) | The boot tokens of the host export, the virtio-fs device from which a guest maps host paths, and the guest's parser of them |
 | [`nvx::protocol::maps`](#nvxprotocolmaps) | The host's mapping table on the wire: its `HostMap` entries, and the `MAPS` payloads that carry them |
-| [`nvx::protocol::nvxs`](#nvxprotocolnvxs) | The NVXS session, independent of any application protocol: its records and the state machines of its host and guest roles |
 | [`nvx::protocol::restore_ready`](#nvxprotocolrestore_ready) | The exact parser of OpenVMM's restore-ready event, including its terminating newline |
 | [`nvx::protocol::root`](#nvxprotocolroot) | The boot tokens that tell the guest which image its layered root assembles, where the root keeps its upper, and how the guest assembles them |
 | [`nvx::protocol::share`](#nvxprotocolshare) | The guest targets that a sandbox's live shares may not take, which the host and the guest both refuse |
@@ -127,14 +127,24 @@ changes only when the module's purpose does.
 
 ### `nvx::protocol`
 
-The codec of the control console's NVXS session, which OpenVMM brokers between
-one host client and the guest's agent: its outer records, which
-`encode_outer` and `decode_outer_header` encode and decode, and the payloads of
-their flow control; and the `MAPS` payloads of the host's mapping table, which
-[`nvx::protocol::maps`](#nvxprotocolmaps) holds and this module re-exports. Any
-application protocol runs over the session's DATA records.
+The payloads and boot tokens that the host and the guest share: the `MAPS`
+payloads of the host's mapping table, which
+[`nvx::protocol::maps`](#nvxprotocolmaps) holds and this module re-exports, the
+`nvx_maps=` token, and the submodules below.
 
-NVX's own control protocol, `NVXC`, is private to the crate: only NVX's
+The control console's NVXS session, which OpenVMM brokers between one host
+client and the guest's agent, is private to the crate: its records, their
+`OUTER_*` sizes and limits, the payloads of their flow control, and the state
+machines of the host's and the guest's roles, which validate every record's
+type, identity, and sequence number, and the guest's receive window and
+credits, without I/O. Programs exchange an application protocol's bytes over the
+session's DATA records through the VM's control connection,
+[`nvx::host::vm::Connection`](#nvxhostvm) and
+[`nvx::guest::control::Connection`](#nvxguestcontrol), as an ordered stream:
+an application message may span DATA records, and the application's own framing
+reassembles it.
+
+NVX's own control protocol, `NVXC`, is private to the crate too: only NVX's
 programs speak it, the CLI, nvx-init, the managed agent, and the fake OpenVMM.
 Its version 2, the only one that they speak, carries every control path, one
 frame per DATA record, and streams an execution's standard input, of which at
@@ -205,18 +215,6 @@ mappings the host sends after a cold boot, which
 `nvx::protocol::parse_host_mapping_count` reads, as a guest-restore record
 does after a restore, and the guest's `MappingTable` keeps the account
 of them, as [`nvx::guest::mappings`](#nvxguestmappings) describes.
-
-### `nvx::protocol::nvxs`
-
-The NVXS session, independent of `NVXC` and of any other application protocol:
-`RecordType`, `Record`, `encode_record`, and `RecordParser`, which parses
-records incrementally across partial reads with buffers bounded by one record;
-`HostSession` and `GuestSession`, the state machines of the host's and the
-guest's roles, which validate every record's type, identity, and sequence
-number, and the guest's receive window and credits, without I/O.
-
-An application message may span DATA records, and the application's own framing
-reassembles it.
 
 ### `nvx::protocol::restore_ready`
 

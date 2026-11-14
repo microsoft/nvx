@@ -9,10 +9,9 @@ use std::time::{Duration, Instant};
 
 use crate::host::transport::{HostConnection, HostConnectionError, Transport};
 use crate::protocol::nvxs::tests::broker::{Broker, CAPABILITY, IDENTITY};
-use crate::protocol::nvxs::tests::{Reassembler, framed, messages, record};
+use crate::protocol::nvxs::tests::{HostState, Reassembler, framed, messages, record};
 use crate::protocol::nvxs::{
-    ErrorCode, GuestEvent, GuestSession, HostState, Identity, RecordParser, RecordType,
-    SessionError,
+    ErrorCode, GuestEvent, GuestSession, Identity, RecordParser, RecordType, SessionError,
 };
 use crate::protocol::{
     CAPABILITY_LEN, OUTER_HEADER_LEN, OUTER_MAX_PAYLOAD, OUTER_MIN_RECEIVE_WINDOW,
