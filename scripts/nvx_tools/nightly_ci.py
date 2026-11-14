@@ -30,7 +30,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol, TypeVar, cast
 
-from .common import ScriptError, credential_safe_opener, positive_int
+from .common import ScriptError, credential_safe_opener, github_token, positive_int
 
 NIGHTLY_EVENT = "schedule"
 REPORT_TITLE = "ci: the nightly full run is failing"
@@ -1555,7 +1555,7 @@ def _summary(plan: Plan) -> str:
 def command_report_nightly_ci(args: argparse.Namespace) -> None:
     if not _REPOSITORY_PATTERN.fullmatch(args.repository):
         raise ScriptError("--repository must be OWNER/REPOSITORY")
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    token = github_token()
     if not token and not args.dry_run:
         raise ScriptError(
             "set GH_TOKEN to a token that can write the repository's issues"

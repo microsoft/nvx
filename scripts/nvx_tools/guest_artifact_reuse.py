@@ -44,6 +44,7 @@ from typing import Protocol, cast
 from .common import (
     ScriptError,
     credential_safe_opener,
+    github_token,
     require_file,
     sha256_file,
     strict_json_object,
@@ -883,7 +884,7 @@ def reuse_in_ci(
     input lists them, with the token in GH_TOKEN or GITHUB_TOKEN, giving up on
     the artifacts after REUSE_TIMEOUT_SECONDS, and report the outcome; every
     failure falls back to building."""
-    token = environment.get("GH_TOKEN") or environment.get("GITHUB_TOKEN")
+    token = github_token(environment)
     deadline = time.monotonic() + REUSE_TIMEOUT_SECONDS
     heading = _REHEARSAL if dry_run else _REUSE
     try:

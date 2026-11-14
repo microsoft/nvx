@@ -19,7 +19,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from http.client import HTTPMessage
 from pathlib import Path, PurePosixPath
-from typing import IO
+from typing import IO, cast
 
 from .build_constants import (
     BuildConstants,
@@ -54,6 +54,32 @@ def strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             raise ScriptError(f"duplicate JSON property: {key}")
         result[key] = value
     return result
+
+
+def require_object(value: object, context: str) -> dict[str, object]:
+    """Require a JSON object with string keys."""
+    if not isinstance(value, dict):
+        raise ScriptError(f"{context} is not a JSON object")
+    result: dict[str, object] = {}
+    for key, item in cast(dict[object, object], value).items():
+        if not isinstance(key, str):
+            raise ScriptError(f"{context} has non-string JSON keys")
+        result[key] = item
+    return result
+
+
+def require_array(value: object, context: str) -> list[object]:
+    """Require a JSON array."""
+    if not isinstance(value, list):
+        raise ScriptError(f"{context} is not a JSON array")
+    return cast(list[object], value)
+
+
+def require_repository(value: str) -> str:
+    """Require an ASCII GitHub repository name in owner/repo form."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
+        raise ScriptError("Repository must have the form owner/repo")
+    return value
 
 
 def positive_int(value: str, *, message: str = "must be greater than zero") -> int:
@@ -155,6 +181,28 @@ def run_capture(
     except OSError as error:
         raise _command_start_error(command, error) from error
     return CommandResult(command, result.returncode, result.stdout, result.stderr)
+
+
+def github_token(
+    environment: Mapping[str, str] = os.environ, *, use_gh_login: bool = False
+) -> str | None:
+    """Read an explicit token, optionally falling back to the local gh login."""
+    token = environment.get("GH_TOKEN") or environment.get("GITHUB_TOKEN")
+    if token:
+        return token
+    if not use_gh_login:
+        return None
+    result = run_capture(["gh", "auth", "token"], env=environment)
+    if result.returncode:
+        raise ScriptError(
+            "GitHub authentication required: run gh auth login or set GH_TOKEN"
+        )
+    token = result.stdout.decode("utf-8").strip()
+    if not token:
+        raise ScriptError(
+            "GitHub authentication required: run gh auth login or set GH_TOKEN"
+        )
+    return token
 
 
 def git_output(*arguments: str) -> str:

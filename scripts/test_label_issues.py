@@ -5,8 +5,6 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -20,46 +18,72 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from label_issues import (  # noqa: E402
     GitHub,
     Issue,
-    LabelError,
-    github_token,
+    LabelConfig,
     label_issue,
     labels_for_title,
-    load_keyword_labels,
+    load_label_config,
     main,
     opened_issue,
 )
+from nvx_tools.common import ScriptError  # noqa: E402
 from nvx_tools.nightly_ci import GitHubApiError, GitHubClient  # noqa: E402
 
 
 class TitleLabelsTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.rules = load_keyword_labels()
+        self.rules = load_label_config().rules
 
     def test_keywords_are_loaded_from_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rules.json"
-            path.write_text('{"area: custom": ["custom phrase"]}', encoding="utf-8")
-            rules = load_keyword_labels(path)
-        self.assertEqual(labels_for_title("CUSTOM phrase", rules), ["area: custom"])
+            path.write_text(
+                '{"fallback_label": "manual review", '
+                '"rules": {"area: custom": ["custom phrase"]}}',
+                encoding="utf-8",
+            )
+            config = load_label_config(path)
+        self.assertEqual(
+            labels_for_title("CUSTOM phrase", config.rules), ["area: custom"]
+        )
+        self.assertEqual(config.fallback_label, "manual review")
 
     def test_invalid_keyword_configuration_is_rejected(self) -> None:
         invalid = (
             "not JSON",
             "[]",
             "{}",
-            '{"": ["guest"]}',
-            '{"area: guest": []}',
-            '{"area: guest": "guest"}',
-            '{"area: guest": [" "]}',
-            '{"area: guest": [1]}',
+            '{"fallback_label": "triage", "rules": []}',
+            '{"fallback_label": "triage", "rules": {}}',
+            '{"fallback_label": "triage", "rules": {"": ["guest"]}}',
+            '{"fallback_label": "triage", "rules": {"area: guest": []}}',
+            '{"fallback_label": "triage", "rules": {"area: guest": "guest"}}',
+            '{"fallback_label": "triage", "rules": {"area: guest": [" "]}}',
+            '{"fallback_label": "triage", "rules": {"area: guest": [1]}}',
+            '{"rules": {"area: guest": ["guest"]}}',
+            '{"fallback_label": "", "rules": {"area: guest": ["guest"]}}',
+            '{"fallback_label": " ", "rules": {"area: guest": ["guest"]}}',
+            '{"fallback_label": [], "rules": {"area: guest": ["guest"]}}',
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rules.json"
             for content in invalid:
                 with self.subTest(content=content):
                     path.write_text(content, encoding="utf-8")
-                    with self.assertRaises((LabelError, ValueError)):
-                        load_keyword_labels(path)
+                    with self.assertRaises((ScriptError, ValueError)):
+                        load_label_config(path)
+
+    def test_duplicate_keyword_configuration_keys_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rules.json"
+            path.write_text(
+                '{"fallback_label": "triage", "rules": '
+                '{"area: guest": ["guest"], "area: guest": ["nvx-init"]}}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ScriptError, "^duplicate JSON property: area: guest$"
+            ):
+                load_label_config(path)
 
     def test_multiple_labels_are_case_insensitive_and_deduplicated(self) -> None:
         self.assertCountEqual(
@@ -114,38 +138,9 @@ class TitleLabelsTests(unittest.TestCase):
                 self.assertEqual(labels_for_title(title, self.rules), [])
 
 
-class AuthenticationTests(unittest.TestCase):
-    def test_environment_token_does_not_invoke_gh(self) -> None:
-        for variable in ("GH_TOKEN", "GITHUB_TOKEN"):
-            with (
-                self.subTest(variable=variable),
-                patch.dict(os.environ, {variable: "test-token"}, clear=True),
-                patch("label_issues.subprocess.run") as run,
-            ):
-                self.assertEqual(github_token(), "test-token")
-                run.assert_not_called()
-
-    def test_local_gh_login_and_missing_authentication(self) -> None:
-        for status, output in ((0, "test-token\n"), (1, ""), (0, "")):
-            with (
-                self.subTest(status=status, output=output),
-                patch.dict(os.environ, {}, clear=True),
-                patch(
-                    "label_issues.subprocess.run",
-                    return_value=subprocess.CompletedProcess([], status, output, ""),
-                ) as run,
-            ):
-                if status or not output:
-                    with self.assertRaisesRegex(LabelError, "authentication required"):
-                        github_token()
-                else:
-                    self.assertEqual(github_token(), "test-token")
-                self.assertEqual(run.call_args.args[0], ["gh", "auth", "token"])
-
-
 class GitHubLabelsTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.rules = load_keyword_labels()
+        self.config = load_label_config()
         sleep = patch("label_issues.time.sleep")
         self.sleep = sleep.start()
         self.addCleanup(sleep.stop)
@@ -156,6 +151,13 @@ class GitHubLabelsTests(unittest.TestCase):
         token = patch("label_issues.github_token", return_value="test-token")
         token.start()
         self.addCleanup(token.stop)
+
+    def test_non_ascii_repository_is_rejected_before_api_calls(self) -> None:
+        with self.assertRaisesRegex(ScriptError, "owner/repo"):
+            GitHub("microsoft/nvx\u0661")
+        self.api.get.assert_not_called()
+        self.api.get_all.assert_not_called()
+        self.api.post.assert_not_called()
 
     def test_labels_are_cached_and_writes_are_spaced(self) -> None:
         self.api.get_all.return_value = [{"name": "area: guest"}]
@@ -200,17 +202,52 @@ class GitHubLabelsTests(unittest.TestCase):
                     self.sleep.assert_called_once_with(60.0)
                     self.assertIn("rate limit", output.getvalue())
 
-    def test_repeated_rate_limits_fail_after_two_retries(self) -> None:
+    def test_repeated_rate_limits_are_bounded_by_elapsed_time(self) -> None:
+        cases = (
+            (
+                "two cooldowns fit before the deadline",
+                (0.0, 10.0, 70.0, 80.0, 140.0, 150.0, 150.0),
+                3,
+            ),
+            ("cooldown would reach the deadline", (0.0, 120.0, 120.0), 1),
+            ("cooldown would exceed the deadline", (0.0, 130.0, 130.0), 1),
+        )
+        for scenario, clock_values, expected_calls in cases:
+            with self.subTest(scenario=scenario):
+                self.api.reset_mock()
+                self.sleep.reset_mock()
+                limited = GitHubApiError(429, "rate limited")
+                self.api.post.side_effect = limited
+                with (
+                    patch("label_issues.time.monotonic", side_effect=clock_values),
+                    contextlib.redirect_stderr(io.StringIO()),
+                    self.assertRaises(GitHubApiError) as raised,
+                ):
+                    GitHub("microsoft/nvx").add_labels(1, ["area: guest"])
+                self.assertIs(raised.exception, limited)
+                self.assertEqual(self.api.post.call_count, expected_calls)
+                self.assertEqual(
+                    [call.args for call in self.sleep.call_args_list],
+                    [(60.0,)] * (expected_calls - 1),
+                )
+
+    def test_sleep_reaching_deadline_does_not_start_another_request(self) -> None:
+        now = 0.0
+
+        def oversleep(seconds: float) -> None:
+            nonlocal now
+            now += 180.0
+
+        self.sleep.side_effect = oversleep
         self.api.post.side_effect = GitHubApiError(429, "rate limited")
         with (
+            patch("label_issues.time.monotonic", side_effect=lambda: now),
             contextlib.redirect_stderr(io.StringIO()),
             self.assertRaises(GitHubApiError),
         ):
             GitHub("microsoft/nvx").add_labels(1, ["area: guest"])
-        self.assertEqual(self.api.post.call_count, 3)
-        self.assertEqual(
-            [call.args for call in self.sleep.call_args_list], [(60.0,), (60.0,)]
-        )
+        self.api.post.assert_called_once()
+        self.sleep.assert_called_once_with(60.0)
 
     def test_other_write_errors_are_not_retried(self) -> None:
         for failure in (
@@ -229,7 +266,7 @@ class GitHubLabelsTests(unittest.TestCase):
 
     def test_backfill_loads_configuration_once_for_multiple_issues(self) -> None:
         with (
-            patch("label_issues.load_keyword_labels", return_value=self.rules) as load,
+            patch("label_issues.load_label_config", return_value=self.config) as load,
             patch.object(
                 GitHub,
                 "open_issues",
@@ -298,7 +335,7 @@ class GitHubLabelsTests(unittest.TestCase):
         self.api.get.return_value = current
         self.api.get_all.return_value = [{"name": "area: nvx-rs"}]
         with contextlib.redirect_stdout(io.StringIO()):
-            label_issue(github, stale, self.rules, apply=True)
+            label_issue(github, stale, self.config, apply=True)
         self.api.post.assert_called_once_with(
             "/repos/microsoft/nvx/issues/1/labels", {"labels": ["area: nvx-rs"]}
         )
@@ -310,6 +347,7 @@ class GitHubLabelsTests(unittest.TestCase):
             ("fix startup", ("needs triage",), []),
             ("guest boot", (), ["area: guest"]),
             ("guest boot", ("area: guest",), []),
+            ("guest boot", ("Area: Guest",), []),
         )
         for title, existing, expected in cases:
             with self.subTest(title=title, existing=existing):
@@ -328,7 +366,7 @@ class GitHubLabelsTests(unittest.TestCase):
                     label_issue(
                         GitHub("microsoft/nvx"),
                         Issue(1, title, existing, "open", False),
-                        self.rules,
+                        self.config,
                         apply=True,
                     )
                 if expected:
@@ -343,12 +381,31 @@ class GitHubLabelsTests(unittest.TestCase):
             label_issue(
                 GitHub("microsoft/nvx"),
                 Issue(1, "fix startup", (), "open", False),
-                self.rules,
+                self.config,
                 apply=False,
             )
         self.assertIn("needs triage", output.getvalue())
         self.api.get_all.assert_not_called()
         self.api.post.assert_not_called()
+
+    def test_configured_fallback_label_is_applied(self) -> None:
+        self.api.get.return_value = {
+            "number": 1,
+            "title": "fix startup",
+            "state": "open",
+            "labels": [],
+        }
+        self.api.get_all.return_value = [{"name": "manual review"}]
+        with contextlib.redirect_stdout(io.StringIO()):
+            label_issue(
+                GitHub("microsoft/nvx"),
+                Issue(1, "fix startup", (), "open", False),
+                LabelConfig(self.config.rules, "manual review"),
+                apply=True,
+            )
+        self.api.post.assert_called_once_with(
+            "/repos/microsoft/nvx/issues/1/labels", {"labels": ["manual review"]}
+        )
 
     def test_missing_label_is_created_without_editing_existing_metadata(self) -> None:
         github = GitHub("microsoft/nvx")
@@ -360,6 +417,17 @@ class GitHubLabelsTests(unittest.TestCase):
         self.api.get_all.assert_called_once_with("/repos/microsoft/nvx/labels")
         self.api.post.assert_called_once()
         self.assertEqual(self.api.post.call_args.args[1]["name"], "area: ci")
+        self.api.patch.assert_not_called()
+
+    def test_existing_repository_labels_are_reused_without_case_sensitivity(
+        self,
+    ) -> None:
+        self.api.get_all.return_value = [{"name": "Area: Guest"}]
+        github = GitHub("microsoft/nvx")
+        github.ensure_labels(["area: guest"])
+        github.ensure_labels(["AREA: GUEST"])
+        self.api.get_all.assert_called_once()
+        self.api.post.assert_not_called()
         self.api.patch.assert_not_called()
 
     def test_apply_rechecks_closed_issues_and_pull_requests(self) -> None:
@@ -378,7 +446,7 @@ class GitHubLabelsTests(unittest.TestCase):
                 label_issue(
                     github,
                     Issue(1, "snapshot", (), "open", False),
-                    self.rules,
+                    self.config,
                     apply=True,
                 )
             ensure.assert_not_called()
@@ -391,20 +459,21 @@ class GitHubLabelsTests(unittest.TestCase):
             "state": "open",
             "labels": [],
         }
-        self.api.get.side_effect = [issue, {"name": "area: guest"}]
+        self.api.get.side_effect = [issue, {"name": "Area: Guest"}]
         self.api.get_all.return_value = []
         self.api.post.side_effect = [GitHubApiError(422, "already exists"), []]
         with contextlib.redirect_stdout(io.StringIO()):
             label_issue(
                 GitHub("microsoft/nvx"),
                 Issue.parse(issue),
-                self.rules,
+                self.config,
                 apply=True,
             )
         self.api.get.assert_called_with("/repos/microsoft/nvx/labels/area%3A%20guest")
         self.api.post.assert_called_with(
             "/repos/microsoft/nvx/issues/1/labels", {"labels": ["area: guest"]}
         )
+        self.api.patch.assert_not_called()
 
     def test_label_creation_failures_are_not_silently_ignored(self) -> None:
         cases = (
@@ -459,11 +528,11 @@ class GitHubLabelsTests(unittest.TestCase):
                     0,
                 )
             self.assertTrue(label.call_args.kwargs["apply"])
-            with self.assertRaisesRegex(LabelError, "repository"):
+            with self.assertRaisesRegex(ScriptError, "repository"):
                 opened_issue(path, "other/repo")
             event["action"] = "edited"
             path.write_text(json.dumps(event), encoding="utf-8")
-            with self.assertRaisesRegex(LabelError, "opened"):
+            with self.assertRaisesRegex(ScriptError, "opened"):
                 opened_issue(path, "microsoft/nvx")
 
 

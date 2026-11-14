@@ -2112,6 +2112,9 @@ rerun can re-add a label that a maintainer removed. Issues that
 `GITHUB_TOKEN` creates, such as the
 [nightly failure reports](#nightly-failure-reports), do not trigger it.
 
+Existing label names are compared without case sensitivity, matching GitHub's
+behavior, without renaming them.
+
 The job runs the default branch's code with a token that can read repository
 contents and write issues, without keeping the checkout's credentials.
 It reads the title from the event JSON, not from a shell command.
@@ -2121,9 +2124,9 @@ pending-run capacity; it is not unbounded.
 
 Matching ignores case and uses whole keywords, with whitespace allowed
 between words in a phrase. The rules are stored in
-[`issue-labels.json`](../scripts/issue-labels.json). A title can match several
-labels; an unmatched title gets `needs triage` if the issue has no existing
-labels. The labels are initial sorting hints,
+[`issue-labels.json`](../scripts/issue-labels.json), under `rules`. A title can
+match several labels; an unmatched title gets the configured `fallback_label`
+if the issue has no existing labels. The labels are initial sorting hints,
 not verified impact, and Windows or Linux alone does not imply a backend.
 
 For the one-time backfill, authenticate `gh` with access to the repository
@@ -2131,6 +2134,11 @@ or set `GH_TOKEN` or `GITHUB_TOKEN`, and preview the labels for all open
 issues. An environment token takes precedence over the local `gh` login.
 The script uses the [nightly reporter's](#nightly-failure-reports) GitHub
 client for requests, pagination and API errors.
+
+Explicit rate-limit rejections retry with one-minute waits within a
+three-minute budget per operation, without an attempt-count limit. No retry
+starts at or after the deadline; in-progress requests may finish after it.
+Other write failures are not retried because the write may have succeeded.
 
 ```console
 python scripts/label_issues.py --repository microsoft/nvx backfill
