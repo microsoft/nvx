@@ -1,4 +1,5 @@
-//! Verified connections to a VM and the host's blocking NVXS driver.
+//! Verified connections to a VM and the host's blocking NVXS driver, which the public
+//! [`Connection`](crate::host::vm::Connection) wraps.
 //!
 //! [`connect_verified`] checks the recorded VM process and the endpoint's server before any
 //! capability is sent. [`HostConnection`] runs the host's role of
@@ -10,36 +11,13 @@
 //! take, and [`receive`](HostConnection::receive) returns the payload of each DATA record from the
 //! guest, in order. The connection reads at most 16 KiB at a time and keeps what it read until
 //! the session consumes it, besides at most one partial record, so a receive that times out loses
-//! nothing and callers can poll with short deadlines.
+//! nothing and callers can poll with short deadlines. A receive whose deadline has passed reads
+//! without waiting until a record completes or the transport has nothing more.
 //!
 //! A failure that leaves the stream unusable ends the connection, and every later call fails with
-//! [`ErrorKind::Protocol`]. That includes a send that fails or times out after it wrote
+//! [`HostConnectionError::Ended`]. That includes a send that fails or times out after it wrote
 //! anything, because a record or a message that the transport took only in part cannot be
 //! resumed.
-//!
-//! # Example
-//!
-//! ```no_run
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! use std::time::{Duration, Instant};
-//!
-//! use nvx::host::transport::{self, HostConnection};
-//! # let endpoint = "";
-//! # let process = nvx::host::process::ProcessRef {
-//! #     pid: 1, start_time: 1,
-//! #     boot: nvx::host::process::BootId::current()?,
-//! # };
-//! # let capability = [0; nvx::protocol::CAPABILITY_LEN];
-//!
-//! // The VM's control endpoint, OpenVMM's process, and the capability that it was launched with.
-//! let deadline = Instant::now() + Duration::from_secs(10);
-//! let transport = transport::connect_verified(endpoint, &process, deadline)?;
-//! let mut connection = HostConnection::attach(transport, &capability, deadline)?;
-//! connection.send(b"a message of the application's protocol", Some(deadline))?;
-//! let payload = connection.receive(Some(deadline))?;
-//! # Ok(())
-//! # }
-//! ```
 
 use std::fmt;
 use std::io;
@@ -54,9 +32,7 @@ use crate::protocol::nvxs::{
 };
 use crate::{Error, ErrorKind, Result};
 
-pub use super::platform::Transport;
-#[cfg(any(target_os = "linux", windows))]
-pub use super::platform::TransportHandle;
+pub(crate) use super::platform::Transport;
 
 /// Connects to the endpoint served by the recorded VM process, retrying while the endpoint is
 /// not yet available, until `deadline`.
@@ -71,7 +47,7 @@ pub use super::platform::TransportHandle;
 /// [`ErrorKind::Exited`], a refused or broken session [`ErrorKind::Protocol`], and an
 /// indeterminate process check or other transport failure [`ErrorKind::Io`]. I/O failures
 /// retain their original source; a confirmed exit has a `NotFound` I/O cause.
-pub fn connect_verified(
+pub(crate) fn connect_verified(
     endpoint: &str,
     reference: &ProcessRef,
     deadline: Instant,
@@ -171,15 +147,14 @@ fn io_kind(error: &io::Error) -> ErrorKind {
 /// Most bytes that one read from the transport takes.
 const READ_CHUNK: usize = 16 * 1024;
 
-/// Retained cause details for failures of a [`HostConnection`].
+/// Failure of a [`HostConnection`].
 ///
-/// Connection methods return the crate's [`Error`]. I/O and protocol failures keep their
-/// original errors as sources; other failures keep these details as their source.
+/// It converts into the crate's [`Error`], whose source is the original I/O or protocol error,
+/// or otherwise this failure.
 #[derive(Debug)]
-#[non_exhaustive]
-pub enum HostConnectionError {
+pub(crate) enum HostConnectionError {
     /// The deadline passed. A receive that times out keeps what arrived, and the connection stays
-    /// usable, as it does after a send that times out before it wrote anything.
+    /// usable, as it does after a send whose deadline passed before it began.
     TimedOut,
     /// The broker closed the stream at a record boundary.
     Closed,
@@ -243,13 +218,12 @@ impl From<HostConnectionError> for Error {
 }
 
 /// The host's end of an NVXS session over a platform transport.
-pub struct HostConnection {
+pub(crate) struct HostConnection {
     /// Transport connected to the broker's host endpoint.
     transport: Box<dyn Transport>,
-    /// The host's role of the session.
-    session: HostSession,
-    /// Identity that the broker attached the host to.
-    identity: Identity,
+    /// The host's role of the session, which holds the identity that the broker attached the host
+    /// to.
+    pub(crate) session: HostSession,
     /// Bytes read from the transport.
     input: Box<[u8]>,
     /// Start of the bytes in `input` that the session has not consumed.
@@ -265,19 +239,14 @@ pub struct HostConnection {
 impl HostConnection {
     /// Attaches the host to the broker over `transport` with the launch `capability`, and waits
     /// until `deadline` while the broker asks the host to wait for the guest.
-    pub fn attach(
+    pub(crate) fn attach(
         transport: Box<dyn Transport>,
         capability: &[u8; CAPABILITY_LEN],
         deadline: Instant,
-    ) -> Result<Self> {
+    ) -> Result<Self, HostConnectionError> {
         let mut connection = Self {
             transport,
             session: HostSession::new(),
-            // The broker's READY replaces this before the caller sees the connection.
-            identity: Identity {
-                instance_id: [0; 16],
-                epoch: 0,
-            },
             input: vec![0; READ_CHUNK].into_boxed_slice(),
             start: 0,
             end: 0,
@@ -292,27 +261,18 @@ impl HostConnection {
         connection.write(timeout)?;
         loop {
             match connection.next_event(Some(deadline))? {
-                HostEvent::Wait => {}
-                HostEvent::Attached(identity) => {
-                    connection.identity = identity;
-                    return Ok(connection);
+                // A broker that keeps the host waiting past the deadline times the attachment
+                // out, however many WAIT records it sends.
+                HostEvent::Wait => {
+                    remaining(Some(deadline))?;
                 }
-                HostEvent::Rejected(code) => return Err(HostConnectionError::Rejected(code).into()),
+                HostEvent::Attached(_) => return Ok(connection),
+                HostEvent::Rejected(code) => return Err(HostConnectionError::Rejected(code)),
                 // The session reports these only once the broker attached the host.
-                HostEvent::Data(_) => return Err(unexpected(RecordType::Data).into()),
-                HostEvent::Reset(_) => return Err(unexpected(RecordType::Reset).into()),
+                HostEvent::Data(_) => return Err(unexpected(RecordType::Data)),
+                HostEvent::Reset(_) => return Err(unexpected(RecordType::Reset)),
             }
         }
-    }
-
-    /// Returns the identity that the broker attached the host to.
-    pub fn identity(&self) -> Identity {
-        self.identity
-    }
-
-    /// Returns the host's role of the session.
-    pub fn session(&self) -> &HostSession {
-        &self.session
     }
 
     /// Sends `data` to the guest by `deadline`, or without a time limit, in as many DATA records
@@ -321,15 +281,19 @@ impl HostConnection {
     ///
     /// Data that fits one record travels in one, so an application protocol that needs one frame
     /// per record sends frames that fit. Empty data sends nothing.
-    pub fn send(&mut self, data: &[u8], deadline: Option<Instant>) -> Result<()> {
+    pub(crate) fn send(
+        &mut self,
+        data: &[u8],
+        deadline: Option<Instant>,
+    ) -> Result<(), HostConnectionError> {
         self.check()?;
         let mut rest = data;
         let mut wrote = false;
         while !rest.is_empty() {
             let timeout = match remaining(deadline) {
                 Ok(timeout) => timeout,
-                Err(error) if wrote => return Err(self.end(error).into()),
-                Err(error) => return Err(error.into()),
+                Err(error) if wrote => return Err(self.end(error)),
+                Err(error) => return Err(error),
             };
             self.output.clear();
             let taken = self
@@ -345,7 +309,13 @@ impl HostConnection {
 
     /// Returns the payload of the next DATA record from the guest, waiting until `deadline`, or
     /// without a time limit.
-    pub fn receive(&mut self, deadline: Option<Instant>) -> Result<Vec<u8>> {
+    ///
+    /// Once `deadline` has passed, it reads only what the transport holds, without waiting, and
+    /// times out when that completes no record.
+    pub(crate) fn receive(
+        &mut self,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<u8>, HostConnectionError> {
         self.check()?;
         let error = match self.next_event(deadline)? {
             HostEvent::Data(payload) => return Ok(payload),
@@ -355,10 +325,20 @@ impl HostConnection {
             HostEvent::Attached(_) => unexpected(RecordType::Ready),
             HostEvent::Rejected(_) => unexpected(RecordType::Error),
         };
-        Err(self.end(error).into())
+        Err(self.end(error))
+    }
+
+    /// Returns the connected transport's descriptor, which polls readable once the broker sent
+    /// what the connection has not read.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn as_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        self.transport.as_fd()
     }
 
     /// Returns the session's next event, reading from the transport until a record completes.
+    ///
+    /// Once `deadline` has passed, each read takes only what the transport holds, so the loop
+    /// ends when the transport runs dry: a record completes within a bounded number of reads.
     fn next_event(&mut self, deadline: Option<Instant>) -> Result<HostEvent, HostConnectionError> {
         loop {
             if self.start < self.end {
@@ -372,7 +352,10 @@ impl HostConnection {
                     None => continue,
                 }
             }
-            let timeout = remaining(deadline)?;
+            let timeout = match remaining(deadline) {
+                Ok(timeout) => timeout,
+                Err(_) => Some(Duration::ZERO),
+            };
             match self.transport.read(&mut self.input, timeout) {
                 Ok(0) => {
                     let error = match self.session.disconnect() {
@@ -436,4 +419,4 @@ fn unexpected(record_type: RecordType) -> HostConnectionError {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

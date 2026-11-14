@@ -392,6 +392,7 @@ fn completion_error(error: u32, transferred: usize, timed_out: bool) -> io::Resu
 }
 
 impl Transport for PipeTransport {
+    #[cfg(feature = "cli")]
     fn try_clone_handle(&self) -> io::Result<Option<TransportHandle>> {
         self.pipe.try_clone().map(Some)
     }

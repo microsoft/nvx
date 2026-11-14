@@ -6,14 +6,12 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::endpoint::UnixTransport;
 #[cfg(feature = "cli")]
 use super::endpoint::endpoint_server_pid_until;
 pub(crate) use super::private::store_dir_problem;
 use super::process::wait_step;
 pub(crate) use super::process::{check_identity, start_time_from_stat};
 use super::*;
-use crate::host::platform::Transport;
 
 #[cfg(feature = "cli")]
 #[test]
@@ -74,6 +72,7 @@ fn a_full_control_backlog_never_replaces_the_callers_probe_deadline() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_duplicated_transport_keeps_the_verified_connection_without_reconnecting() {
     use std::io::Write;
@@ -421,50 +420,6 @@ fn a_restore_ready_client_that_closed_before_its_connection_was_accepted_is_read
     );
     drop(client);
     assert_eq!(receive_all(&mut listener), b"");
-}
-
-#[test]
-fn a_unix_transport_reports_what_its_peer_has_not_read() {
-    let (stream, mut peer) = UnixStream::pair().unwrap();
-    let mut transport = UnixTransport { stream };
-    assert_eq!(transport.unread().unwrap(), Some(0));
-    let data = b"an attachment";
-    transport.write_all(data, None).unwrap();
-    // The kernel charges the socket for the write's buffer, more than its bytes, until the
-    // peer read it whole: a read of a prefix leaves the charge as it was.
-    let queued = transport.unread().unwrap().unwrap();
-    assert!(queued >= data.len(), "{queued}");
-    let mut received = [0; 6];
-    peer.read_exact(&mut received).unwrap();
-    assert_eq!(transport.unread().unwrap(), Some(queued));
-    let mut rest = vec![0; data.len() - received.len()];
-    peer.read_exact(&mut rest).unwrap();
-    assert_eq!(transport.unread().unwrap(), Some(0));
-
-    // Writes of a byte each queue a buffer each, which the kernel charges the same for, and
-    // which the peer's read of any prefix frees.
-    let charges = data
-        .chunks(1)
-        .map(|byte| {
-            transport.write_all(byte, None).unwrap();
-            transport.unread().unwrap().unwrap()
-        })
-        .collect::<Vec<_>>();
-    let step = charges[0];
-    assert!(step > 0, "{charges:?}");
-    assert!(
-        charges
-            .iter()
-            .enumerate()
-            .all(|(index, charge)| *charge == (index + 1) * step),
-        "{charges:?}"
-    );
-    peer.read_exact(&mut received[..1]).unwrap();
-    let queued = charges[charges.len() - 1];
-    assert_eq!(transport.unread().unwrap(), Some(queued - step));
-    let mut rest = vec![0; data.len() - 1];
-    peer.read_exact(&mut rest).unwrap();
-    assert_eq!(transport.unread().unwrap(), Some(0));
 }
 
 /// Returns the permission bits of the mode of the file at `path`, not following a link.

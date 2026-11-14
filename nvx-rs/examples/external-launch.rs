@@ -43,7 +43,6 @@ use nvx::host::process::{BootId, Opened, Process, ProcessRef};
 use nvx::host::runtime::{
     ArtifactIdentity, CompatibilityIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity,
 };
-use nvx::host::transport::{self, Transport};
 use nvx::host::{report, snapshot, vm};
 use nvx::protocol::root::RootImage;
 use nvx::protocol::view::{MachineIdMode, View};
@@ -189,16 +188,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
             return Ok(());
         }
-        let console = outputs.console.as_deref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "no prepared boot console")
-        })?;
-        let mut console = transport::connect_verified(console, process.reference(), deadline)?;
-        read_until(console.as_mut(), b"NVX-GUEST-BOOT-OK:", deadline)?;
+        let mut console = vm::Console::connect(&outputs, process.reference(), deadline)?;
+        read_until(&mut console, b"NVX-GUEST-BOOT-OK:", deadline)?;
         console.write_all(
             b"printf 'NVX-EXTERNAL-LAUNCH-OK\\n'; /sbin/nvx-exit 0\n",
-            Some(deadline.saturating_duration_since(Instant::now())),
+            Some(deadline),
         )?;
-        read_until(console.as_mut(), b"\nNVX-EXTERNAL-LAUNCH-OK", deadline)?;
+        read_until(&mut console, b"\nNVX-EXTERNAL-LAUNCH-OK", deadline)?;
         if process.wait(deadline)?.is_none() {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "VM did not exit").into());
         }
@@ -374,18 +370,17 @@ fn remove_view(directory: &Path) -> io::Result<()> {
 }
 
 /// Prints console output through a marker, retaining only enough bytes to match across reads.
-fn read_until(console: &mut dyn Transport, marker: &[u8], deadline: Instant) -> io::Result<()> {
+fn read_until(console: &mut vm::Console, marker: &[u8], deadline: Instant) -> io::Result<()> {
     let mut pending = Vec::new();
     let mut buffer = [0; 4096];
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        if Instant::now() >= deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "console marker not received",
             ));
         }
-        let count = console.read(&mut buffer, Some(remaining))?;
+        let count = console.read(&mut buffer, Some(deadline))?;
         if count == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,

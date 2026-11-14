@@ -124,7 +124,7 @@ The adapter's README said what each proved.
 | --- | --- | --- |
 | `a_launch_claims_its_scratch_image_until_it_releases_its_checked_files` | rewritten | `nvx-rs/src/host/sandbox/scratch/tests.rs::a_scratch_image_is_claimed_by_one_launch_and_checked_again_after_a_release`; `nvx-rs/src/host/sandbox/scratch/tests.rs::a_claim_lasts_while_the_vmm_holds_the_image` |
 | `a_launch_reads_only_the_networks_that_the_plan_takes` | rewritten | `nvx-rs/tests/cli.rs::network_policies_that_the_planner_refuses_fail_before_launch`; `nvx-rs/src/host/network/tests.rs::invalid_rules_are_rejected_with_the_policy_compilers_messages` |
-| `a_launch_records_what_it_launched` | retired | The adapter's launch records. Callers keep `SavedVm`: `nvx-rs/src/host/vm/tests/reattach.rs::verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint` |
+| `a_launch_records_what_it_launched` | retired | The adapter's launch records. Callers keep `SavedVm`: `nvx-rs/src/host/vm/tests/attach.rs::verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint` |
 | `a_launch_refuses_images_that_are_not_staged_or_changed_since` | rewritten | `nvx-rs/src/host/sandbox/distro/tests.rs::a_staged_image_that_was_replaced_fails_its_check`; `nvx-rs/src/host/sandbox/scratch/tests.rs::checks_fail_without_reading_when_the_image_changes`; `nvx-rs/tests/cli.rs::start_refuses_a_configuration_without_a_valid_distro_binding` |
 | `a_launch_refuses_shares_that_it_cannot_export` | rewritten | `nvx-rs/src/host/filesystem/tests.rs::policy_paths_hide_show_and_narrow_writes`; `nvx-rs/src/host/filesystem/tests.rs::an_export_refuses_a_read_only_path_inside_a_writable_directory` |
 | `a_launch_renders_each_element_of_its_network_through_the_plan` | rewritten | `nvx-rs/src/host/config/tests.rs::cold_boot_arguments_lower_layered_roots_networks_and_exports_by_path`; `nvx-rs/src/host/network/tests.rs::proxy_urls_name_the_gateway_as_the_guest_sees_it` |
@@ -143,9 +143,9 @@ The adapter's README said what each proved.
 
 | Scenario | Fate | Coverage, or why it retires |
 | --- | --- | --- |
-| `a_host_program_of_another_runtime_finds_the_vm_mismatched_and_signals_nothing` | rewritten | `nvx-rs/src/host/vm/tests/reattach.rs::a_saved_vm_runs_until_its_process_exits_and_another_runtime_is_refused_without_a_signal`; `nvx-rs/src/host/vm/tests/reattach.rs::verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint` |
+| `a_host_program_of_another_runtime_finds_the_vm_mismatched_and_signals_nothing` | rewritten | `nvx-rs/src/host/vm/tests/attach.rs::a_saved_vm_runs_until_its_process_exits_and_another_runtime_is_refused_without_a_signal`; `nvx-rs/src/host/vm/tests/attach.rs::verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint` |
 | `a_launch_tears_down_a_vm_whose_guest_agent_is_of_another_build` | retired | The adapter's guest agent and the build that its Ready reports |
-| `a_restarted_host_program_reattaches_to_the_vm_and_stops_it` | rewritten | `nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_reattached_from_saved_values_and_stopped`, which `test-microvm --scenario vm-lifecycle` runs; `nvx-rs/src/host/vm/tests/reattach.rs::reattaching_returns_the_held_owned_child_and_authenticated_connection`; `nvx-rs/src/host/vm/tests.rs::stop_forces_only_its_verified_process_after_grace` |
+| `a_restarted_host_program_reattaches_to_the_vm_and_stops_it` | rewritten | `nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_attached_from_saved_values_and_stopped`, which `test-microvm --scenario vm-lifecycle` runs; `nvx-rs/src/host/vm/tests/attach.rs::attaching_returns_the_held_owned_child_and_authenticated_connection`; `nvx-rs/src/host/vm/tests.rs::stop_forces_only_its_verified_process_after_grace` |
 
 ### `vm_steps` (3)
 
@@ -235,7 +235,7 @@ The adapter's README said what each proved.
 | `a_forward_whose_port_another_socket_holds_fails_the_clone_as_the_host_s` | rewritten | `test-microvm --scenario platform-network-policy`; `nvx-rs/src/host/restore/tests.rs::restore_failures_attribute_the_existing_policy_free_evidence_classes` |
 | `a_generation_is_eligible_by_the_clock_of_its_capture` | rewritten | `nvx-rs/src/host/snapshot/eligibility/tests.rs::within_one_boot_the_downtime_is_the_host_monotonic_clocks`; `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_reports_early_and_expired_time_as_unavailable` |
 | `a_generation_refuses_clones_of_fewer_processors_than_its_template_booted_with` | rewritten | `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_refuses_a_blockless_root_and_each_processor_mismatch`; `test-microvm --scenario restore-processors` |
-| `a_host_program_of_another_runtime_ends_the_clone_through_its_verified_identity` | rewritten | `nvx-rs/src/host/vm/tests/reattach.rs::a_saved_vm_runs_until_its_process_exits_and_another_runtime_is_refused_without_a_signal`; `nvx-rs/src/host/vm/tests.rs::stop_forces_only_its_verified_process_after_grace`. Leases retire (#1121) |
+| `a_host_program_of_another_runtime_ends_the_clone_through_its_verified_identity` | rewritten | `nvx-rs/src/host/vm/tests/attach.rs::a_saved_vm_runs_until_its_process_exits_and_another_runtime_is_refused_without_a_signal`; `nvx-rs/src/host/vm/tests.rs::stop_forces_only_its_verified_process_after_grace`. Leases retire (#1121) |
 | `a_run_in_a_template_of_a_network_finds_its_policy_s_proxy` | rewritten | `test-microvm --scenario platform-network-policy`; `test-microvm --scenario untiered-network-policy`, whose runs restore a named snapshot with a NIC under a network policy of their own, though with no proxy. The template's `run` retires (#1121) |
 | `a_run_runs_one_execution_in_its_clone_then_tears_the_clone_down` | rewritten | `test-microvm --scenario snapshot-core`, whose `run --restore-snapshot` runs one workload in its restored VM and removes its sandbox. The template's `run` and leases retire (#1121) |
 | `a_run_s_execution_finds_its_shares_beneath_the_root` | rewritten | `test-microvm --scenario platform-aggregate-export` |
@@ -248,7 +248,7 @@ The adapter's README said what each proved.
 | `a_tombstone_leaves_the_running_clone_of_its_generation_to_its_lease` | retired | Tombstones, generations and leases leave with the old clone path (#1121) |
 | `clones_at_once_keep_their_own_uppers_and_machine_ids` | rewritten | `test-microvm --scenario snapshot-core`, whose concurrent restores of one snapshot each keep their own upper and machine ID; `test-microvm --scenario scratch-snapshot` |
 | `clones_at_once_see_only_their_own_exports` | rewritten | `test-microvm --scenario snapshot-core`, whose concurrent restores of one snapshot each see their own share alone; `test-microvm --scenario platform-aggregate-export` |
-| `each_command_reattaches_to_the_clone_from_a_new_process` | rewritten | `nvx-rs/src/host/vm/tests/reattach.rs::reattaching_returns_the_held_owned_child_and_authenticated_connection`; `nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_reattached_from_saved_values_and_stopped`. The adapter's probes retire |
+| `each_command_reattaches_to_the_clone_from_a_new_process` | rewritten | `nvx-rs/src/host/vm/tests/attach.rs::attaching_returns_the_held_owned_child_and_authenticated_connection`; `nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_attached_from_saved_values_and_stopped`. The adapter's probes retire |
 | `one_generation_serves_clones_of_each_processor_count_from_its_boot_online_count_to_its_capacity` | rewritten | `test-microvm --scenario restore-processors`; `test-microvm --scenario platform-restore-processors` |
 | `one_generation_serves_clones_of_each_upper_and_memory_target` | rewritten | `test-microvm --scenario scratch-snapshot`; `test-microvm --scenario restore-memory`. Leases retire (#1121) |
 | `one_generation_serves_clones_of_either_format_over_either_upper` | rewritten | `test-microvm --scenario snapshot-tiers`; `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_matching_real_disk_geometry_and_every_resource_boundary` |
@@ -357,7 +357,7 @@ suite in its shards, and the public sandbox scenarios in its guest and sandbox j
 | `untiered-network-policy` | rewritten | On named snapshots with a NIC, which `snapshot capture --net` captures, as [Snapshots](#snapshots) says, keeping its checks of a restore's DNS, egress, forwards and listener publication. Its raw-snapshot parts retire: the raw capture and restores, the guest's repair marker, the console release, and OpenVMM's refusals of raw restores that the CLI cannot issue, in whose place the CLI must refuse a restore without `--network-profile`, and one with `--net` |
 | `virtio-features` | kept |  |
 | `virtio-net` | kept |  |
-| `vm-lifecycle` | kept | A [cold boot](#cold-boots) through the public API: `nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_reattached_from_saved_values_and_stopped`. Since SL4.4d, it pings and stops nvx-init with NVXC version 2's frames, where it sent version 1's |
+| `vm-lifecycle` | kept | A [cold boot](#cold-boots) through the public API: `nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_attached_from_saved_values_and_stopped`. Since SL4.4d, it pings and stops nvx-init with NVXC version 2's frames, where it sent version 1's |
 | `workload-identity` | kept | Since SL6.3 (#1122), it also checks that a guest given OpenVMM's workload identity without `nvx_identity=`, or with another one, fails closed |
 
 ### Cold boots
@@ -380,11 +380,11 @@ teardown; CI's layer smoke test checks the status of the probe that its run runs
 `sandbox-gpt-layer` writes its own GPT disk, whose layer partition a guest fills with an ext4 copy
 of the tree of the EROFS layer, and checks that the guest's root has that partition as its lower
 directory. `test-microvm --scenario vm-lifecycle` cold-boots a VM through the public API instead:
-`nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_reattached_from_saved_values_and_stopped` creates and
-spawns it, with nvx-init over the EROFS layer and a scratch upper, lets the launch go, reattaches
-to it twice from the values that it saved, and stops it through its guest, which must exit without
-a forced termination and report a complete teardown. No cell captures or restores a snapshot:
-[Snapshots](#snapshots) lists the smoke tests that do.
+`nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_attached_from_saved_values_and_stopped` creates and
+spawns it, with nvx-init over the EROFS layer and a scratch upper, connects to it, lets the launch
+and its connection go, attaches to it twice from the values that it saved, and stops it through its
+guest, which must exit without a forced termination and report a complete teardown. No cell
+captures or restores a snapshot: [Snapshots](#snapshots) lists the smoke tests that do.
 
 ### Snapshots
 
@@ -504,8 +504,8 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/host/template/clone.rs - host::template::clone::ClonePlan (line 247)` | retired | `ClonePlan` and `CloneRequest` leave with the old clone path (SL6.2b, #1121) |
 | `nvx-rs/src/host/template/plan.rs - host::template::plan::TemplatePlan (line 137)` | retired | `TemplatePlan` leaves with the template store (SL6.2a, #1121) |
 | `nvx-rs/src/host/template/store.rs - host::template::store::Store (line 473)` | retired | The template store leaves (SL6.2a, #1121) |
-| `nvx-rs/src/host/transport.rs - host::transport (line 22)` | kept |  |
-| `nvx-rs/src/lib.rs - (line 58)` | rewritten | Its `Instance` and sandbox store leave (SL6.1, #1121): `nvx-rs/src/lib.rs - (line 64)` compiles a cold boot and a stop through `host::vm` |
+| `nvx-rs/src/host/transport.rs - host::transport (line 22)` | rewritten | #1574 hides `host::transport`: `nvx-rs/src/host/vm/connection.rs - host::vm::connection::Connection (line 46)` connects to a VM that the program launched and speaks over its `Connection` |
+| `nvx-rs/src/lib.rs - (line 58)` | rewritten | Its `Instance` and sandbox store leave (SL6.1, #1121): `nvx-rs/src/lib.rs - (line 67)` compiles a cold boot and a stop through `host::vm` |
 | `nvx-rs/src/protocol/nvxs/mod.rs - protocol::nvxs (line 68)` | kept |  |
 | `nvx-rs/src/host/snapshot/capture.rs - host::snapshot::capture::finish_capture (line 48)` | kept |  |
 | `nvx-rs/src/host/store/mod.rs - host::store (line 104)` | retired | The sandbox store leaves (SL6.1, #1121) |

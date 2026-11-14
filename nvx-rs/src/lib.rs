@@ -1,9 +1,9 @@
 //! Mechanisms and value types with which a program runs NVX microVMs on OpenVMM: a VM's
 //! configuration and its launch, in a directory that the program owns, for a cold boot, a
 //! capture, or a restore; one snapshot type, with a strict directory format; a restore that the
-//! program drives with its own I/O; verified connections to a running VM, and reattachment to
-//! one; the contracts that a guest's space reads; and the guest's side of a capture and of a
-//! guest restore.
+//! program drives with its own I/O; verified connections to a running VM, and attachment to one
+//! from the values that the program saved; the contracts that a guest's space reads; and the
+//! guest's side of a capture and of a guest restore.
 //!
 //! The library keeps no durable state, runs no workload, and builds no guest space. On the host,
 //! it starts OpenVMM, and no other process, and supervises no VM: the program stops each VM that
@@ -32,10 +32,10 @@
 //! - [`Error`]: the crate's error, whose [`ErrorKind`]s callers act on.
 //! - [`host`] (feature `host`): a VM's runtime, with the
 //!   [`Hypervisor`](host::runtime::Hypervisor) that runs it, and its configuration; its launch,
-//!   stop, and reattachment in a private directory that its caller owns; snapshots, their
+//!   stop, and attachment in a private directory that its caller owns; snapshots, their
 //!   capture's finish, and the restores that their caller drives; the lowering of network and
-//!   filesystem policies; and verified connections to a VM's endpoint, verified process
-//!   references, and OpenVMM's outcome reports.
+//!   filesystem policies; and a VM's authenticated control connection and boot console,
+//!   verified process references, and OpenVMM's outcome reports.
 //! - `guest` (feature `guest`, Linux): the guest's side, for any guest init or agent: its NVXS
 //!   connection and the terminal on which it serves it (`guest::nvxs`, `guest::terminal`), the
 //!   account of a host's mapping table (`guest::mappings`), the time ABI's steps in its own

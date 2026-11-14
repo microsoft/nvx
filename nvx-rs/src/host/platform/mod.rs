@@ -254,14 +254,15 @@ pub(crate) fn check_working_dir(path: &std::path::Path) -> Result<()> {
 }
 
 /// Byte stream to an OpenVMM control endpoint.
-pub trait Transport: Send {
-    /// Duplicates the connected endpoint for an adapter that uses native asynchronous I/O.
+pub(crate) trait Transport: Send {
+    /// Duplicates the connected endpoint, for the CLI, which reads and writes it on separate
+    /// threads, or ends its pending transfers from another thread.
     ///
     /// Returns `Ok(None)` by default for transports without a native handle. The duplicate
     /// owns a handle to the same already peer-verified connection, not a new connection.
-    /// The caller must drop this transport before using the duplicate or registering it with
-    /// an I/O runtime, and must not change the shared blocking mode while this transport lives.
-    #[cfg(any(target_os = "linux", windows))]
+    /// The caller must drop this transport before reading or writing through the duplicate, and
+    /// must not change the shared blocking mode while this transport lives.
+    #[cfg(all(any(target_os = "linux", windows), feature = "cli"))]
     fn try_clone_handle(&self) -> io::Result<Option<TransportHandle>> {
         Ok(None)
     }
@@ -276,27 +277,21 @@ pub trait Transport: Send {
     /// reads meanwhile.
     fn write_all(&mut self, data: &[u8], timeout: Option<Duration>) -> io::Result<()>;
 
-    /// Returns what the platform tells of the data that this end wrote, and that the endpoint has
-    /// not read yet, or `None` where it tells nothing.
-    ///
-    /// On Linux, it is what `SIOCOUTQ` reports of the Unix socket: the memory that the kernel
-    /// charges the socket for the buffers that hold that data, each write's buffers of their own,
-    /// until the endpoint read each buffer whole. The charge exceeds the data's bytes, and a read
-    /// of part of a buffer leaves it as it was, so only data written a byte at a time shows the
-    /// read of each byte. It is zero once the endpoint read everything. A named pipe tells its
-    /// writer nothing of the kind, so on Windows, and by default, it is `None`.
-    fn unread(&self) -> io::Result<Option<usize>> {
-        Ok(None)
+    /// Returns the connected socket, whose readiness tells when the endpoint sent data, or `None`
+    /// for transports without one.
+    #[cfg(target_os = "linux")]
+    fn as_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        None
     }
 }
 
 /// An owned duplicate of a verified control socket connection.
 #[cfg(target_os = "linux")]
-pub type TransportHandle = std::os::fd::OwnedFd;
+pub(crate) type TransportHandle = std::os::fd::OwnedFd;
 
 /// An owned duplicate of a verified, overlapped control pipe connection.
 #[cfg(windows)]
-pub type TransportHandle = std::os::windows::io::OwnedHandle;
+pub(crate) type TransportHandle = std::os::windows::io::OwnedHandle;
 
 /// Returns the time left until `deadline`, `None` without one, or an [`io::ErrorKind::TimedOut`]
 /// error once it has passed.

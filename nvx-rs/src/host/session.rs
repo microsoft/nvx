@@ -143,9 +143,10 @@ pub(crate) enum ExecEvent {
 /// host's NVXS connection to OpenVMM's broker.
 ///
 /// Received bytes are buffered until a whole record is available, so a read that times out
-/// loses nothing and callers can poll with short deadlines. A failure that leaves the stream
-/// unusable, such as a reset or a record that the protocol does not allow, ends the session, and
-/// later calls fail.
+/// loses nothing and callers can poll with short deadlines. A read whose deadline has passed
+/// times out without reading, however much the guest sent, so output that keeps arriving cannot
+/// hold a caller past its deadline. A failure that leaves the stream unusable, such as a reset or
+/// a record that the protocol does not allow, ends the session, and later calls fail.
 pub(crate) struct ControlSession {
     /// The host's NVXS connection to OpenVMM's control endpoint.
     pub(crate) connection: HostConnection,
@@ -172,7 +173,7 @@ impl ControlSession {
         deadline: Instant,
     ) -> Result<Self, SessionError> {
         let connection = HostConnection::attach(transport, capability, deadline)
-            .map_err(|error| failure(error, Stage::Attach))?;
+            .map_err(|error| connection_failure(error, Stage::Attach))?;
         Ok(connection.into())
     }
 
@@ -370,14 +371,21 @@ impl ControlSession {
         let frame = frame.encode(request_id)?;
         self.connection
             .send(&frame, deadline)
-            .map_err(|error| failure(error, Stage::Data))
+            .map_err(|error| connection_failure(error, Stage::Data))
     }
 
     /// Returns the payload of the next DATA record: the bytes of the guest agent's next frame.
+    ///
+    /// Once `deadline` has passed, it times out without reading. The connection would still
+    /// return what arrived, so a guest that keeps sending would otherwise hold a caller that
+    /// receives until it times out past the deadline that bounds its operation.
     fn receive(&mut self, deadline: Option<Instant>) -> Result<Vec<u8>, SessionError> {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(SessionError::TimedOut);
+        }
         self.connection
             .receive(deadline)
-            .map_err(|error| failure(error, Stage::Data))
+            .map_err(|error| connection_failure(error, Stage::Data))
     }
 
     /// Returns the bytes of the next frame, which must answer `request_id`.
@@ -447,29 +455,6 @@ enum Stage {
 /// A violation keeps the message of the check that it fails: a malformed or oversized header, a
 /// payload in WAIT or READY, an empty DATA record, which carries no frame, and otherwise an
 /// invalid attach response or data record. A stream that ends inside a record has closed.
-fn failure(error: Error, stage: Stage) -> SessionError {
-    let (kind, message, source) = error.into_parts();
-    let Some(source) = source else {
-        return match kind {
-            ErrorKind::TimedOut => SessionError::TimedOut,
-            ErrorKind::Exited => SessionError::ProcessExited,
-            _ => SessionError::Protocol(message),
-        };
-    };
-    let error = match source.downcast::<HostConnectionError>() {
-        Ok(error) => *error,
-        Err(source) => match source.downcast::<nvxs::SessionError>() {
-            Ok(error) => HostConnectionError::Protocol(*error),
-            Err(source) => match source.downcast::<io::Error>() {
-                Ok(error) => HostConnectionError::Io(*error),
-                Err(source) => HostConnectionError::Io(io::Error::other(source)),
-            },
-        },
-    };
-    connection_failure(error, stage)
-}
-
-/// Maps retained connection cause details to the legacy NVXC failure at `stage`.
 fn connection_failure(error: HostConnectionError, stage: Stage) -> SessionError {
     let violation = match error {
         HostConnectionError::TimedOut => return SessionError::TimedOut,

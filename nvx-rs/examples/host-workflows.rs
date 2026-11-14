@@ -13,7 +13,6 @@
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -27,9 +26,10 @@ use nvx::host::restore::{
 };
 use nvx::host::runtime::Runtime;
 use nvx::host::snapshot::{self, Snapshot};
-use nvx::host::transport::{self, HostConnection, HostConnectionError};
-use nvx::host::vm::{self, Launched, Prepared, Reattached, SavedVm, Stopped, VmDir, VmOutputs};
-use nvx::protocol::nvxs::SessionError;
+use nvx::host::vm::{
+    self, Attached, Connection, ConnectionError, ConnectionErrorKind, Launched, Prepared, SavedVm,
+    Stopped, VmDir, VmOutputs,
+};
 
 /// One byte past OpenVMM's 25-byte restore-ready event, so that a longer event fails to parse.
 const READY_LIMIT: usize = 26;
@@ -44,7 +44,7 @@ fn main() {}
 
 /// What the caller saves, durably and privately, to find its VM again after it restarts.
 pub struct Saved {
-    /// What [`vm::verify`] and [`vm::reattach`] take: the directory, the endpoint, the
+    /// What [`vm::verify`] and [`vm::attach`] take: the directory, the endpoint, the
     /// capability, the process and the runtime's identity.
     pub vm: SavedVm,
     /// The VM's output files and endpoints, whose outcome report [`vm::stop`] reads.
@@ -122,7 +122,7 @@ pub fn capture<R>(
     deadline: Instant,
 ) -> Result<Snapshot, Box<dyn Error>>
 where
-    R: FnOnce(&mut HostConnection, Instant) -> nvx::Result<()>,
+    R: FnOnce(&mut Connection, Instant) -> nvx::Result<()>,
 {
     vm::create_private_dir(snapshot_dir)?;
     if fs::read_dir(snapshot_dir)?.next().is_some() {
@@ -137,13 +137,10 @@ where
         .cloned()
         .ok_or("the configuration's boot has no capture")?;
     let launched = start(prepared)?;
-    let requested = transport::connect_verified(
-        &launched.outputs.endpoint,
-        launched.process.reference(),
-        deadline,
-    )
-    .and_then(|stream| HostConnection::attach(stream, launched.capability.as_bytes(), deadline))
-    .and_then(|mut connection| request(&mut connection, deadline));
+    let requested = launched
+        .connect(deadline)
+        .map_err(nvx::Error::from)
+        .and_then(|mut connection| request(&mut connection, deadline));
     if let Err(error) = requested {
         return Err(end(launched, error.into()));
     }
@@ -187,9 +184,9 @@ pub fn restore<A>(
     transaction: TransactionId,
     activate: A,
     deadline: Instant,
-) -> Result<(Launched, HostConnection), Box<dyn Error>>
+) -> Result<(Launched, Connection), Box<dyn Error>>
 where
-    A: FnMut(&mut HostConnection, &[u8], Instant) -> nvx::Result<GuestRestoreReady>,
+    A: FnMut(&mut Connection, &[u8], Instant) -> nvx::Result<GuestRestoreReady>,
 {
     vm::create_private_dir(directory)?;
     let dir = VmDir::open(directory)?;
@@ -213,9 +210,9 @@ fn drive<A>(
     record: &GuestRestoreRecord,
     mut activate: A,
     deadline: Instant,
-) -> Result<HostConnection, Box<dyn Error>>
+) -> Result<Connection, Box<dyn Error>>
 where
-    A: FnMut(&mut HostConnection, &[u8], Instant) -> nvx::Result<GuestRestoreReady>,
+    A: FnMut(&mut Connection, &[u8], Instant) -> nvx::Result<GuestRestoreReady>,
 {
     let mut machine = RestoreMachine::new(record);
     machine.input(RestoreInput::Spawned(launched.process.reference().clone()));
@@ -252,17 +249,12 @@ where
             RestoreAction::Connect => {
                 // A connection that was lost closes before another replaces it.
                 current = None;
-                let process = launched.process.reference();
-                let endpoint = &launched.outputs.endpoint;
-                let capability = launched.capability.as_bytes();
-                match transport::connect_verified(endpoint, process, deadline)
-                    .and_then(|stream| HostConnection::attach(stream, capability, deadline))
-                {
+                match launched.connect(deadline) {
                     Ok(connection) => {
                         current = Some(connection);
                         RestoreInput::Connected
                     }
-                    Err(error) => failed(launched, RestorePhase::Connect, error),
+                    Err(error) => failed(launched, RestorePhase::Connect, error.into()),
                 }
             }
             RestoreAction::SendActivate(bytes) => {
@@ -306,24 +298,12 @@ fn ready_event(
 /// A VM that exits ends its connections before its exit shows, so a lost connection's VM has a
 /// moment to show its exit first.
 fn failed(launched: &Launched, phase: RestorePhase, error: nvx::Error) -> RestoreInput {
-    // The broker closed or reset the session, or the stream ended inside a record.
-    let closed = error.source().is_some_and(|cause| {
-        matches!(
-            cause.downcast_ref(),
-            Some(HostConnectionError::Closed | HostConnectionError::Reset(_))
-        ) || matches!(cause.downcast_ref(), Some(SessionError::Truncated { .. }))
-    });
-    let lost = closed
-        || io_cause(&error).is_some_and(|cause| {
-            matches!(
-                cause.kind(),
-                io::ErrorKind::BrokenPipe
-                    | io::ErrorKind::ConnectionAborted
-                    | io::ErrorKind::ConnectionReset
-                    | io::ErrorKind::UnexpectedEof
-                    | io::ErrorKind::WriteZero
-            )
-        });
+    // A failure of the connection itself, rather than of the caller's protocol, is the source of
+    // the crate's error that it converted into.
+    let cause = error
+        .source()
+        .and_then(|cause| cause.downcast_ref::<ConnectionError>());
+    let lost = cause.is_some_and(ConnectionError::is_lost);
     let gone = lost
         && launched
             .process
@@ -334,11 +314,8 @@ fn failed(launched: &Launched, phase: RestorePhase, error: nvx::Error) -> Restor
         _ if gone => return exited(&launched.outputs, phase),
         _ if lost => return RestoreInput::SessionLost,
         ErrorKind::TimedOut => return RestoreInput::Expired,
-        // `transport::connect_verified` refuses an endpoint that another process serves.
-        ErrorKind::Protocol
-            if io_cause(&error)
-                .is_some_and(|cause| cause.kind() == io::ErrorKind::PermissionDenied) =>
-        {
+        // Connecting refuses an endpoint that another process serves.
+        _ if cause.is_some_and(|cause| cause.kind() == ConnectionErrorKind::PeerMismatch) => {
             RestoreEvidence::PeerMismatch
         }
         ErrorKind::Protocol => RestoreEvidence::Malformed,
@@ -349,11 +326,6 @@ fn failed(launched: &Launched, phase: RestorePhase, error: nvx::Error) -> Restor
         evidence,
         source: Some(error.into()),
     }
-}
-
-/// The I/O error that caused `error`, if one did.
-fn io_cause(error: &nvx::Error) -> Option<&io::Error> {
-    error.source()?.downcast_ref()
 }
 
 /// The VM's exit, with the outcome report that tells what the failure is attributed to.
@@ -371,16 +343,16 @@ fn exited(outputs: &VmOutputs, phase: RestorePhase) -> RestoreInput {
 /// Finds a VM again from what the caller saved at its launch, after the caller restarted, or
 /// stops it and returns `None` if another runtime launched it.
 ///
-/// [`vm::reattach`] checks the runtime's identity before it opens anything, then the endpoint's
+/// [`vm::attach`] checks the runtime's identity before it opens anything, then the endpoint's
 /// owner, which must be the VM's own process, before it presents the capability. Its failures
 /// neither signal the VM nor change the saved values, which the caller keeps to try again.
-pub fn reattach(
+pub fn attach(
     saved: &Saved,
     runtime: &Runtime,
     deadline: Instant,
-) -> Result<Option<Reattached>, Box<dyn Error>> {
-    match vm::reattach(&saved.vm, runtime, deadline) {
-        Ok(reattached) => Ok(Some(reattached)),
+) -> Result<Option<Attached>, Box<dyn Error>> {
+    match vm::attach(&saved.vm, runtime, deadline) {
+        Ok(attached) => Ok(Some(attached)),
         // The caller drives no VM of another runtime: it terminates it, through its process.
         Err(error) if error.kind() == ErrorKind::RuntimeMismatch => {
             if let Opened::Running(process) = Process::open(&saved.vm.process)? {

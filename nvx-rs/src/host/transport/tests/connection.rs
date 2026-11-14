@@ -1,9 +1,8 @@
 //! The host's connection over a platform transport: attachment through WAIT, messages that span
-//! records over reads of every size, receives that time out inside a record, and the failures
-//! that end the connection.
+//! records over reads of every size, receives that time out inside a record or poll once their
+//! deadline passed, and the failures that end the connection.
 
 use std::collections::VecDeque;
-use std::error::Error as _;
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -18,14 +17,19 @@ use crate::protocol::nvxs::{
 use crate::protocol::{
     CAPABILITY_LEN, OUTER_HEADER_LEN, OUTER_MAX_PAYLOAD, OUTER_MIN_RECEIVE_WINDOW,
 };
-use crate::{Error, ErrorKind};
 
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(10)
 }
 
-fn cause<T: std::error::Error + 'static>(error: &Error) -> Option<&T> {
-    error.source().and_then(|cause| cause.downcast_ref())
+/// Returns whether `result` failed with a transport error of `kind`.
+fn io_failed<T>(result: &Result<T, HostConnectionError>, kind: io::ErrorKind) -> bool {
+    matches!(result, Err(HostConnectionError::Io(error)) if error.kind() == kind)
+}
+
+/// Returns whether `result` failed because an earlier failure ended the connection.
+fn ended<T>(result: &Result<T, HostConnectionError>) -> bool {
+    matches!(result, Err(HostConnectionError::Ended))
 }
 
 /// The broker and a guest whose application echoes each message.
@@ -145,8 +149,8 @@ fn the_host_connection_waits_attaches_and_exchanges_messages() {
         // The guest acknowledges the reset only after the broker answered the host's attachment,
         // which it did with WAIT.
         let mut connection = HostConnection::attach(transport, &CAPABILITY, deadline()).unwrap();
-        assert_eq!(connection.identity(), IDENTITY);
-        assert_eq!(connection.session().state(), HostState::Attached);
+        assert_eq!(connection.session.identity(), Some(IDENTITY));
+        assert_eq!(connection.session.state(), HostState::Attached);
         let window = world.lock().unwrap().guest.window();
         assert_eq!(window, Some(OUTER_MIN_RECEIVE_WINDOW));
         let mut application = Reassembler::default();
@@ -166,7 +170,7 @@ fn the_host_connection_waits_attaches_and_exchanges_messages() {
         assert_eq!(world.lock().unwrap().broker.held(), 0);
         // Nothing more arrives.
         let timed_out = connection.receive(Some(deadline()));
-        assert!(matches!(timed_out, Err(error) if error.kind() == ErrorKind::TimedOut));
+        assert!(io_failed(&timed_out, io::ErrorKind::TimedOut));
     }
 }
 
@@ -254,36 +258,128 @@ fn a_receive_that_times_out_keeps_the_partial_record() {
     ]);
     let mut connection = attach(transport);
     let first = connection.receive(Some(deadline()));
-    assert!(
-        matches!(&first, Err(error) if error.kind() == ErrorKind::TimedOut),
-        "{first:?}"
-    );
+    assert!(io_failed(&first, io::ErrorKind::TimedOut), "{first:?}");
     assert_eq!(
         connection.receive(Some(deadline())).unwrap(),
         b"the payload"
     );
     let again = connection.receive(None);
-    assert!(
-        matches!(&again, Err(error) if error.kind() == ErrorKind::TimedOut),
-        "{again:?}"
-    );
+    assert!(io_failed(&again, io::ErrorKind::TimedOut), "{again:?}");
     // The stream then ends at a record boundary.
     let closed = connection.receive(None);
     assert!(
-        matches!(&closed, Err(error) if error.kind() == ErrorKind::Protocol
-            && matches!(cause(error), Some(HostConnectionError::Closed))),
+        matches!(&closed, Err(HostConnectionError::Closed)),
         "{closed:?}"
     );
-    let ended = connection.receive(None);
+    let result = connection.receive(None);
+    assert!(ended(&result), "{result:?}");
+    let result = connection.send(b"x", None);
+    assert!(ended(&result), "{result:?}");
+}
+
+/// Transport that records the timeout of each read from another.
+struct Timed {
+    /// Transport that serves the reads and writes.
+    inner: Box<dyn Transport>,
+    /// Timeout of each read so far.
+    timeouts: Arc<Mutex<Vec<Option<Duration>>>>,
+}
+
+impl Transport for Timed {
+    fn read(&mut self, buffer: &mut [u8], timeout: Option<Duration>) -> io::Result<usize> {
+        self.timeouts.lock().unwrap().push(timeout);
+        self.inner.read(buffer, timeout)
+    }
+
+    fn write_all(&mut self, data: &[u8], timeout: Option<Duration>) -> io::Result<()> {
+        self.inner.write_all(data, timeout)
+    }
+}
+
+#[test]
+fn a_receive_whose_deadline_passed_polls_what_arrived_without_waiting() {
+    let data = record(RecordType::Data, IDENTITY, 1, b"arrived");
+    let (inner, _) = scripted(vec![
+        ready(),
+        Ok(data[..30].to_vec()),
+        Ok(data[30..].to_vec()),
+        timed_out(),
+        Ok(record(RecordType::Data, IDENTITY, 2, b"later")),
+    ]);
+    let timeouts = Arc::new(Mutex::new(Vec::new()));
+    let transport = Box::new(Timed {
+        inner,
+        timeouts: Arc::clone(&timeouts),
+    });
+    let mut connection = attach(transport);
+    timeouts.lock().unwrap().clear();
+    let passed = Instant::now();
+    // A record that arrives over several reads completes, and each read takes only what the
+    // transport holds.
+    assert_eq!(connection.receive(Some(passed)).unwrap(), b"arrived");
+    let polled = connection.receive(Some(passed));
+    assert!(io_failed(&polled, io::ErrorKind::TimedOut), "{polled:?}");
+    assert_eq!(connection.receive(Some(passed)).unwrap(), b"later");
+    assert_eq!(*timeouts.lock().unwrap(), [Some(Duration::ZERO); 4]);
+}
+
+#[test]
+fn a_connection_opens_holding_what_arrived_with_its_attachment() {
+    // The broker's READY and the guest's first bytes arrive in one read, which leaves the
+    // transport with nothing to read once the connection opens.
+    let mut arrived = record(RecordType::Ready, IDENTITY, 0, &[]);
+    arrived.extend(record(RecordType::Data, IDENTITY, 1, b"first"));
+    arrived.extend(record(RecordType::Data, IDENTITY, 2, b"second"));
+    let (inner, _) = scripted(vec![Ok(arrived), timed_out()]);
+    let timeouts = Arc::new(Mutex::new(Vec::new()));
+    let transport = Box::new(Timed {
+        inner,
+        timeouts: Arc::clone(&timeouts),
+    });
+    let mut connection = attach(transport);
+    timeouts.lock().unwrap().clear();
+    let passed = Instant::now();
+    assert_eq!(connection.receive(Some(passed)).unwrap(), b"first");
+    assert_eq!(connection.receive(Some(passed)).unwrap(), b"second");
     assert!(
-        matches!(&ended, Err(error) if matches!(cause(error), Some(HostConnectionError::Ended))),
-        "{ended:?}"
+        timeouts.lock().unwrap().is_empty(),
+        "the transport was read"
     );
-    let ended = connection.send(b"x", None);
+    let drained = connection.receive(Some(passed));
+    assert!(io_failed(&drained, io::ErrorKind::TimedOut), "{drained:?}");
+    assert_eq!(*timeouts.lock().unwrap(), [Some(Duration::ZERO)]);
+}
+
+/// Transport whose broker answers the host's attachment with WAIT whenever the host reads.
+struct Waiting {
+    /// Sequence number of the next WAIT.
+    sequence: u64,
+}
+
+impl Transport for Waiting {
+    fn read(&mut self, buffer: &mut [u8], _timeout: Option<Duration>) -> io::Result<usize> {
+        let wait = record(RecordType::Wait, IDENTITY, self.sequence, &[]);
+        self.sequence += 1;
+        buffer[..wait.len()].copy_from_slice(&wait);
+        Ok(wait.len())
+    }
+
+    fn write_all(&mut self, _data: &[u8], _timeout: Option<Duration>) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_broker_that_keeps_the_host_waiting_times_the_attachment_out() {
+    let transport = Box::new(Waiting { sequence: 0 });
+    let deadline = Instant::now() + Duration::from_millis(50);
+    let result = HostConnection::attach(transport, &CAPABILITY, deadline);
     assert!(
-        matches!(&ended, Err(error) if matches!(cause(error), Some(HostConnectionError::Ended))),
-        "{ended:?}"
+        matches!(&result, Err(HostConnectionError::TimedOut)),
+        "{:?}",
+        result.err()
     );
+    assert!(Instant::now() >= deadline);
 }
 
 #[test]
@@ -293,8 +389,7 @@ fn the_host_connection_reports_refusals_and_closed_streams_while_attaching() {
     let result = HostConnection::attach(transport, &CAPABILITY, deadline());
     let refused = matches!(
         &result,
-        Err(error) if error.kind() == ErrorKind::Protocol
-            && matches!(cause(error), Some(HostConnectionError::Rejected(ErrorCode::Authentication)))
+        Err(HostConnectionError::Rejected(ErrorCode::Authentication))
     );
     assert!(refused, "{:?}", result.err());
     // The attachment carried the capability.
@@ -310,7 +405,7 @@ fn the_host_connection_reports_refusals_and_closed_streams_while_attaching() {
     let (transport, _) = scripted(Vec::new());
     let result = HostConnection::attach(transport, &CAPABILITY, deadline());
     assert!(
-        matches!(&result, Err(error) if matches!(cause(error), Some(HostConnectionError::Closed))),
+        matches!(&result, Err(HostConnectionError::Closed)),
         "{:?}",
         result.err()
     );
@@ -318,11 +413,11 @@ fn the_host_connection_reports_refusals_and_closed_streams_while_attaching() {
     // An interrupted read is retried, and a deadline that passed fails before anything is sent.
     let interrupted = Err(io::ErrorKind::Interrupted.into());
     let (transport, _) = scripted(vec![interrupted, ready()]);
-    assert_eq!(attach(transport).identity(), IDENTITY);
+    assert_eq!(attach(transport).session.identity(), Some(IDENTITY));
     let (transport, written) = scripted(vec![ready()]);
     let result = HostConnection::attach(transport, &CAPABILITY, Instant::now());
     assert!(
-        matches!(&result, Err(error) if error.kind() == ErrorKind::TimedOut),
+        matches!(&result, Err(HostConnectionError::TimedOut)),
         "{:?}",
         result.err()
     );
@@ -332,7 +427,7 @@ fn the_host_connection_reports_refusals_and_closed_streams_while_attaching() {
 #[test]
 fn resets_truncations_violations_and_transport_failures_end_the_connection() {
     /// Checks the failure of a case.
-    type Check = fn(&Error) -> bool;
+    type Check = fn(&HostConnectionError) -> bool;
     let next = Identity {
         epoch: 2,
         ..IDENTITY
@@ -341,44 +436,37 @@ fn resets_truncations_violations_and_transport_failures_end_the_connection() {
     let reset_by_peer = Err(io::ErrorKind::ConnectionReset.into());
     let cases: [(io::Result<Vec<u8>>, Check); 4] = [
         (Ok(record(RecordType::Reset, next, 1, &[])), |error| {
-            error.kind() == ErrorKind::Protocol
-                && matches!(
-                    cause(error),
-                    Some(HostConnectionError::Reset(Identity { epoch: 2, .. }))
-                )
+            matches!(error, HostConnectionError::Reset(Identity { epoch: 2, .. }))
         }),
         (Ok(data[..20].to_vec()), |error| {
-            matches!(cause(error), Some(SessionError::Truncated { buffered: 20 }))
+            matches!(
+                error,
+                HostConnectionError::Protocol(SessionError::Truncated { buffered: 20 })
+            )
         }),
         (Ok(record(RecordType::Data, IDENTITY, 2, b"x")), |error| {
             matches!(
-                cause(error),
-                Some(SessionError::Sequence {
+                error,
+                HostConnectionError::Protocol(SessionError::Sequence {
                     expected: 1,
                     actual: 2
                 })
             )
         }),
-        (reset_by_peer, |error| {
-            error.kind() == ErrorKind::Protocol
-                && matches!(cause::<io::Error>(error), Some(error) if error.kind() == io::ErrorKind::ConnectionReset)
-        }),
+        (
+            reset_by_peer,
+            |error| matches!(error, HostConnectionError::Io(error) if error.kind() == io::ErrorKind::ConnectionReset),
+        ),
     ];
     for (read, expected) in cases {
         let (transport, _) = scripted(vec![ready(), read]);
         let mut connection = attach(transport);
         let error = connection.receive(Some(deadline())).unwrap_err();
         assert!(expected(&error), "{error:?}");
-        let ended = connection.receive(Some(deadline()));
-        assert!(
-            matches!(&ended, Err(error) if matches!(cause(error), Some(HostConnectionError::Ended))),
-            "{ended:?}"
-        );
-        let ended = connection.send(b"x", Some(deadline()));
-        assert!(
-            matches!(&ended, Err(error) if matches!(cause(error), Some(HostConnectionError::Ended))),
-            "{ended:?}"
-        );
+        let result = connection.receive(Some(deadline()));
+        assert!(ended(&result), "{result:?}");
+        let result = connection.send(b"x", Some(deadline()));
+        assert!(ended(&result), "{result:?}");
     }
 }
 
@@ -388,7 +476,7 @@ fn a_send_that_times_out_before_writing_leaves_the_connection_usable() {
     let mut connection = attach(transport);
     let result = connection.send(b"late", Some(Instant::now()));
     assert!(
-        matches!(&result, Err(error) if error.kind() == ErrorKind::TimedOut),
+        matches!(&result, Err(HostConnectionError::TimedOut)),
         "{result:?}"
     );
     // The DATA that follows takes the first sequence number.
@@ -412,12 +500,12 @@ fn transport_timeouts_keep_the_original_read_and_write_causes() {
         Ok(record(RecordType::Data, IDENTITY, 1, b"after timeout")),
     ]);
     let mut connection = attach(transport);
-    let error = connection.receive(Some(deadline())).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::TimedOut);
-    assert_eq!(
-        cause::<io::Error>(&error).unwrap().to_string(),
-        "the original read failure"
-    );
+    let error = connection.receive(Some(deadline()));
+    assert!(io_failed(&error, io::ErrorKind::TimedOut), "{error:?}");
+    let Err(HostConnectionError::Io(error)) = error else {
+        unreachable!()
+    };
+    assert_eq!(error.to_string(), "the original read failure");
     assert_eq!(
         connection.receive(Some(deadline())).unwrap(),
         b"after timeout"
@@ -432,14 +520,14 @@ fn transport_timeouts_keep_the_original_read_and_write_causes() {
     });
     let (transport, _) = scripted_writes(vec![ready()], on_write);
     let mut connection = attach(transport);
-    let error = connection.send(b"x", Some(deadline())).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::TimedOut);
-    assert_eq!(
-        cause::<io::Error>(&error).unwrap().to_string(),
-        "the original write failure"
-    );
-    let error = connection.receive(None).unwrap_err();
-    assert!(matches!(cause(&error), Some(HostConnectionError::Ended)));
+    let error = connection.send(b"x", Some(deadline()));
+    assert!(io_failed(&error, io::ErrorKind::TimedOut), "{error:?}");
+    let Err(HostConnectionError::Io(error)) = error else {
+        unreachable!()
+    };
+    assert_eq!(error.to_string(), "the original write failure");
+    let result = connection.receive(None);
+    assert!(ended(&result), "{result:?}");
 }
 
 #[test]
@@ -449,14 +537,14 @@ fn other_transport_failures_keep_their_original_io_source() {
         Err(io::Error::other("the original transport failure")),
     ]);
     let mut connection = attach(transport);
-    let error = connection.receive(Some(deadline())).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Io);
-    assert_eq!(
-        cause::<io::Error>(&error).unwrap().to_string(),
-        "the original transport failure"
-    );
-    let error = connection.send(b"x", None).unwrap_err();
-    assert!(matches!(cause(&error), Some(HostConnectionError::Ended)));
+    let error = connection.receive(Some(deadline()));
+    assert!(io_failed(&error, io::ErrorKind::Other), "{error:?}");
+    let Err(HostConnectionError::Io(error)) = error else {
+        unreachable!()
+    };
+    assert_eq!(error.to_string(), "the original transport failure");
+    let result = connection.send(b"x", None);
+    assert!(ended(&result), "{result:?}");
 }
 
 #[test]
@@ -469,15 +557,9 @@ fn a_send_that_fails_after_writing_ends_the_connection() {
     let (transport, _) = scripted_writes(vec![ready()], on_write);
     let mut connection = attach(transport);
     let result = connection.send(b"x", Some(deadline()));
-    assert!(
-        matches!(&result, Err(error) if error.kind() == ErrorKind::TimedOut),
-        "{result:?}"
-    );
-    let ended = connection.receive(Some(deadline()));
-    assert!(
-        matches!(&ended, Err(error) if matches!(cause(error), Some(HostConnectionError::Ended))),
-        "{ended:?}"
-    );
+    assert!(io_failed(&result, io::ErrorKind::TimedOut), "{result:?}");
+    let result = connection.receive(Some(deadline()));
+    assert!(ended(&result), "{result:?}");
 
     // A transport failure does too.
     let on_write: OnWrite = Box::new(|index| match index {
@@ -487,14 +569,9 @@ fn a_send_that_fails_after_writing_ends_the_connection() {
     let (transport, _) = scripted_writes(vec![ready()], on_write);
     let mut connection = attach(transport);
     let result = connection.send(b"x", None);
-    let broken = matches!(&result, Err(error) if error.kind() == ErrorKind::Protocol
-        && matches!(cause::<io::Error>(error), Some(error) if error.kind() == io::ErrorKind::BrokenPipe));
-    assert!(broken, "{result:?}");
-    let ended = connection.receive(None);
-    assert!(
-        matches!(&ended, Err(error) if matches!(cause(error), Some(HostConnectionError::Ended))),
-        "{ended:?}"
-    );
+    assert!(io_failed(&result, io::ErrorKind::BrokenPipe), "{result:?}");
+    let result = connection.receive(None);
+    assert!(ended(&result), "{result:?}");
 
     // So does a deadline that passes between two records of a message, which leaves the message
     // unfinished: the first record's write lasts until the deadline.
@@ -513,14 +590,11 @@ fn a_send_that_fails_after_writing_ends_the_connection() {
     *message_deadline.lock().unwrap() = Some(deadline);
     let result = connection.send(&vec![0; 100_000], Some(deadline));
     assert!(
-        matches!(&result, Err(error) if error.kind() == ErrorKind::TimedOut),
+        matches!(&result, Err(HostConnectionError::TimedOut)),
         "{result:?}"
     );
-    let ended = connection.send(b"x", None);
-    assert!(
-        matches!(&ended, Err(error) if matches!(cause(error), Some(HostConnectionError::Ended))),
-        "{ended:?}"
-    );
+    let result = connection.send(b"x", None);
+    assert!(ended(&result), "{result:?}");
     // The attachment and the message's first record went out.
     let attachment = OUTER_HEADER_LEN + CAPABILITY_LEN;
     let first_record = OUTER_HEADER_LEN + OUTER_MAX_PAYLOAD;

@@ -53,10 +53,10 @@ A launch takes two values:
    OpenVMM receives on its standard input and the library never writes to a
    file. A program with a launcher of its own takes `Prepared::into_command`
    instead, and follows the launch contract that `VmmCommand` documents.
-4. The program speaks its own protocol with its guest:
-   `transport::connect_verified` connects to the VM's control endpoint once it
-   has checked that the VM's own process serves it, and
-   `HostConnection::attach` authenticates with the capability.
+4. The program speaks its own protocol with its guest, over the `Connection`
+   that `Launched::connect` opens: it connects to the VM's control endpoint
+   once it has checked that the VM's own process serves it, and authenticates
+   with the capability.
 5. `vm::stop` asks the guest to end the VM, through a callback that sends the
    request in the program's protocol, terminates the process once a grace
    deadline passed, and returns once the process exited, with the result of
@@ -129,10 +129,10 @@ spawn returns: the VM directory, the control endpoint, the capability's bytes,
 the process's `ProcessRef`, and the runtime's identity, with the `VmOutputs`
 that a stop reads. Then:
 
-- `vm::reattach(&saved, &runtime, deadline)` checks the runtime's identity,
+- `vm::attach(&saved, &runtime, deadline)` checks the runtime's identity,
   holds the process by its reference, checks that it serves the endpoint, and
-  authenticates with the saved capability: its `Reattached` holds the process
-  and the connection.
+  authenticates with the saved capability: its `Attached` holds the process
+  and the `Connection`.
 - `vm::verify(&saved, &identity)` makes the same checks of the runtime and the
   process without connecting, and returns the held `Process`, which the
   program can wait for or stop.
@@ -141,10 +141,10 @@ that a stop reads. Then:
   `Process::open` of the saved reference.
 
 Their failures neither signal the VM nor change the saved values, which the
-program keeps to try again. `reattach` in
+program keeps to try again. `attach` in
 [`host-workflows`](../nvx-rs/examples/host-workflows.rs) reattaches this way,
-and the example of [`host::transport`](../nvx-rs/src/host/transport.rs), which
-rustdoc compiles, connects to a VM from its endpoint, process, and capability.
+and the example of [`host::vm::Connection`](../nvx-rs/src/host/vm/connection.rs),
+which rustdoc compiles, connects to a VM that the program launched.
 
 ## What the caller owns
 
@@ -207,18 +207,20 @@ owns the following.
 
 **I/O.**
 
-- The program speaks its own protocol with its guest, over the NVXS session
-  that `HostConnection` runs on a verified connection. NVX's own control
-  protocol is private to NVX's programs.
+- The program speaks its own protocol with its guest, over the ordered byte
+  stream of a `Connection`, and frames its own messages in it. NVX's own
+  control protocol is private to NVX's programs.
 - A `RestoreMachine` does no I/O: the program receives the restore-ready event,
   connects, sends the activation record, and reads Ready. Then it sends the
   mapping table, which `VmConfig::mapping_table` returns and
   `protocol::encode_maps_payloads` encodes, but none when the table is empty,
   as it is without an export, and the workload, in its own protocol.
-- A program with an I/O runtime of its own takes the native handles,
-  `Transport::try_clone_handle`, `Process::exit_handle`, and
-  `ReadyListener::into_std`, and checks what their documentation asks it to:
-  the library depends on no asynchronous runtime.
+- A program with an event loop of its own polls, on Linux, the descriptor of
+  each `Connection`, which is `AsFd`, and takes the native handles
+  `Process::exit_handle` and `ReadyListener::into_std`, and checks what their
+  documentation asks it to: the library depends on no asynchronous runtime. A
+  `Connection` is `Send`, so a program runs it on a thread of its own where
+  the platform has no such descriptor, as on Windows.
 
 **Timing.**
 
@@ -237,7 +239,7 @@ owns the following.
 **Recovery.**
 
 - After a restart, the program finds its VMs again from what it saved, with
-  `vm::verify` or `vm::reattach`, and decides what becomes of a launch that it
+  `vm::verify` or `vm::attach`, and decides what becomes of a launch that it
   recorded before a spawn that never returned.
 - A failed restore's `RestoreError` stops no process and writes no record: it
   tells the failed phase, the evidence and what it attributes the failure to,

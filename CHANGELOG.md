@@ -56,6 +56,11 @@ changed item to its replacement, or to what its caller now does.
   as a fourth argument, and `IdentityPart::Compatibility` replaces
   `BootContract`, `ControlContract` and `ControlSession`.
   `RuntimeIdentity::check` and `SnapshotKey::speaks_current_contracts` are gone.
+- **One control connection.** `nvx::host::nvxs` and `nvx::host::transport` are
+  private. `nvx::host::vm::Launched::connect` and `nvx::host::vm::attach`, which
+  replaces `vm::reattach`, open a `vm::Connection`: an authenticated, ordered
+  stream of bytes, whose `ConnectionError` tells a timeout, an exit, and a lost
+  session apart. `vm::Console` reads and writes a VM's boot console.
 - **Errors.** `ErrorCode` and `Error`'s constructors are private: callers tell
   errors apart by their `ErrorKind`, which gains `RuntimeMismatch` and
   `StillRunning`.

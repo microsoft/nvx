@@ -379,6 +379,7 @@ fn a_busy_control_pipe_never_replaces_the_callers_probe_deadline() {
     drop(server);
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_duplicated_transport_keeps_the_verified_connection_without_reconnecting() {
     let endpoint = format!(

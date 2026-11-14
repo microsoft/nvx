@@ -29,7 +29,7 @@ use crate::protocol::view::{MachineIdMode, View};
 use crate::uuid::Uuid;
 
 #[cfg(any(target_os = "linux", windows))]
-mod reattach;
+mod attach;
 
 #[cfg(all(feature = "cli", any(target_os = "linux", windows)))]
 impl Launched {
