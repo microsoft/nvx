@@ -1,12 +1,14 @@
 //! A caller-owned launch: `vm::create` prepares a cold boot or a restore, and the caller's own
 //! launcher starts the VMM of the `vm::VmmCommand` that it hands over.
 //!
-//! Run the compiled example with a backend, OpenVMM, kernel, initramfs, new VM directory, and
-//! the three artifact SHA-256 digests from their installation metadata, in that order.
+//! Run the compiled example with a backend, OpenVMM, kernel, initramfs, new VM directory, the
+//! three artifact SHA-256 digests from their installation metadata, and the compatibility
+//! identity that names the caller's contracts with the guest, in that order.
 //! Append SNAPSHOT-DIR IMAGE.erofs for a restore-ready demonstration: it verifies the ready
 //! event, then intentionally stops and verifies the VM's exit without driving a guest restore.
 //! The snapshot must have captured a disconnected boot console, as `nvx-rs snapshot capture`
-//! does.
+//! does, and a restore names the compatibility identity that the snapshot's capture named, which
+//! `snapshot::SnapshotKey::runtime` returns; `nvx-rs` names the one that its README gives.
 //!
 //! Its launcher, `spawn`, is a minimal one on `std::process`, enough for these two VMs: it writes
 //! the capability into a pipe that it closes to writers before the spawn, gives the VMM that pipe
@@ -38,7 +40,9 @@ use nvx::host::config::{
 };
 use nvx::host::network::{Access, NetworkPolicy};
 use nvx::host::process::{BootId, Opened, Process, ProcessRef};
-use nvx::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity};
+use nvx::host::runtime::{
+    ArtifactIdentity, CompatibilityIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity,
+};
 use nvx::host::transport::{self, Transport};
 use nvx::host::{report, snapshot, vm};
 use nvx::protocol::root::RootImage;
@@ -49,11 +53,12 @@ const READY_LIMIT: usize = 26;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args_os().collect();
-    if args.len() != 9 && args.len() != 11 {
+    if args.len() != 10 && args.len() != 12 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "usage: external-launch BACKEND OPENVMM KERNEL INITRAMFS VM-DIR \
-             OPENVMM-SHA256 KERNEL-SHA256 INITRAMFS-SHA256 [SNAPSHOT-DIR IMAGE.erofs]",
+             OPENVMM-SHA256 KERNEL-SHA256 INITRAMFS-SHA256 COMPATIBILITY \
+             [SNAPSHOT-DIR IMAGE.erofs]",
         )
         .into());
     }
@@ -64,26 +69,30 @@ fn main() -> Result<(), Box<dyn Error>> {
         _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid backend").into()),
     };
     nvx::host::runtime::probe_hypervisor(hypervisor)?;
-    let identity = |index: usize| {
-        ArtifactIdentity::sha256(args[index].to_str().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "artifact digest is not Unicode",
-            )
-        })?)
-        .map_err(Box::<dyn Error>::from)
+    let text = |index: usize| {
+        args[index].to_str().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "an argument is not Unicode")
+        })
+    };
+    let identity = |index: usize| -> Result<ArtifactIdentity, Box<dyn Error>> {
+        Ok(ArtifactIdentity::sha256(text(index)?)?)
     };
     let runtime = Runtime {
         openvmm: std::path::absolute(Path::new(&args[2]))?,
         kernel: std::path::absolute(Path::new(&args[3]))?,
         initramfs: std::path::absolute(Path::new(&args[4]))?,
-        identity: RuntimeIdentity::new(identity(6)?, identity(7)?, identity(8)?),
+        identity: RuntimeIdentity::new(
+            identity(6)?,
+            identity(7)?,
+            identity(8)?,
+            CompatibilityIdentity::new(text(9)?)?,
+        ),
         hypervisor,
         cpu_profile: Some("auto".to_owned()),
         windows_breakaway: false,
         options: LaunchOptions::default(),
     };
-    let snapshot_dir = (args.len() == 11).then(|| Path::new(&args[9]));
+    let snapshot_dir = (args.len() == 12).then(|| Path::new(&args[10]));
     // Every caller of this snapshot must take this same lock before it opens the snapshot, and
     // hold it through the restore-ready event or the VM's exit, and the view's removal.
     #[cfg(target_os = "linux")]
@@ -120,7 +129,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         config.memory_mib = key.memory() / (1 << 20);
         config.root = RootConfig::Layered(LayeredRoot {
-            image: std::path::absolute(Path::new(&args[10]))?,
+            image: std::path::absolute(Path::new(&args[11]))?,
             format: RootImage::erofs(None),
             gpt_first_partition_bound: None,
             upper: UpperConfig::Ram {

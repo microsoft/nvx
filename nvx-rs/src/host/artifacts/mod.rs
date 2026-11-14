@@ -19,7 +19,12 @@
 //! of `artifact_path`, `openvmm_binary_path`, and `require_file` in
 //! `scripts/nvx_tools/common.py`, so that `nvx-rs` and the `nvx.py` commands that build,
 //! install, benchmark, and test the guests agree on where each artifact is.
+//!
+//! The runtime identity of a directory's artifacts names the compatibility of the CLI's
+//! contracts with its bundled guests, which `compatibility` declares.
 
+#[cfg(feature = "cli")]
+pub(crate) mod compatibility;
 #[cfg(feature = "cli")]
 mod dir;
 #[cfg(feature = "cli")]

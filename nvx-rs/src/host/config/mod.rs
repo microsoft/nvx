@@ -20,7 +20,6 @@ use super::filesystem::{ExportPlan, ReservedTargets};
 use super::network::{self, NetworkPolicy};
 use super::platform::parse_hex32;
 use super::runtime::{GuestPowerAction, Hypervisor, Runtime};
-use crate::contract;
 use crate::error::{Error, Result};
 use crate::guest_restore;
 use crate::net::Ipv4Cidr;
@@ -1053,31 +1052,24 @@ impl CaptureConfig {
     /// It identifies the captures that NVX supports, fresh captures of a blockless VM, from the
     /// values alone: it reads nothing on the host, refuses no configuration, which creating the
     /// capture checks, and digests nothing of the VM's root. It digests the runtime's identity,
-    /// the versions of the contracts that this crate speaks, the hypervisor, and the CPU profile
-    /// that the runtime requests; the capture's disks, processors, memory, and invariant
-    /// settings; and of the VM, its NIC's address, which is [`DEFAULT_GUEST_NETWORK`] when the
-    /// configuration names none, its console attachment, whether it exports host paths, and its
-    /// boot's command line. It digests no path, nothing of a launch's options or of the view that
-    /// each clone's guest restore sets, no network policy, which each restore replaces, and not the
-    /// VM's own processors and memory, for which the capture's count.
+    /// whose OpenVMM identity stands for OpenVMM's snapshot format, saved device state, and time
+    /// ABI, and whose compatibility identity stands for whatever its caller drives the guest
+    /// through; the version of the guest-restore record that this crate writes; the hypervisor,
+    /// and the CPU profile that the runtime requests; the capture's disks, processors, memory,
+    /// and invariant settings; and of the VM, its NIC's address, which is
+    /// [`DEFAULT_GUEST_NETWORK`] when the configuration names none, its console attachment,
+    /// whether it exports host paths, and its boot's command line. It digests no path, nothing of
+    /// a launch's options or of the view that each clone's guest restore sets, no network policy,
+    /// which each restore replaces, and not the VM's own processors and memory, for which the
+    /// capture's count.
     pub fn identity(&self, config: &VmConfig, runtime: &Runtime) -> CaptureIdentity {
         let mut fed = Identifying(Sha256::new_with_prefix(CAPTURE_DOMAIN));
         let identity = &runtime.identity;
         for artifact in [&identity.openvmm, &identity.kernel, &identity.initramfs] {
             fed.text(artifact.as_str());
         }
-        fed.number(identity.boot_contract);
-        fed.text(&identity.control_contract);
-        fed.number(identity.control_session);
-        for version in [
-            contract::SNAPSHOT_FORMAT_VERSION,
-            contract::DEVICE_STATE_SCHEMA_VERSION,
-            contract::TIME_ABI_VERSION,
-            contract::RESTORE_PACKET_VERSION,
-            u64::from(guest_restore::VERSION),
-        ] {
-            fed.number(version);
-        }
+        fed.text(identity.compatibility.as_str());
+        fed.number(u64::from(guest_restore::VERSION));
         fed.text(runtime.hypervisor.as_str());
         fed.optional_text(runtime.cpu_profile.as_deref());
         match &self.disks {

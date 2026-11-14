@@ -159,6 +159,11 @@ owns the following.
   initramfs, and labels each with the identity that its install metadata
   records, such as the file's own SHA-256 digest that a release's
   `SHA256SUMS` lists, which the library compares and never computes.
+- The runtime's compatibility: the program names the contracts that it speaks
+  with its guests, such as its boot tokens and its protocol, in a
+  `CompatibilityIdentity` that the library compares and never interprets, and
+  changes it whenever it can no longer drive the VMs that it launched, or
+  restore the snapshots that it captured, under the earlier one.
 - The images: OpenVMM opens a layered root's image and scratch at their paths
   when it starts. The library reads none of their content: a cold boot checks
   only their paths, and a restore their metadata, against the snapshot. The

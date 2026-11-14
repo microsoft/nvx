@@ -22,7 +22,8 @@ use nvx::host::config::{Boot, ConsoleAttachment, LayeredRoot, RootConfig, UpperC
 use nvx::host::process::{Opened, Process, ProcessRef};
 use nvx::host::report::Report;
 use nvx::host::runtime::{
-    ArtifactIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity, probe_hypervisor,
+    ArtifactIdentity, CompatibilityIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity,
+    probe_hypervisor,
 };
 use nvx::host::transport::HostConnection;
 use nvx::host::vm::{self, SavedVm, VmDir, VmOutputs};
@@ -167,6 +168,7 @@ fn a_cold_vm_is_reattached_from_saved_values_and_stopped() {
             identity(&inputs.openvmm_sha256),
             identity(&inputs.kernel_sha256),
             identity(&inputs.initramfs_sha256),
+            CompatibilityIdentity::new("nvx-vm-lifecycle-test").expect("a compatibility identity"),
         ),
         hypervisor,
         cpu_profile: None,

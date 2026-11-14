@@ -252,6 +252,21 @@ fn the_fields_of_a_manifest_need_not_be_written_in_their_order() {
 }
 
 #[test]
+fn the_saved_state_schema_is_recorded_for_openvmm_to_check() {
+    // OpenVMM, which restores the saved state, decides which of its schemas it reads.
+    for schema in [1, 2, u32::MAX] {
+        let mut spec = ManifestSpec::template();
+        spec.schema_version = schema;
+        assert_eq!(parse(&spec).device_state_schema, schema);
+    }
+    assert_refused(
+        |spec| spec.schema_version = 0,
+        ErrorCode::Io,
+        "the snapshot manifest has no saved-state schema version",
+    );
+}
+
+#[test]
 fn other_versions_of_the_format_are_unsupported() {
     let unsupported = ErrorCode::FormatUnsupported;
     for version in [0, 1, 3, 6, u32::MAX] {
@@ -275,14 +290,9 @@ fn other_versions_of_the_format_are_unsupported() {
         "has another format magic",
     );
     assert_refused(
-        |spec| spec.schema_version = 2,
-        unsupported,
-        "has saved-state schema version 2",
-    );
-    assert_refused(
         |spec| spec.root_type = "openvmm.OtherState".to_owned(),
         unsupported,
-        "of root type \"openvmm.OtherState\"",
+        "has a saved state of root type \"openvmm.OtherState\"",
     );
     assert_refused(
         |spec| spec.contract().machine_profile = "standard".to_owned(),

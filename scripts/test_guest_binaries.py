@@ -141,7 +141,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
         )
         for path in (
             "nvx-rs/src/lib.rs",
-            "nvx-rs/src/contract.rs",
+            "nvx-rs/src/uuid.rs",
             "nvx-rs/src/protocol/nvxs/host.rs",
             "nvx-rs/src/guest/exit.rs",
             "nvx-rs/src/guest/device_io.rs",
@@ -178,7 +178,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
             inputs = (
                 *(path.as_posix() for path in GuestRustBuildConstants.SOURCE_FILES),
                 "nvx-rs/src/lib.rs",
-                "nvx-rs/src/contract.rs",
+                "nvx-rs/src/uuid.rs",
                 "nvx-rs/src/net/cidr.rs",
                 "nvx-rs/src/protocol/mod.rs",
                 "nvx-rs/src/protocol/nvxs/host.rs",

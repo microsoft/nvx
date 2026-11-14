@@ -364,7 +364,9 @@ impl Options {
             Access, EgressRule, EgressRules, HostLoopback, LoopbackForward, NetworkPolicy,
             NetworkProxy,
         };
-        use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
+        use nvx::host::runtime::{
+            ArtifactIdentity, CompatibilityIdentity, LaunchOptions, Runtime, RuntimeIdentity,
+        };
         use nvx::host::vm::{self, VmDir};
         use nvx::protocol::view::{MachineIdMode, View};
 
@@ -594,7 +596,12 @@ impl Options {
             openvmm: root.below(OPENVMM),
             kernel: PathBuf::from(old.value("--kernel")),
             initramfs: PathBuf::from(old.value("--initrd")),
-            identity: RuntimeIdentity::new(identity.clone(), identity.clone(), identity),
+            identity: RuntimeIdentity::new(
+                identity.clone(),
+                identity.clone(),
+                identity,
+                CompatibilityIdentity::new("test-fixture").unwrap(),
+            ),
             hypervisor: old.value("--hypervisor").parse().unwrap(),
             cpu_profile: old.values("--cpu-profile").first().cloned(),
             windows_breakaway: false,

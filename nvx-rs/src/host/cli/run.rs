@@ -62,6 +62,7 @@ use super::shell::format_command;
 use super::snapshots::{self, Name};
 use super::{Exit, Result, check_interrupt, output};
 use crate::ErrorCode;
+use crate::host::artifacts::compatibility::compatibility;
 use crate::host::artifacts::{ArtifactDir, Guest, require_artifact};
 use crate::host::config::{
     Boot, COMMAND_LINE_BUDGET, ConsoleAttachment, NicConfig, RootConfig, VmConfig,
@@ -1275,7 +1276,12 @@ fn run_cold(
         openvmm,
         kernel,
         initramfs,
-        identity: RuntimeIdentity::new(identity.clone(), identity.clone(), identity),
+        identity: RuntimeIdentity::new(
+            identity.clone(),
+            identity.clone(),
+            identity,
+            compatibility()?,
+        ),
         hypervisor: hypervisor(options.hypervisor).parse()?,
         cpu_profile: options.cpu_profile.clone(),
         windows_breakaway: false,

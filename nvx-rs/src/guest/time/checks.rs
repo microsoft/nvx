@@ -42,12 +42,13 @@ const HYPERV_VENDOR: [u32; 3] = [
 const HYPERV_MAXIMUM_LEAF: u32 = cpuid::LEAF_HYPERVISOR + 5;
 /// The interface signature of Hyper-V's CPUID leaf 0x40000001, "Hv#1".
 const HYPERV_INTERFACE: u32 = u32::from_le_bytes(*b"Hv#1");
+/// The version of OpenVMM's time ABI that the guest speaks: its clocks and timers, and their
+/// repair after a restore. It must match `TIME_ABI_VERSION` in OpenVMM's
+/// `vmm_core/virt/src/time_abi/mod.rs`, which the ignored test `tests/openvmm_vectors.rs` checks.
+const TIME_ABI_VERSION: u32 = 1;
 /// The build of leaf 0x40000002, OpenVMM's NVX build: "NVX", then the time ABI version as the
 /// major version in the upper half of EBX, version 2.0.
-const HYPERV_BUILD: [u32; 2] = [
-    u32::from_le_bytes(*b"NVX\0"),
-    (crate::contract::TIME_ABI_VERSION as u32) << 16,
-];
+const HYPERV_BUILD: [u32; 2] = [u32::from_le_bytes(*b"NVX\0"), TIME_ABI_VERSION << 16];
 /// The partition privileges of leaf 0x40000003's EAX: the hypercall, VP-index, frequency, and
 /// TSC invariant-control MSRs.
 const HYPERV_PRIVILEGES: u32 = (1 << cpuid::HYPERV_EAX_HYPERCALL)

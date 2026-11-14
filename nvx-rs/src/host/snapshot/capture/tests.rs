@@ -334,7 +334,6 @@ fn finish_checks_the_context_against_the_effective_capture() {
                 guest_network: crate::net::Ipv4Cidr::parse("10.0.0.2/24").unwrap(),
             });
         },
-        |context| context.runtime.control_contract.clear(),
         |context| context.capture.memory.capacity = u64::MAX - 127,
     ];
     for change in changes {

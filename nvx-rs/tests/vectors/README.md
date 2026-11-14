@@ -72,11 +72,13 @@ the key that the vector's bytes decode to.
   one directory sends one only to a guest that deploys with it, so the C agent
   of earlier releases, which refuses it, never receives one. And the snapshot
   key of `snapshot-key-v1.txt` drops the obsolete guest-build field, uses the
-  `nvx snapshot key` hash domain in place, and appends the full capture-time
-  contract, while its compatibility identity still digests only the preceding
-  compatibility fields: its encoding has not been released, and no snapshot
-  outlives a deployment, so no key that an earlier build encoded is supported,
-  since nothing migrates it.
+  `nvx snapshot key` hash domain in place, records the compatibility identity
+  that its runtime's caller names in place of NVX's boot contract, control
+  contract, and control session versions, drops the restore packet version,
+  and appends the full capture-time contract, while its compatibility identity
+  still digests only the preceding compatibility fields: its encoding has not
+  been released, and no snapshot outlives a deployment, so no key that an
+  earlier build encoded is supported, since nothing migrates it.
 - The bytes come from the protocol's definition, never from the code that they
   check, and so do the values of each vector.
 
@@ -109,7 +111,7 @@ check out the OpenVMM submodule, whose deploy key fork pull requests lack. They
 read the copies instead, and the ignored test `tests/openvmm_vectors.rs`
 compares the copies with the submodule's files, and finds each excerpt among
 the lines of its file. It also checks that the versions of OpenVMM's snapshot
-format, saved-state schema, time ABI, and restore packets in `nvx::contract` are
+format, time ABI, and restore packet that the sources of `nvx-rs` define are
 the submodule's, and that the bound of a guest-restore record,
 `nvx::guest_restore::MAX_RECORD_BYTES`, is that of the submodule's restore
 packet.

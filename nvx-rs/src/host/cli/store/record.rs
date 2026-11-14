@@ -52,7 +52,6 @@ impl LaunchJournal {
         prepared: &Prepared,
         runtime: &RuntimeIdentity,
     ) -> Result<Self> {
-        runtime.check()?;
         let vm_dir = VmDir::open(state.dir())?;
         let VmOutputs {
             log,

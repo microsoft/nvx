@@ -9,7 +9,8 @@ use super::*;
 use crate::host::filesystem::{Bind, ExportChild, Owner};
 use crate::host::network::{Access, EgressRule, Protocol};
 use crate::host::runtime::{
-    ArtifactIdentity, GuestPowerAction, Hypervisor, LaunchOptions, RuntimeIdentity,
+    ArtifactIdentity, CompatibilityIdentity, GuestPowerAction, Hypervisor, LaunchOptions,
+    RuntimeIdentity,
 };
 use crate::protocol::view::MachineIdMode;
 use crate::protocol::{cmdline, parse_host_mapping_count};
@@ -638,14 +639,19 @@ fn the_check_of_a_configuration_checks_its_boots_capture() {
     }
 }
 
-/// Returns a runtime of artifacts that don't exist, under this crate's contracts.
+/// Returns a runtime of artifacts that don't exist, of one compatibility.
 fn runtime() -> Runtime {
     let artifact = |digit: char| ArtifactIdentity::sha256(&digit.to_string().repeat(64)).unwrap();
     Runtime {
         openvmm: missing("openvmm"),
         kernel: missing("vmlinux"),
         initramfs: missing("initramfs.cpio.gz"),
-        identity: RuntimeIdentity::new(artifact('a'), artifact('b'), artifact('c')),
+        identity: RuntimeIdentity::new(
+            artifact('a'),
+            artifact('b'),
+            artifact('c'),
+            CompatibilityIdentity::new("nvx-test-v1").unwrap(),
+        ),
         hypervisor: Hypervisor::Kvm,
         cpu_profile: None,
         windows_breakaway: false,
@@ -725,14 +731,8 @@ fn each_input_that_identifies_a_capture_changes_its_identity() {
         ("the initramfs", |_, _, runtime| {
             runtime.identity.initramfs = ArtifactIdentity::new("initramfs-2").unwrap();
         }),
-        ("the boot contract", |_, _, runtime| {
-            runtime.identity.boot_contract += 1
-        }),
-        ("the control contract", |_, _, runtime| {
-            runtime.identity.control_contract.push('2');
-        }),
-        ("the control session", |_, _, runtime| {
-            runtime.identity.control_session += 1
+        ("the compatibility", |_, _, runtime| {
+            runtime.identity.compatibility = CompatibilityIdentity::new("nvx-test-v2").unwrap();
         }),
         ("the hypervisor", |_, _, runtime| {
             runtime.hypervisor = Hypervisor::Mshv

@@ -24,9 +24,6 @@
 //!   from a snapshot reads in place of its captured configuration, and what Ready reports about
 //!   the guest restore. It needs no features, so the host, the guest, and every adapter's framing
 //!   share it.
-//! - [`contract`]: the versions of the contracts that this crate speaks with OpenVMM and the
-//!   guest, and the compatibility of NVX releases with them, with the versions of the contracts
-//!   through which OpenVMM restores a snapshot.
 //! - [`net`]: IP networks in CIDR notation and their subtraction, and the forms of a VM's
 //!   hostname and guest network address.
 //! - [`uuid`]: UUIDs, such as the GUIDs of a GPT disk, in their canonical text, the one form that
@@ -77,13 +74,18 @@
 //! use std::time::{Duration, Instant};
 //!
 //! use nvx::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
-//! use nvx::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity};
+//! use nvx::host::runtime::{
+//!     ArtifactIdentity, CompatibilityIdentity, Hypervisor, LaunchOptions, Runtime,
+//!     RuntimeIdentity,
+//! };
 //! use nvx::host::vm::{self, VmDir};
 //! use nvx::protocol::view::{MachineIdMode, View};
 //!
 //! // The caller locates OpenVMM, the guest kernel, and the Alpine initramfs, and identifies each
 //! // by the SHA-256 digest that its install metadata records, such as the `SHA256SUMS` of an NVX
-//! // release: here, from the command line.
+//! // release: here, from the command line. It names its own contracts with the guest in a
+//! // compatibility identity, which it changes whenever it can no longer drive the guests that it
+//! // started under the earlier one.
 //! let arguments: Vec<String> = std::env::args().skip(1).collect();
 //! let [openvmm, kernel, initramfs, openvmm_sha256, kernel_sha256, initramfs_sha256] =
 //!     <[String; 6]>::try_from(arguments).map_err(|_| "expected three paths and three digests")?;
@@ -92,6 +94,7 @@
 //!         ArtifactIdentity::sha256(&openvmm_sha256)?,
 //!         ArtifactIdentity::sha256(&kernel_sha256)?,
 //!         ArtifactIdentity::sha256(&initramfs_sha256)?,
+//!         CompatibilityIdentity::new("example-v1")?,
 //!     ),
 //!     openvmm: openvmm.into(),
 //!     kernel: kernel.into(),
@@ -155,7 +158,6 @@
 //! - `guest`: the `guest` module and the guest binaries, which the `guest` profile builds as
 //!   static `x86_64-unknown-linux-musl` executables.
 
-pub mod contract;
 mod error;
 #[cfg(any(test, all(feature = "guest", target_os = "linux")))]
 mod gpt;

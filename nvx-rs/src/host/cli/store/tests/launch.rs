@@ -5,7 +5,9 @@ use crate::ErrorKind;
 use crate::host::cli::store::{files, record};
 use crate::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
 use crate::host::process::{BootId, ProcessRef};
-use crate::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity};
+use crate::host::runtime::{
+    ArtifactIdentity, CompatibilityIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity,
+};
 use crate::host::vm::{self, Prepared, SavedVm, VmDir};
 use crate::protocol::CAPABILITY_LEN;
 use crate::protocol::view::{MachineIdMode, View};
@@ -19,14 +21,12 @@ pub(super) fn prepared(
         openvmm: "missing-openvmm".into(),
         kernel: "missing-kernel".into(),
         initramfs: "missing-initramfs".into(),
-        identity: RuntimeIdentity {
-            openvmm: identity("vmm-revision"),
-            kernel: identity("kernel-revision"),
-            initramfs: identity("initramfs-revision"),
-            boot_contract: u64::MAX,
-            control_contract: "saved-control-revision".to_owned(),
-            control_session: u64::MAX - 1,
-        },
+        identity: RuntimeIdentity::new(
+            identity("vmm-revision"),
+            identity("kernel-revision"),
+            identity("initramfs-revision"),
+            CompatibilityIdentity::new("saved-compatibility").unwrap(),
+        ),
         hypervisor: if cfg!(windows) {
             Hypervisor::Whp
         } else {
@@ -209,7 +209,10 @@ fn a_commit_needs_the_same_saved_values_and_an_already_journaled_process() {
             1 => saved.process.start_time -= 1,
             2 => saved.endpoint.push('x'),
             3 => saved.capability[0] ^= 1,
-            4 => saved.runtime.control_session -= 1,
+            4 => {
+                saved.runtime.compatibility =
+                    CompatibilityIdentity::new("other-compatibility").unwrap()
+            }
             5 => {
                 let other = state.dir().join("other-vm");
                 vm::create_private_dir(&other).unwrap();

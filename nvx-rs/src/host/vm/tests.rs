@@ -18,7 +18,9 @@ use crate::host::network::{
 };
 #[cfg(any(target_os = "linux", windows))]
 use crate::host::process::Opened;
-use crate::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, RuntimeIdentity};
+use crate::host::runtime::{
+    ArtifactIdentity, CompatibilityIdentity, Hypervisor, LaunchOptions, RuntimeIdentity,
+};
 use crate::host::snapshot::{DESCRIPTION_FILE, KEY_FILE};
 use crate::host::vm_directory::{LOG, OUTCOME, RESTORE_READY, tests::vm_dir};
 use crate::net::Ipv4Cidr;
@@ -124,13 +126,23 @@ fn cold_config() -> VmConfig {
     }
 }
 
+/// Returns the compatibility identity of the runtimes of the tests.
+fn test_compatibility() -> CompatibilityIdentity {
+    CompatibilityIdentity::new("test-runtime").unwrap()
+}
+
 fn cold_runtime() -> Runtime {
     let identity = ArtifactIdentity::new("test-runtime").unwrap();
     Runtime {
         openvmm: absolute(Path::new("missing-openvmm")).unwrap(),
         kernel: absolute(Path::new("missing-kernel")).unwrap(),
         initramfs: absolute(Path::new("missing-initramfs")).unwrap(),
-        identity: RuntimeIdentity::new(identity.clone(), identity.clone(), identity),
+        identity: RuntimeIdentity::new(
+            identity.clone(),
+            identity.clone(),
+            identity,
+            test_compatibility(),
+        ),
         hypervisor: if cfg!(windows) {
             Hypervisor::Whp
         } else {
@@ -208,6 +220,7 @@ fn capture_creation_records_sparse_disks_devices_and_a_complete_serde_context() 
                 ArtifactIdentity::new("capture-openvmm").unwrap(),
                 ArtifactIdentity::new("capture-kernel").unwrap(),
                 ArtifactIdentity::new("capture-initramfs").unwrap(),
+                test_compatibility(),
             );
             runtime.cpu_profile = nic.map(|_| "amd.genoa.v1".to_owned());
             let mut policy = NetworkPolicy::new(Access::Allow);
@@ -2250,7 +2263,12 @@ fn current_cold_spawn_boots_a_guest_accepts_shell_input_and_exits_cleanly() {
         ArtifactIdentity::sha256(&format!("{:x}", Sha256::digest(fs::read(path).unwrap()))).unwrap()
     };
     let runtime = Runtime {
-        identity: RuntimeIdentity::new(identity(&openvmm), identity(&kernel), identity(&initramfs)),
+        identity: RuntimeIdentity::new(
+            identity(&openvmm),
+            identity(&kernel),
+            identity(&initramfs),
+            test_compatibility(),
+        ),
         openvmm,
         kernel,
         initramfs,

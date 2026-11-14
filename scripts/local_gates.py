@@ -68,7 +68,10 @@ OPENVMM_COMPARISON_INPUTS = (
     "nvx-rs/tests/vectors/",
     "nvx-rs/tests/openvmm_*.rs",
     "nvx-rs/src/host/cli/cpu_generations.json",
-    "nvx-rs/src/contract/",
+    "nvx-rs/src/host/snapshot/manifest.rs",
+    "nvx-rs/src/host/artifacts/compatibility.rs",
+    "nvx-rs/src/guest/time/checks.rs",
+    "nvx-rs/src/guest/time/decoders.rs",
     "scripts/nvx_tools/time_abi.py",
     CI_WORKFLOW,
 )

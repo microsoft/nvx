@@ -505,9 +505,9 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/host/template/plan.rs - host::template::plan::TemplatePlan (line 137)` | retired | `TemplatePlan` leaves with the template store (SL6.2a, #1121) |
 | `nvx-rs/src/host/template/store.rs - host::template::store::Store (line 473)` | retired | The template store leaves (SL6.2a, #1121) |
 | `nvx-rs/src/host/transport.rs - host::transport (line 22)` | kept |  |
-| `nvx-rs/src/lib.rs - (line 58)` | rewritten | Its `Instance` and sandbox store leave (SL6.1, #1121): `nvx-rs/src/lib.rs - (line 67)` compiles a cold boot and a stop through `host::vm` |
+| `nvx-rs/src/lib.rs - (line 58)` | rewritten | Its `Instance` and sandbox store leave (SL6.1, #1121): `nvx-rs/src/lib.rs - (line 64)` compiles a cold boot and a stop through `host::vm` |
 | `nvx-rs/src/protocol/nvxs/mod.rs - protocol::nvxs (line 68)` | kept |  |
 | `nvx-rs/src/host/snapshot/capture.rs - host::snapshot::capture::finish_capture (line 48)` | kept |  |
 | `nvx-rs/src/host/store/mod.rs - host::store (line 104)` | retired | The sandbox store leaves (SL6.1, #1121) |
-| `nvx-rs/README.md`, its Example: an instance through `LaunchSpec` and the sandbox store | rewritten | Nothing compiles it. `nvx-rs/examples/host-workflows.rs` compiles the documented host workflows, and the library's guide (SL6.10a) replaces the example. SL6.1 (#1121) made it the cold boot that `nvx-rs/src/lib.rs - (line 67)` compiles |
+| `nvx-rs/README.md`, its Example: an instance through `LaunchSpec` and the sandbox store | rewritten | Nothing compiles it. `nvx-rs/examples/host-workflows.rs` compiles the documented host workflows, and the library's guide (SL6.10a) replaces the example. SL6.1 (#1121) made it the cold boot that `nvx-rs/src/lib.rs - (line 64)` compiles |
 | `nvx-rs/examples/external-launch.rs` | kept | Compiled with the crate's targets, and run by hand on a host. Since SL6.3 (#1122), which deletes `host::supervisor`, a minimal launcher of its own on `std::process` starts its VMM |

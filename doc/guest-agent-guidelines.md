@@ -55,6 +55,27 @@ announcer, which is a program, `/sbin/nvx-ingress`: an init runs it itself,
 or has `nvx-ingress start` run it from a socket that it binds for it.
 nvx-init's time daemon runs for the VM's life.
 
+## Compatibility
+
+Each guest mechanism of `nvx` interprets only its own formats, and refuses one
+that it cannot interpret:
+
+- `guest_restore::GuestRestoreRecord` decodes version 2 of the guest-restore
+  record.
+- `TimeAbi` checks version 1 of OpenVMM's time ABI, which OpenVMM's NVX build
+  names in its hypervisor identity leaves, and decodes version 1 of OpenVMM's
+  restore packet and of its time samples.
+- The `protocol` parsers read the kernel command-line tokens and the payloads
+  that their rustdoc documents.
+
+An init that calls one depends on that mechanism's documented ABI alone, not
+on nvx-init's conventions. Its boot tokens, its root, and its protocol with its
+host are its own, and its host names them in the compatibility identity of
+each VM's runtime identity, which `nvx` compares and never interprets, as
+[Runtime Identity](design/1.5-compatibility-and-versioning-model.md#154-runtime-identity)
+describes. NVX's CLI names there the boot contract, control session, and
+control contract of nvx-init and its guest agent.
+
 ## Build the space
 
 NVX's space is internal reference code that nvx-init implements, not public

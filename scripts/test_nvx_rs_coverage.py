@@ -434,7 +434,7 @@ class ClassificationTests(unittest.TestCase):
     def test_rows_count_top_level_modules_and_submodules_with_submodules(self):
         paths = [
             "src/lib.rs",
-            "src/contract.rs",
+            "src/uuid.rs",
             "src/bin/nvx-rs.rs",
             "src/activation/mod.rs",
             "src/activation/codec.rs",
@@ -451,7 +451,7 @@ class ClassificationTests(unittest.TestCase):
             [coverage.module_of(path, parents) for path in paths],
             [
                 "src/lib",
-                "src/contract",
+                "src/uuid",
                 "src/bin",
                 "src/activation",
                 "src/activation",
