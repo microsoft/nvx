@@ -11,7 +11,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 
-use windows_sys::Win32::Foundation::{FILETIME, GetLastError, HANDLE};
+use windows_sys::Win32::Foundation::{FILETIME, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ID_INFO, FILE_TYPE_DISK,
     FILE_TYPE_UNKNOWN, FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
@@ -33,8 +33,7 @@ pub(super) fn seal(file: &File) -> io::Result<FileSeal> {
     // SAFETY: the handle is open for as long as `file` is borrowed.
     let file_type = unsafe { GetFileType(handle) };
     if file_type != FILE_TYPE_DISK {
-        // SAFETY: GetLastError has no preconditions.
-        if file_type == FILE_TYPE_UNKNOWN && unsafe { GetLastError() } != 0 {
+        if file_type == FILE_TYPE_UNKNOWN && io::Error::last_os_error().raw_os_error() != Some(0) {
             return Err(io::Error::last_os_error());
         }
         return Err(io::Error::new(
