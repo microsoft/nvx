@@ -104,6 +104,14 @@ class Runner(Protocol):
     ) -> CommandResult: ...
 
 
+def _decode_output(data: bytes | None) -> str:
+    """Decode captured output as text mode does: UTF-8 with replacement
+    characters and LF for every newline, since a Windows host ends its lines
+    with CRLF and the callers print and parse the text."""
+    text = (data or b"").decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 class SubprocessRunner:
     """Run commands while inheriting output unless stdout must be inspected."""
 
@@ -114,16 +122,15 @@ class SubprocessRunner:
         input_text: str | None = None,
         capture_stdout: bool = False,
     ) -> CommandResult:
-        completed: subprocess.CompletedProcess[str] = subprocess.run(
+        # The input travels as bytes, since text mode would write each LF of an
+        # uploaded script as os.linesep, which is CRLF on Windows.
+        completed = subprocess.run(
             list(args),
-            input=input_text,
+            input=None if input_text is None else input_text.encode("utf-8"),
             stdout=subprocess.PIPE if capture_stdout else None,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             check=False,
         )
-        return CommandResult(completed.returncode, completed.stdout or "")
+        return CommandResult(completed.returncode, _decode_output(completed.stdout))
 
 
 def _mapping(value: object, context: str) -> dict[str, object]:
