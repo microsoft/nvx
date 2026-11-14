@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::ErrorKind;
-use crate::activation::{Network, Publication};
+use crate::guest_restore::{Network, Publication};
 use crate::host::config::{
     Boot, Capacity, DEFAULT_GUEST_NETWORK, Invariants, LayeredRoot, PROCESS_COMMAND_LINE_LIMIT,
     RootConfig, UpperConfig, process_command_line_units,
@@ -226,7 +226,7 @@ fn capture_creation_records_sparse_disks_devices_and_a_complete_serde_context() 
             assert_eq!(prepared.nic(), context.nic);
             assert_eq!(
                 prepared
-                    .activation_record(TransactionId::from_bytes([0x61; 16]))
+                    .guest_restore_record(TransactionId::from_bytes([0x61; 16]))
                     .unwrap_err()
                     .kind(),
                 ErrorKind::Unsupported
@@ -700,7 +700,7 @@ fn prepared_record_keeps_checked_root_view_export_resources_and_transaction() {
         config.filesystem = None;
         for bytes in [[0x35; 16], [0x71; 16]] {
             let tx = TransactionId::from_bytes(bytes);
-            let record = prepared.activation_record(tx).unwrap();
+            let record = prepared.guest_restore_record(tx).unwrap();
             assert_eq!(record.restore().unwrap().transaction, tx);
             let configuration = record.configuration();
             assert_eq!(configuration.image, image);
@@ -722,7 +722,10 @@ fn prepared_record_keeps_checked_root_view_export_resources_and_transaction() {
                     memory: 256 << 20,
                 }
             );
-            assert_eq!(ActivationRecord::decode(&record.encode()).unwrap(), record);
+            assert_eq!(
+                GuestRestoreRecord::decode(&record.encode()).unwrap(),
+                record
+            );
         }
     }
 }
@@ -770,7 +773,7 @@ fn resolved_restore_record_uses_captured_presence_address_and_its_own_policy() {
         prepared.configuration.boot = None;
         prepared.nic = Some(captured);
         let tx = TransactionId::from_bytes([0x55; 16]);
-        let record = prepared.activation_record(tx).unwrap();
+        let record = prepared.guest_restore_record(tx).unwrap();
         assert_eq!(prepared.nic(), Some(captured));
         assert_eq!(record.restore().unwrap().transaction, tx);
         assert_eq!(record.configuration().network, Some(expected));
@@ -778,7 +781,7 @@ fn resolved_restore_record_uses_captured_presence_address_and_its_own_policy() {
         assert_eq!(prepared.nic(), None);
         assert_eq!(
             prepared
-                .activation_record(tx)
+                .guest_restore_record(tx)
                 .unwrap()
                 .configuration()
                 .network,
@@ -811,7 +814,7 @@ fn prepared_record_dns_uses_the_effective_nics_ipv6_gateway() {
             prepared.nic = Some(nic);
         }
         let record = prepared
-            .activation_record(TransactionId::from_bytes([0x77; 16]))
+            .guest_restore_record(TransactionId::from_bytes([0x77; 16]))
             .unwrap();
         assert_eq!(
             record.configuration().network.as_ref().unwrap().dns,
@@ -835,7 +838,7 @@ fn prepared_record_refuses_roots_or_memory_that_the_schema_cannot_represent() {
         let (_directory, vm) = vm_dir();
         let prepared = create(&cold_runtime(), &config, None, &vm).unwrap();
         let error = prepared
-            .activation_record(TransactionId::from_bytes([0x66; 16]))
+            .guest_restore_record(TransactionId::from_bytes([0x66; 16]))
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
         assert!(error.to_string().contains(message), "{error}");
@@ -998,7 +1001,7 @@ fn snapshot_creation_owns_the_fixed_view_and_uses_captured_nic_with_requested_po
         assert!(prepared.capture_context().is_none());
         assert!(prepared.ready.is_some());
         let record = prepared
-            .activation_record(TransactionId::from_bytes([0x31; 16]))
+            .guest_restore_record(TransactionId::from_bytes([0x31; 16]))
             .unwrap();
         assert_eq!(record.configuration().network, Some(expected));
         assert!(prepared.inherit.is_empty());

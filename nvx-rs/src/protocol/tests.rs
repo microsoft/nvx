@@ -21,7 +21,7 @@ use super::*;
     target_os = "linux",
     target_arch = "x86_64"
 ))]
-use crate::activation::ActivationRecord;
+use crate::guest_restore::GuestRestoreRecord;
 #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 use crate::tests::ACTIVATION_V2;
 #[cfg(all(
@@ -232,7 +232,7 @@ fn activate_requests_round_trip_records_and_workload_identity() {
         "LARGEST",
     ];
     for vector in of_kind(ACTIVATION_V2, "RECORD", &names) {
-        let record = ActivationRecord::decode(&vector.bytes).unwrap();
+        let record = GuestRestoreRecord::decode(&vector.bytes).unwrap();
         for (flag, create_account) in [(0, false), (1, true)] {
             let workload = app::workload::WorkloadIdentity {
                 uid: 0x0102_0304,
@@ -282,7 +282,8 @@ fn activate_requests_refuse_truncated_or_malformed_payloads() {
 ))]
 #[test]
 fn activate_workload_ids_match_guest_credential_bounds() {
-    let record = ActivationRecord::decode(&vector(ACTIVATION_V2, "RECORD", "CLONE").bytes).unwrap();
+    let record =
+        GuestRestoreRecord::decode(&vector(ACTIVATION_V2, "RECORD", "CLONE").bytes).unwrap();
     for (uid, gid) in [(1, u32::MAX - 1), (u32::MAX - 1, 1)] {
         let workload = app::workload::WorkloadIdentity {
             uid,

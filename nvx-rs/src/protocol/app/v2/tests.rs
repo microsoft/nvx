@@ -334,7 +334,7 @@ fn capture_requests_carry_their_flag_unchanged() {
 ))]
 #[test]
 fn the_activate_exchange_carries_its_payloads_unchanged() {
-    use crate::activation::{ActivationRecord, ReadyActivation};
+    use crate::guest_restore::{GuestRestoreReady, GuestRestoreRecord};
     use crate::protocol::workload::WorkloadIdentity;
     use crate::protocol::{decode_activate_payload, encode_activate_payload};
 
@@ -348,7 +348,7 @@ fn the_activate_exchange_carries_its_payloads_unchanged() {
             continue;
         }
         let name = vector.name;
-        let record = ActivationRecord::decode(&vector.bytes).unwrap();
+        let record = GuestRestoreRecord::decode(&vector.bytes).unwrap();
         let payload = encode_activate_payload(&record, &workload).unwrap();
         let bytes = Frame::Activate(&payload).encode(ID).unwrap();
         let Ok((ID, Frame::Activate(carried))) = Frame::decode(&bytes) else {
@@ -356,7 +356,7 @@ fn the_activate_exchange_carries_its_payloads_unchanged() {
         };
         let (applied, identity) = decode_activate_payload(carried).unwrap();
         assert_eq!((&applied, identity), (&record, workload), "{name}");
-        let reported = ReadyActivation::of(&applied).encode();
+        let reported = GuestRestoreReady::of(&applied).encode();
         let bytes = ready(VERSION, &reported).encode(ID).unwrap();
         let Ok((
             ID,
@@ -369,7 +369,7 @@ fn the_activate_exchange_carries_its_payloads_unchanged() {
             panic!("the READY of {name} does not decode");
         };
         assert_eq!(version, VERSION, "{name}");
-        let activation = ReadyActivation::decode(activation).unwrap();
-        assert_eq!(activation, ReadyActivation::of(&record), "{name}");
+        let activation = GuestRestoreReady::decode(activation).unwrap();
+        assert_eq!(activation, GuestRestoreReady::of(&record), "{name}");
     }
 }

@@ -25,7 +25,7 @@
 //!   state machines of the host's and the guest's roles, which carry application bytes of any
 //!   protocol.
 //! - [`status`]: the exit statuses with which a clone's guest ends its VM once its repair or its
-//!   activation failed, the time ABI's included, from which the host classifies a clone's end.
+//!   guest restore failed, the time ABI's included, from which the host classifies a clone's end.
 //!
 //! The module depends on nothing outside the standard library, so the host, the guest, and test
 //! doubles share it. Tests pin its wire constants and frames as literals, and its records and

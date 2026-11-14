@@ -383,7 +383,7 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
         consumers=(
             "nvx-init",
             "nvx::guest::root",
-            "nvx::guest::activation",
+            "nvx::guest::restore",
         ),
         validation=(
             "the sandbox scenarios",

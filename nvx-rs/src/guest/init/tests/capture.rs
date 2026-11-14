@@ -16,14 +16,14 @@ impl Capture {
     }
 
     pub(crate) fn activation_fixture() -> (Self, Vec<u8>) {
-        use crate::activation::{
-            ActivationRecord, Configuration, ExpectedResources, Image, RestoreSection,
+        use crate::guest_restore::{
+            Configuration, ExpectedResources, GuestRestoreRecord, Image, RestoreSection,
             TransactionId, Upper,
         };
         use crate::protocol::root::OverlayMode;
         use crate::protocol::view::{MachineIdMode, View};
         let repaired = crate::guest::snapshot::repair::tests::repaired_fixture();
-        let record = ActivationRecord::new(
+        let record = GuestRestoreRecord::new(
             Some(RestoreSection {
                 transaction: TransactionId::from_bytes([0x22; TransactionId::LEN]),
             }),

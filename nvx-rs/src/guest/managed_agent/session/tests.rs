@@ -15,7 +15,7 @@ const INSTANCE: [u8; 16] = [7; 16];
 const APP_BUSY: u8 = 0x87;
 
 impl Session<'_> {
-    pub(crate) fn activation_state_for_test(&self) -> Option<ActivationState> {
+    pub(crate) fn activation_state_for_test(&self) -> Option<GuestRestoreState> {
         self.capture
             .as_ref()?
             .restored
@@ -150,7 +150,7 @@ fn a_replacement_session_joins_one_activation_and_caches_ready_without_reapplyin
     let (mut session, mut peer, payload) = restored();
     let deadline = session.connection.get_ref().deadline.get();
     let (record, _) = protocol::decode_activate_payload(&payload).unwrap();
-    let ready = crate::activation::ReadyActivation::of(&record).encode();
+    let ready = crate::guest_restore::GuestRestoreReady::of(&record).encode();
     let bytes = activate_bytes(&mut session, &mut peer, 61, &payload);
     let Ok(Request::App(request)) = session.accept_request(&bytes) else {
         panic!("valid activate");
@@ -158,7 +158,7 @@ fn a_replacement_session_joins_one_activation_and_caches_ready_without_reapplyin
     peer.credit();
     let retained = session
         .activate_with(request, |restored, _, accepted, workload| {
-            assert_eq!(restored.activation.state(), ActivationState::Activating);
+            assert_eq!(restored.activation.state(), GuestRestoreState::Activating);
             assert_eq!(restored.activation.deadline(), deadline);
             assert_eq!(accepted, &record);
             assert_eq!(
@@ -194,7 +194,7 @@ fn a_replacement_session_joins_one_activation_and_caches_ready_without_reapplyin
     session.start_activation().unwrap();
     assert_eq!(
         session.activation_state_for_test(),
-        Some(ActivationState::Started)
+        Some(GuestRestoreState::Started)
     );
 }
 
@@ -204,7 +204,7 @@ fn postactivation_capture_stays_refused_without_pending_cleanup() {
     let state = session.capture.as_mut().unwrap().restored.as_mut().unwrap();
     assert!(matches!(
         state.accept(&payload, Instant::now()).unwrap().0,
-        ActivationAction::Apply(_)
+        GuestRestoreAction::Apply(_)
     ));
     state.activation.complete(Instant::now(), Ok(())).unwrap();
     session.start_activation().unwrap();
@@ -232,9 +232,11 @@ fn changed_record_or_workload_bytes_during_application_fail_without_ready() {
             let (record, _) = protocol::decode_activate_payload(&payload).unwrap();
             let mut configuration = record.configuration().clone();
             configuration.view.hostname = b"changed".to_vec();
-            let record =
-                crate::activation::ActivationRecord::new(record.restore().copied(), configuration)
-                    .unwrap();
+            let record = crate::guest_restore::GuestRestoreRecord::new(
+                record.restore().copied(),
+                configuration,
+            )
+            .unwrap();
             changed.truncate(9);
             changed.extend(record.encode());
         }
@@ -277,7 +279,7 @@ fn failed_application_never_reports_ready_or_admits_root_dependent_work() {
     assert!(session.rootless());
     assert_eq!(
         session.activation_state_for_test(),
-        Some(ActivationState::Failed)
+        Some(GuestRestoreState::Failed)
     );
     peer.stream.set_nonblocking(true).unwrap();
     assert_eq!(
@@ -298,8 +300,8 @@ fn a_failed_restored_activation_gives_init_the_status_of_its_class() {
     };
     peer.credit();
     let failure = crate::Error::io("the network settings cannot be applied").with_source(
-        crate::guest::activation::ApplyError::Network {
-            error: crate::guest::activation::state::apply::NetworkError::Gateway,
+        crate::guest::restore::ApplyError::Network {
+            error: crate::guest::restore::state::apply::NetworkError::Gateway,
             teardown: None,
         },
     );
@@ -311,7 +313,7 @@ fn a_failed_restored_activation_gives_init_the_status_of_its_class() {
     );
     assert_eq!(
         session.activation_status(),
-        Some(protocol::status::ACTIVATION_NETWORK)
+        Some(protocol::status::GUEST_RESTORE_NETWORK)
     );
     // A request while the record applies fails the activation as the protocol's failure.
     let (mut session, mut peer, payload) = restored();
@@ -327,11 +329,11 @@ fn a_failed_restored_activation_gives_init_the_status_of_its_class() {
     assert_eq!(result.err(), Some(Errno::EPROTO));
     assert_eq!(
         session.activation_state_for_test(),
-        Some(ActivationState::Failed)
+        Some(GuestRestoreState::Failed)
     );
     assert_eq!(
         session.activation_status(),
-        Some(protocol::status::ACTIVATION_PROTOCOL)
+        Some(protocol::status::GUEST_RESTORE_PROTOCOL)
     );
 }
 
@@ -350,7 +352,7 @@ fn standard_input_while_the_record_applies_fails_the_activation_as_the_protocols
     assert_eq!(result.err(), Some(Errno::EPROTO));
     assert_eq!(
         session.activation_status(),
-        Some(protocol::status::ACTIVATION_PROTOCOL)
+        Some(protocol::status::GUEST_RESTORE_PROTOCOL)
     );
 }
 
@@ -358,8 +360,8 @@ fn short_deadline(session: &mut Session<'_>) -> Instant {
     let now = Instant::now();
     let repaired = crate::guest::snapshot::repair::tests::repaired_fixture();
     let state = session.capture.as_mut().unwrap().restored.as_mut().unwrap();
-    state.activation = crate::guest::activation::Activation::with_resources(
-        crate::activation::ExpectedResources {
+    state.activation = crate::guest::restore::GuestRestore::with_resources(
+        crate::guest_restore::ExpectedResources {
             cpus: repaired.cpus(),
             memory: repaired.memory(),
         },

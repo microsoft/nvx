@@ -869,7 +869,7 @@ tests of `nvx::protocol::nvxs` and `nvx::host::config` read in the `nvx-rs`
 job, which cannot check out
 OpenVMM, the versions of OpenVMM's snapshot format, saved-state schema,
 time ABI, and restore packets with those of `nvx::contract`, and the bound of
-the restore packet's activation record with that of `nvx::activation`;
+the restore packet's guest-restore record with that of `nvx::guest_restore`;
 see [OpenVMM's vectors](../nvx-rs/tests/vectors/README.md#openvmms-vectors).
 The ignored test `tests/openvmm_cpu_profiles.rs` likewise compares the
 submodule's built-in CPU profiles with the copy of their identities from which

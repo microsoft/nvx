@@ -2831,7 +2831,7 @@ SNAPSHOT_CORE_EXCLUSION_SECONDS = 2.0
 # the downtime before snapshot-core's first restore is.
 SNAPSHOT_CORE_DOWNTIME_MARGIN_SECONDS = 1.0
 # The status with which nvx-init ends the VM of a restore whose root does not
-# assemble over its upper, ACTIVATION_ROOT of nvx::protocol::status, and how
+# assemble over its upper, GUEST_RESTORE_ROOT of nvx::protocol::status, and how
 # the CLI's error ends, with the restore's evidence and its attribution.
 SNAPSHOT_CORE_UNUSABLE_ROOT_STATUS = 54
 SNAPSHOT_CORE_UNUSABLE_ROOT_ATTRIBUTION = ": UnusableRoot, attributed to the request"

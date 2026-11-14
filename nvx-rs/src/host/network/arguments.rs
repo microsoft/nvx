@@ -146,7 +146,7 @@ pub(crate) fn template_arguments(guest_network: &str) -> Vec<String> {
 /// it. Denied host-loopback access leaves the gateway's DNS service to the egress policy.
 ///
 /// OpenVMM names the server on the kernel command line of a VM that boots with the policy, and a
-/// clone whose restore installs the policy learns it from its activation record instead.
+/// clone whose restore installs the policy learns it from its guest-restore record instead.
 ///
 /// Fails as [`openvmm_arguments`] does for rules that it cannot parse.
 pub(crate) fn dns_server(

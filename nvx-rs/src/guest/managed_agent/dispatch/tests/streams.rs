@@ -8,7 +8,7 @@
 use std::os::fd::AsFd;
 use std::time::{Duration, Instant};
 
-use crate::guest::activation::ActivationAction;
+use crate::guest::restore::GuestRestoreAction;
 use crate::protocol::v2::{self, Frame, STDIN_WINDOW, VERSION};
 
 use super::*;
@@ -248,7 +248,7 @@ fn version_2_carries_capture_and_activation_with_their_payloads() {
     let now = Instant::now();
     assert!(matches!(
         restored.accept(&payload, now).unwrap().0,
-        ActivationAction::Apply(_)
+        GuestRestoreAction::Apply(_)
     ));
     let ready = restored.activation.complete(now, Ok(())).unwrap().encode();
     let system = TestSystem::new(Paths::default());

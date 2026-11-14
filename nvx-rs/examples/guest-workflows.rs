@@ -1,5 +1,5 @@
 //! A guest init's documented workflows through the public API alone: its boot's time daemon, its
-//! control session, the capture of its VM, the activation of a restore, and the host's mapping
+//! control session, the capture of its VM, the guest restore of a clone, and the host's mapping
 //! table.
 //!
 //! The example only compiles: CI builds it for Linux guests with the `guest` feature, and nothing
@@ -9,9 +9,9 @@
 //!
 //! The example's init speaks its own protocol over the session's DATA, in which one payload
 //! carries one message, and it reads its session without a deadline. A real init waits for its
-//! session with the activation's deadline, and ticks the activation then, and gives the
-//! activation what its session received while it applied a record before it sends Ready, as
-//! [`Activation`]'s documentation shows.
+//! session with the guest restore's deadline, and ticks the guest restore then, and gives the
+//! guest restore what its session received while it applied a record before it sends Ready, as
+//! [`GuestRestore`]'s documentation shows.
 
 #[cfg(target_os = "linux")]
 pub use linux::*;
@@ -25,14 +25,14 @@ mod linux {
     use std::io::{self, Read, Write};
     use std::time::{Duration, Instant};
 
-    use nvx::activation::{ActivationRecord, ReadyActivation};
-    use nvx::guest::activation::{Activation, ActivationAction, ActivationInput};
     use nvx::guest::mappings::{Mapping, MappingTable, TableError};
     use nvx::guest::nvxs::{GuestConnection, GuestConnectionError};
+    use nvx::guest::restore::{GuestRestore, GuestRestoreAction, GuestRestoreInput};
     use nvx::guest::snapshot::{
         self, CaptureFailure, Captured, Devices, Disks, Disposition, Repaired,
     };
     use nvx::guest::time::{TimeAbi, TimeError};
+    use nvx::guest_restore::{GuestRestoreReady, GuestRestoreRecord};
     use nvx::protocol::OUTER_RECEIVE_WINDOW;
     use nvx::protocol::nvxs::GuestEvent;
 
@@ -98,35 +98,37 @@ mod linux {
         connection: &mut GuestConnection<S>,
         repaired: &Repaired,
         record: impl Fn(&[u8]) -> Option<&[u8]>,
-        space: impl FnOnce(&ActivationRecord) -> Result<(), Box<dyn Error + Send + Sync>>,
-        mut ready: impl FnMut(&mut GuestConnection<S>, ReadyActivation) -> io::Result<()>,
-    ) -> Result<Activation, Box<dyn Error>> {
-        let mut activation = Activation::new(repaired, Duration::from_secs(30), Instant::now());
+        space: impl FnOnce(&GuestRestoreRecord) -> Result<(), Box<dyn Error + Send + Sync>>,
+        mut ready: impl FnMut(&mut GuestConnection<S>, GuestRestoreReady) -> io::Result<()>,
+    ) -> Result<GuestRestore, Box<dyn Error>> {
+        let mut restore = GuestRestore::new(repaired, Duration::from_secs(30), Instant::now());
         let mut space = Some(space);
         loop {
             let action = match connection.next_event()? {
-                GuestEvent::Reset(_) => activation.input(Instant::now(), ActivationInput::Reset)?,
+                GuestEvent::Reset(_) => restore.input(Instant::now(), GuestRestoreInput::Reset)?,
                 GuestEvent::Data(payload) => {
                     connection.credit(u32::try_from(payload.len())?)?;
-                    let input = record(&payload).map_or(ActivationInput::Request, |record| {
-                        ActivationInput::Activate(record)
+                    let input = record(&payload).map_or(GuestRestoreInput::Request, |record| {
+                        GuestRestoreInput::Activate(record)
                     });
-                    activation.input(Instant::now(), input)?
+                    restore.input(Instant::now(), input)?
                 }
             };
             match action {
-                ActivationAction::Acknowledge => connection.acknowledge(OUTER_RECEIVE_WINDOW)?,
-                ActivationAction::Continue | ActivationAction::Join | ActivationAction::Serve => {}
-                ActivationAction::Apply(record) => {
+                GuestRestoreAction::Acknowledge => connection.acknowledge(OUTER_RECEIVE_WINDOW)?,
+                GuestRestoreAction::Continue
+                | GuestRestoreAction::Join
+                | GuestRestoreAction::Serve => {}
+                GuestRestoreAction::Apply(record) => {
                     let space = space.take().ok_or("the activation applied twice")?;
-                    // The activation completes, or expires past its deadline, when the application
-                    // ends.
+                    // The guest restore completes, or expires past its deadline, when the
+                    // application ends.
                     let applied = space(&record);
-                    let established = activation.complete(Instant::now(), applied)?;
+                    let established = restore.complete(Instant::now(), applied)?;
                     ready(connection, established)?;
-                    return Ok(activation);
+                    return Ok(restore);
                 }
-                ActivationAction::Ready(established) => ready(connection, established)?,
+                GuestRestoreAction::Ready(established) => ready(connection, established)?,
             }
         }
     }
