@@ -7,6 +7,7 @@ use std::fs;
 #[cfg(any(test, feature = "cli"))]
 use std::fs::OpenOptions;
 use std::io;
+#[cfg(feature = "cli")]
 use std::mem;
 #[cfg(feature = "cli")]
 use std::os::windows::ffi::OsStrExt;
@@ -302,8 +303,7 @@ fn handle_identity(handle: HANDLE) -> io::Result<(u64, u64)> {
 
 /// Returns the information of the file that `handle` holds open.
 pub(super) fn handle_information(handle: HANDLE) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
-    // SAFETY: BY_HANDLE_FILE_INFORMATION is plain data for which all-zero bytes are valid.
-    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: the caller passes an open handle, and the output pointer is valid.
     if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
         return Err(io::Error::last_os_error());

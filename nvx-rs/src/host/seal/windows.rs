@@ -42,14 +42,12 @@ pub(super) fn seal(file: &File) -> io::Result<FileSeal> {
             "only a file of a disk volume has a seal",
         ));
     }
-    // SAFETY: BY_HANDLE_FILE_INFORMATION is plain data, for which all-zero bytes are valid.
-    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: the handle is open and the output pointer is valid.
     if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: FILE_ID_INFO is plain data, for which all-zero bytes are valid.
-    let mut id: FILE_ID_INFO = unsafe { mem::zeroed() };
+    let mut id = FILE_ID_INFO::default();
     // SAFETY: the handle is open, and the buffer is a FILE_ID_INFO of the size that is passed.
     let has_id = unsafe {
         GetFileInformationByHandleEx(
