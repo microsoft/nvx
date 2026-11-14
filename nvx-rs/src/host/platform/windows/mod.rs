@@ -14,7 +14,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{FreeLibrary, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{FreeLibrary, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
@@ -117,8 +117,7 @@ pub(crate) fn system_directory() -> io::Result<PathBuf> {
 
 /// Returns the calling thread's Win32 last-error code.
 fn last_error() -> u32 {
-    // SAFETY: GetLastError has no preconditions.
-    unsafe { GetLastError() }
+    io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32
 }
 
 /// Takes ownership of a newly returned valid Win32 `handle`.
