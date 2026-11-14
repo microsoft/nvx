@@ -197,9 +197,12 @@ fn a_queued_peer_cannot_be_the_vm_that_reuses_its_pid() {
             let route = if privileged { "sudo" } else { "userns" };
             let mut command = Command::new(if privileged { "sudo" } else { "unshare" });
             if privileged {
+                // sudo resets the environment. Without a coverage run's LLVM_PROFILE_FILE, the
+                // instrumented test writes its profile into its working directory, where the
+                // run doesn't merge it.
                 command.args([
                     "-n",
-                    "--preserve-env=NVX_TEST_READY_OUTER_PID_NAMESPACE,NVX_TEST_READY_OUTER_MOUNT_NAMESPACE,TMPDIR,TEMP,TMP",
+                    "--preserve-env=NVX_TEST_READY_OUTER_PID_NAMESPACE,NVX_TEST_READY_OUTER_MOUNT_NAMESPACE,TMPDIR,TEMP,TMP,LLVM_PROFILE_FILE",
                     "/usr/bin/unshare",
                 ]);
             } else {
