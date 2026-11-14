@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use super::*;
-use crate::guest::sys::{ClockAdjustment, FrequencyHold};
+use crate::guest::sys::{ClockAdjustment, ClockDiscipline, FrequencyHold};
 use crate::guest::time::decoders::{HostClock, PACKET_DNS_SIZE};
 use crate::guest::time::state::HostClockStatus;
 use crate::guest::time::system::PORTB_TIME_WINDOW;
@@ -613,7 +613,8 @@ fn holds(directory: &Path, secret: &[u8]) -> bool {
 }
 
 /// Captures through the fakes, in the in-memory mode and then in the file mode, a restore,
-/// then a VM that continues, on a tmpfs at `/run` in a mount namespace of the process's own.
+/// then a VM that continues, and then a hold that the kernel refuses, on a tmpfs at `/run` in a
+/// mount namespace of the process's own.
 fn capture_in_each_mode() {
     sys::enter_private_mount_namespace().unwrap();
     let _run = sys::TmpfsMount::mount(c"nvx-test", c"/run", c"mode=0755").unwrap();
@@ -623,35 +624,81 @@ fn capture_in_each_mode() {
     let entropy: [u8; Seed::LENGTH] = std::array::from_fn(|index| index as u8 + 2);
     let secret = &entropy[GenerationId::LENGTH..];
     let path = Path::new("/run/nvx/restore-entropy");
-    // Returns the capture's outcome, and what it wrote to the kernel log and the console.
+    // The discipline that the capture finds: the frequency correction that the host's asks for,
+    // and the status and error estimates of a synchronized clock.
+    let found = ClockDiscipline {
+        scaled_ppm: -983_040,
+        maximum_error_us: 40,
+        estimated_error_us: 2,
+        status: 0x2081,
+    };
+    // Returns the capture's outcome, what it wrote to the kernel log and the console, and its
+    // adjustments of the clock.
     let capture_with = |input: Vec<u32>, request| {
         let ops = FakeOps::new(input);
+        *ops.discipline.lock().unwrap() = found;
         let outcome = capture(&Runtime::new(&ops, true), request).unwrap();
         let mut logged = ops.kernel_log.lock().unwrap().clone();
         logged.extend_from_slice(&ops.console.lock().unwrap());
-        (outcome, logged)
+        let adjustments = ops.adjustments.lock().unwrap().clone();
+        (outcome, logged, adjustments)
+    };
+    // Every request first holds the clock at the declared rate, which the fake's 2 GHz is the
+    // kernel's own, without the correction that it found, and keeps the status and the error
+    // estimates that it found.
+    let held = FrequencyHold {
+        scaled_ppm: 0,
+        maximum_error_us: 40,
+        estimated_error_us: 2,
+    };
+    let pin = ClockAdjustment::Pin {
+        hold: held,
+        status: 0x2081,
     };
 
     // The in-memory mode returns the entropy as the restore's seed, and writes no file.
     let request = CaptureRequest::in_memory(ScratchPolicy::Fresh, previous);
-    let (CaptureOutcome::Restored(mut restore), logged) =
+    let (CaptureOutcome::Restored(mut restore), logged, adjustments) =
         capture_with(restore_input(1, &entropy), request)
     else {
         panic!("the in-memory capture restored nothing");
     };
     assert_eq!(logged, b"");
+    // The repair of the restore reads the clock's frequency, which it pairs its time sample at,
+    // and holds the host's correction after its step, as it did before.
+    assert_eq!(adjustments[..2], [ClockAdjustment::Query, pin]);
+    assert!(
+        matches!(
+            adjustments[2..],
+            [
+                ClockAdjustment::Query,
+                ClockAdjustment::Step { .. },
+                ClockAdjustment::Frequency(_)
+            ]
+        ),
+        "{adjustments:?}"
+    );
     let id = restore.generation_id().to_bytes();
     assert_eq!(id[..], entropy[..GenerationId::LENGTH]);
     assert_eq!(restore.take_seed().map(|seed| *seed.bytes()), Some(entropy));
     assert!(!path.exists() && !holds(Path::new("/run"), secret));
     let request = CaptureRequest::in_memory(ScratchPolicy::Fresh, previous);
-    let (outcome, _) = capture_with(vec![0], request);
+    let (outcome, _, adjustments) = capture_with(vec![0], request);
     assert!(matches!(outcome, CaptureOutcome::Continued), "{outcome:?}");
+    // A VM that continues resumes the frequency correction that it found.
+    assert_eq!(
+        adjustments,
+        [
+            ClockAdjustment::Query,
+            pin,
+            ClockAdjustment::SetFrequency(found.scaled_ppm),
+        ]
+    );
 
     // The file mode, which the tools keep, writes the entropy to a file that only its owner
     // may read and write, and the restore holds no seed.
     let request = CaptureRequest::new(ScratchPolicy::Paired, previous, path.to_owned());
-    let (CaptureOutcome::Restored(mut restore), logged) =
+    let (CaptureOutcome::Restored(mut restore), logged, _) =
         capture_with(restore_input(2, &entropy), request)
     else {
         panic!("the file mode's capture restored nothing");
@@ -663,8 +710,38 @@ fn capture_in_each_mode() {
     assert_eq!(mode & 0o7777, 0o600);
     // A VM that continues has the file removed.
     let request = CaptureRequest::new(ScratchPolicy::Fresh, previous, path.to_owned());
-    let (outcome, _) = capture_with(vec![0], request);
+    let (outcome, _, _) = capture_with(vec![0], request);
     assert!(matches!(outcome, CaptureOutcome::Continued), "{outcome:?}");
+    assert!(!path.exists());
+
+    // A kernel that refuses the hold fails the request before it writes the snapshot port, and
+    // the failure's event reaches the debug console in a port transaction of its own.
+    let mut ops = FakeOps::new([]);
+    ops.adjust_error = Some(Errno::EPERM);
+    let runtime = Runtime::new(&ops, true);
+    let request = CaptureRequest::new(ScratchPolicy::Fresh, previous, path.to_owned());
+    let error = capture(&runtime, request).unwrap_err();
+    let TimeError::Violation(violation) = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(
+        (violation.status(), violation.code()),
+        (status::TIME_CONFORMANCE, "G_CONFORMANCE_C10")
+    );
+    assert_eq!(
+        violation.detail(),
+        format!(
+            "cannot hold the clock at the declared rate: adjtimex: {}",
+            Errno::EPERM.desc()
+        )
+    );
+    let output = ops.output.lock().unwrap();
+    assert!(
+        output.iter().all(|&(port, _)| port == Port::PortbData),
+        "{output:?}"
+    );
+    let event = String::from_utf8(output.iter().map(|&(_, byte)| byte).collect()).unwrap();
+    assert!(event.contains("G_CONFORMANCE_C10"), "{event}");
     assert!(!path.exists());
 }
 

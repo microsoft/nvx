@@ -152,14 +152,15 @@ monotonic time advanced by the downtime. The captures share one downtime
 window, so the scenario adds about a minute per backend.
 Before each capture, the guest starts a CPU-bound workload in a cgroup of its
 own and freezes it, as guest preparation freezes the workload for paired
-scratch, arms a one-hour timer, and, once its time daemon's next discipline
-poll has passed, records its clocks, its frequency correction, the workload's
-CPU time and cgroup usage, and the length of its kernel log. The daemon changes
-the correction only at its polls, which take the port lock that the capture
-takes too, 16 s apart at first and 64 s apart once it has settled, so the
-correction recorded is the one that the capture holds. Each capture comes
-within seconds of its guest's boot, so the wait adds up to about 16 s to it,
-and the capture allows this preparation 90 s beyond the scenario's timeout. The
+scratch, arms a one-hour timer, records its clocks, its frequency correction,
+the workload's CPU time and cgroup usage, and the length of its kernel log, and
+leaves a slew of its clock in flight: an adjtime of 5 ms, which the kernel
+slews at 500 ppm for 10 s, and whose rate it caches in its tick length from the
+next second on, which a second's wait lets pass. Each capture's OpenVMM boots
+with the `host-rate-offset-ppm` test hook at 100 ppm, so that the guest holds a
+large frequency correction, which the host's own, at most 250 ppm on a
+qualified host, composes with under Linux's 500 ppm limit, and the capture
+allows this preparation 15 s beyond the scenario's timeout. The
 scenario then restores each snapshot again after a simulated year: OpenVMM's
 `downtime-add-s` test hook adds what brings the downtime to 60 s below the
 time ABI's
@@ -172,8 +173,10 @@ downtime from the expected source. Against its realtime clock, which must
 stand within 10 s of host UTC, its raw monotonic clock must have advanced by
 the simulated downtime at the declared TSC rate, to the kHz, within 1 s plus
 0.5 ppm for the kernel's rounded clocksource multiplier, and its monotonic and
-boot-time clocks by that times one plus the frequency correction that it held
-before the capture, within 5 ppm more for a phase slew then. The timer must
+boot-time clocks by the simulated downtime itself, within 1 s plus 1 ppm,
+whatever frequency correction and slew it held before the capture, since the
+capture holds the declared rate: clocks that kept the 100 ppm and the slew,
+about 555 ppm, would stand some 17,000 s beyond it. The timer must
 fire within 10 s of the restore's clock step, before or after it, the frozen
 workload must gain no CPU time or cgroup usage across the restore and about a
 second's in the second that it then runs, and the restore must print its
@@ -191,7 +194,7 @@ arithmetic: about one restore in twenty then dereferenced NULL in
 `pick_task_fair()` and left its processor spinning on the runqueue lock. Last,
 OpenVMM must refuse a restore of the first snapshot with the bound plus one
 second, with `E_DOWNTIME_EXCESSIVE`, before the guest runs. The simulated
-restores and the captures' waits add about two minutes per backend.
+restores add about a minute per backend.
 The `time-abi-conformance` scenario boots the largest requested vCPU count and
 runs the guest's exhaustive CI check, `/sbin/nvx-time exhaustive`, which the
 boot check leaves to CI. On every online CPU it checks every leaf

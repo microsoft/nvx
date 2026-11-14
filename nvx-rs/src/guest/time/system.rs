@@ -959,6 +959,63 @@ pub(crate) fn synchronize(runtime: &Runtime<'_>, sample: &BestSample) -> Result<
     )
 }
 
+/// What a capture's [hold on the clock's rate](hold_declared_rate) interrupted: the frequency
+/// correction that the discipline held before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RateHold {
+    /// The held frequency correction, in scaled ppm, that a capture that continues resumes.
+    frequency: i64,
+}
+
+/// Holds the wall clock at the declared TSC rate for a capture request, without the host's
+/// clock correction, and without a phase offset in flight, until [`resume_rate`] or the repair
+/// of a restore holds the host's correction again.
+///
+/// The kernel counts a TSC advance at the rate of its clocks' multiplier at that moment, whole,
+/// when it first reads the TSC afterwards. A restore advances the TSC by the downtime at the
+/// declared rate, so a clock whose frequency correction is the host's, as the discipline sets it,
+/// counts the downtime times one plus that correction, which differs from the downtime by up to
+/// the correction's 500 ppm of it. Holding the correction that counts the TSC at exactly the
+/// declared rate, `F_k / F - 1` for the kernel's rounding `F_k` of the rate `F` to the kHz, makes
+/// the monotonic and boot-time clocks advance by the downtime.
+///
+/// The discipline's phase-locked loop adds its slew of a phase offset to the clock's rate, and
+/// the kernel caches that slew in its tick length until its next second, so the hold steps the
+/// clock by zero, which clears the cache, as [`ClockAdjustment::Pin`] describes. It keeps the
+/// discipline's status and error estimates, and the caller holds the port-B lock, so that no
+/// poll of the time daemon changes the rate before the capture's anchor.
+pub(crate) fn hold_declared_rate(runtime: &Runtime<'_>) -> Result<RateHold, Vec<u8>> {
+    let tsc_hz = runtime
+        .tsc_hz()
+        .map_err(|error| error.to_string().into_bytes())?;
+    let kept = runtime
+        .ops
+        .adjust_clock(ClockAdjustment::Query)
+        .map_err(|error| describe(b"adjtimex: ", error))?;
+    let (frequency, _) = decoders::guest_frequency(0, tsc_hz);
+    runtime
+        .ops
+        .adjust_clock(ClockAdjustment::Pin {
+            hold: kept.hold(frequency),
+            status: kept.status,
+        })
+        .map_err(|error| describe(b"adjtimex: ", error))?;
+    Ok(RateHold {
+        frequency: kept.scaled_ppm,
+    })
+}
+
+/// Resumes the frequency correction that a [hold on the clock's rate](hold_declared_rate)
+/// interrupted, for a capture that continues without a restore. The discipline's next poll slews
+/// the phase that the hold cleared.
+pub(crate) fn resume_rate(runtime: &Runtime<'_>, hold: RateHold) -> Result<(), Vec<u8>> {
+    runtime
+        .ops
+        .adjust_clock(ClockAdjustment::SetFrequency(hold.frequency))
+        .map(drop)
+        .map_err(|error| describe(b"adjtimex: ", error))
+}
+
 /// Takes the initial sample within the bound, steps realtime to it, and holds the frequency
 /// correction that the host's clock correction asks for.
 pub(crate) fn initial_sample(runtime: &Runtime<'_>) -> Result<BestSample, Vec<u8>> {

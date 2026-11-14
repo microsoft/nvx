@@ -29,6 +29,10 @@ pub(crate) struct FakeOps {
     pub(crate) output: Mutex<Vec<(Port, u8)>>,
     /// Clock adjustments, in order.
     pub(crate) adjustments: Mutex<Vec<ClockAdjustment>>,
+    /// The discipline that every adjustment reports, as the kernel reports it after one.
+    pub(crate) discipline: Mutex<ClockDiscipline>,
+    /// The error with which the kernel refuses every adjustment but a query, if any.
+    pub(crate) adjust_error: Option<Errno>,
     /// The last power-off status, or zero.
     pub(crate) power: AtomicUsize,
     /// Kernel log records, in order.
@@ -62,6 +66,8 @@ impl FakeOps {
             input: Mutex::new(input.into_iter().collect()),
             output: Mutex::new(Vec::new()),
             adjustments: Mutex::new(Vec::new()),
+            discipline: Mutex::new(ClockDiscipline::default()),
+            adjust_error: None,
             power: AtomicUsize::new(0),
             kernel_log: Mutex::new(Vec::new()),
             console: Mutex::new(Vec::new()),
@@ -180,7 +186,10 @@ impl PrivilegedOps for FakeOps {
 
     fn adjust_clock(&self, adjustment: ClockAdjustment) -> Result<ClockDiscipline, Errno> {
         self.adjustments.lock().unwrap().push(adjustment);
-        Ok(ClockDiscipline::default())
+        match self.adjust_error {
+            Some(error) if adjustment != ClockAdjustment::Query => Err(error),
+            _ => Ok(*self.discipline.lock().unwrap()),
+        }
     }
 
     fn power_off(&self, status: PowerOffStatus) {
@@ -573,6 +582,91 @@ fn a_synchronization_steps_then_holds_the_host_frequency() {
         String::from_utf8(wide_sample(100_001)).unwrap(),
         "time sample uncertainty 100001 ns exceeds 100000 ns"
     );
+}
+
+#[test]
+fn a_capture_holds_the_declared_rate_and_keeps_the_discipline_that_it_found() {
+    // The kernel counts a declared rate of 2,300,000,123 Hz as 2.3 GHz, 123 Hz short, so the
+    // correction that counts the TSC at the declared rate is 0.0535 ppm negative: -3,505 in the
+    // kernel's scaled ppm, which count 65,536 to the ppm.
+    let mut ops = FakeOps::new([]);
+    ops.tsc_hz = Ok(2_300_000_123);
+    let found = ClockDiscipline {
+        scaled_ppm: -2_000_000,
+        maximum_error_us: 70,
+        estimated_error_us: 3,
+        status: 0x2081,
+    };
+    *ops.discipline.lock().unwrap() = found;
+    let runtime = Runtime::new(&ops, false);
+    let hold = hold_declared_rate(&runtime).unwrap();
+    assert_eq!(
+        ops.adjustments.lock().unwrap().as_slice(),
+        [
+            ClockAdjustment::Query,
+            ClockAdjustment::Pin {
+                hold: FrequencyHold {
+                    scaled_ppm: -3_505,
+                    maximum_error_us: 70,
+                    estimated_error_us: 3,
+                },
+                status: 0x2081,
+            },
+        ]
+    );
+    // A capture that continues resumes the frequency correction that it found, and no more.
+    resume_rate(&runtime, hold).unwrap();
+    assert_eq!(
+        ops.adjustments.lock().unwrap().last(),
+        Some(&ClockAdjustment::SetFrequency(-2_000_000))
+    );
+    assert_eq!(ops.adjustments.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn a_capture_holds_no_correction_at_a_rate_that_the_kernel_counts_exactly() {
+    // A rate of a whole number of kHz is the kernel's own.
+    let ops = FakeOps::new([]);
+    let runtime = Runtime::new(&ops, false);
+    hold_declared_rate(&runtime).unwrap();
+    let adjustments = ops.adjustments.lock().unwrap();
+    assert!(
+        matches!(
+            adjustments.as_slice(),
+            [
+                ClockAdjustment::Query,
+                ClockAdjustment::Pin {
+                    hold: FrequencyHold { scaled_ppm: 0, .. },
+                    ..
+                },
+            ]
+        ),
+        "{adjustments:?}"
+    );
+}
+
+#[test]
+fn a_capture_that_cannot_hold_the_rate_reports_why() {
+    // Without the declared rate, which neither the boot checks nor the MSR gave, the capture
+    // touches nothing.
+    let mut ops = FakeOps::new([]);
+    ops.tsc_hz = Err(Errno::EACCES);
+    let runtime = Runtime::new(&ops, false);
+    let detail = hold_declared_rate(&runtime).unwrap_err();
+    assert_eq!(
+        String::from_utf8(detail).unwrap(),
+        format!("MSR 0x40000022 read: {}", Errno::EACCES.desc())
+    );
+    assert!(ops.adjustments.lock().unwrap().is_empty());
+    // A kernel that refuses the pin, or the resumption, is the diagnostic of its error.
+    let mut ops = FakeOps::new([]);
+    ops.adjust_error = Some(Errno::EPERM);
+    let runtime = Runtime::new(&ops, false);
+    let refused = format!("adjtimex: {}", Errno::EPERM.desc());
+    let detail = hold_declared_rate(&runtime).unwrap_err();
+    assert_eq!(String::from_utf8(detail).unwrap(), refused);
+    let detail = resume_rate(&runtime, RateHold { frequency: 7 }).unwrap_err();
+    assert_eq!(String::from_utf8(detail).unwrap(), refused);
 }
 
 #[test]

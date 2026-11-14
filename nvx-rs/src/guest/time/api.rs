@@ -39,11 +39,14 @@ const REPORT_ONLY_TOKEN: Token<'static> = Token {
 /// restore's finish, which run in the calling process.
 ///
 /// A call needs the privileges of `nvx-time`: `CAP_SYS_RAWIO` for OpenVMM's I/O ports, and
-/// write access to `/run/nvx`. It takes the permission for the ports only for each of its port
-/// transactions, on the calling thread, and returns only once the thread holds none of it, or
-/// fails with [`TimeError::PortRelease`], after which the thread must start neither a thread
-/// nor a process, which would inherit the permission; [`Command`](crate::guest::spawn::Command)
-/// refuses to start one from it. No call waits for a child that it did not start.
+/// write access to `/run/nvx`; the cold boot and the capture request, which set the wall clock or
+/// its rate, need `CAP_SYS_TIME` too, the capture request whether or not the VM then restores,
+/// since it holds the clock's rate before it writes the snapshot port. A call takes the
+/// permission for the ports only for each of its port transactions, on the calling thread, and
+/// returns only once the thread holds none of it, or fails with [`TimeError::PortRelease`],
+/// after which the thread must start neither a thread nor a process, which would inherit the
+/// permission; [`Command`](crate::guest::spawn::Command) refuses to start one from it. No call
+/// waits for a child that it did not start.
 ///
 /// A violation of the time ABI is reported by a violation event on the console, in the kernel
 /// log, and on OpenVMM's debug console. In enforcing mode, the event stops the VM, so the call
@@ -181,6 +184,19 @@ impl TimeAbi {
     /// snapshot restored, repairs the restore: reads and validates the restore packet, steps and
     /// slews the wall clock, hands over the packet's fresh entropy, and records the restore,
     /// repair steps 1 to 3.
+    ///
+    /// Just before it writes the port, the call holds the wall clock at the declared TSC rate,
+    /// without the host's clock correction and without a phase slew in flight, so that the
+    /// kernel counts a restore's advance of the TSC by the downtime in its monotonic and
+    /// boot-time clocks as the downtime itself. The hold sets the clock's discipline, which
+    /// needs `CAP_SYS_TIME`, in a VM that continues without a restore as in one that a snapshot
+    /// restored. The repair holds the host's correction again in a restored VM, and the call
+    /// does in a VM that continues without a restore, before it returns
+    /// [`CaptureOutcome::Continued`]. A hold that fails, because the kernel refuses it or the
+    /// declared rate is unknown, is a violation of check C10 that fails the call before it
+    /// writes the port, and so is a refusal to hold the host's correction again afterwards. A
+    /// repair that fails before it steps the clock leaves the declared rate in force; the failure
+    /// stops the VM, unless the call is report-only or strict.
     ///
     /// The request's mode selects how the entropy is handed over. In the file mode of
     /// [`CaptureRequest::new`], the call creates, or truncates, the entropy file before it
@@ -781,6 +797,23 @@ fn capture(runtime: &Runtime<'_>, request: CaptureRequest) -> Result<CaptureOutc
             return Err(TimeError::PortLock(error.into()));
         }
     };
+    // The request holds the clock at the declared rate, so that the restore's advance of the TSC
+    // by the downtime is counted at that rate: see `hold_declared_rate`. The lock keeps the time
+    // daemon's polls from changing the rate until the request returns.
+    let hold = match system::hold_declared_rate(runtime) {
+        Ok(hold) => hold,
+        Err(detail) => {
+            entropy.discard();
+            // The failure's event writes the debug console in a transaction of its own.
+            drop(ports);
+            return Err(check_failed(
+                runtime,
+                Phase::Capture,
+                CheckId::C10,
+                prefixed(b"cannot hold the clock at the declared rate: ", &detail),
+            ));
+        }
+    };
     ports.write_u8(Port::Snapshot, scratch.request());
     let start = clock_ns(sys::Clock::Monotonic);
     let read = (ports.read_u8(Port::PortbStatus) & PORTB_PACKET_AVAILABLE != 0)
@@ -788,7 +821,7 @@ fn capture(runtime: &Runtime<'_>, request: CaptureRequest) -> Result<CaptureOutc
     drop(ports);
     let Some(read) = read else {
         entropy.discard();
-        return Ok(CaptureOutcome::Continued);
+        return resume_rate(runtime, hold);
     };
     let target = RepairTarget {
         previous_id: generation_id,
@@ -796,7 +829,29 @@ fn capture(runtime: &Runtime<'_>, request: CaptureRequest) -> Result<CaptureOutc
         finish,
         daemon_pid,
     };
-    repair_restore(runtime, read, target, start)
+    match repair_restore(runtime, read, target, start)? {
+        CaptureOutcome::Continued => resume_rate(runtime, hold),
+        restored @ CaptureOutcome::Restored(_) => Ok(restored),
+    }
+}
+
+/// Ends a capture that continued without a restore, once the clock holds the host's correction
+/// again, which the capture's [hold](system::hold_declared_rate) interrupted.
+fn resume_rate(runtime: &Runtime<'_>, hold: system::RateHold) -> Result<CaptureOutcome, TimeError> {
+    match system::resume_rate(runtime, hold) {
+        Ok(()) => Ok(CaptureOutcome::Continued),
+        Err(detail) => Err(check_failed(
+            runtime,
+            Phase::Capture,
+            CheckId::C10,
+            prefixed(b"cannot resume the host's clock correction: ", &detail),
+        )),
+    }
+}
+
+/// Returns `detail` after `prefix`, as a violation's diagnostic.
+fn prefixed(prefix: &[u8], detail: &[u8]) -> Vec<u8> {
+    [prefix, detail].concat()
 }
 
 /// Loads the persisted generation, and the declared TSC rate that the boot checks recorded, with
