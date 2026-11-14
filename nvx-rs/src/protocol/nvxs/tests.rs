@@ -1,5 +1,7 @@
 //! Tests of the NVXS session: records against OpenVMM's vectors and cases and every payload rule,
-//! the parser across partial reads and record boundaries, and the state machines of both roles.
+//! the parser across partial reads and record boundaries, the state machines of both roles, and
+//! both roles together through a broker that relays records as OpenVMM's does, which the tests of
+//! the session's drivers share.
 
 use super::*;
 use crate::protocol::{
@@ -8,9 +10,11 @@ use crate::protocol::{
 };
 use crate::tests::{OPENVMM_VECTORS, hex};
 
+pub(crate) mod broker;
 mod guest;
 mod host;
 mod record;
+mod session;
 
 /// Instance ID of the sessions in these tests.
 const INSTANCE: [u8; 16] = [0x22; 16];
@@ -54,7 +58,12 @@ fn openvmm_vector(name: &str) -> Vec<u8> {
 }
 
 /// Encodes a valid record.
-fn record(record_type: RecordType, identity: Identity, sequence: u64, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn record(
+    record_type: RecordType,
+    identity: Identity,
+    sequence: u64,
+    payload: &[u8],
+) -> Vec<u8> {
     let mut output = Vec::new();
     encode_record(
         record_type,
@@ -158,20 +167,20 @@ fn host_stream() -> Vec<u8> {
 
 /// Application framing of the tests: each message is a little-endian `u32` length, then the
 /// message, and messages may span DATA records.
-fn framed(message: &[u8]) -> Vec<u8> {
+pub(crate) fn framed(message: &[u8]) -> Vec<u8> {
     [&(message.len() as u32).to_le_bytes(), message].concat()
 }
 
 /// Receiver of the tests' application framing, which reassembles messages across DATA records.
 #[derive(Default)]
-struct Reassembler {
+pub(crate) struct Reassembler {
     /// Bytes of the message in progress.
     pending: Vec<u8>,
 }
 
 impl Reassembler {
     /// Appends the payload of a DATA record, and returns the messages that it completes.
-    fn push(&mut self, payload: &[u8]) -> Vec<Vec<u8>> {
+    pub(crate) fn push(&mut self, payload: &[u8]) -> Vec<Vec<u8>> {
         self.pending.extend_from_slice(payload);
         let mut messages = Vec::new();
         while self.pending.len() >= 4 {
@@ -184,4 +193,29 @@ impl Reassembler {
         }
         messages
     }
+
+    /// Returns whether a message is in progress.
+    pub(crate) fn is_partial(&self) -> bool {
+        !self.pending.is_empty()
+    }
+}
+
+/// Messages of 10 bytes, of the largest frame that fits one record, of one more byte, and of
+/// about 300 KB, which spans five records.
+pub(crate) fn messages() -> Vec<Vec<u8>> {
+    let largest_in_one_record = OUTER_MAX_PAYLOAD - 4;
+    [
+        10,
+        largest_in_one_record,
+        largest_in_one_record + 1,
+        300_000,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, length)| {
+        (0..length)
+            .map(|byte| (byte as u8).wrapping_mul(31).wrapping_add(index as u8))
+            .collect()
+    })
+    .collect()
 }

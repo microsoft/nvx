@@ -102,7 +102,7 @@ mod guest;
 mod host;
 mod record;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use guest::{GuestEvent, GuestSession, GuestState};
 pub use host::{HostEvent, HostSession, HostState};
