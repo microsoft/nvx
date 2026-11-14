@@ -11,10 +11,11 @@
   summary, and commit mapping below cover positions 001-124, the PR09 fixups at positions
   234-236, the PR13 fixup at position 240, the PR18 fixup at position 241, the PR20 fixup at
   position 242, the PR19 fixup at position 243, and the PR10 fixups at positions 271 and 273.
-- NVX's pinned OpenVMM revision: `efe6bc26734fff155cfd3a5dcbacc5ed285cd0ae`, position 275, the
-  head of microsoft/openvmm#5087, whose one commit follows position 274, `e2458a6ce`, the head of
-  `feature/microvm/dev`, to which microsoft/openvmm#5084 added position 274 after position 273,
-  `09cd771c0`, microsoft/openvmm#5083 added position 273 after position 272, `fb2c8b75c`, and
+- NVX's pinned OpenVMM revision: `7b205c0a0fe7a40cc08fd46951d724bc293bc703`, position 276, the
+  head of microsoft/openvmm#5094, whose one commit follows position 275, `efe6bc267`, the head of
+  `feature/microvm/dev`, to which microsoft/openvmm#5087 added position 275 after position 274,
+  `e2458a6ce`, microsoft/openvmm#5084 added position 274 after position 273, `09cd771c0`,
+  microsoft/openvmm#5083 added position 273 after position 272, `fb2c8b75c`, and
   microsoft/openvmm#5077 added positions 270-272 after position 269, `73cf40357`, the head of
   `feature/microvm/release/v6.1`. The v6.1 rebase replayed the 268
   commits of `feature/microvm/dev` at NVX's pin before it, `5ca20ee08`, whose first 220 commits
@@ -22,9 +23,9 @@
   changes upstream had landed, and added eight fixups at its tip, positions 262-269. A commit's
   position is its v6.0 position less the number of dropped commits before it: v6.0 positions
   003-007 are positions 002-006, 010-013 are 007-010, 015-050 are 011-046, and 054-268 are
-  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 151
+  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 152
   commits past the mapped tip on the same first-parent chain. Positions 125-233, 237-239,
-  244-270, 272, and 274-275 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
+  244-270, 272, and 274-276 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
   position 240 is a PR13 fixup, position 241 is a PR18 fixup, position 242 is a PR20 fixup,
   position 243 is a PR19 fixup, and positions 271 and 273 are PR10 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1161,7 +1162,8 @@ The physical branch is one first-parent chain:
   -> PR10 fixup [273]
   -> IOAPIC MMIO reads wider than 4 bytes zero-extended [274]
   -> restored IOAPIC id checked against the ID register's 4 bits [275]
-  -> efe6bc267 (NVX pin)
+  -> restored host CPU profile checked against the derivation policy [276]
+  -> 7b205c0a0 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1212,7 +1214,7 @@ restore and time advance set in the RTC's clock source, which overflowed near ei
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 124 without merges. Of the 151 later commits,
+The NVX pin extends the chain past position 124 without merges. Of the 152 later commits,
 positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position 241 is a PR18 fixup,
 position 242 is a PR20 fixup, position 243 is a PR19 fixup, positions 262-269 are the fixups of
 the v6.1 rebase, positions 271 and 273 are PR10 fixups, and the others are not yet classified or
@@ -1222,7 +1224,7 @@ and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that s
 commits. Positions 180-184 followed the v3.0 reorganization, positions 185-198 are the ABI restart
 of the v4.0 reorganization, positions 199-204 followed it, positions 205-211 followed the v5.0
 reorganization, positions 212 and 213 followed the v5.1 rebase, positions 214-261 followed the
-v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-275
+v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-276
 followed the v6.1 rebase, so they combine none, apart from position 213, which combines v5.1
 positions 222 and 223. Each commit's position is its v6.0 position less seven, the number of
 commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position
@@ -1386,10 +1388,11 @@ through 147 and one less from v5.1 position 149 on; see
 | 273 | `09cd771c0` | - | - | - | - | - | chipset: bound the RTC's restored and advanced time (microsoft/openvmm#5083); fold into 016, after 271 |
 | 274 | `e2458a6ce` | - | - | - | - | - | chipset: zero-extend wide IOAPIC MMIO reads (microsoft/openvmm#5084) |
 | 275 | `efe6bc267` | - | - | - | - | - | chipset: reject a restored IOAPIC id that the ID register cannot hold (microsoft/openvmm#5087) |
+| 276 | `7b205c0a0` | - | - | - | - | - | cpu_profile: refuse a restored host profile outside the derivation policy (microsoft/openvmm#5094) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
-that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-275, for later
+that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-276, for later
 commits. They name the positions that the commits have now, but the v6.1 rebase did not check the
 earlier ones again on `7d90c4104`.
 
@@ -2175,6 +2178,23 @@ code, and changes nothing that a mapped PR adds. Replaying it on upstream main c
 those tests, at their imports and at their end, where position 183 adds an import and a test, and
 its first test reads the routes that position 183 makes the tests' routing record, so its tests
 follow position 183 upstream, and its change to the device itself applies without conflicts.
+
+Position 276 makes the restore of a host CPU profile refuse a profile that the derivation policy
+would change, which let a snapshot's own copy of its profile give the guest the VMX or SVM that
+every derived profile withholds. In the `cpu_profile` crate, which position 131 adds and positions
+138, 139, 141-143, 145-147, 151, and 214-217 change, it adds `policy_violations`, which applies to
+the profile the derivation policy, the stateless-feature clears, and the XSAVE allowances that
+position 131 adds and positions 143, 146, 214, and 215 extend, and has `host_profile_for_restore`,
+which position 142 adds, refuse a profile that differs. It extends the host profile tests of the
+restore preflight and of the worker's selection of the CPU profile, which position 142 adds to the
+snapshot time module of `openvmm_helpers` and the time ABI module of `openvmm_core`, which
+positions 129 and 128 add, without changing their code. It also describes the refusal on the
+Guide's snapshots page, in the paragraph on a restore's CPU profile requirements, which positions
+141, 142, 145, and 147 write in the section that position 140 adds, and in the limit on CPU
+profiles that positions 140, 141, 145, and 188 write. It changes nothing that a mapped PR adds.
+Replaying it on upstream main conflicts in all seven of its files: upstream main lacks the
+`cpu_profile` crate, the time ABI's modules of `openvmm_helpers` and `openvmm_core`, and that
+section of the snapshots page, so it follows the time ABI series upstream.
 
 ## PR summary
 
