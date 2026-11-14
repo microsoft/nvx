@@ -785,5 +785,50 @@ class HostInventoryTests(unittest.TestCase):
                 self.assertEqual(completed.stderr, "")
 
 
+class SubprocessRunnerTests(unittest.TestCase):
+    """Run the real runner against this host's Python in place of an SSH host."""
+
+    def run_child(
+        self,
+        code: str,
+        *,
+        input_text: str | None = None,
+        capture_stdout: bool = True,
+    ) -> nvx_hosts.CommandResult:
+        return nvx_hosts.SubprocessRunner().run(
+            [sys.executable, "-c", code],
+            input_text=input_text,
+            capture_stdout=capture_stdout,
+        )
+
+    def test_input_reaches_the_child_byte_for_byte(self) -> None:
+        # Text mode writes each LF as os.linesep, so a script with LF line
+        # endings reached the remote shell with a CR on every line when it
+        # was uploaded from Windows.
+        dump = "import sys; sys.stdout.write(sys.stdin.buffer.read().hex())"
+        for name, text in (
+            ("LF", "echo a\necho b\n"),
+            ("CRLF", "Write-Output a\r\nWrite-Output b\r\n"),
+            ("non-ASCII", "echo '\u00e9\u20ac'\n"),
+        ):
+            with self.subTest(name):
+                result = self.run_child(dump, input_text=text)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(bytes.fromhex(result.stdout), text.encode("utf-8"))
+
+    def test_captured_stdout_is_utf8_text_with_universal_newlines(self) -> None:
+        # A Windows host ends its lines with CRLF, and a command can print
+        # bytes that are not UTF-8.
+        output = b"C:/Temp/nvx-1.ps1\r\n\xe2\x82\xac\xff\r"
+        result = self.run_child(f"import sys; sys.stdout.buffer.write({output!r})")
+        self.assertEqual(
+            result, nvx_hosts.CommandResult(0, "C:/Temp/nvx-1.ps1\n\u20ac\ufffd\n")
+        )
+
+    def test_status_is_returned_and_uncaptured_stdout_is_empty(self) -> None:
+        result = self.run_child("import sys; sys.exit(7)", capture_stdout=False)
+        self.assertEqual(result, nvx_hosts.CommandResult(7, ""))
+
+
 if __name__ == "__main__":
     unittest.main()
