@@ -7,7 +7,7 @@ use super::{
 
 /// State of a [`GuestSession`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GuestState {
+pub(crate) enum GuestState {
     /// The guest has not sent its attachment.
     Detached,
     /// The guest sent its attachment and waits for the broker's first RESET.
@@ -25,7 +25,7 @@ pub enum GuestState {
 
 /// Event that a [`GuestSession`] reports for a record from the broker.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GuestEvent {
+pub(crate) enum GuestEvent {
     /// The broker reset the session to this identity. The guest abandons the work of the earlier
     /// epoch, if any, then acknowledges the new one with [`GuestSession::acknowledge`].
     Reset(Identity),
@@ -43,7 +43,7 @@ pub enum GuestEvent {
 /// and [`credit`](Self::credit) encode DATA and CREDIT records in an active epoch. The module
 /// documentation describes the protocol.
 #[derive(Debug, Clone)]
-pub struct GuestSession {
+pub(crate) struct GuestSession {
     /// State of the session.
     state: GuestState,
     /// Parser of the broker's records.
@@ -55,14 +55,14 @@ pub struct GuestSession {
     /// Sequence number of the guest's next record.
     send_sequence: u64,
     /// Receive window that the guest acknowledged the epoch with.
-    window: u32,
+    pub(super) window: u32,
     /// DATA bytes of the epoch that the guest received and has not credited.
-    outstanding: u32,
+    pub(super) outstanding: u32,
 }
 
 impl GuestSession {
     /// Creates a session that has not attached yet.
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             state: GuestState::Detached,
             parser: RecordParser::new(),
@@ -75,35 +75,24 @@ impl GuestSession {
     }
 
     /// Returns the state of the session.
-    pub fn state(&self) -> GuestState {
+    pub(crate) fn state(&self) -> GuestState {
         self.state
     }
 
     /// Returns the identity of the current epoch, once the broker reset the session.
-    pub fn identity(&self) -> Option<Identity> {
+    pub(crate) fn identity(&self) -> Option<Identity> {
         self.identity
-    }
-
-    /// Returns the receive window that the guest acknowledged the current epoch with, while the
-    /// epoch is active.
-    pub fn window(&self) -> Option<u32> {
-        (self.state == GuestState::Active).then_some(self.window)
-    }
-
-    /// Returns the DATA bytes of the current epoch that the guest received and has not credited.
-    pub fn outstanding(&self) -> u32 {
-        self.outstanding
     }
 
     /// Returns how many more bytes complete the broker's record in progress; see
     /// [`RecordParser::needed`].
-    pub fn needed(&self) -> usize {
+    pub(crate) fn needed(&self) -> usize {
         self.parser.needed()
     }
 
     /// Appends the GUEST_ATTACH record to `output`, which the caller sends to the broker before
     /// anything else.
-    pub fn attach(&mut self, output: &mut Vec<u8>) -> Result<(), SessionError> {
+    pub(crate) fn attach(&mut self, output: &mut Vec<u8>) -> Result<(), SessionError> {
         if self.state != GuestState::Detached {
             return Err(SessionError::InvalidState);
         }
@@ -116,7 +105,10 @@ impl GuestSession {
     ///
     /// Returns the number of bytes consumed and the event of the record that the last of them
     /// completed, if any. Bytes after that record are not consumed. A failure ends the session.
-    pub fn receive(&mut self, input: &[u8]) -> Result<(usize, Option<GuestEvent>), SessionError> {
+    pub(crate) fn receive(
+        &mut self,
+        input: &[u8],
+    ) -> Result<(usize, Option<GuestEvent>), SessionError> {
         if !matches!(
             self.state,
             GuestState::Attaching | GuestState::Resetting | GuestState::Active
@@ -142,7 +134,11 @@ impl GuestSession {
     ///
     /// The guest acknowledges once it abandoned the work of the earlier epoch and can take DATA
     /// of the new one. The broker sends none before.
-    pub fn acknowledge(&mut self, window: u32, output: &mut Vec<u8>) -> Result<(), SessionError> {
+    pub(crate) fn acknowledge(
+        &mut self,
+        window: u32,
+        output: &mut Vec<u8>,
+    ) -> Result<(), SessionError> {
         let (GuestState::Resetting, Some(identity)) = (self.state, self.identity) else {
             return Err(SessionError::InvalidState);
         };
@@ -165,7 +161,11 @@ impl GuestSession {
     /// bytes from the front of `data` to `output`, and returns how many bytes it took.
     ///
     /// `data` must not be empty. A message of more bytes takes one call per record.
-    pub fn send(&mut self, data: &[u8], output: &mut Vec<u8>) -> Result<usize, SessionError> {
+    pub(crate) fn send(
+        &mut self,
+        data: &[u8],
+        output: &mut Vec<u8>,
+    ) -> Result<usize, SessionError> {
         let (GuestState::Active, Some(identity)) = (self.state, self.identity) else {
             return Err(SessionError::InvalidState);
         };
@@ -173,8 +173,9 @@ impl GuestSession {
     }
 
     /// Appends a CREDIT record that returns `bytes` consumed DATA bytes to the receive window to
-    /// `output`. `bytes` is from 1 through [`outstanding`](Self::outstanding).
-    pub fn credit(&mut self, bytes: u32, output: &mut Vec<u8>) -> Result<(), SessionError> {
+    /// `output`. `bytes` is from 1 through the DATA bytes of the epoch that the guest received and
+    /// has not credited.
+    pub(crate) fn credit(&mut self, bytes: u32, output: &mut Vec<u8>) -> Result<(), SessionError> {
         let (GuestState::Active, Some(identity)) = (self.state, self.identity) else {
             return Err(SessionError::InvalidState);
         };
@@ -199,7 +200,7 @@ impl GuestSession {
     ///
     /// Fails with [`SessionError::Truncated`] if a record was in progress. A session that
     /// already ended keeps its state.
-    pub fn disconnect(&mut self) -> Result<(), SessionError> {
+    pub(crate) fn disconnect(&mut self) -> Result<(), SessionError> {
         if matches!(self.state, GuestState::Closed | GuestState::Failed) {
             return Ok(());
         }

@@ -101,7 +101,7 @@ nvx/
 |-- nvx-rs/                      The `nvx` package: NVX's library, with NVX's own programs as its binaries
 |   |-- src/
 |   |   |-- lib.rs               The crate's root, its documentation, and its public modules
-|   |   |-- protocol/            Control-console codec, NVXS session, and the guest targets that live shares may not take, shared by the host and the guest
+|   |   |-- protocol/            The host's mapping table on the wire, boot tokens, and the guest targets that live shares may not take, shared by the host and the guest; private to the crate, the control console's NVXS session and NVXC
 |   |   |-- guest_restore/       The guest-restore record of a layered root, its canonical encoding, and what Ready reports about it, shared by the host, the guest, and every adapter's framing
 |   |   |-- net/                 CIDR parsing and subtraction, and hostname and guest-network forms
 |   |   |-- gpt/                 Strict reading of GPT disks for NVX's guest programs, private to the crate

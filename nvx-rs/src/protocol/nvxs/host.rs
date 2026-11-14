@@ -9,7 +9,7 @@ use super::{
 
 /// State of a [`HostSession`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum HostState {
+pub(crate) enum HostState {
     /// The host has not sent its attachment.
     Detached,
     /// The host sent its attachment and waits for the broker to attach it.
@@ -29,7 +29,7 @@ pub enum HostState {
 
 /// Event that a [`HostSession`] reports for a record from the broker.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HostEvent {
+pub(crate) enum HostEvent {
     /// The broker accepted the host's capability, and waits for the guest to acknowledge the
     /// session's reset before it attaches the host.
     Wait,
@@ -52,13 +52,13 @@ pub enum HostEvent {
 /// [`send`](Self::send) encodes application bytes in DATA records once the broker attached the
 /// host. The module documentation describes the protocol.
 #[derive(Debug, Clone)]
-pub struct HostSession {
+pub(crate) struct HostSession {
     /// State of the session.
-    state: HostState,
+    pub(super) state: HostState,
     /// Parser of the broker's records.
     parser: RecordParser,
     /// Identity that READY attached the host to.
-    identity: Option<Identity>,
+    pub(super) identity: Option<Identity>,
     /// Sequence number of the broker's next record.
     receive_sequence: u64,
     /// Sequence number of the host's next DATA record.
@@ -67,7 +67,7 @@ pub struct HostSession {
 
 impl HostSession {
     /// Creates a session that has not attached yet.
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             state: HostState::Detached,
             parser: RecordParser::new(),
@@ -77,25 +77,9 @@ impl HostSession {
         }
     }
 
-    /// Returns the state of the session.
-    pub fn state(&self) -> HostState {
-        self.state
-    }
-
-    /// Returns the identity that the broker attached the host to, once it did.
-    pub fn identity(&self) -> Option<Identity> {
-        self.identity
-    }
-
-    /// Returns how many more bytes complete the broker's record in progress; see
-    /// [`RecordParser::needed`].
-    pub fn needed(&self) -> usize {
-        self.parser.needed()
-    }
-
     /// Appends the HOST_ATTACH record with `capability` to `output`, which the caller sends to
     /// the broker before anything else.
-    pub fn attach(
+    pub(crate) fn attach(
         &mut self,
         capability: &[u8; CAPABILITY_LEN],
         output: &mut Vec<u8>,
@@ -112,7 +96,10 @@ impl HostSession {
     ///
     /// Returns the number of bytes consumed and the event of the record that the last of them
     /// completed, if any. Bytes after that record are not consumed. A failure ends the session.
-    pub fn receive(&mut self, input: &[u8]) -> Result<(usize, Option<HostEvent>), SessionError> {
+    pub(crate) fn receive(
+        &mut self,
+        input: &[u8],
+    ) -> Result<(usize, Option<HostEvent>), SessionError> {
         if !matches!(self.state, HostState::Attaching | HostState::Attached) {
             return Err(SessionError::InvalidState);
         }
@@ -131,7 +118,11 @@ impl HostSession {
     /// bytes from the front of `data` to `output`, and returns how many bytes it took.
     ///
     /// `data` must not be empty. A message of more bytes takes one call per record.
-    pub fn send(&mut self, data: &[u8], output: &mut Vec<u8>) -> Result<usize, SessionError> {
+    pub(crate) fn send(
+        &mut self,
+        data: &[u8],
+        output: &mut Vec<u8>,
+    ) -> Result<usize, SessionError> {
         let (HostState::Attached, Some(identity)) = (self.state, self.identity) else {
             return Err(SessionError::InvalidState);
         };
@@ -142,7 +133,7 @@ impl HostSession {
     ///
     /// Fails with [`SessionError::Truncated`] if a record was in progress. A session that
     /// already ended keeps its state.
-    pub fn disconnect(&mut self) -> Result<(), SessionError> {
+    pub(crate) fn disconnect(&mut self) -> Result<(), SessionError> {
         if !matches!(
             self.state,
             HostState::Detached | HostState::Attaching | HostState::Attached

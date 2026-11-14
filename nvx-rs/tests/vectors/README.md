@@ -90,9 +90,9 @@ the key that the vector's bytes decode to.
 [`b4028c1aa775d8aafba1a170857acc032c7c86a1`](https://github.com/microsoft/openvmm/tree/b4028c1aa775d8aafba1a170857acc032c7c86a1/vm/devices/virtio/virtio_console/test_data).
 They keep OpenVMM's own format, which its `control_session_protocol` tests read:
 one record of each type, as `NAME|BYTES`, and 37 cases of the boundaries and
-refusals of the records' payloads and headers. The tests of
-`nvx::protocol::nvxs` check that each vector decodes and encodes to its bytes,
-and that each case is accepted or refused as it says.
+refusals of the records' payloads and headers. The tests of the crate's NVXS
+session, under `src/protocol/nvxs/`, check that each vector decodes and
+encodes to its bytes, and that each case is accepted or refused as it says.
 
 `openvmm/` also holds two excerpts of OpenVMM's sources at that commit, whole
 lines, unchanged: `platform_command_line_token_is_invariant.rs`, the function

@@ -1,7 +1,8 @@
 //! Tests of the NVXS session: records against OpenVMM's vectors and cases and every payload rule,
 //! the parser across partial reads and record boundaries, the state machines of both roles, and
 //! both roles together through a broker that relays records as OpenVMM's does, which the tests of
-//! the session's drivers share.
+//! the session's drivers share, as they share the accessors with which the tests observe a
+//! session's state and a record's flow control.
 
 use super::*;
 use crate::protocol::{
@@ -10,11 +11,59 @@ use crate::protocol::{
 };
 use crate::tests::{OPENVMM_VECTORS, hex};
 
+pub(crate) use super::host::HostState;
+
 pub(crate) mod broker;
 mod guest;
 mod host;
 mod record;
 mod session;
+
+impl HostSession {
+    /// Returns the state of the session.
+    pub(crate) fn state(&self) -> HostState {
+        self.state
+    }
+
+    /// Returns the identity that the broker attached the host to, once it did.
+    pub(crate) fn identity(&self) -> Option<Identity> {
+        self.identity
+    }
+}
+
+impl GuestSession {
+    /// Returns the receive window that the guest acknowledged the current epoch with, while the
+    /// epoch is active.
+    pub(crate) fn window(&self) -> Option<u32> {
+        (self.state() == GuestState::Active).then_some(self.window)
+    }
+
+    /// Returns the DATA bytes of the current epoch that the guest received and has not credited.
+    pub(crate) fn outstanding(&self) -> u32 {
+        self.outstanding
+    }
+}
+
+impl Record {
+    /// Returns the initial receive window of an ACK record, or `None` for another type.
+    pub(crate) fn window(&self) -> Option<u32> {
+        (self.record_type() == RecordType::Ack).then(|| count(self.payload()))
+    }
+
+    /// Returns the number of bytes that a CREDIT record returns, or `None` for another type.
+    pub(crate) fn credit(&self) -> Option<u32> {
+        (self.record_type() == RecordType::Credit).then(|| count(self.payload()))
+    }
+}
+
+/// Reads the little-endian count that the four-byte payload of an ACK or a CREDIT holds.
+fn count(payload: &[u8]) -> u32 {
+    u32::from_le_bytes(
+        payload
+            .try_into()
+            .expect("the parser checked the payload's length"),
+    )
+}
 
 /// Instance ID of the sessions in these tests.
 const INSTANCE: [u8; 16] = [0x22; 16];
