@@ -62,8 +62,10 @@ lists.
      [the vectors' README](../../../nvx-rs/tests/vectors/README.md#openvmms-vectors);
    - an excerpt is no longer a run of whole lines of its file: copy the new
      lines unchanged into it, and record the revision the same way;
-   - a contract version differs: change it in `nvx::contract`, with the code
-     that reads what it versions;
+   - a version differs: change it where the test names it, in
+     `nvx-rs/src/host/snapshot/manifest.rs`,
+     `nvx-rs/src/host/artifacts/compatibility.rs`, or `nvx-rs/src/guest/time/`,
+     with the code that reads what it versions;
    - a CPU profile was added, revised, or removed: update
      `nvx-rs/src/host/cli/cpu_generations.json` and the copy in
      `scripts/nvx_tools/time_abi.py`.

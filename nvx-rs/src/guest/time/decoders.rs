@@ -33,14 +33,19 @@ pub(crate) const GENERATION_ID_SIZE: usize = 16;
 
 /// The magic number that starts every restore packet.
 const PACKET_MAGIC: [u8; 3] = *b"OVR";
-/// The restore-packet version,
-/// [`RESTORE_PACKET_VERSION`](crate::contract::RESTORE_PACKET_VERSION), which a template's
-/// compatibility key records.
-const PACKET_VERSION: u8 = {
-    let version = crate::contract::RESTORE_PACKET_VERSION;
-    assert!(version <= u8::MAX as u64);
-    version as u8
-};
+/// The version of the restore packet that OpenVMM gives a restored guest, and that the guest
+/// decodes, which refuses a packet of any other. It must match `RESTORE_PACKET_VERSION` in
+/// OpenVMM's `vm/devices/chipset_resources/src/microvm_time.rs`, which the ignored test
+/// `tests/openvmm_vectors.rs` checks.
+///
+/// Version 1 carries no host UTC: the guest takes a time sample to set its clock. A restore that
+/// replaces the network policy of a snapshot without a tier flags the packet's network: the new
+/// policy's DNS server, and whether the guest announces its listeners under it. A platform
+/// restore may flag a guest-restore record, which then ends the packet: the settings of the clone's
+/// own launch, which its launcher supplied. The flag was a reserved bit, which a guest that
+/// predates it refuses, so a packet that sets it fails on such a guest, and a packet that does not
+/// keeps the version's layout and meaning.
+const PACKET_VERSION: u8 = 1;
 /// The bits of the network byte that give the DNS server's address family.
 const PACKET_DNS_MASK: u8 = 0x03;
 /// The network byte's DNS server family of an IPv4 server.

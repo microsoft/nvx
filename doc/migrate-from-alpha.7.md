@@ -74,12 +74,11 @@ cargo install nvx --version 0.2.0-alpha.1 --locked \
 The crate no longer pins NVX's runtime, the OpenVMM executable, guest kernel,
 and initramfs that alpha.7's `bundled` feature downloaded from the release
 that its `artifacts.json` named. A program runs those of an NVX release whose
-`SOURCE-MANIFEST.json` declares the contracts that the crate speaks, for which
-`nvx::contract::manifest_mismatches` finds no mismatch, and labels each file
-with the digest that the release's `SHA256SUMS` lists, as
-[The library](library.md#the-library) describes. The release speaks other
-versions of those contracts than alpha.7, so the runtime that alpha.7 bundled
-does not match it.
+guests speak the contracts that it speaks with them, labels each file with the
+digest that the release's `SHA256SUMS` lists, and names those contracts in a
+`CompatibilityIdentity` of its own, as [The library](library.md#the-library)
+describes. The release's guests speak other versions of their contracts than
+alpha.7's, so the runtime that alpha.7 bundled does not match it.
 
 ## Features and entry points
 
@@ -95,9 +94,9 @@ does not match it.
 | `guest` | The `guest` module, with the guest's space, executions, and processes, and nine guest binaries | The `guest` module, without the guest's space and executions, and ten guest binaries: `nvx-init` is new |
 
 Without default features, the crate holds what the host and the guest share:
-`protocol`, `guest_restore`, `contract`, `net`, `uuid`, and the errors.
-alpha.7's also held `exec`, which is gone, and `Hypervisor`, which moved to
-`host::runtime`.
+`protocol`, `guest_restore`, `net`, `uuid`, and the errors.
+alpha.7's also held `exec` and `contract`, which are gone, and `Hypervisor`,
+which moved to `host::runtime`.
 
 ### Hidden program entry points
 
@@ -150,10 +149,12 @@ keeps its path and its signature.
 | --- | --- |
 | `nvx::Artifacts`, the same type as `host::artifacts::Artifacts`, with `new`, `discover`, `from_dir`, `from_release_dir`, `from_repo_layout`, `artifact_dir`, `ENV_OPENVMM`, `ENV_KERNEL`, `ENV_INITRD`, `ENV_DIR`, and `BESIDE_EXE_DIR` | No longer public: the caller locates OpenVMM, the guest kernel, and the initramfs, and gives their paths in a `host::runtime::Runtime`. NVX's CLI keeps a lookup of its own, which [`nvx-rs artifacts`](../nvx-rs/README.md#artifacts) prints |
 | `Artifacts::bundled` | Removed, with the `bundled` feature |
-| `Artifacts::runtime_identity`, and `host::store`'s `RuntimeIdentity`, `ArtifactIdentity`, `IdentityPart`, and `MAX_IDENTITY_LEN` | `host::runtime`'s `RuntimeIdentity`, `ArtifactIdentity`, `IdentityPart`, and `MAX_IDENTITY_LEN`: `RuntimeIdentity::new` takes three labels that the caller reads from install metadata, such as `ArtifactIdentity::sha256` of the digests that a release's `SHA256SUMS` lists |
+| `Artifacts::runtime_identity`, and `host::store`'s `RuntimeIdentity`, `ArtifactIdentity`, `IdentityPart`, and `MAX_IDENTITY_LEN` | `host::runtime`'s `RuntimeIdentity`, `ArtifactIdentity`, `IdentityPart`, and `MAX_IDENTITY_LEN`: `RuntimeIdentity::new` takes three labels that the caller reads from install metadata, such as `ArtifactIdentity::sha256` of the digests that a release's `SHA256SUMS` lists, and a `CompatibilityIdentity` that names the caller's contracts with its guests |
+| `RuntimeIdentity`'s `boot_contract`, `control_contract`, and `control_session`, `RuntimeIdentity::check`, and `IdentityPart`'s `BootContract`, `ControlContract`, and `ControlSession` | `RuntimeIdentity::compatibility` and `IdentityPart::Compatibility`: a `CompatibilityIdentity`, an opaque token of 1 to `MAX_IDENTITY_LEN` printable ASCII characters without spaces. The caller composes it from the contracts that it drives its guests through, such as the versions of its boot tokens and of its protocol with its guest agent, and `nvx` compares it and never interprets it. `CompatibilityIdentity::new` checks the token, so `check` is gone, and `RuntimeIdentity::differences` reports `Compatibility` when the tokens differ |
 | `nvx::Hypervisor` | `host::runtime::Hypervisor`, with the `host` feature: the same variants, OpenVMM spellings, and calls, such as `from_env_or_default`, which reads `NVX_HYPERVISOR`. The crate root no longer exports it |
 | `Artifacts::probe`, `host::platform::probe_hypervisor`, `host::platform::SUPPORTED` | `host::runtime::probe_hypervisor` checks a hypervisor, and `host::runtime::Hypervisor::supported_on_host` whether the host's operating system can have it. The caller checks that its files exist |
-| `host::artifacts::check_manifest` | `contract::manifest_mismatches`, or `contract::manifest_is_compatible`, of the release's `SOURCE-MANIFEST.json`, which the caller reads |
+| `host::artifacts::check_manifest` | No longer public: the caller decides which releases its guests speak with, for example from the contract versions of a release's `SOURCE-MANIFEST.json`, and names its contracts with them in the `CompatibilityIdentity` of its `RuntimeIdentity` |
+| `nvx::contract`: `MICROVM_ABI_VERSION`, `BOOT_CONTRACT_VERSION`, `CONTROL_SESSION_PROTOCOL_VERSION`, `CONTROL_CONTRACT_REVISION`, `SNAPSHOT_FORMAT_VERSION`, `DEVICE_STATE_SCHEMA_VERSION`, `TIME_ABI_VERSION`, `RESTORE_PACKET_VERSION`, and `manifest_is_compatible` | No longer public, with the module: the caller names the contracts that it drives its guests through in a `CompatibilityIdentity`, and the versions of OpenVMM's formats that the crate reads are private to it |
 | The rest of `host::artifacts`: `ArtifactDir`, `ArtifactPaths`, `GuestPaths`, `Guest`, `Layout`, `absolute`, `openvmm_executable`, and the names of a release's files, such as `KERNEL_NAME`, `CHECKSUMS_NAME`, and `MANIFEST_NAME` | No longer public: the caller knows the layout of the releases that it runs, which [Release packages](build.md#release-packages) gives |
 
 ### Launches and VMs

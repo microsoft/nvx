@@ -27,12 +27,15 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::ErrorCode;
-use crate::contract::manifest_mismatches;
+use crate::host::artifacts::compatibility::{
+    CONTROL_CONTRACT_REVISION, CONTROL_SESSION_PROTOCOL_VERSION, RESTORE_PACKET_VERSION,
+};
 use crate::host::artifacts::{
     ArtifactDir, CHECKSUMS_NAME, Guest, INITRAMFS_PROVENANCE_NAME, KERNEL_NAME,
     KERNEL_PROVENANCE_NAME, MANIFEST_NAME, OPENVMM_PROVENANCE_NAME, openvmm_executable,
 };
 use crate::host::cli::{Exit, Result, io_error, io_message, output};
+use crate::host::snapshot::manifest::{MICROVM_ABI_VERSION, TIME_ABI_VERSION};
 
 /// The suffix of the name of the kernel's configuration, which lies beside the kernel.
 const KERNEL_CONFIG_SUFFIX: &str = ".config";
@@ -165,22 +168,57 @@ pub(super) struct Plan {
     items: Vec<Item>,
     /// The guest artifacts of the checkout that the package does not declare.
     removals: Vec<PathBuf>,
-    /// How the package's manifest departs from the contracts that this crate speaks, one entry for
-    /// each field, as [`manifest_mismatches`] names it; none when it declares them all.
+    /// How the package's manifest departs from the versions that this `nvx-rs` drives its
+    /// bundled guests through, one entry for each field, as [`manifest_mismatches`] names it;
+    /// none when it declares them all.
     mismatches: Vec<String>,
 }
 
 impl Plan {
     /// Returns whether the package's manifest declares the microVM ABI, time ABI, restore packet,
-    /// control session, and control contract that this crate speaks.
+    /// control session, and control contract that this `nvx-rs` drives its bundled guests
+    /// through.
     pub(super) fn compatible(&self) -> bool {
         self.mismatches.is_empty()
     }
 
-    /// Returns how the package's manifest departs from the contracts that this crate speaks.
+    /// Returns how the package's manifest departs from the versions that this `nvx-rs` drives its
+    /// bundled guests through.
     pub(super) fn mismatches(&self) -> &[String] {
         &self.mismatches
     }
+}
+
+/// Returns how the `openvmm` section of a package's `SOURCE-MANIFEST.json` departs from the
+/// versions that this `nvx-rs` drives its bundled guests through: the microVM ABI and time ABI
+/// that its snapshot decoder reads, and the restore packet, control session, and control contract
+/// of [its compatibility](crate::host::artifacts::compatibility). It returns one
+/// `NAME: expected VALUE, found VALUE` entry, in JSON, for each field that the section declares
+/// otherwise or not at all, so that a warning can name every mismatch.
+fn manifest_mismatches(manifest: &Value) -> Vec<String> {
+    let section = manifest.get("openvmm");
+    [
+        ("microvm_abi_version", Value::from(MICROVM_ABI_VERSION)),
+        ("time_abi_version", TIME_ABI_VERSION.into()),
+        ("restore_packet_version", RESTORE_PACKET_VERSION.into()),
+        (
+            "control_session_protocol_version",
+            CONTROL_SESSION_PROTOCOL_VERSION.into(),
+        ),
+        (
+            "control_contract_revision",
+            CONTROL_CONTRACT_REVISION.into(),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(name, expected)| {
+        let declared = section.and_then(|section| section.get(name));
+        (declared != Some(&expected)).then(|| {
+            let found = declared.map_or_else(|| "none".to_owned(), ToString::to_string);
+            format!("{name}: expected {expected}, found {found}")
+        })
+    })
+    .collect()
 }
 
 /// Returns how to install the package at `package` into the checkout `dir`, as

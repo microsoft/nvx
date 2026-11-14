@@ -4,7 +4,6 @@
 use serde_json::Value;
 
 use super::*;
-use crate::contract;
 
 /// The command lines that every reader of the boot tokens agrees on.
 const FIXTURE: &str = include_str!("../../../tests/fixtures/root-tokens.json");
@@ -424,19 +423,18 @@ fn contracted_journal(journal: Journal) -> &'static str {
 
 #[test]
 fn the_boot_contract_version_names_these_tokens() {
-    // Runtime identities record the boot contract version, and a build stops, rather than
-    // drives, a VM that a build of another version started. A change to these tokens, a new image
-    // format or upper, or another way for the guest to assemble the root from them changes the
-    // boot contract, and so its version, before the pins here change with it; see `contract`.
-    // The tokens of the root's settings joined version 5 while nothing deployed rendered them.
+    // The CLI's runtime identities record its boot contract version, and the CLI stops, rather
+    // than drives, a VM that a build of another version started. A change to these tokens, a new
+    // image format or upper, or another way for the guest to assemble the root from them changes
+    // the boot contract, and so its version, before the pins here change with it; see
+    // `host::artifacts::compatibility`. The tokens of the root's settings joined version 5 while
+    // nothing deployed rendered them.
+    #[cfg(feature = "cli")]
     assert_eq!(
-        (
-            contract::BOOT_CONTRACT_VERSION,
-            contract::MICROVM_ABI_VERSION
-        ),
-        (5, 1),
-        "a change to the boot tokens of a layered root or to the microVM ABI changes the boot \
-         contract: increment BOOT_CONTRACT_VERSION, and update this test with it"
+        crate::host::artifacts::compatibility::BOOT_CONTRACT_VERSION,
+        5,
+        "a change to the boot tokens of a layered root changes the boot contract: increment \
+         BOOT_CONTRACT_VERSION, and update this test with it"
     );
     for format in ImageFormat::ALL {
         let image = format!("nvx_layer=distro,0xd0003000,{}", contracted_format(format));

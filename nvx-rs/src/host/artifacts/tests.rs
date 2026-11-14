@@ -7,7 +7,6 @@ use serde_json::Value;
 
 use super::*;
 use crate::ErrorKind;
-use crate::contract;
 use crate::host::runtime::{ArtifactIdentity, RuntimeIdentity};
 
 const COMPATIBLE_MANIFEST: &str = r#"{"openvmm":{"microvm_abi_version":1,
@@ -74,20 +73,6 @@ fn this_repository_uses_the_repository_layout() {
         assert_eq!(directory.layout(), Layout::Repository);
         let build = std::path::absolute(root).unwrap().join("build");
         assert_eq!(directory.kernel(), build.join("vmlinux"));
-    }
-}
-
-#[test]
-fn repository_manifest_declares_the_supported_contract() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join(MANIFEST_NAME);
-    if manifest.is_file() {
-        let manifest: Value =
-            serde_json::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
-        let mismatches = contract::manifest_mismatches(&manifest);
-        assert!(mismatches.is_empty(), "{mismatches:?}");
     }
 }
 
@@ -290,12 +275,18 @@ fn artifact_paths_serialize_every_guest_in_order() {
     );
 }
 
-/// Returns the identity of artifacts whose SHA-256 digests are `digests`.
+/// Returns the identity of artifacts whose SHA-256 digests are `digests`, which the CLI drives
+/// under its compatibility with its bundled guests.
 fn identity_of(digests: &[String; 3]) -> RuntimeIdentity {
     let [openvmm, kernel, initramfs] = digests
         .each_ref()
         .map(|digest| ArtifactIdentity::sha256(digest).unwrap());
-    RuntimeIdentity::new(openvmm, kernel, initramfs)
+    RuntimeIdentity::new(
+        openvmm,
+        kernel,
+        initramfs,
+        compatibility::compatibility().unwrap(),
+    )
 }
 
 /// Writes the build provenance of the artifacts of the checkout at `root`, as `nvx.py`

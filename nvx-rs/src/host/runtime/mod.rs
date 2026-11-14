@@ -3,9 +3,9 @@
 //! [`probe_hypervisor`] checks, and the [`LaunchOptions`].
 //!
 //! The runtime identity of a VM is the identities of its VMM, kernel, and initramfs, and the
-//! versions of the contracts between its host, its VMM, and its guest. A caller saves it with
-//! each VM, in a [`SavedVm`](crate::host::vm::SavedVm), which [`vm::verify`](crate::host::vm::verify)
-//! checks against the current one.
+//! compatibility of the contracts through which its caller drives its guest, which the caller
+//! names. A caller saves it with each VM, in a [`SavedVm`](crate::host::vm::SavedVm), which
+//! [`vm::verify`](crate::host::vm::verify) checks against the current one.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 pub use super::platform::hypervisor::Hypervisor;
 
 use super::platform;
-use crate::contract;
 use crate::error::{Error, Result};
 
 /// What every launch shares: the runtime's files and their identity, the hypervisor, and the
@@ -29,9 +28,9 @@ pub struct Runtime {
     pub kernel: PathBuf,
     /// The guest initramfs.
     pub initramfs: PathBuf,
-    /// The identity of the three files and of the contracts that they speak, which the caller
-    /// takes from their install or staging metadata: NVX compares identities and never reads the
-    /// files.
+    /// The identity of the three files, which the caller takes from their install or staging
+    /// metadata, and of the contracts through which the caller drives their guest: NVX compares
+    /// identities and never reads the files.
     pub identity: RuntimeIdentity,
     /// The hypervisor that OpenVMM runs the VM on.
     pub hypervisor: Hypervisor,
@@ -78,37 +77,32 @@ pub fn probe_hypervisor(hypervisor: Hypervisor) -> Result<()> {
     platform::probe_hypervisor(hypervisor).map_err(Error::unavailable)
 }
 
-/// Longest [`ArtifactIdentity`] and control contract revision, in bytes.
+/// Longest [`ArtifactIdentity`] and [`CompatibilityIdentity`], in bytes.
 pub const MAX_IDENTITY_LEN: usize = 128;
 
 /// Hexadecimal digits of a SHA-256 digest: two for each of its 32 bytes.
 const SHA256_HEX_LEN: usize = 64;
 
 /// Opaque text of 1 to [`MAX_IDENTITY_LEN`] printable ASCII characters and no space: the form of
-/// an [`ArtifactIdentity`] and of a control contract revision, which the library only compares.
+/// an [`ArtifactIdentity`] and of a [`CompatibilityIdentity`], which the library only compares.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Token(String);
 
 impl Token {
-    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) unless `text`, which
-    /// `what` names, has the form of a token.
-    fn check(text: &str, what: &str) -> Result<()> {
+    /// Wraps `text`, which `what` names, if it has the form of a token.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) otherwise.
+    fn new(text: String, what: &str) -> Result<Self> {
         if (1..=MAX_IDENTITY_LEN).contains(&text.len())
             && text.bytes().all(|byte| byte.is_ascii_graphic())
         {
-            Ok(())
+            Ok(Self(text))
         } else {
             Err(Error::unsupported(format!(
                 "{what} {text:?} must hold 1 to {MAX_IDENTITY_LEN} printable ASCII characters and \
                  no space"
             )))
         }
-    }
-
-    /// Wraps `text`, which `what` names, as [`Token::check`] allows.
-    fn new(text: String, what: &str) -> Result<Self> {
-        Self::check(&text, what)?;
-        Ok(Self(text))
     }
 }
 
@@ -172,6 +166,54 @@ impl From<ArtifactIdentity> for String {
     }
 }
 
+/// Identity of the contracts through which a caller drives the guests of a runtime, as the caller
+/// names them: such as the boot tokens through which it configures a guest, the root that the
+/// guest assembles from them, and the control protocol that the guest's agent serves.
+///
+/// The library declares no contract here: it implements none of its caller's, and only compares
+/// the identity. Each caller names the contracts of its own guests and control plane, and changes
+/// the identity whenever it could not drive a VM that a runtime of the earlier identity started
+/// as one that it starts. Like an [`ArtifactIdentity`], it is an opaque token of 1 to
+/// [`MAX_IDENTITY_LEN`] printable ASCII characters without spaces.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CompatibilityIdentity(Token);
+
+impl CompatibilityIdentity {
+    /// Wraps `identity`.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) unless it holds 1 to
+    /// [`MAX_IDENTITY_LEN`] printable ASCII characters and no space.
+    pub fn new(identity: impl Into<String>) -> Result<Self> {
+        Token::new(identity.into(), "compatibility identity").map(Self)
+    }
+
+    /// Returns the identity's text.
+    pub fn as_str(&self) -> &str {
+        &self.0.0
+    }
+}
+
+impl fmt::Display for CompatibilityIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<String> for CompatibilityIdentity {
+    type Error = Error;
+
+    fn try_from(identity: String) -> Result<Self> {
+        Self::new(identity)
+    }
+}
+
+impl From<CompatibilityIdentity> for String {
+    fn from(identity: CompatibilityIdentity) -> Self {
+        identity.0.0
+    }
+}
+
 /// A part of a [`RuntimeIdentity`], which [`RuntimeIdentity::differences`] names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -182,23 +224,17 @@ pub enum IdentityPart {
     Kernel,
     /// [`RuntimeIdentity::initramfs`].
     Initramfs,
-    /// [`RuntimeIdentity::boot_contract`].
-    BootContract,
-    /// [`RuntimeIdentity::control_contract`].
-    ControlContract,
-    /// [`RuntimeIdentity::control_session`].
-    ControlSession,
+    /// [`RuntimeIdentity::compatibility`].
+    Compatibility,
 }
 
 impl IdentityPart {
     /// Every part, in the order of the fields of [`RuntimeIdentity`].
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 4] = [
         Self::OpenVmm,
         Self::Kernel,
         Self::Initramfs,
-        Self::BootContract,
-        Self::ControlContract,
-        Self::ControlSession,
+        Self::Compatibility,
     ];
 
     /// Returns the part's name, as messages print it.
@@ -207,9 +243,7 @@ impl IdentityPart {
             Self::OpenVmm => "OpenVMM",
             Self::Kernel => "kernel",
             Self::Initramfs => "initramfs",
-            Self::BootContract => "boot contract",
-            Self::ControlContract => "control contract",
-            Self::ControlSession => "control session",
+            Self::Compatibility => "compatibility",
         }
     }
 }
@@ -221,8 +255,8 @@ impl fmt::Display for IdentityPart {
 }
 
 /// Identity of the runtime that a VM was launched with: its OpenVMM executable, guest kernel, and
-/// guest initramfs, and the boot and control contract versions between its host, OpenVMM, and
-/// its guest.
+/// guest initramfs, and the compatibility of the contracts through which its caller drives its
+/// guest.
 ///
 /// It decides whether a host may keep managing a VM that it finds recorded, as after an
 /// orchestrator restart or an upgrade of the orchestrator. Under the same runtime identity, a new
@@ -231,8 +265,9 @@ impl fmt::Display for IdentityPart {
 /// must be stopped instead, through its verified process identity; see
 /// [`vm::verify`](crate::host::vm::verify).
 ///
-/// The caller takes the artifact identities from install or staging metadata, and
-/// [`RuntimeIdentity::new`] adds the contract versions that this crate speaks.
+/// The caller supplies every part: the artifact identities from install or staging metadata, and
+/// the [`CompatibilityIdentity`] of its own guests and control plane. The library adds nothing:
+/// it neither knows nor declares which contracts the artifacts implement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeIdentity {
@@ -242,44 +277,25 @@ pub struct RuntimeIdentity {
     pub kernel: ArtifactIdentity,
     /// The guest initramfs.
     pub initramfs: ArtifactIdentity,
-    /// The boot contract between the host, OpenVMM, and the guest: the microVM ABI, the kernel
-    /// command-line tokens that configure the guest, and the root that the guest assembles from
-    /// them, [`BOOT_CONTRACT_VERSION`](contract::BOOT_CONTRACT_VERSION) in this crate. See
-    /// [`contract`] for when each contract version changes.
-    pub boot_contract: u64,
-    /// The revision of the control contract,
-    /// [`CONTROL_CONTRACT_REVISION`](contract::CONTROL_CONTRACT_REVISION) in this crate: 1 to
-    /// [`MAX_IDENTITY_LEN`] printable ASCII characters without spaces.
-    pub control_contract: String,
-    /// The version of the control session that carries the control contract,
-    /// [`CONTROL_SESSION_PROTOCOL_VERSION`](contract::CONTROL_SESSION_PROTOCOL_VERSION) in this
-    /// crate.
-    pub control_session: u64,
+    /// The compatibility of the contracts through which the caller drives the guest.
+    pub compatibility: CompatibilityIdentity,
 }
 
 impl RuntimeIdentity {
-    /// Returns the identity of a runtime of these artifacts under the contracts that this crate
-    /// speaks.
+    /// Returns the identity of a runtime of these artifacts, which the caller drives through the
+    /// contracts that `compatibility` names.
     pub fn new(
         openvmm: ArtifactIdentity,
         kernel: ArtifactIdentity,
         initramfs: ArtifactIdentity,
+        compatibility: CompatibilityIdentity,
     ) -> Self {
         Self {
             openvmm,
             kernel,
             initramfs,
-            boot_contract: contract::BOOT_CONTRACT_VERSION,
-            control_contract: contract::CONTROL_CONTRACT_REVISION.to_owned(),
-            control_session: contract::CONTROL_SESSION_PROTOCOL_VERSION,
+            compatibility,
         }
-    }
-
-    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) if the control
-    /// contract revision does not hold 1 to [`MAX_IDENTITY_LEN`] printable ASCII characters and
-    /// no space: the one field whose type does not ensure its form.
-    pub fn check(&self) -> Result<()> {
-        Token::check(&self.control_contract, "control contract revision")
     }
 
     /// Returns the parts of this identity that differ from `other`, in the order of its fields.
@@ -296,9 +312,7 @@ impl RuntimeIdentity {
             IdentityPart::OpenVmm => self.openvmm == other.openvmm,
             IdentityPart::Kernel => self.kernel == other.kernel,
             IdentityPart::Initramfs => self.initramfs == other.initramfs,
-            IdentityPart::BootContract => self.boot_contract == other.boot_contract,
-            IdentityPart::ControlContract => self.control_contract == other.control_contract,
-            IdentityPart::ControlSession => self.control_session == other.control_session,
+            IdentityPart::Compatibility => self.compatibility == other.compatibility,
         }
     }
 }

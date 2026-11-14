@@ -15,8 +15,7 @@ use crate::host::process::BootId;
 
 /// The longest interval by which a restore advances a clone's VM time, from the cut of the
 /// captured VM's time to the restoring host's time, in nanoseconds: 30 days, the bound that every
-/// runtime of version [`TIME_ABI_VERSION`](crate::contract::TIME_ABI_VERSION) of OpenVMM's time
-/// ABI accepts.
+/// runtime of version 1 of OpenVMM's time ABI accepts.
 ///
 /// Later releases of OpenVMM and of the guest accept 365 days under the same version, but this
 /// window cannot tell their captures from those of a runtime whose OpenVMM or guest predates

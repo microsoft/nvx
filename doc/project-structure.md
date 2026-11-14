@@ -103,7 +103,6 @@ nvx/
 |   |   |-- lib.rs               The crate's root, its documentation, and its public modules
 |   |   |-- protocol/            Control-console codec, NVXS session, and the guest targets that live shares may not take, shared by the host and the guest
 |   |   |-- guest_restore/       The guest-restore record of a layered root, its canonical encoding, and what Ready reports about it, shared by the host, the guest, and every adapter's framing
-|   |   |-- contract.rs          Control-contract versions and release compatibility
 |   |   |-- net/                 CIDR parsing and subtraction, and hostname and guest-network forms
 |   |   |-- gpt/                 Strict reading of GPT disks for NVX's guest programs, private to the crate
 |   |   |-- uuid.rs              UUIDs in their canonical text and in GPT's layout, shared by the host and the guest

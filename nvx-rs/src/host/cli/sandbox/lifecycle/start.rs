@@ -19,6 +19,7 @@ use super::{
     runtime_for,
 };
 use crate::guest_restore::{GuestRestoreRecord, TransactionId};
+use crate::host::artifacts::compatibility::compatibility;
 use crate::host::cli::artifacts::locate;
 use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
 use crate::host::cli::download::Hold;
@@ -647,7 +648,12 @@ pub(crate) fn run(
     let runtime = runtime_for(
         artifacts,
         &config,
-        RuntimeIdentity::new(identity.clone(), identity.clone(), identity),
+        RuntimeIdentity::new(
+            identity.clone(),
+            identity.clone(),
+            identity,
+            compatibility()?,
+        ),
     )?;
     let images = if options.dry_run {
         None

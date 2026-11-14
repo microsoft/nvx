@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use super::compatibility::compatibility;
 use super::identity::{provenance_identity, read_metadata, sha256_identity};
 use super::require::required;
 use super::{
@@ -189,8 +190,9 @@ impl ArtifactDir {
     }
 
     /// Returns the identity of the sandbox runtime of this directory: its OpenVMM executable, its
-    /// kernel, and its Alpine initramfs, as the directory's install metadata names them, under the
-    /// contracts that this crate speaks.
+    /// kernel, and its Alpine initramfs, as the directory's install metadata names them, and the
+    /// [compatibility](super::compatibility::compatibility) of the CLI's contracts with its
+    /// bundled guests.
     ///
     /// The metadata names each artifact by the SHA-256 digest that its build or its package
     /// recorded, so nothing here reads or hashes an artifact:
@@ -230,7 +232,12 @@ impl ArtifactDir {
                 )?,
             ],
         };
-        Ok(RuntimeIdentity::new(openvmm, kernel, initramfs))
+        Ok(RuntimeIdentity::new(
+            openvmm,
+            kernel,
+            initramfs,
+            compatibility()?,
+        ))
     }
 
     /// Returns the identities of the OpenVMM executable, kernel, and Alpine initramfs of a
