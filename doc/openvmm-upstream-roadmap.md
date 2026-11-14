@@ -11,10 +11,11 @@
   summary, and commit mapping below cover positions 001-124, the PR09 fixups at positions
   234-236, the PR13 fixup at position 240, the PR18 fixup at position 241, the PR20 fixup at
   position 242, the PR19 fixup at position 243, and the PR10 fixups at positions 271 and 273.
-- NVX's pinned OpenVMM revision: `cc16902221d903d417b1e08e0127b687439b2ac6`, position 286, the
-  head of microsoft/openvmm#5106, whose one commit follows position 285, `f39508197`, the head of
-  `feature/microvm/dev`, to which microsoft/openvmm#5105 added positions 283-285 after position
-  282, `30b755406`, microsoft/openvmm#5102 added position 282 after position 281, `b723cbed3`,
+- NVX's pinned OpenVMM revision: `9d64daad3cbe14fb0591081b73c6c9648e18d0fb`, position 288, the
+  head of microsoft/openvmm#5107, whose two commits follow position 286, `cc1690222`, the head of
+  `feature/microvm/dev`, to which microsoft/openvmm#5106 added position 286 after position 285,
+  `f39508197`, microsoft/openvmm#5105 added positions 283-285 after position 282, `30b755406`,
+  microsoft/openvmm#5102 added position 282 after position 281, `b723cbed3`,
   microsoft/openvmm#5101 added position 281 after position 280, `c5509cde2`,
   microsoft/openvmm#5100 added position 280 after position 279, `5d2a71027`,
   microsoft/openvmm#5097 added position 279 after position 278, `157866605`,
@@ -30,9 +31,9 @@
   changes upstream had landed, and added eight fixups at its tip, positions 262-269. A commit's
   position is its v6.0 position less the number of dropped commits before it: v6.0 positions
   003-007 are positions 002-006, 010-013 are 007-010, 015-050 are 011-046, and 054-268 are
-  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 162
+  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 164
   commits past the mapped tip on the same first-parent chain. Positions 125-233, 237-239,
-  244-270, 272, and 274-286 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
+  244-270, 272, and 274-288 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
   position 240 is a PR13 fixup, position 241 is a PR18 fixup, position 242 is a PR20 fixup,
   position 243 is a PR19 fixup, and positions 271 and 273 are PR10 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1180,7 +1181,9 @@ The physical branch is one first-parent chain:
   -> KVM save refused for a vCPU whose GIF is clear [284]
   -> contract test that a new KVM VP can be saved [285]
   -> injected #BP or #OF refused on restore [286]
-  -> cc1690222 (NVX pin)
+  -> INIT or SIPI that a stopped VP has not accepted reported [287]
+  -> capture refused while a VP holds an INIT or a SIPI [288]
+  -> 9d64daad3 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1231,7 +1234,7 @@ restore and time advance set in the RTC's clock source, which overflowed near ei
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 124 without merges. Of the 162 later commits,
+The NVX pin extends the chain past position 124 without merges. Of the 164 later commits,
 positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position 241 is a PR18 fixup,
 position 242 is a PR20 fixup, position 243 is a PR19 fixup, positions 262-269 are the fixups of
 the v6.1 rebase, positions 271 and 273 are PR10 fixups, and the others are not yet classified or
@@ -1241,7 +1244,7 @@ and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that s
 commits. Positions 180-184 followed the v3.0 reorganization, positions 185-198 are the ABI restart
 of the v4.0 reorganization, positions 199-204 followed it, positions 205-211 followed the v5.0
 reorganization, positions 212 and 213 followed the v5.1 rebase, positions 214-261 followed the
-v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-286
+v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-288
 followed the v6.1 rebase, so they combine none, apart from position 213, which combines v5.1
 positions 222 and 223. Each commit's position is its v6.0 position less seven, the number of
 commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position
@@ -1416,10 +1419,12 @@ through 147 and one less from v5.1 position 149 on; see
 | 284 | `4e3de6c55` | - | - | - | - | - | virt_kvm: refuse to save a vCPU whose GIF is clear (microsoft/openvmm#5105) |
 | 285 | `f39508197` | - | - | - | - | - | vmm_tests: check that a new KVM VP can be saved (microsoft/openvmm#5105) |
 | 286 | `cc1690222` | - | - | - | - | - | virt_kvm: refuse to restore an injected #BP or #OF (microsoft/openvmm#5106) |
+| 287 | `bf7bb2461` | - | - | - | - | - | virt_kvm: report an INIT or a SIPI that a stopped VP has not accepted (microsoft/openvmm#5107) |
+| 288 | `9d64daad3` | - | - | - | - | - | vmm_core: refuse a snapshot capture while a VP holds an INIT or a SIPI (microsoft/openvmm#5107) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
-that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-286, for later
+that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-288, for later
 commits. They name the positions that the commits have now, but the v6.1 rebase did not check the
 earlier ones again on `7d90c4104`.
 
@@ -2362,6 +2367,54 @@ function and its unit test sit, and in the contract tests' `main.rs`, beside the
 that position 282 adds and the attribute that position 008 drops; its call in `set_activity`
 applies there without conflicts. So it follows positions 008, 250, 251, 253, 279, and 282
 upstream.
+
+Position 287 lets a backend report that a stopped VP holds an INIT or a SIPI that it has not
+accepted yet, so that a snapshot capture can refuse it. KVM holds such an event until the VP runs,
+and accepts it when it reads the VP's MP state, which the activity element of a save does after the
+registers, so a save of a VP that another VP sent an event after it stopped held registers from
+before the event and the rest of its state from after it, in code that upstream main has and no
+commit of the chain changes. `Processor` gains `has_pending_init_sipi`, whose default reports none
+and which the `openvmm_core` VP wrapper forwards; the KVM backend reports a latched INIT, which
+`KVM_GET_VCPU_EVENTS` returns without accepting it, and a pending SIPI, which `KVM_GET_MP_STATE`
+accepts, as `KVM_RUN` would, so that the move of the VP's registers shows it. It adds a `virt_kvm`
+module with the detection and five ignored tests that need `/dev/kvm`, and two KVM-only contract
+tests, `init_sipi::kvm::reports_an_init_that_it_has_not_accepted` and
+`reports_a_sipi_that_a_waiting_vp_has_not_accepted`, in a module of its own of `virt_backend_tests`,
+which register with the `kvm_only` form of `backend_test!` that position 279 adds. It changes files
+that PR05's position 008, PR10's positions 019, 021, and 022, PR12's position 034, PR15's position
+055, PR17's positions 070 and 071, and 16 positions that no PR has yet also change, and adds to no
+line that a mapped PR adds. Replaying it on upstream main conflicts in `virt_kvm`'s x86-64 module,
+where `mod init_sipi;` sits in the list between `mod gif;` of position 284 and `mod lapic_timer;`
+of position 253, which upstream main lacks along with `mod fingerprint;` of position 131; its
+ignored tests also use the guest RAM that position 249 shares among the real-mode tests, and its
+contract tests need that form of `backend_test!`. So it follows positions 131, 249, 253, 279, and
+284 upstream.
+
+Position 288 has a guest-requested microVM capture refuse to save while a VP holds an INIT or a
+SIPI that it has not accepted. After the capture has stopped every state unit, and before the time
+ABI's LAPIC timer checks that position 132 adds read any VP, `quiesce_for_snapshot` asks every VP,
+through the VP set, whether it holds one, and a VP that does fails the capture with a rollback-safe
+error that names it, so that the guest continues and can request the capture again; a backend that
+reports none, which is every backend but KVM, passes. It uses position 287's method and follows the
+shape of position 132's LAPIC timer checks: `PartitionUnit` gains `check_no_pending_init_sipi`, the
+VP set a fan-out in a module of its own, and `SnapshotRequest`, `StateEvent`, and `ControlVp` a
+variant or a method each. It adds three unit tests of the fan-out and a paragraph to the Guide's
+snapshots page, after the one that position 284 adds. It changes files that PR09's position 236,
+PR10's positions 025 and 271, PR11's position 028, PR12's positions 031-033, PR13's positions 039,
+044, and 240, PR15's positions 049, 055, and 056, PR16's positions 060 and 062, PR17's positions
+063, 065, 066, 068, 069, 070, and 072, PR18's positions 075-077, 080, 082, and 083, PR19's
+positions 084-086, PR20's positions 087-092, PR23's positions 106, 108, and 111, PR24's position
+116, and 58 positions that no PR has yet also change, and adds to no line that a mapped PR adds;
+the two lines of `snapshot.rs`'s module documentation that it rewrites are position 140's.
+Replaying it on upstream main conflicts in all four of those files. `microvm.rs` and `snapshot.rs`
+do not exist there, since positions 049 and 025 add them: its call sits in `quiesce_for_snapshot`
+of position 065, after the stop that position 237 rewrites and before the time ABI's checks of
+position 140, and its variant, method, and handler in `snapshot.rs` sit before the LAPIC timer
+checks of position 132. In `vp_set.rs`, its module sits between the modules of positions 063 and
+089, its method, variant, and handler beside those checks, and its tests after the halt-latch test
+of position 148. In the Guide's snapshots page, its paragraph sits after the GIF paragraph of
+position 284, in the block that positions 069 and 233 write. So it follows positions 025, 049, 063,
+065, 069, 089, 132, 140, 148, 233, 237, 284, and 287 upstream.
 
 ## PR summary
 
