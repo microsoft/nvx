@@ -1384,6 +1384,14 @@ The request's mode selects how a restore hands over its fresh entropy: the file
 mode, which `nvx-time` keeps, writes it to a file, and the in-memory mode
 returns it as the `Restore`'s owned `Seed`, and writes no file.
 
+Just before it writes the snapshot port, a `CaptureRequest` holds the wall
+clock at the declared TSC rate, without the host's clock correction and without
+a phase slew in flight, so that a restore's advance of the TSC by the downtime
+counts in the monotonic and boot-time clocks as the downtime itself; the repair
+of a restore holds the host's correction again, and so does a request that
+returns in a VM that continues. A hold that fails is a violation of
+conformance check C10, which fails the request before it writes the port.
+
 A violation of the ABI stops the VM in enforcing mode, with the time ABI's
 status, as `nvx-time` does; in strict mode, `TimeAbi::strict`, which a caller
 that owns the VM's exit status and shutdown selects, the call fails with the

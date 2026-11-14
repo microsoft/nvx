@@ -42,6 +42,21 @@ pub(crate) enum ClockAdjustment {
         /// The frequency correction and the error estimates.
         hold: FrequencyHold,
     },
+    /// Sets the frequency correction alone, and keeps the status, the error estimates, and the
+    /// phase offset.
+    SetFrequency(i64),
+    /// Makes the wall clock run at the frequency correction of `hold` alone, from the moment of
+    /// the call: it steps the wall clock by zero, which clears the kernel's NTP state, the phase
+    /// offset and the tick length's cached correction of it included, which a clearing of the
+    /// phase offset alone leaves in force until the kernel's next second, and then sets the
+    /// frequency correction and the error estimates of `hold`, and `status`, which the step reset
+    /// to unsynchronized.
+    Pin {
+        /// The frequency correction and the error estimates.
+        hold: FrequencyHold,
+        /// The discipline's status, as the kernel reports it.
+        status: i32,
+    },
 }
 
 /// The frequency correction that the discipline holds, and the error estimates that it sets with
@@ -68,14 +83,17 @@ impl ClockAdjustment {
             Self::Frequency(_) => HOLD,
             Self::ClearPhase => libc::ADJ_OFFSET | libc::ADJ_NANO,
             Self::Slew { .. } => HOLD | libc::ADJ_OFFSET | libc::ADJ_TIMECONST | libc::ADJ_NANO,
+            Self::SetFrequency(_) => libc::ADJ_FREQUENCY,
+            Self::Pin { .. } => HOLD | libc::ADJ_SETOFFSET | libc::ADJ_NANO,
         }
     }
 
     /// Returns the discipline status that the adjustment sets, or zero for one that sets none.
     pub(crate) fn status(self) -> i32 {
         match self {
-            Self::Query | Self::Step { .. } | Self::ClearPhase => 0,
+            Self::Query | Self::Step { .. } | Self::ClearPhase | Self::SetFrequency(_) => 0,
             Self::Frequency(_) | Self::Slew { .. } => PLL_NANOSECONDS,
+            Self::Pin { status, .. } => status,
         }
     }
 }
@@ -85,6 +103,24 @@ impl ClockAdjustment {
 pub(crate) struct ClockDiscipline {
     /// Frequency correction in parts per million, scaled by 2^16.
     pub(crate) scaled_ppm: i64,
+    /// Maximum error in microseconds.
+    pub(crate) maximum_error_us: i64,
+    /// Estimated error in microseconds.
+    pub(crate) estimated_error_us: i64,
+    /// The discipline's status bits, `STA_*`.
+    pub(crate) status: i32,
+}
+
+impl ClockDiscipline {
+    /// Returns the hold of the frequency correction `scaled_ppm` with this discipline's error
+    /// estimates.
+    pub(crate) fn hold(self, scaled_ppm: i64) -> FrequencyHold {
+        FrequencyHold {
+            scaled_ppm,
+            maximum_error_us: self.maximum_error_us,
+            estimated_error_us: self.estimated_error_us,
+        }
+    }
 }
 
 impl FrequencyHold {
@@ -104,7 +140,7 @@ pub(crate) fn adjust_clock(adjustment: ClockAdjustment) -> Result<ClockDisciplin
     value.modes = adjustment.modes();
     value.status = adjustment.status();
     match adjustment {
-        ClockAdjustment::Query => {}
+        ClockAdjustment::Query | ClockAdjustment::ClearPhase => {}
         ClockAdjustment::Step {
             seconds,
             nanoseconds,
@@ -115,8 +151,10 @@ pub(crate) fn adjust_clock(adjustment: ClockAdjustment) -> Result<ClockDisciplin
                 tv_usec: nanoseconds,
             };
         }
-        ClockAdjustment::Frequency(hold) => hold.apply(&mut value),
-        ClockAdjustment::ClearPhase => {}
+        ClockAdjustment::Frequency(hold) | ClockAdjustment::Pin { hold, .. } => {
+            hold.apply(&mut value);
+        }
+        ClockAdjustment::SetFrequency(scaled_ppm) => value.freq = scaled_ppm,
         ClockAdjustment::Slew {
             offset_ns,
             time_constant,
@@ -131,6 +169,9 @@ pub(crate) fn adjust_clock(adjustment: ClockAdjustment) -> Result<ClockDisciplin
     Errno::result(unsafe { libc::adjtimex(&raw mut value) })?;
     Ok(ClockDiscipline {
         scaled_ppm: value.freq,
+        maximum_error_us: value.maxerror,
+        estimated_error_us: value.esterror,
+        status: value.status,
     })
 }
 

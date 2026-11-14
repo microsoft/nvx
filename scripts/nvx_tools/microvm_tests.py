@@ -680,19 +680,29 @@ RESTORE_YEAR_MARGIN_SECONDS = 60
 RESTORE_YEAR_PATH = "/tmp/nvx-restore-year"
 RESTORE_YEAR_COMPLETION_MARKER = b"NVX-RESTORE-YEAR-OK"
 RESTORE_YEAR_REPORT_PREFIX = "NVX-RESTORE-YEAR "
+# The host clock correction, in ppm, that the simulated year's captures boot
+# with, through OpenVMM's host-rate-offset-ppm hook, so that the guest holds a
+# large frequency correction when it requests its capture, as a host whose
+# clock runs far from its TSC's declared rate would give it: a restore would
+# count the downtime in the monotonic clocks at it, as a share of a year, if
+# the capture did not hold the declared rate. The host's own correction, at
+# most 250 ppm on a qualified host, composes with it within Linux's 500 ppm
+# limit.
+RESTORE_YEAR_HOST_PPM = 100
 # How far, in seconds, the guest's raw monotonic clock may advance from the
 # real downtime plus the simulated one, against its realtime clock, at the
 # declared TSC rate as the kernel counts it, to the kHz, beyond the ppb by
 # which the kernel's clocksource multiplier, rounded to the nearest for its
 # 600 s range, counts cycles off that rate at any plausible rate up to 10 GHz;
-# how far, in ppm of the simulated downtime, its frequency-corrected
-# monotonic and boot-time clocks may advance beyond that rate times the
-# frequency correction that it held before the capture, by the phase slew
-# that its discipline ran then; and how far its realtime clock may stand
-# from host UTC once the report arrives.
+# how far, in ppb of the simulated downtime, its monotonic and boot-time
+# clocks may advance from the downtime itself, since the guest holds its
+# frequency correction at that rate through the capture, but the kernel's tick
+# length rounds the multiplier of that rate down, up to one more unit than the
+# raw clock's rounding to the nearest; and how far its realtime clock may
+# stand from host UTC once the report arrives.
 RESTORE_YEAR_CLOCK_TOLERANCE_SECONDS = 1
 RESTORE_YEAR_MULTIPLIER_PPB = 500
-RESTORE_YEAR_SLEW_PPM = 5
+RESTORE_YEAR_MONOTONIC_PPB = 1_000
 RESTORE_YEAR_REALTIME_TOLERANCE_SECONDS = 10
 # The timer that the simulated downtime expires: one hour, armed before the
 # capture, which must fire within this many seconds of the restore's clock
@@ -702,11 +712,9 @@ RESTORE_YEAR_TIMER_SECONDS = 3600
 RESTORE_YEAR_TIMER_DELAY_SECONDS = 10
 # How long, in seconds, the capture of each restore-downtime snapshot gives the
 # year's pre-capture preparation beyond the scenario's timeout: a second of its
-# workload, up to 5 s for the freeze, and the wait for the time daemon's next
-# discipline poll, which comes 16 s after the last one at first and 64 s after
-# it once the daemon has settled, and which the preparation gives up on after
-# 700 sleeps of 0.1 s.
-RESTORE_YEAR_PREPARATION_SECONDS = 90
+# workload, up to 5 s for the freeze, and the second and a fifth that it lets
+# pass for the slew that it leaves in flight.
+RESTORE_YEAR_PREPARATION_SECONDS = 15
 # How much longer, in seconds, a simulated one-year restore may take to print
 # the restore marker than the restore of the same snapshot after the real
 # downtime: Linux accumulates the year's TSC advance at its first tick, 128
@@ -8156,7 +8164,12 @@ def run_restore_downtime(
             # harness can stage its downtime check; the post-restore status
             # query waits for the restore to finish first.
             capture_snapshot(
-                [*boot_command, "--snapshot-destination", str(snapshot_path)],
+                [
+                    *boot_command,
+                    *time_host_correction_hook(RESTORE_YEAR_HOST_PPM),
+                    "--snapshot-destination",
+                    str(snapshot_path),
+                ],
                 snapshot_path,
                 timeout=timeout,
                 processors=processors,
@@ -8352,8 +8365,9 @@ def check_simulated_year(
     advanced by the simulated downtime more than its realtime clock, which
     stands on host UTC, ``host_utc_ns`` once the report arrived: its raw
     monotonic clock by the TSC's advance at the declared rate, as the kernel
-    counts it to the kHz, and its monotonic and boot-time clocks by that
-    advance at the frequency correction that it held before the capture; the
+    counts it to the kHz, and its monotonic and boot-time clocks by the
+    downtime itself, whatever frequency correction the guest held before the
+    capture, since it held the declared rate through the capture; the
     one-hour timer that it armed before the capture fired within
     RESTORE_YEAR_TIMER_DELAY_SECONDS of the restore's clock step, before or
     after it; a frozen workload that gained no CPU time or cgroup usage while
@@ -8388,26 +8402,26 @@ def check_simulated_year(
         after = {clock: _clock_ns(report[f"{clock}_after"]) for clock in clocks}
         real = after["realtime"] - before["realtime"]
         # The restore advanced the TSC by the downtime at the declared rate,
-        # which the kernel counts to the kHz, raw and at its frequency
-        # correction.
+        # which the kernel counts to the kHz in its raw clock. The guest held
+        # its frequency correction at that rate across the capture, so the
+        # kernel counts the advance in its monotonic and boot-time clocks at
+        # it too: they advance by the downtime.
         tsc_hz = int(report["tsc_hz"])
         kernel_hz = tsc_hz // 1000 * 1000
         frequency_ppb = int(report["frequency_ppb"])
         raw = simulated * tsc_hz // kernel_hz
-        corrected = raw + raw * frequency_ppb // second
-        multiplier = simulated * RESTORE_YEAR_MULTIPLIER_PPB // second
         allowances = {
-            "monotonic_raw": RESTORE_YEAR_CLOCK_TOLERANCE_SECONDS * second + multiplier,
+            "monotonic_raw": RESTORE_YEAR_CLOCK_TOLERANCE_SECONDS * second
+            + simulated * RESTORE_YEAR_MULTIPLIER_PPB // second,
             "monotonic": RESTORE_YEAR_CLOCK_TOLERANCE_SECONDS * second
-            + multiplier
-            + simulated * RESTORE_YEAR_SLEW_PPM // 1_000_000,
+            + simulated * RESTORE_YEAR_MONOTONIC_PPB // second,
         }
         allowances["boottime"] = allowances["monotonic"]
         gains: list[str] = []
         for clock, expected in (
             ("monotonic_raw", raw),
-            ("monotonic", corrected),
-            ("boottime", corrected),
+            ("monotonic", simulated),
+            ("boottime", simulated),
         ):
             gained = after[clock] - before[clock] - real
             gains.append(f"{clock} {gained - simulated:+d} ns")
@@ -8419,7 +8433,7 @@ def check_simulated_year(
         summary.append(
             "beyond the simulated downtime, "
             + ", ".join(gains)
-            + f" at {tsc_hz} Hz and {frequency_ppb} ppb"
+            + f" at {tsc_hz} Hz, after {frequency_ppb} ppb before the capture"
         )
         lag = host_utc_ns - after["realtime"]
         if abs(lag) > RESTORE_YEAR_REALTIME_TOLERANCE_SECONDS * second:

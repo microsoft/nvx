@@ -480,7 +480,11 @@ fn test_correction(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), Comma
                 hold.estimated_error_us
             );
         }
-        ClockAdjustment::Query | ClockAdjustment::Frequency(_) | ClockAdjustment::ClearPhase => {}
+        ClockAdjustment::Query
+        | ClockAdjustment::Frequency(_)
+        | ClockAdjustment::ClearPhase
+        | ClockAdjustment::SetFrequency(_)
+        | ClockAdjustment::Pin { .. } => {}
     }
     Ok(())
 }
