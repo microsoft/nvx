@@ -53,15 +53,15 @@ fn verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint
     assert!(!format!("{saved:?}").contains(&format!("{CREDENTIAL:?}")));
 
     let mut other = saved.runtime.clone();
-    other.control_session += 1;
+    other.compatibility = CompatibilityIdentity::new("other-runtime").unwrap();
     saved.process.pid = 0;
     let error = verify(&saved, &other).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::RuntimeMismatch);
-    assert!(error.to_string().contains("control session"));
+    assert!(error.to_string().contains("compatibility"));
     other.kernel = ArtifactIdentity::new("other-kernel").unwrap();
     let error = verify(&saved, &other).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::RuntimeMismatch);
-    assert!(error.to_string().contains("kernel, control session"));
+    assert!(error.to_string().contains("kernel, compatibility"));
     assert_eq!(
         reattach(
             &saved,
@@ -423,7 +423,7 @@ fn a_saved_vm_runs_until_its_process_exits_and_another_runtime_is_refused_withou
     let held = verify(&saved, &saved.runtime).unwrap();
     assert!(held.wait(Instant::now()).unwrap().is_none());
     let mut other = saved.runtime.clone();
-    other.control_session += 1;
+    other.compatibility = CompatibilityIdentity::new("other-runtime").unwrap();
     assert_eq!(
         verify(&saved, &other).unwrap_err().kind(),
         ErrorKind::RuntimeMismatch

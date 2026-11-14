@@ -8,9 +8,6 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use nvx::contract::{
-    BOOT_CONTRACT_VERSION, CONTROL_CONTRACT_REVISION, CONTROL_SESSION_PROTOCOL_VERSION,
-};
 use nvx::host::process::{Opened, Process, ProcessRef};
 use serde_json::{Value, json};
 
@@ -212,9 +209,7 @@ fn assert_runtime_record(root: &Root, state: &str, record: &Value) -> (String, P
             "openvmm": digest(0),
             "kernel": digest(1),
             "initramfs": digest(2),
-            "bootContract": BOOT_CONTRACT_VERSION,
-            "controlContract": CONTROL_CONTRACT_REVISION,
-            "controlSession": CONTROL_SESSION_PROTOCOL_VERSION,
+            "compatibility": "nvx-boot-v5+nvxs-v1+nvx-microvm-v2-control-v2",
         }),
         "{record}"
     );

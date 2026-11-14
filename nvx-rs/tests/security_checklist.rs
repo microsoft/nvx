@@ -20,7 +20,9 @@ use std::process::{Command, Stdio};
 
 use nvx::ErrorKind;
 use nvx::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
-use nvx::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity};
+use nvx::host::runtime::{
+    ArtifactIdentity, CompatibilityIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity,
+};
 use nvx::host::{snapshot, vm};
 use nvx::protocol::view::{MachineIdMode, View};
 
@@ -215,6 +217,7 @@ fn runtime() -> Runtime {
             ArtifactIdentity::new("install:openvmm").unwrap(),
             ArtifactIdentity::new("install:kernel").unwrap(),
             ArtifactIdentity::new("install:initramfs").unwrap(),
+            CompatibilityIdentity::new("security-checklist").unwrap(),
         ),
         hypervisor: if cfg!(windows) {
             Hypervisor::Whp

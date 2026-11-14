@@ -9,18 +9,20 @@ use super::CaptureContext;
 use super::canonical::{CanonicalError, Reader, Writer};
 use super::manifest::{
     AddressSpace, BlockGeometry, CPUID_ENTRY_LEN, CpuProfile, Device, DeviceRange,
-    FILESYSTEM_SLOT_VERSION, HostClock, Interrupts, Ipv6Identity, MAX_COMMAND_LINE_LEN,
-    MAX_CPUID_ENTRIES, MAX_DEVICE_RANGES, MAX_DEVICE_WORDS, MAX_DEVICES, MAX_MEMORY_RANGES,
-    MAX_PROCESSORS, MAX_TEXT_LEN, Machine, Memory, MemoryRange, Nic, PolicyIdentity, Rates,
-    SnapshotManifest, TimeContract, Topology, parse_profile_id,
+    FILESYSTEM_SLOT_VERSION, FORMAT_VERSION, HostClock, Interrupts, Ipv6Identity,
+    MAX_COMMAND_LINE_LEN, MAX_CPUID_ENTRIES, MAX_DEVICE_RANGES, MAX_DEVICE_WORDS, MAX_DEVICES,
+    MAX_MEMORY_RANGES, MAX_PROCESSORS, MAX_TEXT_LEN, Machine, Memory, MemoryRange, Nic,
+    PolicyIdentity, Rates, SnapshotManifest, TIME_ABI_VERSION, TimeContract, Topology,
+    parse_profile_id,
 };
-use crate::contract;
 use crate::error::{Error, Result};
 use crate::guest_restore;
 use crate::host::config::{DiskCapture, check_setting};
 use crate::host::platform::parse_hex32;
 use crate::host::process::BootId;
-use crate::host::runtime::{ArtifactIdentity, Hypervisor, MAX_IDENTITY_LEN, RuntimeIdentity};
+use crate::host::runtime::{
+    ArtifactIdentity, CompatibilityIdentity, Hypervisor, MAX_IDENTITY_LEN, RuntimeIdentity,
+};
 use crate::host::sandbox::mount::MOUNT_TAG;
 
 pub use crate::host::config::Invariants;
@@ -31,43 +33,38 @@ const KEY_DOMAIN: &[u8] = b"nvx snapshot key\0";
 /// The generation of a CPU profile that a host derives, rather than a built-in one.
 const HOST_GENERATION: &str = "host";
 
-/// The versions of the contracts of a template's clones that its runtime identity does not
-/// record: the snapshot format, the saved device state, the time ABI, the restore packet, and the
-/// activation record.
+/// The versions of the representations through which a template's clones are restored, which
+/// its runtime identity does not record: OpenVMM's snapshot format, the schema of its saved
+/// device state, and its time ABI, and the guest-restore record that this crate writes to clones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Contracts {
-    /// [`contract::SNAPSHOT_FORMAT_VERSION`].
+    /// The version of OpenVMM's snapshot format, which the manifest decoder reads.
     snapshot: u64,
-    /// [`contract::DEVICE_STATE_SCHEMA_VERSION`].
+    /// The version of the schema of the saved device state that the manifest records, which
+    /// OpenVMM alone interprets.
     device_state: u64,
-    /// [`contract::TIME_ABI_VERSION`].
+    /// The version of OpenVMM's time ABI, which the manifest decoder reads.
     time: u64,
-    /// [`contract::RESTORE_PACKET_VERSION`].
-    restore_packet: u64,
     /// [`guest_restore::VERSION`], as a `u64`, as the other versions are.
     activation: u64,
 }
 
 impl Contracts {
-    /// The versions that this crate speaks.
-    const CURRENT: Self = Self {
-        snapshot: contract::SNAPSHOT_FORMAT_VERSION,
-        device_state: contract::DEVICE_STATE_SCHEMA_VERSION,
-        time: contract::TIME_ABI_VERSION,
-        restore_packet: contract::RESTORE_PACKET_VERSION,
-        // `u64::from` is not `const`, and widening a `u16` is lossless.
-        activation: guest_restore::VERSION as u64,
-    };
+    /// Returns the versions of the capture whose manifest is `manifest`: the snapshot format and
+    /// time ABI that the decoder read it in, the schema of its saved device state, and the
+    /// guest-restore record that this crate writes.
+    fn of(manifest: &SnapshotManifest) -> Self {
+        Self {
+            snapshot: FORMAT_VERSION,
+            device_state: manifest.device_state_schema.into(),
+            time: TIME_ABI_VERSION.into(),
+            activation: guest_restore::VERSION.into(),
+        }
+    }
 
     /// Writes the versions.
     fn write(&self, writer: &mut Writer) {
-        for version in [
-            self.snapshot,
-            self.device_state,
-            self.time,
-            self.restore_packet,
-            self.activation,
-        ] {
+        for version in [self.snapshot, self.device_state, self.time, self.activation] {
             writer.u64(version);
         }
     }
@@ -78,20 +75,17 @@ impl Contracts {
             snapshot: reader.u64("the snapshot format version")?,
             device_state: reader.u64("the device-state schema version")?,
             time: reader.u64("the time ABI version")?,
-            restore_packet: reader.u64("the restore packet version")?,
             activation: reader.u64("the activation contract version")?,
         })
     }
 }
 
-/// Writes the runtime identity `runtime`: its artifacts, then its boot and control versions.
+/// Writes the runtime identity `runtime`: its artifacts, then its compatibility.
 fn write_runtime(writer: &mut Writer, runtime: &RuntimeIdentity) {
     for artifact in [&runtime.openvmm, &runtime.kernel, &runtime.initramfs] {
         writer.text(artifact.as_str());
     }
-    writer.u64(runtime.boot_contract);
-    writer.text(&runtime.control_contract);
-    writer.u64(runtime.control_session);
+    writer.text(runtime.compatibility.as_str());
 }
 
 /// Reads an artifact identity, which `what` names.
@@ -102,20 +96,18 @@ fn read_artifact(reader: &mut Reader<'_>, what: &str) -> Result<ArtifactIdentity
 
 /// Reads a runtime identity, as [`write_runtime`] writes it.
 fn read_runtime(reader: &mut Reader<'_>) -> Result<RuntimeIdentity, CanonicalError> {
-    let runtime = RuntimeIdentity {
-        openvmm: read_artifact(reader, "the OpenVMM identity")?,
-        kernel: read_artifact(reader, "the kernel identity")?,
-        initramfs: read_artifact(reader, "the initramfs identity")?,
-        boot_contract: reader.u64("the boot contract version")?,
-        control_contract: reader
-            .text(MAX_IDENTITY_LEN, "the control contract revision")?
-            .to_owned(),
-        control_session: reader.u64("the control session version")?,
-    };
-    runtime
-        .check()
+    let openvmm = read_artifact(reader, "the OpenVMM identity")?;
+    let kernel = read_artifact(reader, "the kernel identity")?;
+    let initramfs = read_artifact(reader, "the initramfs identity")?;
+    let compatibility = reader.text(MAX_IDENTITY_LEN, "the compatibility identity")?;
+    let compatibility = CompatibilityIdentity::new(compatibility)
         .map_err(|error| CanonicalError::new(error.message()))?;
-    Ok(runtime)
+    Ok(RuntimeIdentity::new(
+        openvmm,
+        kernel,
+        initramfs,
+        compatibility,
+    ))
 }
 
 /// Writes a block geometry.
@@ -272,9 +264,9 @@ fn guest_network_of(nic: &Nic) -> String {
 /// A key holds, and nothing else:
 ///
 /// - **Runtime and contracts:** the identities of OpenVMM, the guest kernel, and the guest
-///   initramfs; and the versions
-///   of the key's encoding and of the boot, snapshot, device-state, time, restore-packet,
-///   control, and activation contracts.
+///   initramfs, and the compatibility identity that the caller names in its
+///   [`RuntimeIdentity`]; and the versions of the key's encoding, of OpenVMM's snapshot format,
+///   saved device state, and time ABI, and of the guest-restore record.
 /// - **CPU and time:** the backend; the CPU profile's vendor, generation, revision, and the digest
 ///   of its canonical document, and the effective CPUID; the processor topology; and the TSC and
 ///   LAPIC timer rates that the time contract declares, and its rate policy, the tolerance of a
@@ -309,9 +301,9 @@ fn guest_network_of(nic: &Nic) -> String {
 /// [`to_bytes`](Self::to_bytes) appends the per-capture time fields to that prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotKey {
-    /// The runtime: OpenVMM, the guest kernel and initramfs, and the boot and control contracts.
+    /// The runtime: OpenVMM, the guest kernel and initramfs, and the caller's compatibility.
     runtime: RuntimeIdentity,
-    /// The versions of the other contracts.
+    /// The versions of the representations through which clones are restored.
     contracts: Contracts,
     /// The machine, as the manifest describes it.
     machine: Machine,
@@ -325,7 +317,7 @@ pub struct SnapshotKey {
 
 /// The checked inputs of a capture, which its context holds.
 struct CaptureInputs<'a> {
-    /// The runtime's artifact and contract identities.
+    /// The runtime's artifact and compatibility identities.
     runtime: &'a RuntimeIdentity,
     /// The requested backend.
     hypervisor: Hypervisor,
@@ -355,8 +347,9 @@ impl SnapshotKey {
     /// Version 1 omits the guest build, appends the complete capture-time contract, and holds
     /// the snapshot's NIC, if it has one, with the identity of the complete
     /// deny-all policy under which the capture attached it, but no network policy of its clones.
-    /// It has not been released, so no key that an earlier build encoded is supported. There is
-    /// no migration.
+    /// Its runtime holds the caller's compatibility identity, and no version of a contract that
+    /// the caller drives its guest through. It has not been released, so no key that an earlier
+    /// build encoded is supported. There is no migration.
     pub const VERSION: u16 = 1;
 
     /// Most bytes of a key's canonical encoding: what the largest key that a manifest of at most
@@ -369,7 +362,6 @@ impl SnapshotKey {
         manifest: &SnapshotManifest,
     ) -> Result<Self> {
         context.capture.check()?;
-        context.runtime.check()?;
         let cpu_profile = context.cpu_profile.as_deref().unwrap_or("auto");
         if let Some(problem) = cpu_profile_problem(cpu_profile) {
             return Err(Error::unsupported(problem));
@@ -473,7 +465,7 @@ impl SnapshotKey {
         }
         Ok(Self {
             runtime: class.runtime.clone(),
-            contracts: Contracts::CURRENT,
+            contracts: Contracts::of(manifest),
             machine: machine.clone(),
             filesystem_tag: MOUNT_TAG.to_owned(),
             invariants: class.invariants.clone(),
@@ -492,22 +484,17 @@ impl SnapshotKey {
     }
 
     /// Returns the runtime: the identities of OpenVMM, the guest kernel, and the guest initramfs,
-    /// and the versions of the boot and control contracts.
+    /// and the compatibility identity that the caller named.
     pub fn runtime(&self) -> &RuntimeIdentity {
         &self.runtime
     }
 
-    /// Returns whether the versions of the snapshot, device-state, time, restore-packet, and
-    /// activation contracts in the key are those that this crate speaks.
-    pub fn speaks_current_contracts(&self) -> bool {
-        self.contracts == Contracts::CURRENT
-    }
-
-    /// Checks the manifest's complete machine, the current key contracts and the filesystem tag.
+    /// Checks the manifest's complete machine, the versions that the key records of it and of
+    /// this crate's own representations, and the filesystem tag.
     pub(super) fn check_manifest(&self, manifest: &SnapshotManifest) -> Result<()> {
         if self.machine != manifest.machine
             || &self.time != manifest.time()
-            || !self.speaks_current_contracts()
+            || self.contracts != Contracts::of(manifest)
             || self.filesystem_tag != MOUNT_TAG
         {
             return Err(Error::io(
@@ -607,10 +594,9 @@ impl SnapshotKey {
     /// Version 1 holds, in order, each value encoded as the [module](super) describes:
     ///
     /// 1. [`VERSION`](Self::VERSION), a `u16`.
-    /// 2. The runtime and contracts: the OpenVMM, kernel, and initramfs identities, texts; the boot
-    ///    contract version, a `u64`; the control contract revision, a text; the control session
-    ///    version, a `u64`; and the snapshot format, device-state schema,
-    ///    time ABI, restore packet, and activation contract versions, `u64`s.
+    /// 2. The runtime and contracts: the OpenVMM, kernel, and initramfs identities, and the
+    ///    compatibility identity, texts; and the snapshot format, device-state schema, time ABI,
+    ///    and guest-restore record versions, `u64`s.
     /// 3. CPU and time: the backend, a text, as OpenVMM spells it; the CPU profile's vendor and
     ///    generation, texts, its revision, a `u32`, and its digest, 32 bytes; the effective
     ///    CPUID, a byte string, as OpenVMM encodes it; the sockets, the dies of each socket, the

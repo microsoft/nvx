@@ -1665,7 +1665,8 @@ because the runtime state is stale, while `start` launches OpenVMM again and
 
 `start` records the runtime identity of the artifacts with the VM: the SHA-256
 digests of OpenVMM, the kernel, and the Alpine initramfs, as the install
-metadata lists them, without hashing an artifact. A release lists them in its
+metadata lists them, without hashing an artifact, and the versions of the
+CLI's contracts with its guests. A release lists the digests in its
 `SHA256SUMS`, and a checkout in the build provenance that `nvx.py` writes to
 `build/` with each artifact that it builds, and that `nvx-rs download`
 installs. The transitions drive only a VM that artifacts of the same identity
@@ -1879,8 +1880,8 @@ that another version wrote, as it refuses a sandbox's configuration of another
 format with `format-unsupported`, or fail to read their records at all. A
 snapshot restores only under the runtime identity that captured it, which
 names the OpenVMM, kernel, and Alpine initramfs of its artifacts and the
-contracts of NVX, so a restore refuses it once an upgrade has installed new
-artifacts. To upgrade:
+versions of the CLI's contracts with its guests, so a restore refuses it once
+an upgrade has installed new artifacts. To upgrade:
 
 1. With the version that you leave, stop and deprovision each sandbox, which
    also ends the VM of a start that was interrupted.

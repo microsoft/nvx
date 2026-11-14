@@ -486,9 +486,9 @@ scratch. The VM keeps the processors that the snapshot had online, and
 `--memory-mib` must be a multiple of 128 between the snapshot's boot memory and
 its capacity. The snapshot's key records the runtime identity that captured
 it: the OpenVMM, kernel, and Alpine initramfs of the artifacts, and the
-contracts of NVX. A restore under another one, as after an upgrade that
-installs new artifacts, is refused, and the snapshot must be captured again;
-see [Upgrades](run.md#upgrades).
+versions of the CLI's contracts with its guests. A restore under another one,
+as after an upgrade that installs new artifacts, is refused, and the snapshot
+must be captured again; see [Upgrades](run.md#upgrades).
 
 The sandbox's NIC comes from the snapshot, with its presence and its address:
 `--net` belongs to [`snapshot capture`](#snapshot-capture), which gives a

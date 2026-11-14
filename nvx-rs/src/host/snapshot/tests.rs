@@ -20,7 +20,9 @@ use crate::host::config::{
 };
 use crate::host::network::{Access, NetworkPolicy};
 use crate::host::process::BootId;
-use crate::host::runtime::{ArtifactIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity};
+use crate::host::runtime::{
+    ArtifactIdentity, CompatibilityIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity,
+};
 use crate::net::Ipv4Cidr;
 use crate::protocol::root::{Journal, OverlayMode, RootImage};
 use crate::protocol::view::{MachineIdMode, View};
@@ -635,7 +637,7 @@ impl ManifestSpec {
         let platform = DeviceSpec::platform;
         let mut contract = ContractSpec {
             machine_profile: "microvm".to_owned(),
-            abi_version: crate::contract::MICROVM_ABI_VERSION as u32,
+            abi_version: super::manifest::MICROVM_ABI_VERSION,
             source_hypervisor: "kvm".to_owned(),
             command_line: COMMAND_LINE.to_owned(),
             command_line_digest: None,
@@ -788,7 +790,7 @@ impl ManifestSpec {
             memory_block_size: 128 * MIB,
             expansion_ranges: vec![(512 * MIB, 1536 * MIB)],
             time: Some(TimeSpec {
-                abi_version: crate::contract::TIME_ABI_VERSION as u32,
+                abi_version: super::manifest::TIME_ABI_VERSION,
                 tsc_hz: 2_100_000_000,
                 tolerance_ppm: 250,
                 apic_hz: 200_000_000,
@@ -970,6 +972,11 @@ pub(in crate::host) fn artifact(digit: char) -> ArtifactIdentity {
     ArtifactIdentity::sha256(&digit.to_string().repeat(64)).unwrap()
 }
 
+/// Returns the compatibility identity that the runtimes of the tests name.
+pub(in crate::host) fn compatibility() -> CompatibilityIdentity {
+    CompatibilityIdentity::new("nvx-test-v1").unwrap()
+}
+
 /// Returns the checked inputs of the capture of [`ManifestSpec::template`].
 pub(in crate::host) fn context() -> CaptureContext {
     CaptureContext {
@@ -998,7 +1005,7 @@ pub(in crate::host) fn context() -> CaptureContext {
         },
         nic: None,
         console: ConsoleAttachment::Disconnected,
-        runtime: RuntimeIdentity::new(artifact('a'), artifact('b'), artifact('c')),
+        runtime: RuntimeIdentity::new(artifact('a'), artifact('b'), artifact('c'), compatibility()),
         hypervisor: Hypervisor::Kvm,
         cpu_profile: Some("auto".to_owned()),
     }
@@ -2046,13 +2053,11 @@ fn snapshot_accepts_refuses_nonregular_disks_without_waiting_for_a_fifo_writer()
 
 #[test]
 fn snapshot_accepts_refuses_every_runtime_identity_part_independently() {
-    let changes: [fn(&mut RuntimeIdentity); 6] = [
+    let changes: [fn(&mut RuntimeIdentity); 4] = [
         |identity| identity.openvmm = artifact('d'),
         |identity| identity.kernel = artifact('d'),
         |identity| identity.initramfs = artifact('d'),
-        |identity| identity.boot_contract += 1,
-        |identity| identity.control_contract.push_str("-other"),
-        |identity| identity.control_session += 1,
+        |identity| identity.compatibility = CompatibilityIdentity::new("other-v1").unwrap(),
     ];
     for change in changes {
         let mut fixture = RestoreFixture::new(false);

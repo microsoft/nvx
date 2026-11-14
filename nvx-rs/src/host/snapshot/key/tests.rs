@@ -87,14 +87,8 @@ fn each_part_of_the_key_changes_it() {
         ("initramfs", |context, _| {
             context.runtime.initramfs = artifact('d')
         }),
-        ("boot contract", |context, _| {
-            context.runtime.boot_contract += 1
-        }),
-        ("control contract", |context, _| {
-            context.runtime.control_contract = "other-revision".to_owned();
-        }),
-        ("control session", |context, _| {
-            context.runtime.control_session += 1
+        ("compatibility", |context, _| {
+            context.runtime.compatibility = CompatibilityIdentity::new("other-v1").unwrap()
         }),
         // CPU and time.
         ("backend", |context, spec| {
@@ -295,23 +289,38 @@ fn each_part_of_the_key_changes_it() {
 #[test]
 fn each_contract_version_changes_the_key() {
     let base = network_key();
-    assert!(base.speaks_current_contracts());
-    let changes: [fn(&mut Contracts); 5] = [
+    let manifest = manifest(&ManifestSpec::with_network());
+    base.check_manifest(&manifest).unwrap();
+    let changes: [fn(&mut Contracts); 4] = [
         |contracts| contracts.snapshot += 1,
         |contracts| contracts.device_state += 1,
         |contracts| contracts.time += 1,
-        |contracts| contracts.restore_packet += 1,
         |contracts| contracts.activation += 1,
     ];
     let mut identities = HashSet::from([base.identity()]);
     for change in changes {
         let mut other = base.clone();
         change(&mut other.contracts);
-        assert!(!other.speaks_current_contracts());
+        other.check_manifest(&manifest).unwrap_err();
         assert!(identities.insert(other.identity()));
         // A key of other versions reads back as it is, so that a store can name what it holds.
         assert_eq!(SnapshotKey::from_bytes(&other.to_bytes()).unwrap(), other);
     }
+}
+
+#[test]
+fn a_key_records_the_saved_state_schema_of_its_manifest() {
+    let context = network_context();
+    let mut spec = ManifestSpec::with_network();
+    let base = key(&context, &spec);
+    assert_eq!(base.contracts.device_state, 1);
+    spec.schema_version = 2;
+    let other = key(&context, &spec);
+    assert_eq!(other.contracts.device_state, 2);
+    assert_ne!(other.identity(), base.identity());
+    // A key holds the schema of its own manifest, and no other.
+    other.check_manifest(&manifest(&spec)).unwrap();
+    base.check_manifest(&manifest(&spec)).unwrap_err();
 }
 
 #[test]
@@ -553,11 +562,6 @@ fn a_class_selects_a_profile_as_openvmm_does() {
 fn captures_of_invalid_contexts_are_refused() {
     type ContextChange = fn(&mut CaptureContext);
     let cases: &[(ContextChange, &str)] = &[
-        (
-            |context| context.runtime.control_contract = "two words".to_owned(),
-            "control contract revision \"two words\" must hold 1 to 128 printable ASCII \
-             characters and no space",
-        ),
         (
             |context| context.cpu_profile = Some("fastest".to_owned()),
             "CPU profile \"fastest\" must be \"auto\", \"host\", or a profile ID",
@@ -853,7 +857,6 @@ const VECTOR_CONTRACTS: Contracts = Contracts {
     snapshot: 6,
     device_state: 1,
     time: 1,
-    restore_packet: 4,
     activation: 1,
 };
 
@@ -891,14 +894,12 @@ fn vector_context(name: &str) -> CaptureContext {
     } else {
         support::context()
     };
-    context.runtime = RuntimeIdentity {
-        openvmm: artifact('a'),
-        kernel: artifact('b'),
-        initramfs: artifact('c'),
-        boot_contract: 3,
-        control_contract: "nvx-microvm-v2-control-v2".to_owned(),
-        control_session: 1,
-    };
+    context.runtime = RuntimeIdentity::new(
+        artifact('a'),
+        artifact('b'),
+        artifact('c'),
+        CompatibilityIdentity::new("nvx-boot-v3+nvxs-v1+nvx-microvm-v2-control-v2").unwrap(),
+    );
     context
 }
 

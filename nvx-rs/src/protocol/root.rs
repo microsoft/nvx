@@ -35,9 +35,9 @@
 //! Guests read the tokens with [`RootLayout::parse`], which accepts exactly these forms and
 //! refuses every other, with no fallback that probes the image or the devices.
 //!
-//! The tokens belong to the boot contract that
-//! [`BOOT_CONTRACT_VERSION`](crate::contract::BOOT_CONTRACT_VERSION) versions, so a change to
-//! them changes that version too.
+//! The tokens belong to the boot contract between a host and the guests that read them, so a
+//! change to them changes the compatibility identity of each runtime whose guests read them, such
+//! as the boot contract version that NVX's CLI names in its own.
 
 use std::fmt;
 use std::ops::RangeInclusive;

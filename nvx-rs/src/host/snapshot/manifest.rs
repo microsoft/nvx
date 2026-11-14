@@ -16,7 +16,6 @@ use std::time::{Duration, SystemTime};
 use sha2::{Digest, Sha256};
 
 use super::wire::{Field, Message, WireError};
-use crate::contract;
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::platform;
 use crate::host::process::BootId;
@@ -30,8 +29,31 @@ pub const MANIFEST_NAME: &str = "manifest.bin";
 /// OpenVMM's own reader.
 pub const MAX_MANIFEST_LEN: u64 = 1024 * 1024;
 
+/// Version of OpenVMM's snapshot format that this decoder reads: the manifest of a capture, and
+/// the artifacts that it describes. It must match `MANIFEST_VERSION` in OpenVMM's
+/// `openvmm/openvmm_helpers/src/snapshot.rs`, which the ignored test `tests/openvmm_vectors.rs`
+/// checks.
+pub(super) const FORMAT_VERSION: u64 = 2;
+
 /// The magic that identifies a manifest of version 2 of OpenVMM's snapshot format.
 const FORMAT_MAGIC: &[u8] = b"OPENVMM_SNAPSHOT_V2\0";
+
+/// Version of OpenVMM's microVM ABI that this decoder reads: the machine, its devices, and their
+/// addresses, through which OpenVMM boots the guest and saves its state.
+///
+/// Version 1 of OpenVMM's v4 microVM offers no device `VIRTIO_F_ACCESS_PLATFORM` and no console
+/// `VIRTIO_CONSOLE_F_SIZE`, and gives each virtio device an IOAPIC input of its own past the ISA
+/// IRQs. The decoder refuses the snapshot of an earlier OpenVMM by its
+/// [snapshot format](FORMAT_VERSION).
+pub(crate) const MICROVM_ABI_VERSION: u32 = 1;
+
+/// Version of OpenVMM's time ABI that this decoder reads: the guest's clocks and timers, and their
+/// repair after a restore. It must match `TIME_ABI_VERSION` in OpenVMM's
+/// `vmm_core/virt/src/time_abi/mod.rs`, which the ignored test `tests/openvmm_vectors.rs` checks.
+///
+/// Version 1 pairs each time sample's host UTC with the guest TSC on the host, and publishes the
+/// host's clock correction with it, which the guest applies instead of estimating it.
+pub(crate) const TIME_ABI_VERSION: u32 = 1;
 
 /// The type of the root of a snapshot's saved state.
 const SAVED_STATE_ROOT_TYPE: &str = "openvmm.SavedState";
@@ -627,17 +649,22 @@ impl Machine {
 ///
 /// [`read`](Self::read) reads it, bounded and strict: it reads at most [`MAX_MANIFEST_LEN`] bytes
 /// of a manifest that is a regular file, not a link or other reparse point, and refuses a manifest
-/// of any other format version than
-/// [`SNAPSHOT_FORMAT_VERSION`](crate::contract::SNAPSHOT_FORMAT_VERSION), a field that this
-/// format does not have, a field that is not of its type or that appears twice, truncated bytes,
-/// and a manifest that is not a template's: a platform-tier capture of a microVM, for clones, with
-/// a read-only `distro` whose identity is unbound, a fresh scratch, and the dormant filesystem
-/// slot. Of the snapshot ID in field 18, which OpenVMM's SaveVM records and a microVM capture
-/// leaves zero, it checks only the length. It never reads another artifact of the snapshot.
+/// of any other version of OpenVMM's snapshot format, microVM ABI, boot layout, or time ABI than
+/// it reads, a field that this format does not have, a field that is not of its type or that
+/// appears twice, truncated bytes, and a manifest that is not a template's: a platform-tier
+/// capture of a microVM, for clones, with a read-only `distro` whose identity is unbound, a fresh
+/// scratch, and the dormant filesystem slot. Of the snapshot ID in field 18, which OpenVMM's
+/// SaveVM records and a microVM capture leaves zero, it checks only the length. It never reads
+/// another artifact of the snapshot.
 ///
-/// A template's [`SnapshotKey`](super::SnapshotKey) projects its machine. The rest is the
-/// capture's own: when it was taken, its [`TimeContract`]'s anchor, host, boot, and lineage
-/// counter, and the lengths of its artifacts, in which the generations of one key differ.
+/// The schema of the saved device state is OpenVMM's alone: the reader requires one, and records
+/// it without interpreting it, and OpenVMM refuses to restore a saved state of a schema that it
+/// does not read.
+///
+/// A template's [`SnapshotKey`](super::SnapshotKey) projects its machine and the schema of its
+/// saved state. The rest is the capture's own: when it was taken, its [`TimeContract`]'s anchor,
+/// host, boot, and lineage counter, and the lengths of its artifacts, in which the generations of
+/// one key differ.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotManifest {
     /// When OpenVMM created the snapshot.
@@ -646,6 +673,8 @@ pub struct SnapshotManifest {
     openvmm_version: String,
     /// The length of the snapshot's saved state, `state.bin`, in bytes.
     state_len: u64,
+    /// The version of the schema of the snapshot's saved device state, which OpenVMM interprets.
+    pub(super) device_state_schema: u32,
     /// The time contract.
     time: TimeContract,
     /// The machine.
@@ -675,9 +704,9 @@ impl SnapshotManifest {
     /// Parses and checks the bytes of a template's manifest.
     ///
     /// Fails with [`ErrorKind::Io`](crate::ErrorKind::Io) for a manifest of another version of the
-    /// snapshot format, saved-state schema, machine ABI, boot layout, or time ABI than this build
-    /// reads, for more than [`MAX_MANIFEST_LEN`] bytes, bytes that are not such a manifest, and a
-    /// manifest that is not a template's, as [`SnapshotManifest`] describes.
+    /// snapshot format, machine ABI, boot layout, or time ABI than this build reads, for more than
+    /// [`MAX_MANIFEST_LEN`] bytes, bytes that are not such a manifest, and a manifest that is not a
+    /// template's, as [`SnapshotManifest`] describes.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         Self::parse_described(bytes, "the snapshot manifest")
     }
@@ -721,12 +750,13 @@ impl SnapshotManifest {
     /// Checks the decoded manifest `raw`, and returns the manifest.
     fn from_raw(raw: RawManifest) -> Result<Self, Problem> {
         // The version and the magic were checked before the manifest was decoded.
-        if u64::from(raw.saved_state_schema_version) != contract::DEVICE_STATE_SCHEMA_VERSION
-            || raw.saved_state_root_type != SAVED_STATE_ROOT_TYPE
-        {
+        if raw.saved_state_schema_version == 0 {
+            return Err(invalid("has no saved-state schema version"));
+        }
+        if raw.saved_state_root_type != SAVED_STATE_ROOT_TYPE {
             return Err(Problem::Format(format!(
-                "has saved-state schema version {} of root type {:?}",
-                raw.saved_state_schema_version, raw.saved_state_root_type
+                "has a saved state of root type {:?}",
+                raw.saved_state_root_type
             )));
         }
         if raw.architecture != ARCHITECTURE || raw.page_size != PAGE_SIZE {
@@ -775,6 +805,7 @@ impl SnapshotManifest {
             created_at,
             openvmm_version: raw.openvmm_version,
             state_len: raw.state_size,
+            device_state_schema: raw.saved_state_schema_version,
             time,
             machine,
             attachments,
@@ -880,7 +911,7 @@ fn check_format(bytes: &[u8]) -> Result<(), Problem> {
         }
     }
     let version = version.unwrap_or(0);
-    if version != contract::SNAPSHOT_FORMAT_VERSION {
+    if version != FORMAT_VERSION {
         return Err(Problem::Format(format!("has format version {version}")));
     }
     if magic != Some(FORMAT_MAGIC) {
@@ -1536,7 +1567,7 @@ fn check_contract(
     memory_size: u64,
 ) -> Result<(Machine, TimeContract), Problem> {
     if raw.machine_profile != MACHINE_PROFILE
-        || u64::from(raw.abi_version) != contract::MICROVM_ABI_VERSION
+        || raw.abi_version != MICROVM_ABI_VERSION
         || raw.boot_layout_version != BOOT_LAYOUT_VERSION
     {
         return Err(Problem::Format(format!(
@@ -1621,7 +1652,7 @@ fn check_time(raw: Option<RawTime>) -> Result<TimeContract, Problem> {
     let Some(raw) = raw else {
         return Err(invalid("has no time contract"));
     };
-    if u64::from(raw.abi_version) != contract::TIME_ABI_VERSION {
+    if raw.abi_version != TIME_ABI_VERSION {
         return Err(Problem::Format(format!(
             "has a time contract of time ABI version {}",
             raw.abi_version

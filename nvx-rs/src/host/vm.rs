@@ -547,7 +547,6 @@ pub fn create(
     let capture = config.boot.as_ref().and_then(|boot| boot.capture.as_ref());
     if capture.is_some() {
         config.kernel_command_line()?;
-        runtime.identity.check()?;
     }
     VmDir::open(dir.path())?;
     let working_dir = vmm_working_dir(dir.path())?;

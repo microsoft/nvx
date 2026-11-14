@@ -867,8 +867,8 @@ compares the submodule's control-session protocol vectors, and the lines of its
 platform allowlist of kernel command-line tokens, with the copies that the
 tests of `nvx::protocol::nvxs` and `nvx::host::config` read in the `nvx-rs`
 job, which cannot check out
-OpenVMM, the versions of OpenVMM's snapshot format, saved-state schema,
-time ABI, and restore packets with those of `nvx::contract`, and the bound of
+OpenVMM, the versions of OpenVMM's snapshot format, time ABI, and restore
+packet with those that the sources of `nvx-rs` define, and the bound of
 the restore packet's guest-restore record with that of `nvx::guest_restore`;
 see [OpenVMM's vectors](../nvx-rs/tests/vectors/README.md#openvmms-vectors).
 The ignored test `tests/openvmm_cpu_profiles.rs` likewise compares the

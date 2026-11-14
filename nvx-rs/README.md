@@ -43,9 +43,9 @@ workspace.
 | `cli` | NVX's own `nvx-rs` binary; it adds no API, and enables `host`. See [The nvx-rs CLI](#the-nvx-rs-cli) |
 | `testing` | NVX's own `nvx-fake-openvmm` binary, a fake OpenVMM for tests; see [Test hooks](#test-hooks). It adds no API |
 
-Without default features, the crate has only `protocol`, `guest_restore`,
-`contract`, `net`, `uuid`, and `Error`, and depends on nothing but `serde` when
-`serde` is enabled and `nix` and `getrandom` when `guest` is.
+Without default features, the crate has only `protocol`, `guest_restore`, `net`,
+`uuid`, and `Error`, and depends on nothing but `serde` when `serde` is enabled
+and `nix` and `getrandom` when `guest` is.
 
 ## Layout
 
@@ -59,8 +59,6 @@ nvx-rs/
 │   ├── guest_restore/
 │   │                the guest-restore record of a layered root, its canonical encoding, and what
 │   │                Ready reports about it; no dependencies, shared by the host and the guest
-│   ├── contract.rs  the versions of the contracts that the crate speaks with OpenVMM and the
-│   │                guest, and the compatibility of releases with them
 │   ├── net/         CIDR networks and their subtraction, hostnames, guest addresses, and gateways
 │   ├── gpt/         strict reading of GPT disks for NVX's guest programs, private to the crate
 │   ├── uuid.rs      UUIDs in their canonical text and in GPT's layout
@@ -105,7 +103,6 @@ changes only when the module's purpose does.
 | [`nvx::protocol::status`](#nvxprotocolstatus) | The exit statuses with which a clone's guest ends its VM once it fails fast, and what each means |
 | [`nvx::protocol::view`](#nvxprotocolview) | The `View`, hostname and machine-ID mode that cold boots and restores share, with a cold boot's renderer and strict parser of their tokens |
 | [`nvx::guest_restore`](#nvxguest_restore) | The guest-restore record of a layered root, which a clone reads in place of its captured configuration, and what Ready reports |
-| [`nvx::contract`](#nvxcontract) | The versions of the contracts that the crate speaks with OpenVMM and the guest, and the compatibility of releases with them |
 | [`nvx::net`](#nvxnet) | Network primitives that do not depend on the host: CIDR networks, hostnames, guest addresses, and gateways |
 | [`nvx::uuid`](#nvxuuid) | UUIDs, such as those of GPT disks and filesystems, in their canonical text and in GPT's layout |
 | [`nvx::Error`](#nvxerror) | `Error`, `ErrorKind`, and `Result`: the crate's error, which only `nvx` makes, and whose kinds callers act on |
@@ -333,15 +330,6 @@ or `CLONE_LEN` bytes, 1 or 17, that `GuestRestoreReady::encode` writes and
 
 The records and both encodings need no features.
 
-### `nvx::contract`
-
-The OpenVMM microVM ABI, boot contract, broker protocol, and control-contract
-revision that the crate speaks, and when each changes, and
-`manifest_is_compatible` for a release's `SOURCE-MANIFEST.json`; and the
-versions of OpenVMM's snapshot format, saved device state, time ABI, and restore
-packet, which a snapshot's key holds and which an ignored test of
-`tests/openvmm_vectors.rs` checks against the OpenVMM submodule.
-
 ### `nvx::net`
 
 `Cidr`: IPv4 and IPv6 networks and their subtraction, which `Cidr::parse` reads
@@ -391,10 +379,13 @@ attaches its own.
 
 `RuntimeIdentity` labels the three files with the `ArtifactIdentity` tokens that
 their install or staging metadata gives, such as `sha256:` and a digest, which
-NVX compares and never computes, and adds the versions of the contracts that the
-crate speaks; `differences` names the `IdentityPart`s in which two identities
-differ. A caller saves it with each VM, in a `SavedVm`, which `vm::verify`
-checks against the current one.
+NVX compares and never computes, and adds the `CompatibilityIdentity` that the
+caller names for its contracts with its guests, such as the versions of the
+boot tokens and the protocol that they read, which NVX compares and never
+interprets: a caller changes it whenever it can no longer drive the guests that
+it started under the earlier one. `differences` names the `IdentityPart`s in
+which two identities differ. A caller saves it with each VM, in a `SavedVm`,
+which `vm::verify` checks against the current one.
 
 `Hypervisor` names the hypervisor that OpenVMM runs a VM on: KVM or MSHV on
 Linux, or WHP on Windows. It displays, parses, and serializes as its OpenVMM
@@ -522,7 +513,9 @@ presence and address, never a network policy: each restore supplies its own.
 capture, strictly: of the snapshot ID that OpenVMM's SaveVM records, which a
 microVM capture leaves zero, it checks only the length. `SnapshotKey` is the
 compatibility key that NVX derives from a capture's context and manifest: the
-runtime and contract versions through which it is restored, the backend, CPU
+runtime identity, and the versions of OpenVMM's snapshot format, of the schema
+of its saved device state, which only OpenVMM interprets, of its time ABI, and
+of the guest-restore record, through which it is restored, the backend, CPU
 profile and effective CPUID, topology, rates, resources, kernel command line,
 disks, and devices of its machine, with the NIC's addresses and the identity of
 the complete deny-all policy under which the capture attached it. A key has one
@@ -1612,12 +1605,14 @@ keeps running: it never ends OpenVMM otherwise, except one of another
 
 `start` records the runtime identity of its artifacts in the runtime record:
 the SHA-256 digests of OpenVMM, the kernel, and the Alpine initramfs, and the
-boot contract, control contract, and control session versions of this build,
-which `nvx::contract` defines with the changes that make each one change. The
-boot contract covers the microVM ABI, the kernel command-line tokens that
-configure the guest, such as those of `nvx::protocol::root`, and the root that
-the guest assembles from them. The digests come from the root's install
-metadata, and no artifact is hashed:
+compatibility identity of the CLI's bundled guests,
+`nvx-boot-v5+nvxs-v1+nvx-microvm-v2-control-v2`, which joins this build's boot
+contract, control session, and control contract versions. The CLI defines them,
+privately, with the changes that make each one change. The boot contract covers
+the microVM ABI, the kernel command-line tokens that configure the guest, such
+as those of `nvx::protocol::root`, and the root that the guest assembles from
+them. The digests come from the root's install metadata, and no artifact is
+hashed:
 
 - A release lists them in its `SHA256SUMS`, under `bin/openvmm[.exe]`,
   `guest/vmlinux`, and `guest/initramfs.cpio.gz`.
@@ -2230,8 +2225,8 @@ cargo test --locked --all-features --lib -- \
 `tests/openvmm_vectors.rs` is an ignored test that compares the copies of
 OpenVMM's vectors in `tests/vectors/openvmm/` with the files of the OpenVMM
 submodule, which the `nvx-rs` job cannot check out, the versions of
-OpenVMM's snapshot format, saved-state schema, time ABI, and restore packets in
-`nvx::contract` with the submodule's, and the bound of a guest-restore record,
+OpenVMM's snapshot format, time ABI, and restore packet that the crate's
+sources define with the submodule's, and the bound of a guest-restore record,
 `nvx::guest_restore::MAX_RECORD_BYTES`, with that of the restore packet's. The
 NVX CLI jobs run it once they check the submodule out, and so does an OpenVMM
 pin promotion; see

@@ -48,6 +48,14 @@ changed item to its replacement, or to what its caller now does.
   `resolve_guest_path` is gone, and `ExportPlan` holds paths only.
 - **NVXC is private.** NVX's own protocol is private to `nvx`, and speaks only
   version 2: version 1 and its `FEATURES` request are gone.
+- **No public contracts.** `nvx::contract` is gone: NVX's CLI owns the versions
+  of its boot contract, control session and control contract, and each helper
+  declares the versions of OpenVMM's formats that it reads. `RuntimeIdentity`
+  holds a `CompatibilityIdentity`, which its caller names, in place of its
+  `boot_contract`, `control_contract` and `control_session`, so `new` takes it
+  as a fourth argument, and `IdentityPart::Compatibility` replaces
+  `BootContract`, `ControlContract` and `ControlSession`.
+  `RuntimeIdentity::check` and `SnapshotKey::speaks_current_contracts` are gone.
 - **Errors.** `ErrorCode` and `Error`'s constructors are private: callers tell
   errors apart by their `ErrorKind`, which gains `RuntimeMismatch` and
   `StillRunning`.

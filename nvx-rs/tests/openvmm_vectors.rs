@@ -1,7 +1,7 @@
 //! Compares what `nvx-rs` copies from OpenVMM with the OpenVMM submodule: the control-session
 //! protocol vectors and the excerpts of OpenVMM's sources in `tests/vectors/openvmm/`, the
-//! versions of OpenVMM's contracts in `nvx::contract`, and the bound of a guest-restore record,
-//! which a restore packet carries.
+//! versions of OpenVMM's contracts that the sources of `nvx-rs` define, and the bound of a
+//! guest-restore record, which a restore packet carries.
 //!
 //! The protocol's tests read the copies, and the unit tests of `nvx::host::config` compile the
 //! excerpts of OpenVMM's allowlist, because the `nvx-rs` job cannot check out the submodule, whose
@@ -11,7 +11,7 @@
 use std::fs;
 use std::path::Path;
 
-use nvx::{contract, guest_restore};
+use nvx::guest_restore;
 
 /// The files of OpenVMM's `vm/devices/virtio/virtio_console/test_data/` that
 /// `tests/vectors/openvmm/` copies.
@@ -33,29 +33,50 @@ const EXCERPTS: [(&str, &str); 2] = [
     ),
 ];
 
-/// The versions of `nvx::contract` that are OpenVMM's: for each, the file of the OpenVMM
-/// submodule that defines OpenVMM's, the start of the line that defines it, up to its value, and
-/// the version of `nvx::contract`.
-const VERSIONS: [(&str, &str, u64); 4] = [
+/// The definition of a version: the file that defines it, and the start of the line that defines
+/// it, up to its value.
+type Definition = (&'static str, &'static str);
+
+/// The versions of OpenVMM's contracts that `nvx-rs` reads or speaks, which its library and CLI
+/// keep private: for each, OpenVMM's definition, in the OpenVMM submodule, and the definitions in
+/// the sources of `nvx-rs` that must give it the same value. OpenVMM checks the schema of a
+/// snapshot's saved device state itself, so `nvx-rs` defines no version of it.
+const VERSIONS: [(Definition, &[Definition]); 3] = [
     (
-        "openvmm/openvmm_helpers/src/snapshot.rs",
-        "pub const MANIFEST_VERSION: u32 = ",
-        contract::SNAPSHOT_FORMAT_VERSION,
+        (
+            "openvmm/openvmm_helpers/src/snapshot.rs",
+            "pub const MANIFEST_VERSION: u32 = ",
+        ),
+        &[(
+            "src/host/snapshot/manifest.rs",
+            "pub(super) const FORMAT_VERSION: u64 = ",
+        )],
     ),
     (
-        "openvmm/openvmm_helpers/src/snapshot/format.rs",
-        "pub const SAVED_STATE_SCHEMA_VERSION: u32 = ",
-        contract::DEVICE_STATE_SCHEMA_VERSION,
+        (
+            "vmm_core/virt/src/time_abi/mod.rs",
+            "pub const TIME_ABI_VERSION: u32 = ",
+        ),
+        &[
+            (
+                "src/host/snapshot/manifest.rs",
+                "pub(crate) const TIME_ABI_VERSION: u32 = ",
+            ),
+            ("src/guest/time/checks.rs", "const TIME_ABI_VERSION: u32 = "),
+        ],
     ),
     (
-        "vmm_core/virt/src/time_abi/mod.rs",
-        "pub const TIME_ABI_VERSION: u32 = ",
-        contract::TIME_ABI_VERSION,
-    ),
-    (
-        "vm/devices/chipset_resources/src/microvm_time.rs",
-        "pub const RESTORE_PACKET_VERSION: u8 = ",
-        contract::RESTORE_PACKET_VERSION,
+        (
+            "vm/devices/chipset_resources/src/microvm_time.rs",
+            "pub const RESTORE_PACKET_VERSION: u8 = ",
+        ),
+        &[
+            (
+                "src/host/artifacts/compatibility.rs",
+                "pub(crate) const RESTORE_PACKET_VERSION: u64 = ",
+            ),
+            ("src/guest/time/decoders.rs", "const PACKET_VERSION: u8 = "),
+        ],
     ),
 ];
 
@@ -127,26 +148,38 @@ fn the_excerpts_are_lines_of_the_submodules_files() {
 #[test]
 #[ignore = "needs the OpenVMM submodule, which the NVX CLI jobs check out"]
 fn the_contract_versions_are_the_submodules() {
-    let openvmm = Path::new(env!("CARGO_MANIFEST_DIR")).join("../openvmm");
-    for (file, definition, version) in VERSIONS {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let openvmm = crate_root.join("../openvmm");
+    for ((file, definition), copies) in VERSIONS {
         let source = fs::read_to_string(openvmm.join(file)).unwrap_or_else(|error| {
             panic!(
                 "cannot read {file} of the OpenVMM submodule, which `scripts/nvx.py init` checks \
                  out: {error}"
             )
         });
-        let values: Vec<&str> = source
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix(definition)?.strip_suffix(';'))
-            .collect();
-        assert_eq!(
-            values,
-            [version.to_string()],
-            "{file} of the OpenVMM submodule does not define `{definition}{version};` once: \
-             change the version of nvx::contract that names {file} with OpenVMM's, and the code \
-             that reads what it versions"
-        );
+        let [version] = values(&source, definition)[..] else {
+            panic!("{file} of the OpenVMM submodule does not define `{definition}` once");
+        };
+        for (copy, copy_definition) in copies {
+            let source = fs::read_to_string(crate_root.join(copy)).unwrap();
+            assert_eq!(
+                values(&source, copy_definition),
+                [version],
+                "{copy} does not define `{copy_definition}{version};` once, as {file} of the \
+                 OpenVMM submodule defines its version: change it with OpenVMM's, and the code \
+                 that reads what it versions"
+            );
+        }
     }
+}
+
+/// Returns the values of the lines of `source` that, once trimmed, start with `definition` and end
+/// with `;`.
+fn values<'a>(source: &'a str, definition: &str) -> Vec<&'a str> {
+    source
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(definition)?.strip_suffix(';'))
+        .collect()
 }
 
 #[test]
