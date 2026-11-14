@@ -203,7 +203,8 @@ so the resolver reads the main worktree's. `nvx_hosts.py show PROFILE` resolves 
 `exec` and `run` run a command or a script in the host's checkout over SSH, and `probe`,
 `worktree`, and `benchmark` run this checkout's `host_probe.py`, `host_worktree.py`, and
 `benchmark_series.py` against that checkout, which can predate them. None of them prompts for
-secrets.
+secrets. `run` turns the CRLF line endings of a script for a Linux host into LF and leaves those of
+a script for a Windows host as they are, whatever the workstation's operating system.
 
 ## Development
 
