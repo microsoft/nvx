@@ -171,8 +171,8 @@ impl<S: Read + Write> GuestConnection<S> {
         Ok(())
     }
 
-    /// Returns `bytes` consumed DATA bytes to the receive window, from 1 through the session's
-    /// [`outstanding`](GuestSession::outstanding) bytes.
+    /// Returns `bytes` consumed DATA bytes to the receive window, from 1 through the bytes that the
+    /// session received and has not credited.
     pub(crate) fn credit(&mut self, bytes: u32) -> Result<(), GuestConnectionError> {
         self.send_record(|session, output| session.credit(bytes, output))
     }

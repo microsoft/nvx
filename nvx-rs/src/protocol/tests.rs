@@ -166,22 +166,13 @@ fn records_match_their_vectors() {
             "{name}"
         );
         assert_eq!(record.payload(), payload, "{name}");
-        // So do the codecs of the payloads of acknowledgements and credits.
-        match record_type {
-            RecordType::Ack => {
-                let window = decode_ack_payload(&payload).unwrap();
-                assert_eq!(encode_ack_payload(window).unwrap()[..], payload, "{name}");
-            }
-            RecordType::Credit => {
-                let credit = decode_credit_payload(&payload).unwrap();
-                assert_eq!(
-                    encode_credit_payload(credit).unwrap()[..],
-                    payload,
-                    "{name}"
-                );
-            }
-            _ => {}
-        }
+        // The session reads the window of an acknowledgement and the bytes of a credit.
+        let value = match record_type {
+            RecordType::Ack => record.window().unwrap(),
+            RecordType::Credit => record.credit().unwrap(),
+            _ => continue,
+        };
+        assert_eq!(value.to_le_bytes()[..], payload, "{name}");
     }
     // The DATA record carries the PING frame.
     let data = vector(NVXC_V1, "RECORD", "DATA_PING");
@@ -895,42 +886,6 @@ fn exec_limits_support_linux_paths() {
     // A working directory may be as long as one argument, and Linux cannot
     // enter a directory longer than that argument limit.
     const { assert!(MAX_CWD_BYTES < MAX_ARGUMENT_BYTES) };
-}
-
-#[test]
-fn guest_window_payloads_enforce_broker_bounds() {
-    for window in [
-        OUTER_MIN_RECEIVE_WINDOW,
-        OUTER_RECEIVE_WINDOW,
-        OUTER_MAX_RECEIVE_WINDOW,
-    ] {
-        let payload = encode_ack_payload(window).unwrap();
-        assert_eq!(decode_ack_payload(&payload).unwrap(), window);
-    }
-    for window in [
-        0,
-        OUTER_MIN_RECEIVE_WINDOW - 1,
-        OUTER_MAX_RECEIVE_WINDOW + 1,
-    ] {
-        assert!(encode_ack_payload(window).is_err(), "{window}");
-        assert!(
-            decode_ack_payload(&window.to_le_bytes()).is_err(),
-            "{window}"
-        );
-    }
-    for credit in [1, 24, OUTER_MAX_RECEIVE_WINDOW] {
-        let payload = encode_credit_payload(credit).unwrap();
-        assert_eq!(decode_credit_payload(&payload).unwrap(), credit);
-    }
-    for credit in [0, OUTER_MAX_RECEIVE_WINDOW + 1] {
-        assert!(encode_credit_payload(credit).is_err(), "{credit}");
-        assert!(
-            decode_credit_payload(&credit.to_le_bytes()).is_err(),
-            "{credit}"
-        );
-    }
-    assert!(decode_ack_payload(&[0; 3]).is_err());
-    assert!(decode_credit_payload(&[0; 5]).is_err());
 }
 
 #[test]

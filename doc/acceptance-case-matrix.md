@@ -506,7 +506,7 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/host/template/store.rs - host::template::store::Store (line 473)` | retired | The template store leaves (SL6.2a, #1121) |
 | `nvx-rs/src/host/transport.rs - host::transport (line 22)` | rewritten | #1574 hides `host::transport`: `nvx-rs/src/host/vm/connection.rs - host::vm::connection::Connection (line 46)` connects to a VM that the program launched and speaks over its `Connection` |
 | `nvx-rs/src/lib.rs - (line 58)` | rewritten | Its `Instance` and sandbox store leave (SL6.1, #1121): `nvx-rs/src/lib.rs - (line 67)` compiles a cold boot and a stop through `host::vm` |
-| `nvx-rs/src/protocol/nvxs/mod.rs - protocol::nvxs (line 68)` | kept |  |
+| `nvx-rs/src/protocol/nvxs/mod.rs - protocol::nvxs (line 68)` | rewritten | #1574 hides `protocol::nvxs`: `nvx-rs/src/protocol/nvxs/tests/host.rs::the_host_attaches_after_waiting_and_exchanges_data` attaches the host at Ready, and `nvx-rs/src/protocol/nvxs/tests/host.rs::the_host_sends_a_long_message_in_records_of_the_largest_payload` splits a message across DATA records |
 | `nvx-rs/src/host/snapshot/capture.rs - host::snapshot::capture::finish_capture (line 48)` | kept |  |
 | `nvx-rs/src/host/store/mod.rs - host::store (line 104)` | retired | The sandbox store leaves (SL6.1, #1121) |
 | `nvx-rs/README.md`, its Example: an instance through `LaunchSpec` and the sandbox store | rewritten | Nothing compiles it. `nvx-rs/examples/host-workflows.rs` compiles the documented host workflows, and the library's guide (SL6.10a) replaces the example. SL6.1 (#1121) made it the cold boot that `nvx-rs/src/lib.rs - (line 64)` compiles |

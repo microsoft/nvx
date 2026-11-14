@@ -865,7 +865,7 @@ operating system hands it, as described above.
 Each also runs the ignored `nvx-rs` test `tests/openvmm_vectors.rs`, which
 compares the submodule's control-session protocol vectors, and the lines of its
 platform allowlist of kernel command-line tokens, with the copies that the
-tests of `nvx::protocol::nvxs` and `nvx::host::config` read in the `nvx-rs`
+tests of the crate's NVXS session and of `nvx::host::config` read in the `nvx-rs`
 job, which cannot check out
 OpenVMM, the versions of OpenVMM's snapshot format, time ABI, and restore
 packet with those that the sources of `nvx-rs` define, and the bound of

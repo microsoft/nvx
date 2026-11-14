@@ -8,7 +8,8 @@ use crate::guest::sys::{self, Errno, FileDescriptor};
 use crate::host::platform::Transport;
 use crate::protocol::{
     self, OUTER_ACK, OUTER_CREDIT, OUTER_DATA, OUTER_GUEST_ATTACH, OUTER_HEADER_LEN,
-    OUTER_HOST_ATTACH, OUTER_READY, OUTER_RESET, OuterHeader,
+    OUTER_HOST_ATTACH, OUTER_MAX_RECEIVE_WINDOW, OUTER_MIN_RECEIVE_WINDOW, OUTER_READY,
+    OUTER_RESET, OuterHeader,
 };
 
 use super::seam::tests::{TestSystem, start_as_privileged};
@@ -114,8 +115,7 @@ impl BrokerCore {
             self.guest_receive_sequence = self.guest_receive_sequence.wrapping_add(1);
             match header.record_type {
                 OUTER_CREDIT => {
-                    let credit =
-                        protocol::decode_credit_payload(&payload).map_err(|_| protocol_error())?;
+                    let credit = window_count(&payload, 1)?;
                     let available = self
                         .receive_credit
                         .checked_add(credit)
@@ -163,8 +163,7 @@ impl BrokerCore {
                 && header.epoch == self.epoch
                 && header.sequence == 0
             {
-                let window =
-                    protocol::decode_ack_payload(&payload).map_err(|_| protocol_error())?;
+                let window = window_count(&payload, OUTER_MIN_RECEIVE_WINDOW)?;
                 self.receive_window = window;
                 self.receive_credit = window;
                 self.guest_receive_sequence = 1;
@@ -265,6 +264,16 @@ impl BrokerHandle {
 
 fn protocol_error() -> io::Error {
     io::Error::from(Errno::EPROTO)
+}
+
+/// Reads the four-byte count of an ACK's window or a CREDIT's bytes, which the broker bounds by
+/// `minimum` through `OUTER_MAX_RECEIVE_WINDOW`.
+fn window_count(payload: &[u8], minimum: u32) -> io::Result<u32> {
+    let count = u32::from_le_bytes(payload.try_into().map_err(|_| protocol_error())?);
+    (minimum..=OUTER_MAX_RECEIVE_WINDOW)
+        .contains(&count)
+        .then_some(count)
+        .ok_or_else(protocol_error)
 }
 
 fn timeout_error(error: io::Error) -> io::Error {
