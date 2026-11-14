@@ -11,10 +11,11 @@
   summary, and commit mapping below cover positions 001-124, the PR09 fixups at positions
   234-236, the PR13 fixup at position 240, the PR18 fixup at position 241, the PR20 fixup at
   position 242, the PR19 fixup at position 243, and the PR10 fixups at positions 271 and 273.
-- NVX's pinned OpenVMM revision: `b723cbed35f253a7b97e9e7f32f3d7d3502cae36`, position 281, the
-  head of microsoft/openvmm#5101, whose one commit follows position 280, `c5509cde2`, the head of
-  `feature/microvm/dev`, to which microsoft/openvmm#5100 added position 280 after position 279,
-  `5d2a71027`, microsoft/openvmm#5097 added position 279 after position 278, `157866605`,
+- NVX's pinned OpenVMM revision: `30b7554069182a5262099f902c4a203d54c8bb88`, position 282, the
+  head of microsoft/openvmm#5102, whose one commit follows position 281, `b723cbed3`, the head of
+  `feature/microvm/dev`, to which microsoft/openvmm#5101 added position 281 after position 280,
+  `c5509cde2`, microsoft/openvmm#5100 added position 280 after position 279, `5d2a71027`,
+  microsoft/openvmm#5097 added position 279 after position 278, `157866605`,
   microsoft/openvmm#5095 added positions 277-278 after position 276, `7b205c0a0`,
   microsoft/openvmm#5094 added position 276 after position 275, `efe6bc267`,
   microsoft/openvmm#5087 added position 275 after position 274, `e2458a6ce`,
@@ -27,9 +28,9 @@
   changes upstream had landed, and added eight fixups at its tip, positions 262-269. A commit's
   position is its v6.0 position less the number of dropped commits before it: v6.0 positions
   003-007 are positions 002-006, 010-013 are 007-010, 015-050 are 011-046, and 054-268 are
-  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 157
+  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 158
   commits past the mapped tip on the same first-parent chain. Positions 125-233, 237-239,
-  244-270, 272, and 274-281 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
+  244-270, 272, and 274-282 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
   position 240 is a PR13 fixup, position 241 is a PR18 fixup, position 242 is a PR20 fixup,
   position 243 is a PR19 fixup, and positions 271 and 273 are PR10 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1172,7 +1173,8 @@ The physical branch is one first-parent chain:
   -> restored EFER's SVME checked against the guest's CPUID [279]
   -> SYSENTER MSRs held in the fields that name them [280]
   -> restored XSAVE component checked against the caps [281]
-  -> b723cbed3 (NVX pin)
+  -> restored APIC timer's delivery mode checked to be Fixed [282]
+  -> 30b755406 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1223,7 +1225,7 @@ restore and time advance set in the RTC's clock source, which overflowed near ei
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 124 without merges. Of the 157 later commits,
+The NVX pin extends the chain past position 124 without merges. Of the 158 later commits,
 positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position 241 is a PR18 fixup,
 position 242 is a PR20 fixup, position 243 is a PR19 fixup, positions 262-269 are the fixups of
 the v6.1 rebase, positions 271 and 273 are PR10 fixups, and the others are not yet classified or
@@ -1233,7 +1235,7 @@ and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that s
 commits. Positions 180-184 followed the v3.0 reorganization, positions 185-198 are the ABI restart
 of the v4.0 reorganization, positions 199-204 followed it, positions 205-211 followed the v5.0
 reorganization, positions 212 and 213 followed the v5.1 rebase, positions 214-261 followed the
-v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-281
+v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-282
 followed the v6.1 rebase, so they combine none, apart from position 213, which combines v5.1
 positions 222 and 223. Each commit's position is its v6.0 position less seven, the number of
 commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position
@@ -1403,10 +1405,11 @@ through 147 and one less from v5.1 position 149 on; see
 | 279 | `5d2a71027` | - | - | - | - | - | virt_kvm: refuse a restored EFER.SVME for a guest whose CPUID has no SVM (microsoft/openvmm#5097) |
 | 280 | `c5509cde2` | - | - | - | - | - | virt: hold each SYSENTER MSR in the field that names it (microsoft/openvmm#5100) |
 | 281 | `b723cbed3` | - | - | - | - | - | virt_kvm: refuse a restored XSAVE component outside the caps (microsoft/openvmm#5101) |
+| 282 | `30b755406` | - | - | - | - | - | virt_kvm: reject a restored APIC timer whose delivery mode is not Fixed (microsoft/openvmm#5102) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
-that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-281, for later
+that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-282, for later
 commits. They name the positions that the commits have now, but the v6.1 rebase did not check the
 earlier ones again on `7d90c4104`.
 
@@ -2277,6 +2280,20 @@ ignored test that restores each component into a real VP. It changes files that 
 278, and 279 also change, none of them in `set_xsave`, and nothing that a mapped PR adds.
 Replaying it on upstream main applies without conflicts, and `virt_kvm` type-checks there with its
 tests, which pass, the ignored one included, so it can go upstream on its own.
+
+Position 282 makes the KVM backend's `set_apic` reject a LAPIC page whose unmasked timer entry has
+a delivery mode other than Fixed, which KVM would fire as an INIT, a startup IPI, an NMI, or an SMI,
+or as a wake of a halted VP, none of which the saved state holds, in code that upstream main has.
+It adds `check_restorable_apic_timer`, which `set_apic` calls first, a unit test, a KVM-only
+contract test of `virt_backend_tests` in a module of its own, and a paragraph and a sentence of the
+Guide. It changes files that PR01's position 002, PR05's positions 007 and 008, PR10's positions
+022, 271, and 273, and positions 140, 248, 250, 251, 253, 279, and 281 also change, and adds to no
+line that a mapped PR adds. Replaying it on upstream main conflicts in `vp_state.rs`, at the start
+of `set_apic`, whose timer reset position 253 adds, and from the end of the `AccessVpState`
+implementation on, which positions 250, 251, 253, and 279 add; in the Guide's KVM timekeeping
+section, which positions 250 and 253 extend; in the Guide's page of the contract tests, whose
+`kvm_only` sentence is position 279's; and in the contract tests' `main.rs`, beside the attribute
+that position 008 drops. So it follows positions 008, 250, 251, 253, and 279 upstream.
 
 ## PR summary
 
