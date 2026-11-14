@@ -8,7 +8,8 @@
 //! The caller keeps its executions still. After answering the capture request, its transport
 //! sends nothing until this call returns. After [`Captured::Continued`] or a failure with
 //! [`Disposition::Resumed`], it reports on the same session. After [`Captured::Restored`], it
-//! takes RESET and calls `GuestConnection::acknowledge(window)` before the guest restore.
+//! takes the session's reset, an `Event::Reset`, and acknowledges it with
+//! `Connection::acknowledge` before the guest restore.
 //!
 //! On a restore, the existing repair runs before this call returns: it checks the restore and
 //! its seed, activates its processor target and then its memory target, reseeds the kernel's

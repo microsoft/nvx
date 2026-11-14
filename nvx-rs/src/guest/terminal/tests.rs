@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 
+use nix::poll::{PollFd, PollFlags};
 use nix::pty::{self, PtyMaster};
 
 use super::*;
@@ -69,4 +70,30 @@ fn a_terminal_in_raw_mode_passes_every_byte_as_it_is() {
     let mut sent = vec![0; backward.len()];
     master.read_exact(&mut sent).unwrap();
     assert_eq!(sent, backward);
+}
+
+/// Returns whether polling the descriptor that `terminal` lends reports it readable within
+/// `timeout_ms` milliseconds.
+fn polls_readable(terminal: &Terminal, timeout_ms: u16) -> bool {
+    let mut descriptors = [PollFd::new(terminal.as_fd(), PollFlags::POLLIN)];
+    nix::poll::poll(&mut descriptors, timeout_ms).unwrap() > 0
+        && descriptors[0]
+            .revents()
+            .is_some_and(|events| events.contains(PollFlags::POLLIN))
+}
+
+#[test]
+fn a_terminal_polls_readable_while_it_holds_bytes_to_read() {
+    let (master, path) = locked_pseudo_terminal();
+    pty::unlockpt(&master).unwrap();
+    let master = FileDescriptor::from_owned(OwnedFd::from(master));
+    let mut terminal = Terminal::open(&path).unwrap();
+    terminal.configure_raw().unwrap();
+    assert!(!polls_readable(&terminal, 0));
+    master.write_all(b"x").unwrap();
+    assert!(polls_readable(&terminal, 10_000));
+    let mut byte = [0];
+    terminal.read_exact(&mut byte).unwrap();
+    assert_eq!(&byte, b"x");
+    assert!(!polls_readable(&terminal, 0));
 }

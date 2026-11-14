@@ -63,9 +63,9 @@ pub use self::apply::{MACHINE_ID_FILE, RESOLVER_FILE};
 ///
 /// /// What the agent's control session received from the host, in the agent's own framing.
 /// enum Received {
-///     /// The session's NVXS RESET.
+///     /// The session's reset.
 ///     Reset,
-///     /// Bytes that complete no message, such as a part of a DATA record's payload.
+///     /// Bytes that complete no message, such as the start of one.
 ///     Partial,
 ///     /// The host's Activate, with its record's bytes.
 ///     Activate(Vec<u8>),
@@ -452,12 +452,13 @@ impl fmt::Debug for GuestRestore {
 /// request of the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GuestRestoreInput<'a> {
-    /// The NVXS session's reset, a [`GuestEvent::Reset`](crate::protocol::nvxs::GuestEvent::Reset),
-    /// which starts a new epoch: the one that the restore queued for the session that the guest
-    /// attached before the capture, or a later one, such as once the host's attachment ended.
+    /// The control session's reset, an [`Event::Reset`](crate::guest::control::Event::Reset),
+    /// which starts the session over: the one that the restore queued for the session that the
+    /// guest attached before the capture, or a later one, such as once the host's attachment
+    /// ended.
     Reset,
-    /// Flow control, which carries no request: bytes of a message that they do not complete, such
-    /// as a DATA record's payload, or a credit that the adapter returned to its receive window.
+    /// Flow control, which carries no request: bytes of a message that they do not complete, or
+    /// a credit that the adapter returned to its transport's receive window, if it has one.
     Flow,
     /// The host's Activate, with the bytes of its guest-restore record, the canonical encoding of
     /// an [`GuestRestoreRecord`].
@@ -476,9 +477,10 @@ pub enum GuestRestoreInput<'a> {
 /// What the adapter does next, which [`GuestRestore::input`] returns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GuestRestoreAction {
-    /// The guest restore took the session's reset: the adapter acknowledges it with its receive
-    /// window, unless its transport acknowledged it already, and abandons the work of the earlier
-    /// epoch.
+    /// The guest restore took the session's reset: the adapter abandons the work of the earlier
+    /// session, then acknowledges the reset, as
+    /// [`Connection::acknowledge`](crate::guest::control::Connection::acknowledge) does, unless
+    /// its transport acknowledged it already.
     Acknowledge,
     /// The guest restore took the input, which needs nothing more of the adapter.
     Continue,
@@ -505,8 +507,8 @@ pub enum GuestRestoreAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum GuestRestoreState {
-    /// The transport bootstrap: the clone awaits the reset of its NVXS session that the restore
-    /// queued, which the adapter acknowledges.
+    /// The transport bootstrap: the clone awaits the reset of its control session that the
+    /// restore queued, which the adapter acknowledges.
     Bootstrap,
     /// The restricted session: it takes only flow control and one Activate.
     Restricted,

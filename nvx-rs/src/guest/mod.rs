@@ -1,8 +1,9 @@
 //! The guest's side of the library, for Linux guests: the calls on which any guest init or agent
 //! builds, in its own process.
 //!
-//! - [`nvxs`]: the guest's I/O driver of the NVXS session, and [`terminal`]: the terminal on
-//!   which an agent serves that session, such as the VM's control console.
+//! - [`control`]: the guest's end of the VM's control connection, which carries the bytes of a
+//!   program's connection to the VM, and [`terminal`]: the terminal on which an agent serves that
+//!   connection, such as the VM's control console.
 //! - [`mappings`]: host mappings, and the account of a host's mapping table, which hands each of
 //!   the table's parts to the caller's own mapper.
 //! - [`reseed`]: a restore's fresh entropy, which starts with the VM's new [`GenerationId`], and
@@ -65,6 +66,7 @@ pub use generation::GenerationId;
 
 #[doc(hidden)]
 pub mod console_pending;
+pub mod control;
 #[cfg(target_arch = "x86_64")]
 #[doc(hidden)]
 pub mod device_io;
@@ -84,7 +86,7 @@ pub mod mappings;
 #[cfg(target_arch = "x86_64")]
 #[doc(hidden)]
 pub mod mmio_write;
-pub mod nvxs;
+pub(crate) mod nvxs;
 pub mod reseed;
 #[cfg(target_arch = "x86_64")]
 pub mod restore;

@@ -23,6 +23,25 @@ method nvx::guest::GenerationId::from_bytes
 method nvx::guest::GenerationId::to_bytes
 mod nvx::guest::console_pending (hidden)
 fn nvx::guest::console_pending::main (hidden)
+mod nvx::guest::control
+struct nvx::guest::control::Connection
+method nvx::guest::control::Connection::acknowledge
+method nvx::guest::control::Connection::attach
+method nvx::guest::control::Connection::get_ref
+method nvx::guest::control::Connection::receive
+method nvx::guest::control::Connection::send
+struct nvx::guest::control::ConnectionError
+method nvx::guest::control::ConnectionError::kind
+enum nvx::guest::control::ConnectionErrorKind
+variant nvx::guest::control::ConnectionErrorKind::Closed
+variant nvx::guest::control::ConnectionErrorKind::Ended
+variant nvx::guest::control::ConnectionErrorKind::Io
+variant nvx::guest::control::ConnectionErrorKind::OutOfOrder
+variant nvx::guest::control::ConnectionErrorKind::Protocol
+enum nvx::guest::control::Event
+variant nvx::guest::control::Event::Data
+field nvx::guest::control::Event::Data::0
+variant nvx::guest::control::Event::Reset
 mod nvx::guest::device_io (hidden)
 fn nvx::guest::device_io::main (hidden)
 mod nvx::guest::exit (hidden)
@@ -86,24 +105,6 @@ field nvx::guest::mappings::TableError::Refused::refusal
 method nvx::guest::mappings::TableError::entry
 mod nvx::guest::mmio_write (hidden)
 fn nvx::guest::mmio_write::main (hidden)
-mod nvx::guest::nvxs
-struct nvx::guest::nvxs::GuestConnection
-method nvx::guest::nvxs::GuestConnection::acknowledge
-method nvx::guest::nvxs::GuestConnection::attach
-method nvx::guest::nvxs::GuestConnection::credit
-method nvx::guest::nvxs::GuestConnection::get_ref
-method nvx::guest::nvxs::GuestConnection::into_inner
-method nvx::guest::nvxs::GuestConnection::new
-method nvx::guest::nvxs::GuestConnection::next_event
-method nvx::guest::nvxs::GuestConnection::send
-method nvx::guest::nvxs::GuestConnection::session
-enum nvx::guest::nvxs::GuestConnectionError
-variant nvx::guest::nvxs::GuestConnectionError::Closed
-variant nvx::guest::nvxs::GuestConnectionError::Ended
-variant nvx::guest::nvxs::GuestConnectionError::Io
-field nvx::guest::nvxs::GuestConnectionError::Io::0
-variant nvx::guest::nvxs::GuestConnectionError::Protocol
-field nvx::guest::nvxs::GuestConnectionError::Protocol::0
 mod nvx::guest::reseed
 enum nvx::guest::reseed::ReseedError
 variant nvx::guest::reseed::ReseedError::OpenRandom

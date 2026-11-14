@@ -25,6 +25,7 @@
 
 use std::ffi::CStr;
 use std::io;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::thread;
@@ -42,8 +43,9 @@ const OPEN_DELAY: Duration = Duration::from_millis(50);
 ///
 /// It reads and writes as a byte stream through [`io::Read`] and [`io::Write`], with one system
 /// call for each call and no buffer, so that a caller that serves a session on it, such as a
-/// [`GuestConnection`](super::nvxs::GuestConnection), sees each byte as soon as it arrives.
-/// Dropping it closes the terminal.
+/// [`Connection`](super::control::Connection), sees each byte as soon as it arrives. It lends its
+/// descriptor through [`AsFd`] to poll for readiness, such as through
+/// [`Connection::get_ref`](super::control::Connection::get_ref). Dropping it closes the terminal.
 #[derive(Debug)]
 pub struct Terminal(FileDescriptor);
 
@@ -83,6 +85,12 @@ impl Terminal {
     /// Returns the terminal's descriptor, on which NVX's managed agent serves its session.
     pub(crate) fn into_descriptor(self) -> FileDescriptor {
         self.0
+    }
+}
+
+impl AsFd for Terminal {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.borrowed()
     }
 }
 
