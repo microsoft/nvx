@@ -304,8 +304,7 @@ pub(super) fn log_job_processes(id: (u64, u128)) -> io::Result<Option<u32>> {
     let LogJobName::Users(job) = log_job_named(&log_job_name(id))? else {
         return Ok(None);
     };
-    // SAFETY: the structure is plain data for which all-zero bytes are valid.
-    let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { mem::zeroed() };
+    let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
     // SAFETY: the handle is a job object open for querying, and the information has the size
     // given.
     if unsafe {

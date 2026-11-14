@@ -330,9 +330,10 @@ fn overlapped(
     deadline: Option<Instant>,
     start: impl FnOnce(HANDLE, *mut OVERLAPPED) -> i32,
 ) -> io::Result<usize> {
-    // SAFETY: OVERLAPPED is plain data for which all-zero bytes are a valid initial state.
-    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-    overlapped.hEvent = event;
+    let mut overlapped = OVERLAPPED {
+        hEvent: event,
+        ..OVERLAPPED::default()
+    };
     if start(pipe, &raw mut overlapped) == 0 {
         let error = last_error();
         if error != ERROR_IO_PENDING {

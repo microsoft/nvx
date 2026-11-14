@@ -335,8 +335,7 @@ fn spawn_listed(
     } else {
         Some(AttributeList::new(lists)?)
     };
-    // SAFETY: STARTUPINFOEXW is a plain C structure for which all-zero is a valid value.
-    let mut startup: STARTUPINFOEXW = unsafe { mem::zeroed() };
+    let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
     let mut flags = flags | CREATE_UNICODE_ENVIRONMENT;
     if let Some(attributes) = &mut attributes {
@@ -383,8 +382,7 @@ fn spawn_listed(
         startup.lpAttributeList = attributes.as_ptr();
         flags |= EXTENDED_STARTUPINFO_PRESENT;
     }
-    // SAFETY: PROCESS_INFORMATION is a plain C structure for which all-zero is a valid value.
-    let mut information: PROCESS_INFORMATION = unsafe { mem::zeroed() };
+    let mut information = PROCESS_INFORMATION::default();
     #[cfg(test)]
     super::tests::in_window();
     // SAFETY: every string is NUL-terminated, the command line is mutable, and the startup
