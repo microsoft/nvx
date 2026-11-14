@@ -2,15 +2,14 @@
 //! broker: messages that span records, partial reads of every size, the guest's receive window,
 //! a reset in the middle of a message, and a refused host.
 
-use nvx::protocol::nvxs::{
+use super::broker::{Broker, CAPABILITY, IDENTITY};
+use super::{Reassembler, framed, messages};
+use crate::protocol::nvxs::{
     ErrorCode, GuestEvent, GuestSession, GuestState, HostEvent, HostSession, HostState,
 };
-use nvx::protocol::{
+use crate::protocol::{
     CAPABILITY_LEN, OUTER_HEADER_LEN, OUTER_MAX_PAYLOAD, OUTER_MIN_RECEIVE_WINDOW,
 };
-
-use crate::broker::{Broker, CAPABILITY, IDENTITY};
-use crate::{Reassembler, framed, messages};
 
 /// The broker, both roles, and the applications above them.
 struct Ends {

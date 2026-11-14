@@ -8,18 +8,17 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use nvx::host::transport::{HostConnection, HostConnectionError, Transport};
-use nvx::protocol::nvxs::{
+use crate::host::transport::{HostConnection, HostConnectionError, Transport};
+use crate::protocol::nvxs::tests::broker::{Broker, CAPABILITY, IDENTITY};
+use crate::protocol::nvxs::tests::{Reassembler, framed, messages, record};
+use crate::protocol::nvxs::{
     ErrorCode, GuestEvent, GuestSession, HostState, Identity, RecordParser, RecordType,
     SessionError,
 };
-use nvx::protocol::{
+use crate::protocol::{
     CAPABILITY_LEN, OUTER_HEADER_LEN, OUTER_MAX_PAYLOAD, OUTER_MIN_RECEIVE_WINDOW,
 };
-use nvx::{Error, ErrorKind};
-
-use crate::broker::{Broker, CAPABILITY, IDENTITY, record};
-use crate::{Reassembler, framed, messages};
+use crate::{Error, ErrorKind};
 
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(10)

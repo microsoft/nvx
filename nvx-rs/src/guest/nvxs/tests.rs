@@ -5,16 +5,15 @@ use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Mutex};
 
-use nvx::guest::nvxs::{GuestConnection, GuestConnectionError};
-use nvx::protocol::nvxs::{
+use super::{GuestConnection, GuestConnectionError};
+use crate::protocol::nvxs::tests::broker::{Broker, CAPABILITY, IDENTITY};
+use crate::protocol::nvxs::tests::{Reassembler, framed, messages, record};
+use crate::protocol::nvxs::{
     GuestEvent, GuestState, HostEvent, HostSession, RecordParser, RecordType, SessionError,
 };
-use nvx::protocol::{
+use crate::protocol::{
     OUTER_HEADER_LEN, OUTER_MAX_PAYLOAD, OUTER_MIN_RECEIVE_WINDOW, OUTER_RECEIVE_WINDOW,
 };
-
-use crate::broker::{Broker, CAPABILITY, IDENTITY, record};
-use crate::{Reassembler, framed, messages};
 
 /// State of a [`Stream`], which the test shares with the connection.
 #[derive(Default)]

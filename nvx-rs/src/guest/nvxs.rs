@@ -246,3 +246,6 @@ impl<S: Read + Write> GuestConnection<S> {
         error
     }
 }
+
+#[cfg(test)]
+mod tests;
