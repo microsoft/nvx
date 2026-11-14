@@ -11,21 +11,22 @@
   summary, and commit mapping below cover positions 001-124, the PR09 fixups at positions
   234-236, the PR13 fixup at position 240, the PR18 fixup at position 241, the PR20 fixup at
   position 242, the PR19 fixup at position 243, and the PR10 fixups at positions 271 and 273.
-- NVX's pinned OpenVMM revision: `e2458a6cef958c3ac2d710e13a6ba490a9911b88`, position 274, the
-  head of microsoft/openvmm#5084, whose one commit follows position 273, `09cd771c0`, the head of
-  `feature/microvm/dev`, to which microsoft/openvmm#5083 added position 273 after position 272,
-  `fb2c8b75c`, and microsoft/openvmm#5077 added positions 270-272 after position 269,
-  `73cf40357`, the head of `feature/microvm/release/v6.1`. The v6.1 rebase replayed the 268
+- NVX's pinned OpenVMM revision: `efe6bc26734fff155cfd3a5dcbacc5ed285cd0ae`, position 275, the
+  head of microsoft/openvmm#5087, whose one commit follows position 274, `e2458a6ce`, the head of
+  `feature/microvm/dev`, to which microsoft/openvmm#5084 added position 274 after position 273,
+  `09cd771c0`, microsoft/openvmm#5083 added position 273 after position 272, `fb2c8b75c`, and
+  microsoft/openvmm#5077 added positions 270-272 after position 269, `73cf40357`, the head of
+  `feature/microvm/release/v6.1`. The v6.1 rebase replayed the 268
   commits of `feature/microvm/dev` at NVX's pin before it, `5ca20ee08`, whose first 220 commits
   are those of `feature/microvm/release/v6.0`, onto the new fork base without the seven whose
   changes upstream had landed, and added eight fixups at its tip, positions 262-269. A commit's
   position is its v6.0 position less the number of dropped commits before it: v6.0 positions
   003-007 are positions 002-006, 010-013 are 007-010, 015-050 are 011-046, and 054-268 are
-  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 150
+  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 151
   commits past the mapped tip on the same first-parent chain. Positions 125-233, 237-239,
-  244-270, 272, and 274 are not yet assigned to PRs, positions 234-236 are PR09 fixups, position
-  240 is a PR13 fixup, position 241 is a PR18 fixup, position 242 is a PR20 fixup, position 243
-  is a PR19 fixup, and positions 271 and 273 are PR10 fixups; see
+  244-270, 272, and 274-275 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
+  position 240 is a PR13 fixup, position 241 is a PR18 fixup, position 242 is a PR20 fixup,
+  position 243 is a PR19 fixup, and positions 271 and 273 are PR10 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `7d90c41044077e31ca060df9206532f579f24716` (2026-11-13), the fork base itself;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1159,7 +1160,8 @@ The physical branch is one first-parent chain:
   -> microVM RPC options parsed on a big stack [272]
   -> PR10 fixup [273]
   -> IOAPIC MMIO reads wider than 4 bytes zero-extended [274]
-  -> e2458a6ce (NVX pin)
+  -> restored IOAPIC id checked against the ID register's 4 bits [275]
+  -> efe6bc267 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1210,7 +1212,7 @@ restore and time advance set in the RTC's clock source, which overflowed near ei
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 124 without merges. Of the 150 later commits,
+The NVX pin extends the chain past position 124 without merges. Of the 151 later commits,
 positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position 241 is a PR18 fixup,
 position 242 is a PR20 fixup, position 243 is a PR19 fixup, positions 262-269 are the fixups of
 the v6.1 rebase, positions 271 and 273 are PR10 fixups, and the others are not yet classified or
@@ -1220,7 +1222,7 @@ and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that s
 commits. Positions 180-184 followed the v3.0 reorganization, positions 185-198 are the ABI restart
 of the v4.0 reorganization, positions 199-204 followed it, positions 205-211 followed the v5.0
 reorganization, positions 212 and 213 followed the v5.1 rebase, positions 214-261 followed the
-v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-274
+v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-275
 followed the v6.1 rebase, so they combine none, apart from position 213, which combines v5.1
 positions 222 and 223. Each commit's position is its v6.0 position less seven, the number of
 commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position
@@ -1383,10 +1385,11 @@ through 147 and one less from v5.1 position 149 on; see
 | 272 | `fb2c8b75c` | - | - | - | - | - | openvmm_entry: parse the microVM options on a big stack on every host (microsoft/openvmm#5077) |
 | 273 | `09cd771c0` | - | - | - | - | - | chipset: bound the RTC's restored and advanced time (microsoft/openvmm#5083); fold into 016, after 271 |
 | 274 | `e2458a6ce` | - | - | - | - | - | chipset: zero-extend wide IOAPIC MMIO reads (microsoft/openvmm#5084) |
+| 275 | `efe6bc267` | - | - | - | - | - | chipset: reject a restored IOAPIC id that the ID register cannot hold (microsoft/openvmm#5087) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
-that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-274, for later
+that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-275, for later
 commits. They name the positions that the commits have now, but the v6.1 rebase did not check the
 earlier ones again on `7d90c4104`.
 
@@ -2162,6 +2165,16 @@ the device's tests, in a file whose saved-state tests position 183 also changes,
 that it changes. It changes nothing that a mapped PR adds. Replaying it on upstream main applies
 without conflicts, and `chipset` type-checks there with its tests, which pass, so it can go
 upstream on its own.
+
+Position 275 makes the IOAPIC's `restore` reject a saved id that the ID register's 4-bit id field
+cannot hold, which made the next read of that register panic the vCPU thread, and so OpenVMM,
+because the field's setter panics on a larger value, in code that upstream main has: it adds
+`IoApicId::MAX_ID` and a check that runs before `restore` changes the device. It adds tests to
+the device's saved-state tests, which position 183 also extends, without changing any of its
+code, and changes nothing that a mapped PR adds. Replaying it on upstream main conflicts only in
+those tests, at their imports and at their end, where position 183 adds an import and a test, and
+its first test reads the routes that position 183 makes the tests' routing record, so its tests
+follow position 183 upstream, and its change to the device itself applies without conflicts.
 
 ## PR summary
 
