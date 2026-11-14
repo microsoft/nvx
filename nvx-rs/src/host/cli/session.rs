@@ -295,7 +295,7 @@ impl Session {
     /// Observes the same verified transport through attachment and later control operations.
     pub(crate) fn reattach(saved: &SavedVm, runtime: &Runtime, timeout: f64) -> Result<Self> {
         let probe = Arc::new(Probe::default());
-        let attached = vm::reattach_with_transport(
+        let connection = vm::attach_with_transport(
             saved,
             runtime,
             Deadline::after(timeout).instant(),
@@ -334,7 +334,7 @@ impl Session {
             }
         })?;
         Ok(Self {
-            inner: Some(attached.connection.into()),
+            inner: Some(connection.into()),
             probe,
         })
     }

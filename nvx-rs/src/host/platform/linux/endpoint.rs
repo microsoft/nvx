@@ -357,6 +357,7 @@ fn map_timeout(error: io::Error) -> io::Error {
 }
 
 impl Transport for UnixTransport {
+    #[cfg(feature = "cli")]
     fn try_clone_handle(&self) -> io::Result<Option<TransportHandle>> {
         self.stream.try_clone().map(|stream| Some(stream.into()))
     }
@@ -392,7 +393,7 @@ impl Transport for UnixTransport {
         Ok(())
     }
 
-    fn unread(&self) -> io::Result<Option<usize>> {
-        sys::unread_by_peer(&self.stream).map(Some)
+    fn as_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        Some(std::os::fd::AsFd::as_fd(&self.stream))
     }
 }

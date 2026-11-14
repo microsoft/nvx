@@ -11,11 +11,11 @@ use crate::guest_restore::{
     Configuration, ExpectedResources, Export, ExportKind, GuestRestoreReady, GuestRestoreRecord,
     Image, Network, Publication, RestoreSection, TransactionId, Upper,
 };
-use crate::host::nvxs::HostConnection;
 use crate::host::runtime::Hypervisor;
 use crate::host::session;
 use crate::host::snapshot::SnapshotManifest;
 use crate::host::spawn::{Launched, VmmCommand, spawn_vm_with_mode};
+use crate::host::transport::HostConnection;
 use crate::protocol::root::OverlayMode;
 use crate::protocol::v2::{self, Frame, Outcome};
 use crate::protocol::view::{MachineIdMode, View};
@@ -347,7 +347,10 @@ fn run() -> Result<(), AnyError> {
     let mut connection = HostConnection::attach(transport, &capability, by)?;
     println!(
         "RESTORED_HOST_SESSION_EPOCH={}",
-        connection.identity().epoch
+        connection
+            .session
+            .identity()
+            .map_or(0, |identity| identity.epoch)
     );
     let attached = Instant::now();
     let expected_status;

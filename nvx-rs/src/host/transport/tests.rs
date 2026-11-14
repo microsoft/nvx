@@ -1,7 +1,6 @@
 #![cfg(any(target_os = "linux", windows))]
 
 use std::error::Error as _;
-#[cfg(feature = "cli")]
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 
@@ -11,11 +10,11 @@ use crate::host::process::BootId;
 mod connection;
 
 #[cfg(target_os = "linux")]
-type Server = std::os::unix::net::UnixListener;
+pub(crate) type Server = std::os::unix::net::UnixListener;
 #[cfg(windows)]
-type Server = std::fs::File;
+pub(crate) type Server = std::fs::File;
 
-fn reference(pid: u32) -> ProcessRef {
+pub(crate) fn reference(pid: u32) -> ProcessRef {
     ProcessRef {
         pid,
         start_time: platform::process_start_time(pid).unwrap().unwrap(),
@@ -23,7 +22,7 @@ fn reference(pid: u32) -> ProcessRef {
     }
 }
 
-fn endpoint(directory: &tempfile::TempDir) -> String {
+pub(crate) fn endpoint(directory: &tempfile::TempDir) -> String {
     #[cfg(target_os = "linux")]
     {
         directory
@@ -44,7 +43,7 @@ fn endpoint(directory: &tempfile::TempDir) -> String {
     }
 }
 
-fn bind(endpoint: &str) -> Server {
+pub(crate) fn bind(endpoint: &str) -> Server {
     #[cfg(target_os = "linux")]
     {
         Server::bind(endpoint).unwrap()
@@ -55,15 +54,22 @@ fn bind(endpoint: &str) -> Server {
     }
 }
 
-#[cfg(feature = "cli")]
-fn exchange(server: Server) {
+/// Accepts the one client of `server`, and returns the stream to it.
+pub(crate) fn accept(server: Server) -> impl Read + Write {
     #[cfg(target_os = "linux")]
-    let mut peer = server.accept().unwrap().0;
+    {
+        server.accept().unwrap().0
+    }
     #[cfg(windows)]
-    let mut peer = {
+    {
         platform::tests::accept_control(&server);
         server
-    };
+    }
+}
+
+#[cfg(feature = "cli")]
+fn exchange(server: Server) {
+    let mut peer = accept(server);
     let mut request = [0; 7];
     peer.read_exact(&mut request).unwrap();
     assert_eq!(&request, b"request");
@@ -119,11 +125,8 @@ fn verified_and_legacy_connections_wait_for_the_owned_endpoint_and_keep_native_i
         } else {
             connect_verified(&endpoint, &process, deadline).unwrap()
         };
+        #[cfg(feature = "cli")]
         assert!(transport.try_clone_handle().unwrap().is_some());
-        #[cfg(target_os = "linux")]
-        assert_eq!(transport.unread().unwrap(), Some(0));
-        #[cfg(windows)]
-        assert_eq!(transport.unread().unwrap(), None);
         transport
             .write_all(b"request", Some(Duration::from_secs(10)))
             .unwrap();
@@ -138,8 +141,6 @@ fn verified_and_legacy_connections_wait_for_the_owned_endpoint_and_keep_native_i
         }
         assert_eq!(&response, b"response");
         server.join().unwrap();
-        #[cfg(target_os = "linux")]
-        assert_eq!(transport.unread().unwrap(), Some(0));
     }
 }
 

@@ -4,7 +4,8 @@
 OpenVMM runs: a VM's configuration and its launch, in a directory that its
 caller owns, for a cold boot, a capture, or a restore; one snapshot type, with
 a strict directory format; a restore that its caller drives with its own I/O;
-verified connections to a running VM, and reattachment to one; the contracts
+verified connections to a running VM, and attachment to one from the values
+that its caller saved; the contracts
 that a guest's space reads; and the guest's side of a capture and of a
 guest restore. It keeps no durable state, runs no workload, and builds
 no guest space: each of its users keeps its own state and policy. The
@@ -107,14 +108,12 @@ changes only when the module's purpose does.
 | [`nvx::uuid`](#nvxuuid) | UUIDs, such as those of GPT disks and filesystems, in their canonical text and in GPT's layout |
 | [`nvx::Error`](#nvxerror) | `Error`, `ErrorKind`, and `Result`: the crate's error, which only `nvx` makes, and whose kinds callers act on |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
-| [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold, capture and restore preparation, owned launch commands, verified detached launch, confirmed stop, and caller-saved reattachment |
+| [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold, capture and restore preparation, owned launch commands, verified detached launch, confirmed stop, and control and console connections |
 | [`nvx::host::snapshot`](#nvxhostsnapshot) | Strict private snapshots, post-exit capture finishing, verified metadata, VM compatibility, captured NIC addresses, and time eligibility |
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: pure configuration, cold-boot kernel/OpenVMM arguments, portable length checks, and capture identity |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
 | [`nvx::host::filesystem`](#nvxhostfilesystem) | The plan of the host paths that a VM exports to the guest through OpenVMM's virtio-fs device, its check and lowering, and the guest-path convention |
-| [`nvx::host::nvxs`](#nvxhostnvxs) | Compatibility paths for the host NVXS connection and its retained cause details |
-| [`nvx::host::transport`](#nvxhosttransport) | A verified VM endpoint connection and the blocking host NVXS driver, with the existing timed transport |
 | [`nvx::host::process`](#nvxhostprocess) | Verified references to OpenVMM processes, through which callers wait for them and end them |
 | [`nvx::host::report`](#nvxhostreport) | OpenVMM's outcome report |
 | [`nvx::guest`](#nvxguest) | The guest's side of the library, for any guest init or agent, and NVX's guest programs; see [Guest binaries](#guest-binaries) |
@@ -357,11 +356,12 @@ dependencies, so the host and the guest share it.
 `Error`, `ErrorKind`, and `Result`. The crate's fallible calls return an
 `nvx::Error`, which only `nvx` makes: a message that callers can show as is, an
 `ErrorKind`, by which callers tell errors apart, and an optional cause, such as
-the `HostConnectionError` of a session. Its codes and constructors are private
-to the crate. The calls whose failures carry facts of their own return errors
-of their own instead: the restore's `RestoreError`, the guest's, such as its
-`CaptureFailure` and `RepairError`, the codecs', such as `ProtocolError` and
-`GuestRestoreError`, and the I/O errors of most calls of `nvx::host::process`.
+the `ConnectionError` of a VM's control connection. Its codes and constructors
+are private to the crate. The calls whose failures carry facts of their own
+return errors of their own instead: a control connection's `ConnectionError`,
+the restore's `RestoreError`, the guest's, such as its `CaptureFailure` and
+`RepairError`, the codecs', such as `ProtocolError` and `GuestRestoreError`, and
+the I/O errors of most calls of `nvx::host::process`.
 See [Errors](#errors) for what each kind means.
 
 ### `nvx::host::runtime`
@@ -470,10 +470,53 @@ control endpoint, the capability's bytes, the process's `ProcessRef`, and the
 `RuntimeIdentity`. The library neither serializes nor locates them. `verify`
 compares the runtime identity, and fails with `ErrorKind::RuntimeMismatch`,
 which names the parts that differ, before it opens the process, then returns
-the held `Process`. `reattach` also connects through
-`transport::connect_verified` and attaches with the saved capability, and
-returns a `Reattached` with the process and the connection. Their failures
-neither signal the VM nor change the saved values.
+the held `Process`. `attach` also connects to the VM, as `Launched::connect`
+does, with the saved capability, and returns an `Attached` with the process
+and the connection. Their failures neither signal the VM nor change the saved
+values, and a failure of `attach` to connect keeps its `ConnectionError` as its
+source.
+
+`Launched::connect` and `attach` open a `Connection`: the authenticated control
+connection to the VM's guest, an ordered stream of bytes in each direction, over
+which the caller speaks a protocol of its own. Connecting holds the VM's
+process, retries while its control endpoint is unavailable until the caller's
+deadline, and checks the endpoint's server before it presents the capability:
+Unix peer credentials and the original socket peer's live pidfd on Linux, and
+the named-pipe server process ID on Windows. Linux requires `SO_PEERPIDFD`
+(Linux 6.5 or a backport) and refuses unverifiable peers rather than falling
+back to a numeric PID. An indeterminate process check remains an error, never
+exit proof. The connection then opens once the VM accepted the capability and
+the guest acknowledged the session, which tells nothing of whether the guest's
+application is ready.
+
+`Connection::send` and `Connection::receive` take deadlines, or none. Where a
+receive splits the stream is unspecified, so the caller's protocol frames its
+own messages. A receive that times out keeps what arrived, and a send whose
+deadline passed before it began sends nothing: the connection stays usable
+after either. A receive whose deadline has passed returns only what has
+arrived, without waiting. Any other failure, including a send that times out
+while it writes, ends the connection. A connection is `Send`, so a thread of
+the caller's may block on it, and on Linux it is `AsFd`, for a caller with an
+event loop of its own: its descriptor polls readable once bytes arrive that the
+connection has not read. The connection reads ahead, so from the moment it
+opens it may hold bytes that the descriptor no longer shows: before each wait
+for the descriptor, the first included, the caller receives with a passed
+deadline until that times out. NVX depends on no asynchronous runtime.
+
+A `ConnectionError` has a `ConnectionErrorKind`: `TimedOut`, `Exited` before
+the connection opened, a `PeerMismatch` of the endpoint's server, a capability
+that the VM `Rejected`, a session that the VM `Closed` or `Reset`, a `Protocol`
+that the VM broke, another `Io` failure, or a connection that an earlier
+failure `Ended`. `ConnectionError::is_lost` tells a closed or reset session,
+after which the caller may connect again. It keeps its description and its
+original cause, and converts into the crate's `Error`, whose source it then is:
+`TimedOut`, `Exited`, and `Io` keep their kinds, and any other failure is
+`Protocol`.
+
+`Console::connect`, or `Launched::console`, connects to the boot console of a
+VM launched with a `ConsoleAttachment::Listener`, with the same check of the
+endpoint's server, and reads the console's output and writes its input with
+deadlines. A VM without a console listener is `Unsupported`.
 
 On Linux, the spawned child gets the caller's umask with the owner's bits
 cleared, and the caller's own umask is unchanged. On Windows, it starts without
@@ -666,46 +709,6 @@ denied, allowed, and write paths, and the owner into a plan, with the pins of
 the objects that a workload could move, and the checks of those pins and of the
 plan's host objects before each start are the CLI's path rules, private to the
 crate (feature `cli`). The CLI records the pins beside the plan.
-
-### `nvx::host::nvxs`
-
-Compatibility paths for `HostConnection` and its retained cause details, now
-owned by [`nvx::host::transport`](#nvxhosttransport).
-
-### `nvx::host::transport`
-
-`connect_verified` opens and holds the recorded process by its boot, ID and
-start time, retries while the endpoint is unavailable until the caller's
-deadline, and checks its server before authentication: Unix peer credentials
-and the original socket peer's live pidfd on Linux, and the named-pipe server
-process ID on Windows. Linux requires `SO_PEERPIDFD` (Linux 6.5 or a backport)
-and refuses unverifiable peers rather than falling back to a numeric PID.
-An indeterminate process check remains an error, never exit proof.
-
-`HostConnection`: the host's role of the NVXS session over a platform transport,
-on which NVX's own control session and other host applications run their
-protocols.
-It attaches with the launch capability, waiting while the broker asks it to,
-sends application bytes in as many DATA records as they take, and returns each
-DATA payload from the guest, with deadlines; a receive that times out keeps a
-partial record.
-
-These APIs return the crate's `Result`: a deadline is `TimedOut`, an exited
-recorded VM `Exited`, a refused, closed, reset or broken session `Protocol`,
-and another transport failure `Io`. Original I/O and protocol causes are
-retained directly; attachment refusal, reset and ended-connection details
-remain available as sources.
-
-A `Transport`, the timed byte stream of a verified connection, whose
-definitions the crate's private platform layer holds, reads and writes with
-deadlines. `Transport::unread` tells what the endpoint has not read yet of what
-it wrote where the platform tells, on Linux, from what `SIOCOUTQ` reports of
-its Unix socket; on Windows, and for a transport that does not tell, it is
-`None`. On Linux and Windows, `Transport::try_clone_handle` returns an owned
-native handle to the same connection, not a reconnect, for an adapter that
-registers it with an I/O runtime of its own once it dropped the blocking
-transport; a transport without one returns `Ok(None)`, and NVX depends on no
-asynchronous runtime.
 
 ### `nvx::host::process`
 
@@ -1735,7 +1738,7 @@ intended changes of behavior.
   treats as one that has not appeared yet, and, on Windows, starts OpenVMM
   without a console window, as `nvx::host::vm::spawn` starts it.
 - `start` stops waiting for the control endpoint once the OpenVMM that it
-  launched exits, as `nvx::host::transport::connect_verified` does, and fails
+  launched exits, as `nvx::host::vm::Launched::connect` does, and fails
   at once with `exited`, where `nvx.py` waited until `--timeout` passed before
   it reported the exit.
 - `exec` and `sandbox run` stream the workload's standard input, output and
@@ -2252,7 +2255,7 @@ python3 ../scripts/nvx.py test-microvm --backend kvm --scenario managed-lifecycl
 
 `tests/vm_lifecycle.rs` is an ignored test of a cold VM's lifecycle through
 the public API alone, on a real hypervisor: `host::vm::create`, `spawn`,
-`reattach` from the values that the caller saved, once the launch is gone,
+`attach` from the values that the caller saved, once the launch is gone,
 and `stop`, through a request to the guest, nvx-init, over the Ubuntu layer
 and a scratch upper. `nvx.py test-microvm --scenario vm-lifecycle` gives it
 its inputs, runs it with Cargo, and checks the outcome report that it leaves:

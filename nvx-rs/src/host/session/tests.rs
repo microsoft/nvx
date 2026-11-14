@@ -266,7 +266,7 @@ fn attach_waits_for_the_guest_then_authenticates() {
         instance_id: INSTANCE,
         epoch: 4,
     };
-    assert_eq!(session.connection.identity(), identity);
+    assert_eq!(session.connection.session.identity(), Some(identity));
     let records = host_records(&wire.output());
     assert_eq!(records, [(OUTER_HOST_ATTACH, 0, vec![1; CAPABILITY_LEN])]);
 }
@@ -421,6 +421,27 @@ fn exec_streams_events_in_order() {
             },
         ]
     );
+}
+
+#[test]
+fn output_that_keeps_arriving_does_not_outlast_the_deadline() {
+    // The commands that stream an execution end it when a receive times out past their
+    // deadline, so a receive whose deadline has passed times out while the guest's output is
+    // waiting, and leaves that output to the next receive.
+    let (mut session, wire) = ready();
+    session
+        .start_exec(9, &workload(&["/usr/bin/yes"]), deadline())
+        .unwrap();
+    let output = |sequence| outer(OUTER_DATA, 1, sequence, &encode(9, Frame::Stdout(b"y\n")));
+    let line = ExecEvent::Stdout(b"y\n".to_vec());
+    wire.supply(&[output(1)]);
+    assert_eq!(session.next_exec_event(9, Some(deadline())).unwrap(), line);
+    wire.supply(&[output(2), output(3)]);
+    let passed = session.next_exec_event(9, Some(Instant::now()));
+    assert!(matches!(passed, Err(SessionError::TimedOut)), "{passed:?}");
+    for _ in 2..=3 {
+        assert_eq!(session.next_exec_event(9, Some(deadline())).unwrap(), line);
+    }
 }
 
 #[cfg(any(
