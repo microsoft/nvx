@@ -11,10 +11,11 @@
   summary, and commit mapping below cover positions 001-124, the PR09 fixups at positions
   234-236, the PR13 fixup at position 240, the PR18 fixup at position 241, the PR20 fixup at
   position 242, the PR19 fixup at position 243, and the PR10 fixups at positions 271 and 273.
-- NVX's pinned OpenVMM revision: `c565311a3c5b623e6757906fc101a45526df3c04`, position 290, the
-  head of microsoft/openvmm#5109, whose one commit follows position 289, `0b386e1e1`, the head of
-  `feature/microvm/dev`, to which microsoft/openvmm#5108 added position 289 after position 288,
-  `9d64daad3`, microsoft/openvmm#5107 added positions 287-288 after position 286, `cc1690222`,
+- NVX's pinned OpenVMM revision: `1fe818eda282f7698fd64f85af9a9e657b3864e7`, position 294, the
+  head of microsoft/openvmm#5110, whose four commits follow position 290, `c565311a3`, the head
+  of `feature/microvm/dev`, to which microsoft/openvmm#5109 added position 290 after position
+  289, `0b386e1e1`, microsoft/openvmm#5108 added position 289 after position 288, `9d64daad3`,
+  microsoft/openvmm#5107 added positions 287-288 after position 286, `cc1690222`,
   microsoft/openvmm#5106 added position 286 after position 285, `f39508197`,
   microsoft/openvmm#5105 added positions 283-285 after position 282, `30b755406`,
   microsoft/openvmm#5102 added position 282 after position 281, `b723cbed3`,
@@ -33,9 +34,9 @@
   changes upstream had landed, and added eight fixups at its tip, positions 262-269. A commit's
   position is its v6.0 position less the number of dropped commits before it: v6.0 positions
   003-007 are positions 002-006, 010-013 are 007-010, 015-050 are 011-046, and 054-268 are
-  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 166
+  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 170
   commits past the mapped tip on the same first-parent chain. Positions 125-233, 237-239,
-  244-270, 272, and 274-290 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
+  244-270, 272, and 274-294 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
   position 240 is a PR13 fixup, position 241 is a PR18 fixup, position 242 is a PR20 fixup,
   position 243 is a PR19 fixup, and positions 271 and 273 are PR10 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1187,7 +1188,11 @@ The physical branch is one first-parent chain:
   -> capture refused while a VP holds an INIT or a SIPI [288]
   -> ICMP echo replies relayed to the guest on Linux hosts [289]
   -> queued connections to a published port accepted without another wakeup [290]
-  -> c565311a3 (NVX pin)
+  -> guest's IA32_SPEC_CTRL saved and restored [291]
+  -> contract test that a restore keeps the guest's SPEC_CTRL controls [292]
+  -> WHP hardware test of the SPEC_CTRL state under a host profile [293]
+  -> SPEC_CTRL profile test built only for x86-64 guests [294]
+  -> 1fe818eda (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1238,7 +1243,7 @@ restore and time advance set in the RTC's clock source, which overflowed near ei
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 124 without merges. Of the 166 later commits,
+The NVX pin extends the chain past position 124 without merges. Of the 170 later commits,
 positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position 241 is a PR18 fixup,
 position 242 is a PR20 fixup, position 243 is a PR19 fixup, positions 262-269 are the fixups of
 the v6.1 rebase, positions 271 and 273 are PR10 fixups, and the others are not yet classified or
@@ -1248,7 +1253,7 @@ and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that s
 commits. Positions 180-184 followed the v3.0 reorganization, positions 185-198 are the ABI restart
 of the v4.0 reorganization, positions 199-204 followed it, positions 205-211 followed the v5.0
 reorganization, positions 212 and 213 followed the v5.1 rebase, positions 214-261 followed the
-v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-290
+v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-294
 followed the v6.1 rebase, so they combine none, apart from position 213, which combines v5.1
 positions 222 and 223. Each commit's position is its v6.0 position less seven, the number of
 commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position
@@ -1427,10 +1432,14 @@ through 147 and one less from v5.1 position 149 on; see
 | 288 | `9d64daad3` | - | - | - | - | - | vmm_core: refuse a snapshot capture while a VP holds an INIT or a SIPI (microsoft/openvmm#5107) |
 | 289 | `0b386e1e1` | - | - | - | - | - | consomme: relay ICMP echo replies on Linux hosts (microsoft/openvmm#5108) |
 | 290 | `c565311a3` | - | - | - | - | - | consomme: poll a TCP listener again after it accepts a connection (microsoft/openvmm#5109) |
+| 291 | `2628446f3` | - | - | - | - | - | virt: save and restore a guest's IA32_SPEC_CTRL (microsoft/openvmm#5110) |
+| 292 | `c8c41cb55` | - | - | - | - | - | vmm_tests: check that a restore keeps a guest's SPEC_CTRL controls (microsoft/openvmm#5110) |
+| 293 | `e4bfa4f87` | - | - | - | - | - | virt_whp: check that WHP takes SPEC_CTRL under a host profile (microsoft/openvmm#5110) |
+| 294 | `1fe818eda` | - | - | - | - | - | virt: build the SPEC_CTRL profile test only for x86-64 guests (microsoft/openvmm#5110) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
-that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-290, for later
+that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-294, for later
 commits. They name the positions that the commits have now, but the v6.1 rebase did not check the
 earlier ones again on `7d90c4104`.
 
@@ -2455,6 +2464,75 @@ and positions 161 and 167 also change, and changes no line that a mapped PR adds
 upstream main conflicts in `tcp.rs` and `tcp/tests.rs`: its wake sits beside the admission check
 that position 167 adds, and its test follows the tests of position 167. So it follows position 167
 upstream, and cannot go on its own.
+
+Position 291 makes a snapshot keep the guest's `IA32_SPEC_CTRL`, which no element of a VP's saved
+state held, so that a restore into new vCPUs left it at 0 on KVM, MSHV, and WHP alike, and a guest
+that had enabled IBRS, STIBP, or SSBD ran with the controls clear until it next wrote the MSR, in
+code that upstream main has and no commit of the chain changes. `SpecCtrl`, field 16 of
+`VpSavedState`, is a new optional element, and `X86PartitionCapabilities::spec_ctrl`, which
+`from_cpuid` derives from the guest's CPUID with `enumerates_spec_ctrl`, gates it: Intel's IBRS,
+STIBP, or SSBD in `CPUID.(7,0):EDX`, or AMD's in `CPUID.0x80000008:EBX`, which of the pinned CPU
+profiles only the Skylake-SP and Alder Lake ones enumerate. KVM, MSHV, and WHP read and write the
+MSR as a register. KVM clears the capability on a host whose `KVM_GET_MSR_INDEX_LIST` lacks the MSR
+and for an SNP guest, MSHV for an isolated one, and OpenHCL does not save the MSR. The element needs
+no version, as upstream's microsoft/openvmm#4704 needed none for the TSC-deadline element: a saved
+state without it restores the reset value, as before, and an earlier build ignores it. The commit
+adds six unit tests, a comment above `state_trait!` that lists what the next optional element
+needs, a section of the Guide's snapshot format, and a paragraph of its snapshots page. It changes
+files that PR05's positions 007-009, PR10's positions 019-024 and 271, PR11's positions 027 and 028,
+PR12's positions 031-033, PR13's positions 039, 044, and 240, PR17's positions 069, 070, and 072,
+PR18's positions 075, 077, and 081-083, PR19's positions 085 and 086, PR20's positions 087, 088,
+090, and 092, PR21's position 099, PR23's positions 106 and 111, PR24's position 116, and 75
+positions that no PR has yet also change, and it changes no line that a mapped PR adds: the one
+block of `from_cpuid` that it re-indents is upstream's. Replaying it on upstream main conflicts in
+six of its files, where it adds beside what upstream main lacks: in the Guide's snapshots page, its
+paragraph sits in the time and CPU compatibility section that position 140 writes, between lines of
+positions 152 and 186; in `state.rs` and `x86/vp.rs`, its tests sit at the end of the test modules
+that positions 283 and 132 add, after the tests of position 280 in the latter; in `virt_kvm`'s
+x86-64 module, `msr_index_list` sits beside `cpu_surface` of position 137, and its gate in `build`
+sits in the capabilities code that positions 022, 126, and 137 write; in `virt_mshv`'s x86-64
+module, `spec_ctrl: false` sits beside the TSC-deadline comment of position 020; and `finalize.rs`
+does not exist there, since position 008 adds it, and positions 020 and 023 extend it where the
+gate sits. So it follows positions 008, 020, 022, 023, 126, 132, 137, 140, 152, 186, 280, and 283
+upstream.
+
+Position 292 adds a contract test, `speculation::spec_ctrl_survives_a_save_and_restore`, in a module
+of its own of `virt_backend_tests`, with the capability probe `Capabilities::spec_ctrl` that its
+`requires` clause reads. The test enables the controls that the guest-free fixture's VP takes,
+saves the VP through the mesh encoding, clears the MSR, restores the saved state, and requires the
+controls back, so it fails for a saved state that leaves the element out. It reports ignored where
+the fixture's default CPUID enumerates no control, as on the Azure virtual machines of NVX's hosts,
+whose hypervisors hide the MSR, and the Guide's description of the suite says so. It changes files
+that PR01's position 002, PR05's positions 007 and 008, and 5 positions that no PR has yet also
+change, and adds to no line that a mapped PR adds. Replaying it on upstream main applies without
+conflicts, but it uses the capability and the accessors that position 291 adds, so it follows
+position 291 upstream, and cannot go on its own.
+
+Position 293 adds a WHP hardware test, ignored without WHP like its neighbors, to the `whp_tests`
+module of the time ABI backend:
+`host_profile_partition_takes_spec_ctrl_where_it_enumerates_a_control`. It builds the time ABI
+partition of the host's CPU profile, requires WHP's CPUID to enumerate the SPEC_CTRL controls as
+the profile does, and, where it does, reads 0 from the VP's `WHvX64RegisterSpecCtrl` and sets and
+reads back IBRS, STIBP, SSBD, all three, and 0; elsewhere it skips. WHP's default partition does
+not present the controls, so only a partition with a profile's processor features holds the MSR. It
+changes `time_abi.rs`, which 17 positions that no PR has yet also change, and adds to no line that
+a mapped PR adds. Replaying it on upstream main conflicts in `time_abi.rs`, which does not exist
+there, since position 133 adds it, with the `Partition` fixture and `partition` helper of positions
+135, 137, 141, and 142 that its test uses; the test also calls `enumerates_spec_ctrl` of position
+291. So it follows positions 133, 135, 137, 141, 142, and 291 upstream.
+
+Position 294 builds position 291's unit test of the SPEC_CTRL capability of every pinned profile,
+`spec_ctrl_state_is_present_for_the_profiles_that_enumerate_a_control`, only for x86-64 guests. The
+test calls `time_abi::cpuid` and `time_abi::identity`, which exist only for x86-64 guests, but
+`virt`'s `x86` module and its tests build for every guest architecture, so the unit tests of `virt`
+did not compile, and clippy failed, for the aarch64 guests, such as `aarch64-apple-darwin` and
+`aarch64-unknown-linux-gnu`, which the CI jobs and the development hosts of x86-64 do not build. It
+adds a `cfg` attribute and a comment to that test, in `vmm_core/virt/src/x86/mod.rs`, which PR10's
+positions 019 and 021 and positions 140, 277, 278, and 291 also change, and it adds to no line that
+a mapped PR adds. It fixes position 291, which no PR maps yet, so it is not a fixup of a PR yet, and
+folds into position 291 when that position goes into one. Replaying it on upstream main conflicts
+in that file, since the test that it changes follows the other tests of position 291. So it follows
+position 291, and the positions that position 291 follows, upstream.
 
 ## PR summary
 
