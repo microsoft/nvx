@@ -11,9 +11,10 @@
   summary, and commit mapping below cover positions 001-124, the PR09 fixups at positions
   234-236, the PR13 fixup at position 240, the PR18 fixup at position 241, the PR20 fixup at
   position 242, the PR19 fixup at position 243, and the PR10 fixups at positions 271 and 273.
-- NVX's pinned OpenVMM revision: `1fe818eda282f7698fd64f85af9a9e657b3864e7`, position 294, the
-  head of microsoft/openvmm#5110, whose four commits follow position 290, `c565311a3`, the head
-  of `feature/microvm/dev`, to which microsoft/openvmm#5109 added position 290 after position
+- NVX's pinned OpenVMM revision: `f32ab2d9022d515fd8b2911fe7ea4f55225b9a02`, position 298, the
+  head of microsoft/openvmm#5114, whose four commits follow position 294, `1fe818eda`, the head
+  of `feature/microvm/dev`, to which microsoft/openvmm#5110 added positions 291-294 after position
+  290, `c565311a3`, microsoft/openvmm#5109 added position 290 after position
   289, `0b386e1e1`, microsoft/openvmm#5108 added position 289 after position 288, `9d64daad3`,
   microsoft/openvmm#5107 added positions 287-288 after position 286, `cc1690222`,
   microsoft/openvmm#5106 added position 286 after position 285, `f39508197`,
@@ -34,9 +35,9 @@
   changes upstream had landed, and added eight fixups at its tip, positions 262-269. A commit's
   position is its v6.0 position less the number of dropped commits before it: v6.0 positions
   003-007 are positions 002-006, 010-013 are 007-010, 015-050 are 011-046, and 054-268 are
-  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 170
+  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 174
   commits past the mapped tip on the same first-parent chain. Positions 125-233, 237-239,
-  244-270, 272, and 274-294 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
+  244-270, 272, and 274-298 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
   position 240 is a PR13 fixup, position 241 is a PR18 fixup, position 242 is a PR20 fixup,
   position 243 is a PR19 fixup, and positions 271 and 273 are PR10 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1192,7 +1193,11 @@ The physical branch is one first-parent chain:
   -> contract test that a restore keeps the guest's SPEC_CTRL controls [292]
   -> WHP hardware test of the SPEC_CTRL state under a host profile [293]
   -> SPEC_CTRL profile test built only for x86-64 guests [294]
-  -> 1fe818eda (NVX pin)
+  -> AMD's legacy PMU registers hidden from a time ABI guest [295]
+  -> guest's user-wait, debug, and feature MSRs saved and restored [296]
+  -> guest's machine-check state saved and restored [297]
+  -> Guide's description of the VP state elements that hold a guest's MSRs [298]
+  -> f32ab2d90 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1243,7 +1248,7 @@ restore and time advance set in the RTC's clock source, which overflowed near ei
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 124 without merges. Of the 170 later commits,
+The NVX pin extends the chain past position 124 without merges. Of the 174 later commits,
 positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position 241 is a PR18 fixup,
 position 242 is a PR20 fixup, position 243 is a PR19 fixup, positions 262-269 are the fixups of
 the v6.1 rebase, positions 271 and 273 are PR10 fixups, and the others are not yet classified or
@@ -1253,7 +1258,7 @@ and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that s
 commits. Positions 180-184 followed the v3.0 reorganization, positions 185-198 are the ABI restart
 of the v4.0 reorganization, positions 199-204 followed it, positions 205-211 followed the v5.0
 reorganization, positions 212 and 213 followed the v5.1 rebase, positions 214-261 followed the
-v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-294
+v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-298
 followed the v6.1 rebase, so they combine none, apart from position 213, which combines v5.1
 positions 222 and 223. Each commit's position is its v6.0 position less seven, the number of
 commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position
@@ -1436,10 +1441,14 @@ through 147 and one less from v5.1 position 149 on; see
 | 292 | `c8c41cb55` | - | - | - | - | - | vmm_tests: check that a restore keeps a guest's SPEC_CTRL controls (microsoft/openvmm#5110) |
 | 293 | `e4bfa4f87` | - | - | - | - | - | virt_whp: check that WHP takes SPEC_CTRL under a host profile (microsoft/openvmm#5110) |
 | 294 | `1fe818eda` | - | - | - | - | - | virt: build the SPEC_CTRL profile test only for x86-64 guests (microsoft/openvmm#5110) |
+| 295 | `2fd176044` | - | - | - | - | - | virt_kvm: hide AMD's legacy PMU from a time ABI guest (microsoft/openvmm#5114) |
+| 296 | `f64731c83` | - | - | - | - | - | virt: save a guest's user-wait, debug, and feature MSRs (microsoft/openvmm#5114) |
+| 297 | `2418fd7a1` | - | - | - | - | - | virt_kvm: save the machine-check state of a VP (microsoft/openvmm#5114) |
+| 298 | `f32ab2d90` | - | - | - | - | - | Guide: describe the VP state elements that hold a guest's MSRs (microsoft/openvmm#5114) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
-that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-294, for later
+that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-298, for later
 commits. They name the positions that the commits have now, but the v6.1 rebase did not check the
 earlier ones again on `7d90c4104`.
 
@@ -2533,6 +2542,92 @@ a mapped PR adds. It fixes position 291, which no PR maps yet, so it is not a fi
 folds into position 291 when that position goes into one. Replaying it on upstream main conflicts
 in that file, since the test that it changes follows the other tests of position 291. So it follows
 position 291, and the positions that position 291 follows, upstream.
+
+Position 295 hides AMD's legacy performance counters, `PerfEvtSel0-3` and `PerfCtr0-3`
+(`0xc0010000` through `0xc0010007`), from a time ABI guest of an AMD CPU profile on KVM. The guest
+has no PMU, but a KVM whose virtual PMU is on serves the counters to every AMD guest and keeps their
+state in the vCPU, where no element of the saved state reaches it, so a restore dropped what a guest
+had programmed, and what the guest saw depended on the host. The time ABI's MSR filter denies the
+eight registers in that case, and `KvmTimeAbi::hides_msr` answers them with #GP, as for the MSRs that
+the time ABI hides already; `time_abi_msr_filter` now matches on the vendor, so that a vendor's
+range is a change of one arm. Without the time ABI no filter is installed, and nothing changes. The
+commit adds a test, changes two, and adds a sentence to the Guide's snapshots page. It changes files
+that PR10's position 271, PR11's position 028, PR12's positions 031-033, PR13's positions 039, 044,
+and 240, PR17's positions 069 and 072, PR18's positions 075, 077, 082, and 083, PR19's positions 085
+and 086, PR20's positions 087, 088, 090, and 092, PR23's positions 106 and 111, PR24's position 116,
+and 58 positions that no PR has yet also change, and it changes only lines that positions 135 and
+143, which no PR has yet, added, so it changes no line that a mapped PR adds. Replaying it on
+upstream main conflicts in both of its files: `time_abi.rs` does not exist there, since position 126
+adds it, and the sentence of the Guide sits in the time and CPU compatibility section that position
+140 writes, beside lines of positions 143 and 153. So it follows positions 126, 135, 140, 143, and
+153 upstream.
+
+Position 296 makes a snapshot keep the guest's `IA32_UMWAIT_CONTROL`, `IA32_DEBUGCTL`,
+`IA32_MISC_ENABLE`, `MSR_MISC_FEATURES_ENABLES`, and `IA32_POWER_CTL`, which KVM keeps in the vCPU
+and no element of a VP's saved state held, so that a restore into a new vCPU gave the guest the
+values that the VMM gives a new one, and a VM reset did not return them to their reset values. It
+adds three optional elements of `VpSavedState`, `umwait_control`, `debug_ctl`, and `misc_msrs`, in
+fields 17 through 19, each gated by a capability of `X86PartitionCapabilities`. `from_cpuid` derives
+`umwait_control` from the guest's WAITPKG; the KVM backend sets it, and the other two, for the MSRs
+that the host's `KVM_GET_MSR_INDEX_LIST` lists, except `IA32_DEBUGCTL`, which every KVM has and only
+kernels since commit `3700f0788da6` list, and never for an SNP guest; MSHV, WHP, and OpenHCL hold
+none of them. `MISC_ENABLE`'s reset value moves from `hv1_emulator` to `x86defs`. The elements need
+no version, as position 291's needed none. The commit adds their accessors to the `AccessVpState`
+implementations of KVM, MSHV, WHP, and OpenHCL that position 291 extended, five unit tests of `virt`
+and six of `virt_kvm`, and the backend contract tests of a module of its own of
+`virt_backend_tests`. It changes files that PR01's position 003, PR05's positions 007-009, PR10's
+positions 019-024, PR12's position 034, PR17's position 070, PR20's positions 090 and 091, and 32
+positions that no PR has yet also change, and it changes only lines that position 291, which no PR
+maps yet, adds, so it changes no line that a mapped PR adds. Replaying it on upstream main conflicts
+in 14 of its files, where it adds beside what upstream main lacks: the accessors of the OpenHCL,
+MSHV, WHP, and KVM backends and `virt_kvm`'s `regs.rs` sit beside the SPEC_CTRL lines of position
+291, and in `virt_kvm`'s `vp_state.rs` and `virt_mshv`'s x86-64 module also beside lines of
+positions 140 and 020, respectively; `virt`'s `x86/mod.rs` sits beside lines of positions 291 and
+294, and its `x86/vp.rs` beside lines of positions 132 and 291; `virt_kvm`'s x86-64 module sits
+beside lines of positions 022, 249, 253, 284, 287, and 291; the capability probe of `native.rs`
+sits beside position 292's; and `finalize.rs` does not exist there, since position 008 adds it. So
+it follows positions 008, 020, 022, 132, 140, 249, 253, 284, 287, 291, 292, and 294 upstream.
+
+Position 297 makes a snapshot keep the guest's machine-check state, `IA32_MCG_STATUS`,
+`IA32_MCG_CTL`, and the control, status, address, miscellaneous, and CMCI control registers of each
+bank, which KVM keeps in the vCPU and no element held, so that restoring the CMCI entry of the
+LAPIC's local vector table did not restore the bank controls behind it, and recorded errors were
+lost. It adds an optional element, `machine_check`, in field 20, with the KVM side in the new
+`machine_check.rs`. KVM lists `IA32_MCG_STATUS` and `IA32_MCG_CTL` but not the registers of the
+banks, so the capability follows `IA32_MCG_STATUS` and the number of banks is the one that the vCPU's
+`IA32_MCG_CAP` reports. A restore sets the banks that the saved state lists, puts the others back as
+`bind` left them, and refuses a state that lists more banks than the vCPU has before it writes
+anything; the state at reset lists none, so it resets every bank, and a VM reset now does. The
+element needs no version. The commit adds three unit tests of `virt_kvm`, five against `/dev/kvm`,
+and two backend contract tests. It changes files that PR05's positions 007-009, PR10's positions
+019-024, PR17's position 070, PR20's position 090, and 29 positions that no PR has yet also change,
+and it changes only lines that position 296 adds, so it changes no line that a mapped PR adds.
+Replaying it on upstream main conflicts in 13 of its files, where it adds beside lines of position
+296, which upstream main lacks, in the `AccessVpState` implementations, the capability list, and
+the test modules, and, in some, beside lines of other positions: those of position 291 in `x86/vp.rs`,
+of positions 253, 284, and 287 in `virt_kvm`'s x86-64 module, of position 140 in its `vp_state.rs`,
+and of position 020 in `virt_mshv`'s x86-64 module. The `msr_state.rs` of `virt_kvm` and the one of
+`virt_backend_tests` do not exist there, since position 296 adds them. So it follows position 296,
+and the positions that position 296 follows, upstream.
+
+Position 298 describes the VP state elements that hold a guest's MSRs in the Guide. The snapshot
+format page lists elements 16 through 20 with the MSRs that each holds, says how a partition decides
+which it has, the guest's CPUID for two and the backend for the others, which on KVM follows the
+host's MSR list except for `IA32_DEBUGCTL`, with the kernel commit that lists it, and for the
+machine-check banks, says that a saved state restores only into a partition that has every element
+that it holds, what a snapshot or a build from before the elements does, and which guest-writable
+state has no element and why (`IA32_BNDCFGS`, `MSR_VM_HSAVE_PA`, and AMD's legacy performance
+counters). The snapshots page adds a bullet to its limitations, and the guide to the VMM tests names
+the contract cases. It changes files that PR01's position 002, PR05's position 007, PR10's position
+271, PR11's positions 027 and 028, PR12's positions 031-033, PR13's positions 039, 044, and 240,
+PR17's positions 069 and 072, PR18's positions 075, 077, and 081-083, PR19's positions 085 and 086,
+PR20's positions 087, 088, 090, and 092, PR21's position 099, PR23's positions 106 and 111, PR24's
+position 116, and 60 positions that no PR has yet also change, and it adds to no line that a mapped
+PR adds. Replaying it on upstream main conflicts in all three of its files, where it adds beside
+what upstream main lacks: the table follows the paragraph of position 291 in the snapshot format,
+the note in the guide to the VMM tests follows that of position 292, and the bullet of the snapshots
+page sits beside a line of position 276. So it follows positions 276, 291, and 292, and the
+positions that they follow, upstream.
 
 ## PR summary
 
