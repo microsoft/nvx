@@ -11,9 +11,10 @@
   summary, and commit mapping below cover positions 001-124, the PR09 fixups at positions
   234-236, the PR13 fixup at position 240, the PR18 fixup at position 241, the PR20 fixup at
   position 242, the PR19 fixup at position 243, and the PR10 fixups at positions 271 and 273.
-- NVX's pinned OpenVMM revision: `f32ab2d9022d515fd8b2911fe7ea4f55225b9a02`, position 298, the
-  head of microsoft/openvmm#5114, whose four commits follow position 294, `1fe818eda`, the head
-  of `feature/microvm/dev`, to which microsoft/openvmm#5110 added positions 291-294 after position
+- NVX's pinned OpenVMM revision: `2b0a7ed46d3c18bf0b9918a09dcfca2bff179694`, position 299, the
+  head of microsoft/openvmm#5115, whose commit follows position 298, `f32ab2d90`, the head of
+  `feature/microvm/dev`, to which microsoft/openvmm#5114 added positions 295-298 after position
+  294, `1fe818eda`, microsoft/openvmm#5110 added positions 291-294 after position
   290, `c565311a3`, microsoft/openvmm#5109 added position 290 after position
   289, `0b386e1e1`, microsoft/openvmm#5108 added position 289 after position 288, `9d64daad3`,
   microsoft/openvmm#5107 added positions 287-288 after position 286, `cc1690222`,
@@ -35,9 +36,9 @@
   changes upstream had landed, and added eight fixups at its tip, positions 262-269. A commit's
   position is its v6.0 position less the number of dropped commits before it: v6.0 positions
   003-007 are positions 002-006, 010-013 are 007-010, 015-050 are 011-046, and 054-268 are
-  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 174
+  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 175
   commits past the mapped tip on the same first-parent chain. Positions 125-233, 237-239,
-  244-270, 272, and 274-298 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
+  244-270, 272, and 274-299 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
   position 240 is a PR13 fixup, position 241 is a PR18 fixup, position 242 is a PR20 fixup,
   position 243 is a PR19 fixup, and positions 271 and 273 are PR10 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1197,7 +1198,8 @@ The physical branch is one first-parent chain:
   -> guest's user-wait, debug, and feature MSRs saved and restored [296]
   -> guest's machine-check state saved and restored [297]
   -> Guide's description of the VP state elements that hold a guest's MSRs [298]
-  -> f32ab2d90 (NVX pin)
+  -> AMD's HWCR refused under an Intel CPU profile [299]
+  -> 2b0a7ed46 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1248,7 +1250,7 @@ restore and time advance set in the RTC's clock source, which overflowed near ei
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 124 without merges. Of the 174 later commits,
+The NVX pin extends the chain past position 124 without merges. Of the 175 later commits,
 positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position 241 is a PR18 fixup,
 position 242 is a PR20 fixup, position 243 is a PR19 fixup, positions 262-269 are the fixups of
 the v6.1 rebase, positions 271 and 273 are PR10 fixups, and the others are not yet classified or
@@ -1258,7 +1260,7 @@ and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that s
 commits. Positions 180-184 followed the v3.0 reorganization, positions 185-198 are the ABI restart
 of the v4.0 reorganization, positions 199-204 followed it, positions 205-211 followed the v5.0
 reorganization, positions 212 and 213 followed the v5.1 rebase, positions 214-261 followed the
-v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-298
+v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-299
 followed the v6.1 rebase, so they combine none, apart from position 213, which combines v5.1
 positions 222 and 223. Each commit's position is its v6.0 position less seven, the number of
 commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position
@@ -1445,10 +1447,11 @@ through 147 and one less from v5.1 position 149 on; see
 | 296 | `f64731c83` | - | - | - | - | - | virt: save a guest's user-wait, debug, and feature MSRs (microsoft/openvmm#5114) |
 | 297 | `2418fd7a1` | - | - | - | - | - | virt_kvm: save the machine-check state of a VP (microsoft/openvmm#5114) |
 | 298 | `f32ab2d90` | - | - | - | - | - | Guide: describe the VP state elements that hold a guest's MSRs (microsoft/openvmm#5114) |
+| 299 | `2b0a7ed46` | - | - | - | - | - | virt_kvm: raise #GP for AMD's HWCR under an Intel CPU profile (microsoft/openvmm#5115) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
-that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-298, for later
+that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-299, for later
 commits. They name the positions that the commits have now, but the v6.1 rebase did not check the
 earlier ones again on `7d90c4104`.
 
@@ -2628,6 +2631,25 @@ what upstream main lacks: the table follows the paragraph of position 291 in the
 the note in the guide to the VMM tests follows that of position 292, and the bullet of the snapshots
 page sits beside a line of position 276. So it follows positions 276, 291, and 292, and the
 positions that they follow, upstream.
+
+Position 299 makes a time ABI guest of an Intel CPU profile on KVM take a #GP for AMD's `HWCR`
+(`0xc0010015`), as an Intel CPU does. KVM took the guest's write for any guest CPU, kept the
+`McStatusWrEn` and `TscFreqSel` bits in the vCPU, where no element of the saved state reaches them,
+and read them back, so a restore dropped what the guest had written. The time ABI's MSR filter now
+denies `HWCR` under an Intel profile, in the `Intel` arm that position 295 left empty, and
+`KvmTimeAbi::hides_msr` answers it with #GP, as for the MSRs that the time ABI hides already. An AMD
+profile, every other register, and every host-initiated access are unchanged, and no element, field,
+or version of the saved state changes. The commit adds a unit test and three tests against
+`/dev/kvm`, changes two tests, and adds a sentence to the Guide's snapshots page. It changes files
+that PR10's position 271, PR11's position 028, PR12's positions 031-033, PR13's positions 039, 044,
+and 240, PR17's positions 069 and 072, PR18's positions 075, 077, 082, and 083, PR19's positions 085
+and 086, PR20's positions 087, 088, 090, and 092, PR23's positions 106 and 111, PR24's position 116,
+and 60 positions that no PR has yet also change, and it changes only lines that positions 143 and
+295, which no PR has yet, added, so it changes no line that a mapped PR adds. Replaying it on
+upstream main conflicts in both of its files: `time_abi.rs` does not exist there, since position 126
+adds it, and the sentence of the Guide sits in the time and CPU compatibility section that position
+140 writes, beside lines of positions 143, 153, and 295. So it follows positions 126, 140, 143, 153,
+and 295, and the positions that position 295 follows, upstream.
 
 ## PR summary
 
