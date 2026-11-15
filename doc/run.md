@@ -507,15 +507,27 @@ the guest listens, and relays connections and datagrams to the guest.
 OpenVMM admits a client only when its address is not globally reachable, such
 as one in `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`,
 `169.254.0.0/16`, or `fc00::/7`. It resets the TCP connections and drops the
-UDP datagrams of other clients, so internet clients never reach the guest. It
-also refuses clients that the guest could not answer: those inside the guest's
-own networks, such as `10.0.0.0/24` and `fd00::a00:0/120` for `10.0.0.2/24`,
-which the guest would take for its gateway or its neighbors, and IPv6
-link-local clients, so choose a guest network that contains no client. The
-host itself, at a loopback address or one of its own, counts as host loopback:
-OpenVMM admits it only with explicit `--host-loopback allow`. Replies to
-admitted clients pass whatever the egress policy, while the guest's own
-connections remain subject to it.
+UDP datagrams of other clients, so internet clients never reach the guest.
+Because it listens on every host address, the host accepts a connection before
+OpenVMM can refuse it: a refused TCP client sees its connection reset at once,
+usually after its connect succeeds and sometimes before it returns, not
+refused, and a refused UDP client gets no reply. OpenVMM also refuses clients
+that the guest could not answer: those inside the guest's own networks, such as
+`10.0.0.0/24` and `fd00::a00:0/120` for `10.0.0.2/24`, which the guest would
+take for its gateway or its neighbors, and IPv6 link-local clients, so choose a
+guest network that contains no client, the host's own addresses included. With
+`10.0.0.2/24` on a host at `10.0.0.14`, neither that address nor its neighbors
+in `10.0.0.0/24` reach the guest, even with `--host-loopback allow`, which
+admits loopback and the host's addresses outside the guest's networks.
+
+The host itself, at a loopback address or one of its own, counts as host
+loopback: OpenVMM admits it only with explicit `--host-loopback allow`, and
+otherwise refuses it as it refuses any other client, while the clients of the
+host's networks stay admitted. The two options are independent, so
+`--network-ingress allow` with `--host-loopback deny`, or without
+`--host-loopback`, is a valid policy for a guest that only other machines may
+reach. Replies to admitted clients pass whatever the egress policy, while the
+guest's own connections remain subject to it.
 
 Publication is best effort. OpenVMM cannot publish a port that a host process
 holds, or on Linux a privileged port that it may not bind; it logs a warning
@@ -525,7 +537,8 @@ most 64 ports. A TCP socket listening on `::` counts for IPv4 too unless it is
 IPv6-only, and a UDP socket on `::` unless the guest sets
 `net.ipv6.bindv6only`. Clients on other hosts also need the host's firewall to
 admit them to OpenVMM, for example an inbound rule for `openvmm.exe` on
-Windows. Snapshot capture rejects ingress `allow`, because the published
+Windows, which can also ask whether to allow `openvmm.exe` when it binds every
+host address. Snapshot capture rejects ingress `allow`, because the published
 listeners are live host attachments, and so does a restore, unless it
 installs a new policy on a [NIC template](#networked-snapshots).
 
@@ -562,16 +575,20 @@ its listeners as it does for
 [private-network ingress](#private-network-ingress). For each reported port,
 OpenVMM listens on the same port of host `127.0.0.1` or `::1`, for each family
 on which the guest listens, and admits only the host, so neither the host's
-networks nor the internet reach the guest. Replies to the host pass whatever
-the egress policy. A guest listener bound to `127.0.0.1` or `::1` alone is
-never reported and stays private to the guest. A port that a host process
-holds, on loopback or on every host address, stays with that process: OpenVMM
-logs a warning and retries with the next report. A host process that later
-binds every host address at a published port fails on Linux; on Windows,
-unless it asks for exclusive use of the port, it succeeds but gets no loopback
-traffic, which stays with the guest, as it would with any host process
-listening on loopback alone. With ingress `allow` as well, the listeners that
-OpenVMM publishes on every host address admit the host instead.
+networks nor the internet reach the guest. A guest server bound to `0.0.0.0` or
+to the guest's IPv4 address accepts IPv4 alone, so the host reaches it at
+`127.0.0.1` but not at `[::1]`; one bound to `::`, such as
+`python3 -m http.server 8000 --bind ::`, accepts both, so the host reaches it
+at either. Replies to the host pass whatever the egress policy. A guest
+listener bound to `127.0.0.1` or `::1` alone is never reported and stays
+private to the guest. A port that a host process holds, on loopback or on
+every host address, stays with that process: OpenVMM logs a warning and
+retries with the next report. A host process that later binds every host
+address at a published port fails on Linux; on Windows, unless it asks for
+exclusive use of the port, it succeeds but gets no loopback traffic, which
+stays with the guest, as it would with any host process listening on loopback
+alone. With ingress `allow` as well, the listeners that OpenVMM publishes on
+every host address admit the host instead.
 
 Explicit `--host-loopback allow` needs a guest network of `/29` or larger.
 OpenVMM presents host peers at addresses inside the guest's network, and a
