@@ -420,6 +420,61 @@ identify the restored guest. For example, for a snapshot of a boot with
   --virtio-console console
 ```
 
+### ICMP
+
+ICMP echo, which carries ping, works on a guest network within these limits,
+which [Packet Forwarding](design/3.5-network.md#352-packet-forwarding) and
+[Egress Policy](design/3.5-network.md#353-egress-policy) specify:
+
+- An `icmp` rule selects the ICMP of its destinations, and ICMPv6 for IPv6
+  ones. Allow and deny rules and the default apply to ICMP as to TCP and UDP,
+  and a rule without a protocol selects it with the rest. So
+  `--network-egress deny --network-egress-allow 1.1.1.1/32:icmp` lets the
+  guest ping `1.1.1.1` and nothing else, and
+  `--network-egress allow --network-egress-deny 1.1.1.1/32:icmp` blocks only
+  ICMP to it. A policy file's `"protocol": "icmp"` port selector, without a
+  `port`, lowers to the same native rules.
+- OpenVMM answers echo requests to the gateway, IPv4 or IPv6, itself, whatever
+  the host's network, so a deny policy that allows `icmp` to the gateway lets
+  the guest measure its round-trip time to the VMM. It relays IPv4 echo
+  requests to the other destinations that the policy allows through a host
+  ICMP socket, and returns the replies.
+- Nothing else is relayed. ICMPv6 echo to a destination other than the IPv6
+  gateway gets no reply, even where a rule allows it, since OpenVMM has no
+  ICMPv6 relay. The guest's other ICMP messages are dropped, and ICMP errors
+  from the network, such as an unreachable destination or an expired hop
+  limit, never reach the guest, so tools that need them, such as traceroute,
+  don't work.
+- The host supplies the socket: a raw socket on Windows, and an unprivileged
+  datagram socket elsewhere, which Linux opens only to the groups in
+  `net.ipv4.ping_group_range`. A Linux host whose range excludes the OpenVMM
+  process, such as one that keeps Linux's default of `1 0`, drops each
+  request and OpenVMM logs `icmp socket creation failed`; widen the range, for
+  example with `sysctl -w net.ipv4.ping_group_range="0 2147483647"`. A host
+  firewall may still block the echo replies.
+- The guest needs no capability. Its init opens Linux's unprivileged ICMP
+  sockets to every group, with `net.ipv4.ping_group_range` set to
+  `0 4294967294`, so a workload without any capability, as NVX starts it, can
+  ping through a datagram socket, for IPv4 and IPv6, whatever its identity. The
+  tool has to open one: the `ping` of iputils and of BusyBox 1.37 do, as does
+  any program that opens a `SOCK_DGRAM` socket of protocol ICMP, whereas the
+  `ping` of BusyBox 1.36, which the Azure Linux guest ships, insists on a raw
+  socket, which needs `CAP_NET_RAW`.
+  NVX's guest agents never grant that capability; see
+  [Identity and Credentials](design/4.3-isolation-and-resource-model.md#431-identity-and-credentials).
+  The setting is in the guest's memory, so a snapshot of a guest whose image
+  predates it keeps the kernel's default.
+- Published listeners, host-loopback access, and snapshots change none of
+  this. Published listeners admit no ICMP, since ICMP is neither TCP nor UDP,
+  so with egress denied only an allow rule that admits ICMP, an `icmp` rule or
+  one without a protocol, lets ICMP out. With
+  `--host-loopback deny`, an echo request to a loopback or link-local
+  destination is dropped, and with it allowed the gateway's loopback mapping
+  still covers TCP and UDP alone, so a ping to the gateway never reaches host
+  loopback. A proxy-only network drops all ICMP. ICMP flows are not saved in
+  a snapshot, so an echo request in flight at a capture gets no reply, and
+  the restored guest pings again under the policy that it restores with.
+
 ### Private-network ingress
 
 Ingress `allow` lets clients on the host's private networks reach every TCP

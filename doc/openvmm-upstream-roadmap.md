@@ -11,10 +11,11 @@
   summary, and commit mapping below cover positions 001-124, the PR09 fixups at positions
   234-236, the PR13 fixup at position 240, the PR18 fixup at position 241, the PR20 fixup at
   position 242, the PR19 fixup at position 243, and the PR10 fixups at positions 271 and 273.
-- NVX's pinned OpenVMM revision: `9d64daad3cbe14fb0591081b73c6c9648e18d0fb`, position 288, the
-  head of microsoft/openvmm#5107, whose two commits follow position 286, `cc1690222`, the head of
-  `feature/microvm/dev`, to which microsoft/openvmm#5106 added position 286 after position 285,
-  `f39508197`, microsoft/openvmm#5105 added positions 283-285 after position 282, `30b755406`,
+- NVX's pinned OpenVMM revision: `0b386e1e1ed9a4a6e6e7861d8d7c91f0490ba5bc`, position 289, the
+  head of microsoft/openvmm#5108, whose one commit follows position 288, `9d64daad3`, the head of
+  `feature/microvm/dev`, to which microsoft/openvmm#5107 added positions 287-288 after position
+  286, `cc1690222`, microsoft/openvmm#5106 added position 286 after position 285, `f39508197`,
+  microsoft/openvmm#5105 added positions 283-285 after position 282, `30b755406`,
   microsoft/openvmm#5102 added position 282 after position 281, `b723cbed3`,
   microsoft/openvmm#5101 added position 281 after position 280, `c5509cde2`,
   microsoft/openvmm#5100 added position 280 after position 279, `5d2a71027`,
@@ -31,9 +32,9 @@
   changes upstream had landed, and added eight fixups at its tip, positions 262-269. A commit's
   position is its v6.0 position less the number of dropped commits before it: v6.0 positions
   003-007 are positions 002-006, 010-013 are 007-010, 015-050 are 011-046, and 054-268 are
-  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 164
+  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 165
   commits past the mapped tip on the same first-parent chain. Positions 125-233, 237-239,
-  244-270, 272, and 274-288 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
+  244-270, 272, and 274-289 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
   position 240 is a PR13 fixup, position 241 is a PR18 fixup, position 242 is a PR20 fixup,
   position 243 is a PR19 fixup, and positions 271 and 273 are PR10 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1183,7 +1184,8 @@ The physical branch is one first-parent chain:
   -> injected #BP or #OF refused on restore [286]
   -> INIT or SIPI that a stopped VP has not accepted reported [287]
   -> capture refused while a VP holds an INIT or a SIPI [288]
-  -> 9d64daad3 (NVX pin)
+  -> ICMP echo replies relayed to the guest on Linux hosts [289]
+  -> 0b386e1e1 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1234,7 +1236,7 @@ restore and time advance set in the RTC's clock source, which overflowed near ei
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 124 without merges. Of the 164 later commits,
+The NVX pin extends the chain past position 124 without merges. Of the 165 later commits,
 positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position 241 is a PR18 fixup,
 position 242 is a PR20 fixup, position 243 is a PR19 fixup, positions 262-269 are the fixups of
 the v6.1 rebase, positions 271 and 273 are PR10 fixups, and the others are not yet classified or
@@ -1244,7 +1246,7 @@ and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that s
 commits. Positions 180-184 followed the v3.0 reorganization, positions 185-198 are the ABI restart
 of the v4.0 reorganization, positions 199-204 followed it, positions 205-211 followed the v5.0
 reorganization, positions 212 and 213 followed the v5.1 rebase, positions 214-261 followed the
-v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-288
+v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-289
 followed the v6.1 rebase, so they combine none, apart from position 213, which combines v5.1
 positions 222 and 223. Each commit's position is its v6.0 position less seven, the number of
 commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position
@@ -1421,10 +1423,11 @@ through 147 and one less from v5.1 position 149 on; see
 | 286 | `cc1690222` | - | - | - | - | - | virt_kvm: refuse to restore an injected #BP or #OF (microsoft/openvmm#5106) |
 | 287 | `bf7bb2461` | - | - | - | - | - | virt_kvm: report an INIT or a SIPI that a stopped VP has not accepted (microsoft/openvmm#5107) |
 | 288 | `9d64daad3` | - | - | - | - | - | vmm_core: refuse a snapshot capture while a VP holds an INIT or a SIPI (microsoft/openvmm#5107) |
+| 289 | `0b386e1e1` | - | - | - | - | - | consomme: relay ICMP echo replies on Linux hosts (microsoft/openvmm#5108) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
-that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-288, for later
+that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-289, for later
 commits. They name the positions that the commits have now, but the v6.1 rebase did not check the
 earlier ones again on `7d90c4104`.
 
@@ -2415,6 +2418,25 @@ checks of position 132. In `vp_set.rs`, its module sits between the modules of p
 of position 148. In the Guide's snapshots page, its paragraph sits after the GIF paragraph of
 position 284, in the block that positions 069 and 233 write. So it follows positions 025, 049, 063,
 065, 069, 089, 132, 140, 148, 233, 237, 284, and 287 upstream.
+
+Position 289 makes the IPv4 echo relay of Consomme return to the guest the echo replies that answer
+its requests, on Linux hosts, where it returned none, and only those, on every host. A Linux host's
+unprivileged datagram ICMP socket delivers the ICMP message without its IPv4 header, and with the
+identifier of its own binding, but `poll_conn` read every delivery as a raw IPv4 packet, and a
+Windows host's raw socket delivers every ICMP message that reaches the host, all of which the relay
+forwarded, in code that upstream main has and no commit of the chain changes. A new `icmp/echo.rs`
+holds `PendingEchoes`, the table of the echo requests of a flow that await replies: it gives each
+request a sequence number of its own on the host, and each request that leaves through a raw socket
+the flow's own identifier, both random to start with, and turns what a socket delivers into the
+reply that the guest receives. `poll_conn` and `handle_icmp` use it, and `handle_icmp` drops the
+guest's other ICMP messages with the new `DropReason::UnsupportedIcmpv4`, which `net_consomme`'s
+`process_tx` counts as an unknown transmit. It adds 18 unit tests in a module of their own, one of
+which sends an echo through a real host socket, adapts the flow-limit and driver-refresh tests of
+`icmp.rs`, and rewrites the Guide's ICMP section. It changes files that PR13's position 043, PR21's
+positions 096 and 099, and positions 161, 167, and 172 also change, none of them in the ICMP relay
+or the Guide's ICMP section, and adds to no line that a mapped PR adds. Replaying it on upstream
+main applies without conflicts, and `consomme` and `net_consomme` type-check there with their
+tests, which pass, so it can go upstream on its own.
 
 ## PR summary
 
