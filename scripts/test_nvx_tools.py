@@ -18950,6 +18950,79 @@ class InitPseudoMountTests(unittest.TestCase):
         self.assertNotIn("CONTINUED", result.stdout)
 
 
+class InitIcmpEchoSocketsTests(unittest.TestCase):
+    """Unprivileged workloads hold no capability, so the init opens ICMP echo
+    sockets to every group for them, in every guest mode (#1250)."""
+
+    INIT = Path(__file__).parents[1] / "guest/common/init"
+    SETTING = "/proc/sys/net/ipv4/ping_group_range"
+
+    def _run(self, *, setting: str | None, directory: bool = False):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        source = self.INIT.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "ping_group_range"
+            if directory:
+                path.mkdir()
+            elif setting is not None:
+                path.write_text(setting, encoding="utf-8")
+            function = (
+                _shell_function(source, "open_icmp_echo_sockets")
+                .replace(self.SETTING, shlex.quote(path.as_posix()))
+                .replace("/sbin/nvx-exit", "test_exit")
+            )
+            script = (
+                'test_exit() { printf \'EXIT %s\\n\' "$1"; exit "$1"; }\n'
+                "sleep() { exit 87; }\n"
+                + function
+                + "\nopen_icmp_echo_sockets\necho CONTINUED\n"
+            )
+            result = subprocess.run(
+                [shell, "-c", script], capture_output=True, text=True, timeout=10
+            )
+            written = path.read_text(encoding="utf-8") if path.is_file() else None
+        return result, written
+
+    def test_the_kernel_default_opens_to_every_group(self):
+        result, written = self._run(setting="1\t0\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "CONTINUED\n")
+        self.assertEqual(result.stderr, "")
+        # Linux rejects 4294967295, which no group has, and accepts the group
+        # IDs before it.
+        self.assertEqual(written, "0 4294967294\n")
+
+    def test_a_kernel_without_the_setting_boots_on(self):
+        result, written = self._run(setting=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "CONTINUED\n")
+        self.assertIsNone(written)
+
+    def test_a_setting_that_does_not_take_the_range_stops_the_boot(self):
+        result, _ = self._run(setting=None, directory=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "NVX-INIT-ERROR: cannot open ICMP echo sockets to every group",
+            result.stderr,
+        )
+        self.assertEqual(result.stdout, "EXIT 1\n")
+
+    def test_every_guest_mode_gets_the_setting(self):
+        source = self.INIT.read_text(encoding="utf-8")
+        call = source.index("\nopen_icmp_echo_sockets\n")
+        # The one-shot program, the sandbox control agent, and the managed agent
+        # all start after the call.
+        for later in (
+            'if [ -n "$nvx_exec" ]; then',
+            "exec /sbin/nvx-init-agent",
+            "exec /sbin/nvx-managed-agent",
+        ):
+            with self.subTest(later=later):
+                self.assertLess(call, source.index(later))
+
+
 class SandboxShareAgentTests(unittest.TestCase):
     AGENT = Path(__file__).parents[1] / "guest" / "common" / "nvx-init-agent"
 

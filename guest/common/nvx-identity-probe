@@ -11,4 +11,12 @@ fi
 if setpriv --reuid 0 --regid 0 --clear-groups true 2>/dev/null; then
     exit 82
 fi
+# Without a capability, a workload still opens the datagram sockets that send
+# ICMP echo, since the init opens them to every group, and the workload's group
+# is in the range. A ping applet would check the same through the loopback, but
+# not every guest's applet opens such a socket. The range is read whole, since a
+# sysctl file yields nothing to a second read.
+# shellcheck disable=SC2046
+set -- $(cat /proc/sys/net/ipv4/ping_group_range)
+[ "$1" -le "$gid" ] && [ "$gid" -le "$2" ] || exit 83
 echo "NVX-WORKLOAD-IDENTITY-OK uid=$uid gid=$gid"

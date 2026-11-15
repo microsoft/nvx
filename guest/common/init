@@ -41,6 +41,23 @@ if ! /sbin/nvx-time boot; then
     done
 fi
 mount -t tmpfs none /tmp
+# A workload holds no capability, so it opens no raw ICMP socket. Linux gives
+# the ICMP echo sockets that unprivileged processes open, as datagram sockets,
+# to the groups in net.ipv4.ping_group_range, which starts empty. Every group
+# gets them, up to 4294967294, the last that Linux accepts: such a socket sends
+# only echo requests, and the host's egress policy decides where they go, as
+# it does for all traffic.
+open_icmp_echo_sockets() {
+    [ -e /proc/sys/net/ipv4/ping_group_range ] || return 0
+    echo "0 4294967294" >/proc/sys/net/ipv4/ping_group_range || {
+        echo "NVX-INIT-ERROR: cannot open ICMP echo sockets to every group" >&2
+        /sbin/nvx-exit 1
+        while :; do
+            sleep 3600
+        done
+    }
+}
+open_icmp_echo_sockets
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
 ifconfig lo 127.0.0.1 up
 cmdline=" $(cat /proc/cmdline) "
