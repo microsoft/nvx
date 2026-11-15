@@ -76,17 +76,22 @@ pub struct NetworkPolicy {
     /// Destinations blocked despite an `allow` default or an `allow` rule.
     pub deny: EgressRules,
     /// Default policy for connections that clients initiate to the guest. With [`Access::Allow`],
-    /// OpenVMM listens on every host address at the TCP and UDP ports where the guest listens,
-    /// and admits clients on the host's private networks, whose addresses are not globally
-    /// reachable, but not clients inside the guest network, IPv6 link-local clients, or the host
-    /// itself unless `host_loopback` allows it; replies to their connections pass whatever the
-    /// egress policy.
+    /// OpenVMM listens on every host address, of each address family on which the guest listens,
+    /// at the TCP and UDP ports where the guest listens, and admits clients on the host's private
+    /// networks, whose addresses are not globally reachable, but not clients inside the guest
+    /// network, IPv6 link-local clients, or the host itself unless `host_loopback` allows it;
+    /// replies to their connections pass whatever the egress policy. The host accepts a TCP
+    /// connection before OpenVMM can refuse it, so OpenVMM resets the connection of a client that
+    /// it does not admit at once, after its handshake, and drops the datagrams of a UDP client;
+    /// neither reaches the guest. Allowing `ingress` without allowing `host_loopback` is valid: it
+    /// admits the host's networks but not the host itself.
     pub ingress: Access,
     /// Access between the guest and host loopback. With [`HostLoopback::Allow`], the guest
     /// reaches host loopback services through its gateway, subject to the egress policy, and the
     /// host reaches the guest's TCP and UDP listeners on non-loopback guest addresses at the same
-    /// ports of host IPv4 and IPv6 loopback, where OpenVMM listens without displacing a host
-    /// listener and admits only the host; replies to the host pass whatever the egress policy.
+    /// ports of host loopback, `127.0.0.1` for a listener that accepts IPv4 and `::1` for one that
+    /// accepts IPv6, where OpenVMM listens without displacing a host listener and admits only the
+    /// host; replies to the host pass whatever the egress policy.
     /// With `ingress` allowed too, the listeners on every host address admit the host instead.
     /// [`HostLoopback::Outbound`] opens only the guest's direction, and [`HostLoopback::Deny`]
     /// neither. [`HostLoopback::Allow`] needs a guest network prefix of at most

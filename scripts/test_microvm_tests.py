@@ -4969,6 +4969,11 @@ class MicrovmTests(unittest.TestCase):
                 patch.object(microvm_tests, "OpenvmmProcess") as process,
                 patch.object(
                     microvm_tests,
+                    "_host_loopback_publication_port",
+                    return_value=50001,
+                ),
+                patch.object(
+                    microvm_tests,
                     "workload_boot_command",
                     side_effect=_fresh_openvmm_command,
                 ),
@@ -5029,6 +5034,11 @@ class MicrovmTests(unittest.TestCase):
                 patch.object(microvm_tests, "OpenvmmProcess") as process,
                 patch.object(
                     microvm_tests,
+                    "_host_loopback_publication_port",
+                    return_value=50001,
+                ),
+                patch.object(
+                    microvm_tests,
                     "workload_boot_command",
                     side_effect=_fresh_openvmm_command,
                 ),
@@ -5057,6 +5067,111 @@ class MicrovmTests(unittest.TestCase):
         port = microvm_tests._private_ingress_port()
         self.assertFalse(microvm_tests._publishes(port, socket.SOCK_STREAM))
         self.assertFalse(microvm_tests._publishes(port, socket.SOCK_DGRAM))
+
+    def test_publication_probe_detects_a_held_ipv6_port(self):
+        holder = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        try:
+            holder.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            holder.bind(("::", 0))
+        except OSError:
+            holder.close()
+            self.skipTest("IPv6 is unavailable")
+        try:
+            port = int(holder.getsockname()[1])
+            self.assertTrue(
+                microvm_tests._publishes(port, socket.SOCK_STREAM, socket.AF_INET6)
+            )
+        finally:
+            holder.close()
+        self.assertFalse(
+            microvm_tests._publishes(port, socket.SOCK_STREAM, socket.AF_INET6)
+        )
+
+    def _serve_connections(
+        self, listener: socket.socket, behaviors: Sequence[tuple[float, bytes]]
+    ) -> None:
+        """Serve the connections to `listener`, one behavior each, in order:
+        hold the connection for the delay, send the bytes, and close it. Each
+        connection waits on its own, so a long delay does not hold up the ones
+        behind it."""
+
+        def hold(connection: socket.socket, delay: float, data: bytes) -> None:
+            with connection:
+                try:
+                    time.sleep(delay)
+                    if data:
+                        connection.sendall(data)
+                except OSError:
+                    pass  # the probe gave up and closed its end
+
+        def serve() -> None:
+            try:
+                for delay, data in behaviors:
+                    connection, _ = listener.accept()
+                    threading.Thread(
+                        target=hold, args=(connection, delay, data), daemon=True
+                    ).start()
+            except OSError:
+                pass  # the test closed the listener
+
+        threading.Thread(target=serve, daemon=True).start()
+
+    def test_refused_connection_probe_accepts_prompt_resets(self):
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            port = int(listener.getsockname()[1])
+            self._serve_connections(listener, [(0, b"")] * 4)
+            microvm_tests._verify_refused_connections(
+                "127.0.0.1", port, 5, attempts=4, reset_seconds=5, late_resets=0
+            )
+
+    def test_refused_connection_probe_tolerates_late_resets_up_to_its_limit(self):
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            port = int(listener.getsockname()[1])
+            # One reset outlasts the bound, as on a runner that stalled.
+            self._serve_connections(listener, [(3, b""), (0, b""), (0, b""), (0, b"")])
+            microvm_tests._verify_refused_connections(
+                "127.0.0.1", port, 5, attempts=4, reset_seconds=1, late_resets=1
+            )
+
+    def test_refused_connection_probe_rejects_resets_that_wait_for_a_wakeup(self):
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            port = int(listener.getsockname()[1])
+            # The first connection resets at once, and those behind it wait.
+            self._serve_connections(listener, [(0, b"")] + [(3, b"")] * 2)
+            with self.assertRaisesRegex(
+                RuntimeError, "did not reset 2 of 3 refused connections"
+            ):
+                microvm_tests._verify_refused_connections(
+                    "127.0.0.1", port, 5, attempts=3, reset_seconds=1, late_resets=1
+                )
+
+    def test_refused_connection_probe_counts_a_reset_during_connect(self):
+        with patch.object(
+            socket, "create_connection", side_effect=ConnectionResetError
+        ) as connect:
+            microvm_tests._verify_refused_connections(
+                "127.0.0.1", 1, 5, attempts=3, late_resets=0
+            )
+        self.assertEqual(connect.call_count, 3)
+
+    def test_refused_connection_probe_rejects_a_refused_connect(self):
+        # The published port is gone, which a reset is not.
+        with patch.object(
+            socket, "create_connection", side_effect=ConnectionRefusedError
+        ):
+            with self.assertRaises(ConnectionRefusedError):
+                microvm_tests._verify_refused_connections("127.0.0.1", 1, 5)
+
+    def test_refused_connection_probe_rejects_a_connection_that_reaches_the_guest(
+        self,
+    ):
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            port = int(listener.getsockname()[1])
+            self._serve_connections(listener, [(0, b"NVX-REPLY\n")])
+            with self.assertRaisesRegex(RuntimeError, "reached the guest"):
+                microvm_tests._verify_refused_connections(
+                    "127.0.0.1", port, 5, attempts=1, reset_seconds=5
+                )
 
     def test_host_loopback_udp_probes_reject_failed_sender(self):
         shell = _posix_shell()
