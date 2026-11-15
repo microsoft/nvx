@@ -11,10 +11,11 @@
   summary, and commit mapping below cover positions 001-124, the PR09 fixups at positions
   234-236, the PR13 fixup at position 240, the PR18 fixup at position 241, the PR20 fixup at
   position 242, the PR19 fixup at position 243, and the PR10 fixups at positions 271 and 273.
-- NVX's pinned OpenVMM revision: `23fb678876c9b2a1125664fc599e5b261b325d8c`, position 301, the
-  head of microsoft/openvmm#5118, whose commit follows position 300, `85b93bbd2`, the head of
-  `feature/microvm/dev`, to which microsoft/openvmm#5117 added position 300 after position 299,
-  `2b0a7ed46`, microsoft/openvmm#5115 added position 299 after position 298,
+- NVX's pinned OpenVMM revision: `f9cc4163bc5fe03a578a07064ec2fc212268d9bf`, position 302, the
+  head of microsoft/openvmm#5119, whose commit follows position 301, `23fb67887`, the head of
+  `feature/microvm/dev`, to which microsoft/openvmm#5118 added position 301 after position 300,
+  `85b93bbd2`, microsoft/openvmm#5117 added position 300 after position 299, `2b0a7ed46`,
+  microsoft/openvmm#5115 added position 299 after position 298,
   `f32ab2d90`, microsoft/openvmm#5114 added positions 295-298 after position
   294, `1fe818eda`, microsoft/openvmm#5110 added positions 291-294 after position
   290, `c565311a3`, microsoft/openvmm#5109 added position 290 after position
@@ -38,9 +39,9 @@
   changes upstream had landed, and added eight fixups at its tip, positions 262-269. A commit's
   position is its v6.0 position less the number of dropped commits before it: v6.0 positions
   003-007 are positions 002-006, 010-013 are 007-010, 015-050 are 011-046, and 054-268 are
-  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 177
+  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 178
   commits past the mapped tip on the same first-parent chain. Positions 125-233, 237-239,
-  244-270, 272, and 274-301 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
+  244-270, 272, and 274-302 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
   position 240 is a PR13 fixup, position 241 is a PR18 fixup, position 242 is a PR20 fixup,
   position 243 is a PR19 fixup, and positions 271 and 273 are PR10 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1203,7 +1204,8 @@ The physical branch is one first-parent chain:
   -> AMD's HWCR refused under an Intel CPU profile [299]
   -> VP thread's PKRU of 0 raised so that saves keep the guest's [300]
   -> XSAVE area's init components restored as init [301]
-  -> 23fb67887 (NVX pin)
+  -> short or malformed XSAVE area refused on restore [302]
+  -> f9cc4163b (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1254,7 +1256,7 @@ restore and time advance set in the RTC's clock source, which overflowed near ei
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 124 without merges. Of the 177 later commits,
+The NVX pin extends the chain past position 124 without merges. Of the 178 later commits,
 positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position 241 is a PR18 fixup,
 position 242 is a PR20 fixup, position 243 is a PR19 fixup, positions 262-269 are the fixups of
 the v6.1 rebase, positions 271 and 273 are PR10 fixups, and the others are not yet classified or
@@ -1264,7 +1266,7 @@ and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that s
 commits. Positions 180-184 followed the v3.0 reorganization, positions 185-198 are the ABI restart
 of the v4.0 reorganization, positions 199-204 followed it, positions 205-211 followed the v5.0
 reorganization, positions 212 and 213 followed the v5.1 rebase, positions 214-261 followed the
-v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-301
+v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-302
 followed the v6.1 rebase, so they combine none, apart from position 213, which combines v5.1
 positions 222 and 223. Each commit's position is its v6.0 position less seven, the number of
 commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position
@@ -1454,10 +1456,11 @@ through 147 and one less from v5.1 position 149 on; see
 | 299 | `2b0a7ed46` | - | - | - | - | - | virt_kvm: raise #GP for AMD's HWCR under an Intel CPU profile (microsoft/openvmm#5115) |
 | 300 | `85b93bbd2` | - | - | - | - | - | virt_kvm: raise a VP thread's PKRU of 0 so that saves keep the guest's (microsoft/openvmm#5117) |
 | 301 | `23fb67887` | - | - | - | - | - | virt_kvm: restore the init components of an XSAVE area as init (microsoft/openvmm#5118) |
+| 302 | `f9cc4163b` | - | - | - | - | - | virt_kvm: refuse to restore a short or malformed XSAVE area (microsoft/openvmm#5119) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
-that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-301, for later
+that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-302, for later
 commits. They name the positions that the commits have now, but the v6.1 rebase did not check the
 earlier ones again on `7d90c4104`.
 
@@ -2687,6 +2690,32 @@ which only position 281 changes, and it changes only lines that position 281, wh
 added, so it changes no line that a mapped PR adds. Replaying it on upstream main conflicts in
 `xsave.rs`, which does not exist there, since position 281 adds it. So it follows position 281,
 which applies there on its own.
+
+Position 302 makes a restore of a short or malformed XSAVE area fail with an error, where it
+panicked the VM worker, in debug and release builds. `virt`'s `Xsave::write_standard`, which the
+`Buffers::new` that position 301 adds calls on the area of the saved state, unwrapped its reads of
+the legacy area and of the header, and sliced the area at each component that its `XCOMP_BV` and
+`XSTATE_BV` both select, without checking either bound, in code that upstream main has and no
+commit of the chain changes; only a crafted or damaged saved state holds such an area. It now
+returns `Result<(), XsaveError>`, a new error of `virt`'s x86 VP module, and checks the area's
+length, each selected component's place in the area, and the buffer's length before it writes a
+byte, with one iterator that places the components for the check and the copy. `Buffers::new`
+returns the error, and `KvmError` gains `Xsave`, which wraps it, so `restore_all` fails with the
+state error of the xsave element before any `KVM_SET_XSAVE`. No element, field, or version of the
+saved state changes. The commit adds five unit tests of `write_standard`, one of `Buffers::new`,
+and a KVM-only contract test of `virt_backend_tests` in a module of its own, which registers with
+the `kvm_only` form of `backend_test!` that position 279 adds. It changes files that PR05's
+position 008, PR10's positions 020 and 022, and 19 positions that no PR has yet also change, and it
+changes no line that a mapped PR adds: it rewrites `write_standard`, which upstream main has and no
+commit of the chain changes, changes lines that positions 281 and 301, which no PR has yet, added,
+and adds the rest. Replaying it on upstream main conflicts in three files, none of them in
+`write_standard`, which its patch rewrites there without conflicts: the `xsave.rs` of `virt_kvm`
+does not exist there, since position 281 adds it; in `lib.rs`, the new variant follows the
+`GifClear` of position 284; and in `vp.rs`, its tests follow those that positions 132 and 296 add.
+Its contract test also needs the `kvm_only` form of `backend_test!`, and upstream main's other
+caller of `write_standard`, in `set_xsave` of `vp_state.rs`, which position 281 replaces with
+`xsave::restore`, would have to handle the result. So it follows positions 132, 279, 281, 284, 296,
+and 301, and the positions that they follow, upstream.
 
 ## PR summary
 
