@@ -350,6 +350,18 @@ PRIVATE_INGRESS_TCP_REQUEST = b"NVX-PRIVATE-INGRESS-TCP-REQUEST\n"
 PRIVATE_INGRESS_TCP_REPLY = b"NVX-PRIVATE-INGRESS-TCP-REPLY\n"
 PRIVATE_INGRESS_UDP_REQUEST = b"NVX-PRIVATE-INGRESS-UDP-REQUEST\n"
 PRIVATE_INGRESS_UDP_REPLY = b"NVX-PRIVATE-INGRESS-UDP-REPLY\n"
+# OpenVMM resets a connection that a published port refuses at once. A listener
+# that is not polled again after it accepts a connection waits for the guest's
+# repeat of its announcement, which comes every two seconds, so a reset must
+# come within less than half of that to be prompt.
+PRIVATE_INGRESS_RESET_SECONDS = 0.75
+# Connections to one published port, each after the one before it, so that
+# those behind the first wait if the listener is not polled again. They stay
+# below the listener's backlog of 10.
+PRIVATE_INGRESS_REFUSED_ATTEMPTS = 8
+# One reset may be late, as on a runner that stalled; a listener that is not
+# polled again makes most of them late.
+PRIVATE_INGRESS_LATE_RESETS = 1
 SANDBOX_BLOCK_SIZE = 8 * 1024 * 1024
 SNAPSHOT_CORE_CONTINUED_MARKER = b"NVX-SNAPSHOT-CORE-CONTINUED"
 SNAPSHOT_CORE_COMPLETION_MARKER = b"NVX-SNAPSHOT-CORE-OK"
@@ -4406,14 +4418,20 @@ def _private_ingress_port() -> int:
     ) from last_error
 
 
-def _publishes(port: int, kind: socket.SocketKind) -> bool:
-    """Return whether a host socket holds ``port`` on every IPv4 address.
+def _publishes(
+    port: int,
+    kind: socket.SocketKind,
+    family: socket.AddressFamily = socket.AF_INET,
+) -> bool:
+    """Return whether a host socket holds ``port`` on every address of ``family``.
 
     During the scenario, that socket is OpenVMM's listener for the guest port.
     """
-    probe = socket.socket(socket.AF_INET, kind)
+    probe = socket.socket(family, kind)
     try:
-        probe.bind(("0.0.0.0", port))
+        if family == socket.AF_INET6:
+            probe.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        probe.bind(("::" if family == socket.AF_INET6 else "0.0.0.0", port))
     except OSError:
         return True
     finally:
@@ -4452,6 +4470,52 @@ def _udp_client(timeout: float) -> socket.socket:
     client.bind(("127.0.0.1", 0))
     client.settimeout(timeout)
     return client
+
+
+def _verify_refused_connections(
+    address: str,
+    port: int,
+    timeout: float,
+    *,
+    attempts: int = PRIVATE_INGRESS_REFUSED_ATTEMPTS,
+    reset_seconds: float = PRIVATE_INGRESS_RESET_SECONDS,
+    late_resets: int = PRIVATE_INGRESS_LATE_RESETS,
+) -> None:
+    """Verify that a published port resets each of several successive
+    connections from ``address`` that it refuses, at once.
+
+    The host completes the handshake before OpenVMM refuses a connection, so a
+    refused connection connects and then resets, or resets before the connect
+    returns when OpenVMM is quick. Each connection follows the one before it:
+    a listener that waits for an unrelated wakeup after it accepts one resets
+    the connections behind it only when the guest repeats its announcement, so
+    they outlast ``reset_seconds``. The probe tolerates ``late_resets`` of
+    them, for a runner that stalls.
+    """
+    late = 0
+    for _ in range(attempts):
+        try:
+            client = socket.create_connection((address, port), timeout=timeout)
+        except (ConnectionResetError, ConnectionAbortedError):
+            continue
+        with client:
+            client.settimeout(reset_seconds)
+            try:
+                data = client.recv(4096)
+            except (ConnectionResetError, ConnectionAbortedError):
+                continue
+            except TimeoutError:
+                late += 1
+                continue
+            if data:
+                raise RuntimeError(
+                    f"a refused connection from {address} reached the guest: {data!r}"
+                )
+    if late > late_resets:
+        raise RuntimeError(
+            f"OpenVMM did not reset {late} of {attempts} refused connections "
+            f"from {address} to port {port} within {reset_seconds:g}s"
+        )
 
 
 def _private_ingress_command(
@@ -4533,9 +4597,9 @@ def run_private_network_ingress(
     published listeners refuse unless host loopback is allowed. The scenario
     therefore exchanges TCP and UDP with the guest's servers from the host with
     host loopback allowed and egress denied, which also requires the guest's
-    replies to pass; it requires the host's own connections to be refused with
-    host loopback denied, and nothing to be published with ingress denied.
-    Unit tests classify the peers of other hosts.
+    replies to pass; it requires the host's own connections, over IPv4 and IPv6,
+    to be reset at once with host loopback denied, and nothing to be published
+    with ingress denied. Unit tests classify the peers of other hosts.
     """
     port = _private_ingress_port()
     outbound = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -4621,30 +4685,24 @@ def run_private_network_ingress(
     finally:
         outbound.close()
 
-    port = _private_ingress_port()
+    # The guest's servers are dual-stack, so OpenVMM publishes the port at ::
+    # too, where the host's own connections through ::1 are refused as well.
+    port = _host_loopback_publication_port()
 
     def refused() -> None:
         _wait_until(
-            lambda: (
-                _publishes(port, socket.SOCK_STREAM)
-                and _publishes(port, socket.SOCK_DGRAM)
+            lambda: all(
+                _publishes(port, kind, family)
+                for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM)
+                for family in (socket.AF_INET, socket.AF_INET6)
             ),
             timeout,
             f"guest port {port} was not published to the host",
         )
         # The host completes the handshake with the published listener, which
         # then resets connections from the host itself.
-        for address in ["127.0.0.1", *_host_ipv4_addresses()]:
-            with socket.create_connection((address, port), timeout=timeout) as client:
-                client.settimeout(timeout)
-                try:
-                    data = client.recv(4096)
-                except (ConnectionResetError, ConnectionAbortedError):
-                    data = b""
-                if data:
-                    raise RuntimeError(
-                        f"a refused connection from {address} reached the guest: {data!r}"
-                    )
+        for address in ["127.0.0.1", "::1", *_host_ipv4_addresses()]:
+            _verify_refused_connections(address, port, timeout)
         with _udp_client(NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS) as client:
             for _ in range(3):
                 client.sendto(PRIVATE_INGRESS_UDP_REQUEST, ("127.0.0.1", port))
