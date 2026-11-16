@@ -11,9 +11,10 @@
   summary, and commit mapping below cover positions 001-124, the PR09 fixups at positions
   234-236, the PR13 fixup at position 240, the PR18 fixup at position 241, the PR20 fixup at
   position 242, the PR19 fixup at position 243, and the PR10 fixups at positions 271 and 273.
-- NVX's pinned OpenVMM revision: `359169f1e6f113a22b9a840208aa42a47ef639bf`, position 313, the
-  head of microsoft/openvmm#5125, whose four commits follow position 309, `9ecb41f00`, the head
-  of `feature/microvm/dev`, to which microsoft/openvmm#5123 added positions 308-309 after position
+- NVX's pinned OpenVMM revision: `fe61f9cbf04ffa323694e8bc798386670842fe92`, position 315, the
+  head of microsoft/openvmm#5126, whose two commits follow position 313, `359169f1e`, the head
+  of `feature/microvm/dev`, to which microsoft/openvmm#5125 added positions 310-313 after position
+  309, `9ecb41f00`, microsoft/openvmm#5123 added positions 308-309 after position
   307, `364ca3625`, microsoft/openvmm#5122 added positions 306-307 after position
   305, `66d1cfaca`, microsoft/openvmm#5121 added positions 304-305 after position 303,
   `0f1317d82`, microsoft/openvmm#5120 added position 303 after position 302,
@@ -44,9 +45,9 @@
   changes upstream had landed, and added eight fixups at its tip, positions 262-269. A commit's
   position is its v6.0 position less the number of dropped commits before it: v6.0 positions
   003-007 are positions 002-006, 010-013 are 007-010, 015-050 are 011-046, and 054-268 are
-  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 189
+  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 191
   commits past the mapped tip on the same first-parent chain. Positions 125-233, 237-239,
-  244-270, 272, and 274-313 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
+  244-270, 272, and 274-315 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
   position 240 is a PR13 fixup, position 241 is a PR18 fixup, position 242 is a PR20 fixup,
   position 243 is a PR19 fixup, and positions 271 and 273 are PR10 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1221,7 +1222,9 @@ The physical branch is one first-parent chain:
   -> kind of an interrupt shadow saved and restored on KVM [311]
   -> backends that cannot hold the kind of an interrupt shadow refuse it [312]
   -> comments and Guide that say what an STI shadow restored as a MOV SS shadow loses [313]
-  -> 359169f1e (NVX pin)
+  -> restore that refuses an element that the partition lacks before it sets any state [314]
+  -> contract tests that each backend refuses an element that its partition lacks [315]
+  -> fe61f9cbf (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1272,7 +1275,7 @@ restore and time advance set in the RTC's clock source, which overflowed near ei
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 124 without merges. Of the 189 later commits,
+The NVX pin extends the chain past position 124 without merges. Of the 191 later commits,
 positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position 241 is a PR18 fixup,
 position 242 is a PR20 fixup, position 243 is a PR19 fixup, positions 262-269 are the fixups of
 the v6.1 rebase, positions 271 and 273 are PR10 fixups, and the others are not yet classified or
@@ -1282,7 +1285,7 @@ and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that s
 commits. Positions 180-184 followed the v3.0 reorganization, positions 185-198 are the ABI restart
 of the v4.0 reorganization, positions 199-204 followed it, positions 205-211 followed the v5.0
 reorganization, positions 212 and 213 followed the v5.1 rebase, positions 214-261 followed the
-v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-313
+v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-315
 followed the v6.1 rebase, so they combine none, apart from position 213, which combines v5.1
 positions 222 and 223. Each commit's position is its v6.0 position less seven, the number of
 commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position
@@ -1484,10 +1487,12 @@ through 147 and one less from v5.1 position 149 on; see
 | 311 | `8c1bc6481` | - | - | - | - | - | virt_kvm: keep the kind of an interrupt shadow across a save and restore (microsoft/openvmm#5125) |
 | 312 | `e95dce866` | - | - | - | - | - | virt: refuse an interrupt shadow kind that a backend cannot hold (microsoft/openvmm#5125) |
 | 313 | `359169f1e` | - | - | - | - | - | virt: say what an STI shadow restored as a MOV SS shadow loses (microsoft/openvmm#5125) |
+| 314 | `30ce395c8` | - | - | - | - | - | virt: refuse to restore an element that the partition lacks (microsoft/openvmm#5126) |
+| 315 | `fe61f9cbf` | - | - | - | - | - | vmm_tests: check that each backend refuses unsupported restore state (microsoft/openvmm#5126) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
-that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-313, for later
+that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-315, for later
 commits. They name the positions that the commits have now, but the v6.1 rebase did not check the
 earlier ones again on `7d90c4104`.
 
@@ -3103,6 +3108,63 @@ position 311 adds and position 312 extends, in a block that positions 031, 032, 
 207, 211, 220, 222, 227, 233, 284, 288, 304, 306, 307, and 308 also write. So it follows positions
 174, 207, 211, 286, 291, 298, 306, 309, 310, 311, and 312, and the positions that they follow,
 upstream.
+
+Position 314 makes the generated `restore_all` refuse a saved state that holds an element that the
+partition lacks, where it asserted that each element was present as it set them, so that a decoded
+snapshot that held one, such as SynIC state for a microVM, whose partition has no Hyper-V
+enlightenments, or an element for an MSR that the destination's KVM does not list, panicked after
+`restore_all` had set the elements before it and, since OpenVMM builds with `panic = "abort"`,
+aborted the process with no restore error. `restore_all` now checks every element of the saved
+state against the partition before it sets or commits any of them, and fails with the new
+`StateError::Unsupported`, which names the element in the phase `restore check` and has no source.
+`StateError` becomes an enum, whose `Access` variant keeps the phase and the backend's error as its
+source, so a backend failure reports as before. The check is per call, so a refusal for a later VP
+leaves the VM state and the earlier VPs restored, as any other failed restore does. No element,
+field, or version of the saved state changes, and `StateError` is an in-memory error. The commit adds
+three unit tests of the macro, one of which fails without the check, adapts the test of
+`check_saveable` that position 283 adds to the enum, and says in the Guide's snapshot format and
+snapshots page, and in the rules comment of the VP state's `state_trait!`, that a restore refuses
+such a state, where position 298 said that it stops on an assertion. It changes files that PR10's
+positions 020, 022, and 271, PR11's positions 027 and 028, PR12's positions 031-033, PR13's
+positions 039, 044, and 240, PR17's positions 069 and 072, PR18's positions 075, 077, and 081-083,
+PR19's positions 085 and 086, PR20's positions 087, 088, 090, and 092, PR21's position 099, PR23's
+positions 106 and 111, PR24's position 116, and 74 positions that no PR has yet also change, and it
+changes no line that a mapped PR adds: it rewrites 11 lines of `state.rs` that upstream main has and
+no commit of the chain changes, two lines of `state.rs` that position 283 adds, a line of the rules
+comment that position 296 adds, and a line each of the Guide's snapshot format and snapshots page
+that position 298 adds, and adds the rest. Replaying it on upstream main conflicts in four files,
+where it edits or adds beside what upstream main lacks: in `state.rs`, its paragraph of the macro's
+documentation follows the one that position 283 adds for `check_saveable`, its edit of the line of
+`save_all` that calls `check_saveable` rewrites a line that position 283 adds, its paragraph of
+`restore_all`'s documentation precedes the one that position 309 adds, and its tests follow the
+test module that positions 283, 291, and 309 add; in `vp.rs`, its bullet extends the comment on
+adding an element that position 291 adds and position 296 extends; in the Guide's snapshot format,
+its text sits in the section that position 291 adds and position 298 extends; and in its snapshots
+page, its paragraph follows the one that position 311 adds, position 312 extends, and position 313
+corrects, and precedes text that position 174 writes, and its edit of the Limitations rewrites a line
+of the bullet that position 298 adds. So it follows positions 174, 283, 291, 296, 298, 309, and
+311-313, and the positions that they follow, upstream.
+
+Position 315 adds the contract tests of position 314's refusal, in the new `unsupported_state.rs`,
+which builds on Linux and Windows. `refuses_unsupported_cpu_state` restores a saved state that holds
+SynIC state, which the fixture's partition always lacks, and, where the backend, the host, or the
+fixture's CPUID does not give the partition them, `IA32_SPEC_CTRL`, `IA32_UMWAIT_CONTROL`,
+`IA32_DEBUGCTL`, the feature and power MSRs, and the machine-check state, one at a time and with
+registers that differ from the VP's, and requires that the restore fails with
+`StateError::Unsupported`, naming the element, and that the registers stay as they were.
+`refuses_unsupported_vm_state` does the same for each element of the VM state, the hypercall MSRs,
+the reference time, and the reference TSC page. Both run on KVM, MSHV, and WHP, and the commit adds a
+paragraph to the Guide's page of the contract tests. It changes files that PR01's position 002,
+PR05's positions 007 and 008, and 13 positions that no PR has yet also change, and it changes no
+line that a mapped PR adds: it removes no line. Replaying it on upstream main conflicts in two
+files, where it adds beside what upstream main lacks, and `unsupported_state.rs` is a new file: in
+`main.rs`, `mod unsupported_state;` sits between the `mod time;` that upstream main has and the
+`mod xsave;` that position 302 adds, among the `mod` lines that positions 279, 282, 285-287, 292,
+296, 302, 303, 307, 309, and 312 add; and in the Guide's page of the contract tests, its paragraph
+follows the ones that positions 292 and 298 add. Its tests also need the `StateError::Unsupported`
+that position 314 adds, and `SpecCtrl`, `UmwaitControl`, `DebugCtl`, `MiscMsrs`, and `MachineCheck`
+and the capabilities that name them, which positions 291, 296, and 297 add. So it follows positions
+291, 292, 296, 297, 298, 302, and 314, and the positions that they follow, upstream.
 
 ## PR summary
 
