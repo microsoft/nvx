@@ -35,7 +35,7 @@ jobs:
       NVX_RS: ${{ github.workspace }}/nvx-rs/target/release/nvx-rs
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -45,7 +45,7 @@ jobs:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
@@ -93,7 +93,7 @@ jobs:
       # A rerun of the job replaces the reports of its earlier attempt.
       - name: Upload the reports
         if: ${{ !cancelled() && hashFiles('build/scripts-coverage/**') != '' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: scripts-coverage-${{ github.run_id }}
           path: build/scripts-coverage

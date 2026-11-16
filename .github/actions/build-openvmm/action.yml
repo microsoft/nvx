@@ -54,7 +54,7 @@ runs:
     - name: Restore OpenVMM inputs on Linux
       id: restore-openvmm-inputs-linux
       if: runner.os != 'Windows'
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       env:
         PATH: ${{ steps.cache-tools-linux.outputs.path }}
       with:
@@ -68,7 +68,7 @@ runs:
     - name: Restore OpenVMM inputs on Windows
       id: restore-openvmm-inputs-windows
       if: runner.os == 'Windows'
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           openvmm/flowey-persist/flowey_lib_common__download_gh_release
@@ -80,7 +80,7 @@ runs:
     - name: Restore OpenVMM binary on Linux
       id: restore-openvmm-binary-linux
       if: runner.os != 'Windows'
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       env:
         PATH: ${{ steps.cache-tools-linux.outputs.path }}
       with:
@@ -92,7 +92,7 @@ runs:
     - name: Restore OpenVMM binary on Windows
       id: restore-openvmm-binary-windows
       if: runner.os == 'Windows'
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           build/openvmm.provenance.json
@@ -102,7 +102,7 @@ runs:
     - name: Restore shared Cargo cache on Linux
       id: restore-cargo-linux
       if: runner.os != 'Windows' && steps.restore-openvmm-binary-linux.outputs.cache-hit != 'true'
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       env:
         PATH: ${{ steps.cache-tools-linux.outputs.path }}
       with:
@@ -116,7 +116,7 @@ runs:
     - name: Restore shared Cargo cache on Windows
       id: restore-cargo-windows
       if: runner.os == 'Windows' && steps.restore-openvmm-binary-windows.outputs.cache-hit != 'true'
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           ${{ format('{0}/cargo-home/registry', runner.temp) }}
@@ -172,7 +172,7 @@ runs:
         github.ref == 'refs/heads/dev' &&
         runner.os != 'Windows' &&
         steps.restore-openvmm-binary-linux.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       env:
         PATH: ${{ steps.cache-tools-linux.outputs.path }}
       with:
@@ -188,7 +188,7 @@ runs:
         github.ref == 'refs/heads/dev' &&
         runner.os == 'Windows' &&
         steps.restore-openvmm-binary-windows.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           build/openvmm.provenance.json
@@ -206,7 +206,7 @@ runs:
         runner.os != 'Windows' &&
         steps.restore-openvmm-binary-linux.outputs.cache-hit != 'true' &&
         steps.restore-openvmm-inputs-linux.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       env:
         PATH: ${{ steps.cache-tools-linux.outputs.path }}
       with:
@@ -223,7 +223,7 @@ runs:
         runner.os == 'Windows' &&
         steps.restore-openvmm-binary-windows.outputs.cache-hit != 'true' &&
         steps.restore-openvmm-inputs-windows.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           openvmm/flowey-persist/flowey_lib_common__download_gh_release
@@ -238,7 +238,7 @@ runs:
         runner.os != 'Windows' &&
         steps.restore-openvmm-binary-linux.outputs.cache-hit != 'true' &&
         steps.restore-cargo-linux.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       env:
         PATH: ${{ steps.cache-tools-linux.outputs.path }}
       with:
@@ -255,7 +255,7 @@ runs:
         runner.os == 'Windows' &&
         steps.restore-openvmm-binary-windows.outputs.cache-hit != 'true' &&
         steps.restore-cargo-windows.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           ${{ format('{0}/cargo-home/registry', runner.temp) }}

@@ -2402,6 +2402,46 @@ setup scripts and the Specula runner setup read, together; a test in
 `scripts/test_nvx_tools.py` fails while they differ. Update every self-hosted
 runner as the setup guide describes before the change merges.
 
+## Action references
+
+The workflows and composite actions under `.github/` name each remote action,
+any whose reference does not start with `./`, by the full-length commit SHA of
+one of its releases, followed by a comment that names that release exactly:
+
+```yaml
+uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+```
+
+A tag, such as `v5`, or a branch is a pointer that whoever controls the
+action's repository can move, and every job that names it then runs the new
+commit, with the job's credentials and on its runner, the self-hosted ones
+included. A commit SHA is the only reference that nobody can move (#1664).
+The comment names the release, `vX.Y.Z`, never a major tag such as `v5`, which
+names no fixed commit. Local actions, `./.github/actions/NAME` and
+`./.github/workflows/NAME.yml`, come from the checkout itself and keep their
+paths. A test in `scripts/test_nvx_tools.py` fails on a remote reference in any
+other form, and another reads the release from the comment to keep
+`actions/upload-artifact` and `actions/download-artifact` at releases that run
+on Node 24.
+
+To pin a release, or to move a pin to another one, resolve the commit of the
+release's tag in the action's own repository, `OWNER/REPO`, the first two
+components of the reference's path, such as `actions/cache` for
+`actions/cache/restore`:
+
+```bash
+gh api repos/OWNER/REPO/commits/vX.Y.Z --jq .sha
+git ls-remote --tags https://github.com/OWNER/REPO vX.Y.Z 'vX.Y.Z^{}'
+```
+
+Both must name the same commit: `ls-remote` prints the tag, and for an
+annotated tag also its commit, on the line that ends in `^{}`. Take the SHA from
+the tag in that repository, never from a fork or a commit page alone, because
+GitHub also runs an action at a commit that exists only in a fork of its
+repository. Before you move a pin, read the release notes and the changes
+between the two commits, `https://github.com/OWNER/REPO/compare/OLD...NEW`, and
+change the SHA and the comment of each reference that moves together.
+
 ## Compilation cache
 
 Every self-hosted runner keeps a persistent

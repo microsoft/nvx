@@ -259,6 +259,47 @@ def _yaml_scalar(configuration: str, field: str) -> str:
     raise AssertionError(f"configuration has no {field} field")
 
 
+def _yaml_uses(node: yaml.Node | None) -> list[yaml.Node]:
+    """Return the value node of every `uses` key in a composed workflow or
+    action."""
+    if isinstance(node, yaml.MappingNode):
+        uses: list[yaml.Node] = []
+        for key, child in cast(list[tuple[yaml.Node, yaml.Node]], node.value):
+            if isinstance(key, yaml.ScalarNode) and key.value == "uses":
+                uses.append(child)
+            else:
+                uses.extend(_yaml_uses(child))
+        return uses
+    if isinstance(node, yaml.SequenceNode):
+        children = cast(list[yaml.Node], node.value)
+        return [use for child in children for use in _yaml_uses(child)]
+    return []
+
+
+def _action_references() -> list[tuple[str, str, str]]:
+    """Return the location, reference, and trailing comment of every `uses`
+    value of the workflows and actions under .github/. YAML drops comments,
+    so the comment is the rest of the source line after the value."""
+    root = BuildConstants.REPO_ROOT
+    references: list[tuple[str, str, str]] = []
+    for path in sorted(
+        path
+        for pattern in ("*.yml", "*.yaml")
+        for path in (root / ".github").rglob(pattern)
+    ):
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        for node in _yaml_uses(yaml.SafeLoader(text).get_single_node()):
+            location = f"{path.relative_to(root).as_posix()}:{node.start_mark.line + 1}"
+            if not isinstance(node, yaml.ScalarNode):
+                raise AssertionError(f"{location}: uses: is not a scalar")
+            end = node.end_mark
+            references.append(
+                (location, str(node.value), lines[end.line][end.column :])
+            )
+    return references
+
+
 def _outer_parentheses_enclose(expression: str) -> bool:
     expression = expression.strip()
     if not expression.startswith("("):
@@ -11743,15 +11784,41 @@ Write-Output (Get-ExpectedRunnerLabels -BenchmarkRunner)
         )
         self.assertNotIn("--clobber", publish_action)
 
-    def test_ci_artifact_actions_use_node24(self):
-        configurations = "\n".join(
-            path.read_text(encoding="utf-8")
-            for pattern in ("*.yml", "*.yaml")
-            for path in (BuildConstants.REPO_ROOT / ".github").rglob(pattern)
-        )
+    def test_remote_actions_are_pinned_to_release_commits(self):
+        # A tag or a branch is a pointer that whoever controls the action's
+        # repository can move, so every remote action names a full commit SHA
+        # and the release whose commit it is (doc/ci.md#action-references).
+        # Local actions come from the checkout itself.
+        references = [
+            reference
+            for reference in _action_references()
+            if not reference[1].startswith("./")
+        ]
 
-        self.assertNotRegex(configurations, r"actions/upload-artifact@v[1-5]\b")
-        self.assertNotRegex(configurations, r"actions/download-artifact@v[1-6]\b")
+        self.assertTrue(references)
+        for location, reference, comment in references:
+            with self.subTest(location=location):
+                self.assertRegex(reference, r"^[\w.-]+/[^@\s]+@[0-9a-f]{40}$")
+                self.assertRegex(comment, r"^ # v\d+\.\d+\.\d+$")
+
+    def test_ci_artifact_actions_use_node24(self):
+        # The artifact actions run on Node 24 from upload-artifact v6 and
+        # download-artifact v7. A pin names a commit, so the release comes
+        # from its version comment.
+        minimum = {"actions/upload-artifact": 6, "actions/download-artifact": 7}
+        found = dict.fromkeys(minimum, 0)
+        for location, reference, comment in _action_references():
+            action = reference.partition("@")[0]
+            if action not in minimum:
+                continue
+            found[action] += 1
+            with self.subTest(location=location):
+                release = re.fullmatch(r" # v(\d+)\.\d+\.\d+", comment)
+                if release is None:
+                    self.fail(f"{reference} names no release: {comment!r}")
+                self.assertGreaterEqual(int(release[1]), minimum[action])
+
+        self.assertTrue(all(found.values()), found)
 
     def test_benchmark_diagnostics_preserve_each_workflow_attempt(self):
         action = (

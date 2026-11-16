@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -46,7 +46,7 @@ jobs:
           save-cache: "false"
 
       - name: Upload guest kernel
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: guest-kernel
           path: |
@@ -57,7 +57,7 @@ jobs:
           retention-days: 1
 
       - name: Upload Alpine initramfs
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: guest-alpine
           path: |
@@ -68,7 +68,7 @@ jobs:
           retention-days: 1
 
       - name: Upload Ubuntu distro layer
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: guest-ubuntu-distro
           path: |
@@ -85,7 +85,7 @@ jobs:
     timeout-minutes: 180
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -99,19 +99,19 @@ jobs:
           binary-path: openvmm/target/release/openvmm
 
       - name: Download guest kernel
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-kernel
           path: build
 
       - name: Download Alpine initramfs
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-alpine
           path: build
 
       - name: Download Ubuntu distro layer
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-ubuntu-distro
           path: build
@@ -165,7 +165,7 @@ jobs:
       # A rerun of the job replaces the reports of its earlier attempt.
       - name: Upload the reports
         if: ${{ !cancelled() && hashFiles('build/nvx-rs-scenario-coverage/**') != '' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nvx-rs-scenario-coverage-${{ github.run_id }}
           path: build/nvx-rs-scenario-coverage

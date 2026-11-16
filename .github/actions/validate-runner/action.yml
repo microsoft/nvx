@@ -293,7 +293,7 @@ runs:
     # host's whole CPU surface for a new generation or profile revision.
     - name: Upload the CPU fingerprint
       if: failure() && inputs.verify-openvmm == 'true'
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         path: ${{ runner.temp }}/nvx-cpu-fingerprint.json
         name: cpu-fingerprint-${{ github.job }}-${{ inputs.backend }}-${{ runner.name }}-attempt-${{ github.run_attempt }}

@@ -160,7 +160,7 @@ runs:
     - name: Restore Linux kernel (zstd)
       id: cache-linux-kernel-zstd
       if: steps.components.outputs.kernel == 'true'
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           build/vmlinux
@@ -172,7 +172,7 @@ runs:
     - name: Restore Alpine disk image (zstd)
       id: cache-alpine-image-zstd
       if: steps.components.outputs.alpine == 'true'
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           build/initramfs.cpio.gz
@@ -184,7 +184,7 @@ runs:
     - name: Restore Ubuntu initramfs (zstd)
       id: cache-ubuntu-initramfs-zstd
       if: steps.components.outputs.ubuntu == 'true'
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           build/initramfs-ubuntu.cpio.gz
@@ -195,7 +195,7 @@ runs:
     - name: Restore Ubuntu distro layer (zstd)
       id: cache-ubuntu-distro-zstd
       if: steps.components.outputs.ubuntu == 'true'
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           build/ubuntu-distro.erofs
@@ -207,7 +207,7 @@ runs:
     - name: Restore Azure Linux initramfs (zstd)
       id: cache-azurelinux-initramfs-zstd
       if: steps.components.outputs.azurelinux == 'true'
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           build/initramfs-azurelinux.cpio.gz
@@ -264,7 +264,7 @@ runs:
         inputs.save-cache == 'true' &&
         steps.components.outputs.kernel == 'true' &&
         steps.cache-linux-kernel-zstd.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           build/vmlinux
@@ -276,7 +276,7 @@ runs:
     - name: Restore Linux debug kernel (zstd)
       id: cache-linux-debug-kernel-zstd
       if: steps.components.outputs.debug-kernel == 'true'
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           build/vmlinux-debug
@@ -304,7 +304,7 @@ runs:
         inputs.save-cache == 'true' &&
         steps.components.outputs.debug-kernel == 'true' &&
         steps.cache-linux-debug-kernel-zstd.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           build/vmlinux-debug
@@ -333,7 +333,7 @@ runs:
         inputs.save-cache == 'true' &&
         steps.components.outputs.alpine == 'true' &&
         steps.cache-alpine-image-zstd.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           build/initramfs.cpio.gz
@@ -382,7 +382,7 @@ runs:
         inputs.save-cache == 'true' &&
         steps.components.outputs.ubuntu == 'true' &&
         steps.cache-ubuntu-initramfs-zstd.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           build/initramfs-ubuntu.cpio.gz
@@ -415,7 +415,7 @@ runs:
         inputs.save-cache == 'true' &&
         steps.components.outputs.azurelinux == 'true' &&
         steps.cache-azurelinux-initramfs-zstd.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           build/initramfs-azurelinux.cpio.gz
@@ -445,7 +445,7 @@ runs:
         inputs.save-cache == 'true' &&
         steps.components.outputs.ubuntu == 'true' &&
         steps.cache-ubuntu-distro-zstd.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: |
           build/ubuntu-distro.erofs
@@ -470,7 +470,7 @@ runs:
 
     - name: Upload guest artifact record
       if: inputs.restore-only != 'true' && inputs.record-artifact != ''
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: ${{ inputs.record-artifact }}
         path: build/guest-artifacts.json

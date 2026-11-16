@@ -79,7 +79,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -99,34 +99,34 @@ jobs:
       # unsharded default run the Ubuntu distro layer of its public sandbox
       # scenarios.
       - name: Download guest kernel
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-kernel
           path: build
 
       - name: Download Alpine initramfs
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-alpine
           path: build
 
       - name: Download guest debug kernel
         if: inputs.debug-kernel
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-debug-kernel
           path: build
 
       - name: Download Ubuntu initramfs
         if: ${{ inputs.guests-and-sandboxes && !inputs.debug-kernel }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-ubuntu
           path: build
 
       - name: Download Ubuntu distro layer
         if: ${{ inputs.guests-and-sandboxes && !inputs.debug-kernel }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-ubuntu-distro
           path: build
@@ -135,26 +135,26 @@ jobs:
       # public sandbox scenarios of an unsharded default run read.
       - name: Download Ubuntu distro layer for the whole default run
         if: ${{ !inputs.guests-and-sandboxes && !inputs.debug-kernel && !inputs.shard }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-ubuntu-distro
           path: build
 
       - name: Download Azure Linux initramfs
         if: ${{ inputs.guests-and-sandboxes && !inputs.debug-kernel }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-azurelinux
           path: build
 
       - name: Download OpenVMM executable
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ inputs.openvmm-artifact }}-executable
           path: openvmm/target/release
 
       - name: Download OpenVMM provenance
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ inputs.openvmm-artifact }}-provenance
           path: build
@@ -168,7 +168,7 @@ jobs:
       # with nvx-rs, which they find where `cargo build --release` puts it,
       # and whose artifact root is then this checkout.
       - name: Download nvx-rs executable
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ inputs.nvx-rs-artifact }}-executable
           path: nvx-rs/target/release
@@ -1250,7 +1250,7 @@ jobs:
 
       - name: Upload NVX microVM failure logs
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nvx-microvm-tests-${{ inputs.backend }}${{ inputs.debug-kernel && '-debug' || '' }}${{ inputs.guests-and-sandboxes && '-guests' || '' }}${{ inputs.shard && format('-shard-{0}', inputs.shard) || '' }}
           path: |
@@ -1268,7 +1268,7 @@ jobs:
       # keeps its own.
       - name: Upload NVX microVM scenario durations
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nvx-microvm-durations-${{ runner.os }}-${{ inputs.backend }}-${{ inputs.debug-kernel && 'debug' || 'default' }}${{ inputs.guests-and-sandboxes && '-guests' || '' }}${{ inputs.shard && format('-shard-{0}', inputs.shard) || '' }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: build/test-results/*/scenario-durations.jsonl
