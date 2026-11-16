@@ -1,4 +1,4 @@
-"""Tests for title-based issue-label suggestions."""
+"""Tests for title-based issue-label suggestions and the Bug report form's areas."""
 
 from __future__ import annotations
 
@@ -578,6 +578,108 @@ class WorkflowTests(unittest.TestCase):
                 "--event",
                 '"${GITHUB_EVENT_PATH}"',
             ],
+        )
+
+
+class BugReportFormTests(unittest.TestCase):
+    """The Bug report issue form, whose Area options are the rules' areas."""
+
+    PATH = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "ISSUE_TEMPLATE"
+        / "bug-report.yml"
+    )
+    SECTIONS = (
+        "What is this bug about?",
+        "Why is this bug relevant?",
+        "How is this bug reproducible?",
+    )
+
+    def setUp(self) -> None:
+        self.form = yaml.safe_load(self.PATH.read_text(encoding="utf-8"))
+        self.fields = [
+            element for element in self.form["body"] if element["type"] != "markdown"
+        ]
+
+    def test_form_sets_the_bug_issue_type_without_labels(self) -> None:
+        self.assertEqual(self.form["name"], "Bug report")
+        self.assertEqual(self.form["type"], "Bug")
+        self.assertNotIn("labels", self.form)
+
+    def test_form_follows_githubs_issue_form_syntax(self) -> None:
+        # GitHub reports these errors only when someone opens the form.
+        self.assertLessEqual(
+            set(self.form),
+            {
+                "name",
+                "description",
+                "body",
+                "assignees",
+                "labels",
+                "title",
+                "type",
+                "projects",
+            },
+        )
+        for key in ("name", "description"):
+            self.assertIsInstance(self.form[key], str)
+            self.assertTrue(self.form[key].strip())
+        for element in self.form["body"]:
+            self.assertLessEqual(
+                set(element), {"type", "id", "attributes", "validations"}
+            )
+            if element["type"] == "markdown":
+                self.assertTrue(element["attributes"]["value"].strip())
+        ids = [field["id"] for field in self.fields]
+        for field_id in ids:
+            self.assertRegex(field_id, r"\A[A-Za-z0-9_-]+\Z")
+        self.assertEqual(len(set(ids)), len(ids))
+        labels = [field["attributes"]["label"] for field in self.fields]
+        self.assertEqual(len(set(labels)), len(labels))
+        for field in self.fields:
+            options = field["attributes"].get("options", [])
+            self.assertTrue(all(isinstance(option, str) for option in options))
+            self.assertEqual(len(set(options)), len(options))
+            self.assertNotIn("none", [option.casefold() for option in options])
+
+    def test_area_and_sections_are_required_in_order(self) -> None:
+        self.assertEqual(
+            [(field["type"], field["attributes"]["label"]) for field in self.fields],
+            [
+                ("dropdown", "Area"),
+                *(("textarea", section) for section in self.SECTIONS),
+            ],
+        )
+        for field in self.fields:
+            with self.subTest(label=field["attributes"]["label"]):
+                self.assertIs(field["validations"]["required"], True)
+
+    def test_area_options_are_the_area_labels_of_the_rules(self) -> None:
+        area = self.fields[0]["attributes"]
+        self.assertEqual(
+            area["options"],
+            [label for label in load_label_config().rules if label.startswith("area:")],
+            "the Area options of .github/ISSUE_TEMPLATE/bug-report.yml must be "
+            "the area: labels of scripts/issue-labels.json, in its order",
+        )
+        self.assertNotIn("default", area)
+        self.assertNotIn("multiple", area)
+
+    def test_sections_guide_without_prefilled_answers(self) -> None:
+        for field in self.fields[1:]:
+            with self.subTest(label=field["attributes"]["label"]):
+                self.assertTrue(field["attributes"]["description"].strip())
+                self.assertNotIn("value", field["attributes"])
+
+    def test_reminder_links_the_security_policy(self) -> None:
+        reminders = "".join(
+            element["attributes"]["value"]
+            for element in self.form["body"]
+            if element["type"] == "markdown"
+        )
+        self.assertIn(
+            "(https://github.com/microsoft/nvx/blob/dev/SECURITY.md)", reminders
         )
 
 

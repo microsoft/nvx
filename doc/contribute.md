@@ -5,8 +5,10 @@ NVX takes contributions as pull requests to the `dev` branch of
 workflow, the conventions that reviewers expect, the quality gates, test
 ownership, the layout and expectations of tests, and how OpenVMM changes
 reach NVX.
-Report security vulnerabilities as [SECURITY.md](../SECURITY.md) describes,
-never in a public issue.
+Report a bug with the
+[Bug report](https://github.com/microsoft/nvx/issues/new?template=bug-report.yml)
+issue form, and security vulnerabilities as [SECURITY.md](../SECURITY.md)
+describes, never in a public issue.
 
 ## Workflow
 
