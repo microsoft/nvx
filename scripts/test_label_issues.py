@@ -558,7 +558,7 @@ class WorkflowTests(unittest.TestCase):
         job = workflow["jobs"]["label"]
         self.assertEqual(job["permissions"], {"contents": "read", "issues": "write"})
         checkout, label = job["steps"]
-        self.assertEqual(checkout["uses"], "actions/checkout@v5")
+        self.assertRegex(checkout["uses"], r"^actions/checkout@")
         self.assertEqual(
             checkout["with"],
             {

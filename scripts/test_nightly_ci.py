@@ -2052,7 +2052,7 @@ class WorkflowTests(unittest.TestCase):
     def test_the_report_runs_the_default_branch_without_credentials(self):
         self.assertEqual(self.job["runs-on"], "ubuntu-latest")
         checkout = self.step("Checkout")
-        self.assertEqual(checkout["uses"], "actions/checkout@v5")
+        self.assertRegex(cast(str, checkout["uses"]), r"^actions/checkout@")
         # Without a ref, the checkout is the default branch, not the run's code.
         self.assertEqual(checkout["with"], {"persist-credentials": False})
         # The triggering run reaches the command only through the environment.

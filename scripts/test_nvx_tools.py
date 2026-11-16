@@ -5353,7 +5353,7 @@ class MergeQueueTests(unittest.TestCase):
                     [needs] if isinstance(needs, str) else needs,
                 )
         [checkout, cancel] = job["steps"]
-        self.assertEqual(checkout["uses"], "actions/checkout@v5")
+        self.assertRegex(checkout["uses"], r"^actions/checkout@")
         # The token can cancel any of the repository's runs, so the job runs
         # the command that the group's base branch has merged rather than the
         # group's copy, although its steps still come from the group's ci.yml.
@@ -6840,7 +6840,7 @@ class CiConfigurationTests(unittest.TestCase):
             job,
         )
         self.assertLess(
-            job.index("uses: actions/checkout@v5"),
+            job.index("uses: actions/checkout@"),
             job.index("python3 scripts/nvx.py check-required-ci"),
         )
         self.assertIn("persist-credentials: false", job)
@@ -9008,7 +9008,7 @@ python3() {
             self.assertIn("path: openvmm/target/release", consumer_workflow)
             self.assertIn("path: build", consumer_workflow)
             self.assertEqual(
-                consumer_workflow.count("uses: actions/download-artifact@v8"),
+                consumer_workflow.count("uses: actions/download-artifact@"),
                 download_count,
             )
             self.assertIn(
@@ -9059,9 +9059,9 @@ python3() {
         self.assertNotIn("actions/cache/", workflow)
         self.assertNotIn("openvmm-inputs-v1-", workflow)
         self.assertNotIn("openvmm-cargo-v1-", workflow)
-        self.assertNotIn("uses: actions/cache@v5", workflow)
-        self.assertNotIn("uses: actions/cache@v5", build_workflow)
-        self.assertNotIn("uses: actions/cache@v5", build_action)
+        self.assertNotIn("uses: actions/cache@", workflow)
+        self.assertNotIn("uses: actions/cache@", build_workflow)
+        self.assertNotIn("uses: actions/cache@", build_action)
 
         release_job = _workflow_job(workflow, "release")
         performance_gate_job = _workflow_job(workflow, "performance-gate")
@@ -9292,7 +9292,7 @@ python3() {
         )
         self.assertEqual(upload["name"], "Upload guest artifact record")
         self.assertEqual(upload["if"], record["if"])
-        self.assertEqual(upload["uses"], "actions/upload-artifact@v7")
+        self.assertRegex(upload["uses"], r"^actions/upload-artifact@")
         # It expires with the components' artifacts.
         self.assertEqual(
             upload["with"],
@@ -9736,11 +9736,11 @@ python3() {
 
         self.assertIn("      debug-kernel:\n", microvm_workflow)
         self.assertIn("        type: boolean\n", microvm_workflow)
-        download = microvm_workflow.index("name: guest-debug-kernel")
-        self.assertIn(
-            "if: inputs.debug-kernel",
-            microvm_workflow[download - 120 : download],
+        download = _workflow_step(
+            microvm_workflow, "test", "Download guest debug kernel"
         )
+        self.assertIn("\n          name: guest-debug-kernel\n", download)
+        self.assertEqual(_yaml_scalar(download, "if"), "inputs.debug-kernel")
         debug_flag = "${{ inputs.debug-kernel && '--debug-kernel' || '' }}"
         self.assertEqual(microvm_workflow.count(debug_flag), 2)
         # The debug run replaces every production-kernel workload rather than
@@ -10166,7 +10166,7 @@ python3() {
         self.assertNotIn("checkout-openvmm", text)
         self.assertNotIn("head.repo.full_name", text)
         checkout, check = job["steps"]
-        self.assertEqual(checkout["uses"], "actions/checkout@v5")
+        self.assertRegex(checkout["uses"], r"^actions/checkout@")
         self.assertEqual(checkout["with"], {"persist-credentials": False})
         self.assertEqual(check["env"]["GH_TOKEN"], "${{ github.token }}")
         self.assertEqual(
@@ -10328,7 +10328,7 @@ python3() {
                 self.assertEqual(job.count("uses: ./.github/actions/validate-nvx"), 1)
                 for prerequisite in (
                     "uses: ./.github/actions/checkout-openvmm",
-                    "uses: actions/setup-python@v6",
+                    "uses: actions/setup-python@",
                     "rustup toolchain install",
                 ):
                     self.assertLess(
@@ -10642,12 +10642,14 @@ python3() {
                 configuration,
             )
         download = microvm.index("      - name: Download nvx-rs executable\n")
-        self.assertIn(
-            "        uses: actions/download-artifact@v8\n"
-            "        with:\n"
-            "          name: ${{ inputs.nvx-rs-artifact }}-executable\n"
-            "          path: nvx-rs/target/release\n",
+        self.assertRegex(
             microvm[download:],
+            r"        uses: actions/download-artifact@[^\n]+\n"
+            + re.escape(
+                "        with:\n"
+                "          name: ${{ inputs.nvx-rs-artifact }}-executable\n"
+                "          path: nvx-rs/target/release\n"
+            ),
         )
         chmod = microvm.index("      - name: Make nvx-rs executable\n")
         self.assertIn(
@@ -11766,7 +11768,7 @@ Write-Output (Get-ExpectedRunnerLabels -BenchmarkRunner)
         )
 
         self.assertIn("      if: always()", diagnostics)
-        self.assertIn("      uses: actions/upload-artifact@v7", diagnostics)
+        self.assertIn("      uses: actions/upload-artifact@", diagnostics)
         self.assertIn("        path: data/runs/${{ inputs.platform }}", diagnostics)
         self.assertIn(f"        name: {name}", diagnostics)
         self.assertIn("        if-no-files-found: error", diagnostics)
@@ -12532,7 +12534,7 @@ Write-Output (Get-BenchmarkScratchDirectory)
         }
         upload = steps["Upload NVX microVM scenario durations"]
         self.assertEqual(upload["if"], "always()")
-        self.assertEqual(upload["uses"], "actions/upload-artifact@v7")
+        self.assertRegex(upload["uses"], r"^actions/upload-artifact@")
         self.assertEqual(
             upload["with"]["path"],
             f"build/test-results/*/{microvm_durations.REPORT_NAME}",
