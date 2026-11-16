@@ -48,7 +48,7 @@ from pathlib import Path, PurePosixPath
 from typing import IO, Protocol, cast
 
 from . import benchmark_host
-from .common import ScriptError, sha256_file, workflow_path
+from .common import ScriptError, github_token, sha256_file, workflow_path
 from .nightly_ci import GITHUB_API_URL, GitHubApiError, GitHubClient
 from .performance import (
     PerformanceError,
@@ -746,7 +746,7 @@ def _toplevel(directory: Path) -> Path:
 def command_persist_recorded_performance(args: argparse.Namespace) -> int:
     if not _REPOSITORY.fullmatch(args.repository):
         raise ScriptError("--repository must be OWNER/REPOSITORY")
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    token = github_token()
     if not token:
         raise ScriptError(
             "set GH_TOKEN to a token that can read the repository's workflow runs"

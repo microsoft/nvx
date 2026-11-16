@@ -1,0 +1,18 @@
+{
+  "fallback_label": "needs triage",
+  "rules": {
+    "area: openvmm": ["openvmm", "microvm"],
+    "area: guest": ["guest", "nvx-init"],
+    "area: kernel": ["kernel"],
+    "area: nvx-rs": ["nvx-rs"],
+    "area: userland": ["userland", "alpine", "ubuntu", "azure linux", "azurelinux"],
+    "area: networking": ["network", "networking"],
+    "area: snapshot": ["snapshot", "snapshots"],
+    "area: ci": ["ci"],
+    "area: docs": ["docs", "documentation"],
+    "area: security": ["security"],
+    "platform: kvm": ["kvm"],
+    "platform: mshv": ["mshv"],
+    "platform: whp": ["whp"]
+  }
+}

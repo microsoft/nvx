@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
-from .common import ScriptError, git_output
+from .common import ScriptError, git_output, github_token
 from .nightly_ci import GITHUB_API_URL, GitHubClient
 
 OPENVMM_REPOSITORY = "microsoft/openvmm"
@@ -291,7 +291,7 @@ def command_check_openvmm_ci(args: argparse.Namespace) -> None:
         raise ScriptError(f"{revision!r} is no full OpenVMM commit SHA")
     # The repository is public, so any token reads its runs, and none does
     # too, under a lower rate limit.
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or None
+    token = github_token()
     api = GitHubClient(token, os.environ.get("GITHUB_API_URL") or GITHUB_API_URL)
     verdicts = check_openvmm_ci(api, revision, wait_seconds=args.wait_minutes * 60)
     for verdict in verdicts:

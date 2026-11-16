@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol, cast
 
-from .common import ScriptError, positive_int, workflow_path
+from .common import ScriptError, github_token, positive_int, workflow_path
 from .nightly_ci import GITHUB_API_URL, GitHubApiError, GitHubClient
 
 MERGE_GROUP_BRANCH = re.compile(
@@ -232,7 +232,7 @@ def cancel_superseded_merge_groups(
 def command_cancel_superseded_merge_groups(args: argparse.Namespace) -> None:
     if not _REPOSITORY.fullmatch(args.repository):
         raise ScriptError("--repository must be OWNER/REPOSITORY")
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    token = github_token()
     if not token:
         raise ScriptError(
             "set GH_TOKEN to a token that can cancel the repository's workflow runs"
