@@ -72,7 +72,7 @@ An init that calls one depends on that mechanism's documented ABI alone, not
 on nvx-init's conventions. Its boot tokens, its root, and its protocol with its
 host are its own, and its host names them in the compatibility identity of
 each VM's runtime identity, which `nvx` compares and never interprets, as
-[Runtime Identity](design/1.5-compatibility-and-versioning-model.md#154-runtime-identity)
+[Runtime Identity](design/1.5-compatibility-and-versioning-model.md#155-runtime-identity)
 describes. NVX's CLI names there the boot contract, control session, and
 control contract of nvx-init and its guest agent.
 

@@ -309,7 +309,7 @@ starts from fresh state.
   restores only under the runtime identity that captured it; see
   [Snapshot compatibility](design/1.5-compatibility-and-versioning-model.md#152-snapshot-compatibility)
   and
-  [Runtime identity](design/1.5-compatibility-and-versioning-model.md#154-runtime-identity).
+  [Runtime identity](design/1.5-compatibility-and-versioning-model.md#155-runtime-identity).
 - **Guest-restore records**, alpha.7's activation records. The release reads
   and writes version 2 alone.
 - **NVXC.** NVXC v1 and its FEATURES exchange are gone, and NVX's hosts and
