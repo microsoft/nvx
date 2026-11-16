@@ -18939,11 +18939,11 @@ class InitIcmpEchoSocketsTests(unittest.TestCase):
     def test_every_guest_mode_gets_the_setting(self):
         source = self.INIT.read_text(encoding="utf-8")
         call = source.index("\nopen_icmp_echo_sockets\n")
-        # The one-shot program, the sandbox control agent, and the managed agent
+        # The one-shot program, the sandbox's nvx-init, and the managed agent
         # all start after the call.
         for later in (
-            'if [ -n "$nvx_exec" ]; then',
-            "exec /sbin/nvx-init-agent",
+            'if [ -n "$nvx_exec" ] && [ "$sandbox_mode" = false ]; then',
+            'exec /sbin/nvx-init "$@"',
             "exec /sbin/nvx-managed-agent",
         ):
             with self.subTest(later=later):
