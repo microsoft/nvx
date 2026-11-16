@@ -74,6 +74,8 @@ _EXTRACTED_LIMIT_BYTES = 64 * 1024 * 1024
 # The persistence reads GitHub for at most this long, well within its job's
 # timeout, and stops at the first run that it can't fetch in time.
 _FETCH_BUDGET_SECONDS = 15 * 60.0
+_RENAME_RETRY_SECONDS = 1.0
+_RENAME_RETRY_INTERVAL_SECONDS = 0.05
 _DIGEST = re.compile(r"sha256:([0-9a-f]{64})")
 _REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _RESULT_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.csv")
@@ -426,7 +428,30 @@ def _fetch(
         results = staging / "results"
         results.mkdir()
         _extract(archive, results)
-        results.rename(directory)
+        # Windows can briefly deny a directory rename while a child file is open.
+        rename_deadline = min(deadline, time.monotonic() + _RENAME_RETRY_SECONDS)
+        first_attempt = True
+        rename_error: PermissionError | None = None
+        while first_attempt or time.monotonic() < rename_deadline:
+            first_attempt = False
+            try:
+                results.rename(directory)
+            except PermissionError as error:
+                if (
+                    getattr(error, "winerror", None) not in (5, 32)
+                    or not results.is_dir()
+                    or directory.exists()
+                ):
+                    raise
+                rename_error = error
+                remaining = rename_deadline - time.monotonic()
+                if remaining > 0:
+                    time.sleep(min(_RENAME_RETRY_INTERVAL_SECONDS, remaining))
+            else:
+                break
+        else:
+            assert rename_error is not None
+            raise rename_error
     return directory
 
 

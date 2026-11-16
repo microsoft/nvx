@@ -39,6 +39,61 @@ fn process_group_exists(process: ProcessId) -> bool {
     signal_process_group(process, 0) != Err(Errno::ESRCH)
 }
 
+/// Runs a process-global test in a dedicated test-harness subprocess.
+///
+/// Returns `true` in the parent after the isolated run succeeds and `false` in the child that
+/// should execute the test body. Isolation prevents PID-1-style `waitpid(-1)` behavior from
+/// reaping children that unrelated parallel host tests own.
+pub(crate) fn isolate_process_test(marker: &str, test: &str) -> bool {
+    if std::env::var_os(marker).is_some() {
+        return false;
+    }
+    let status = std::process::Command::new(
+        std::env::current_exe().expect("the test executable has a path"),
+    )
+    .args(["--exact", test, "--nocapture", "--include-ignored"])
+    .env(marker, "1")
+    .status()
+    .expect("the isolated test process starts");
+    assert!(status.success(), "the isolated test process failed");
+    true
+}
+
+#[test]
+fn process_stats_distinguish_live_userspace_kernel_threads_and_zombies() {
+    for (state, flags, threads, live) in [
+        ("R", 0, 1, true),
+        ("S", KERNEL_THREAD, 1, false),
+        ("Z", 0, 1, false),
+        ("X", 0, 1, false),
+        ("Z", 0, 2, true),
+    ] {
+        let stat = format!("42 (a ) name) {state} 1 2 3 4 5 {flags} 0 0 0 0 0 0 0 0 0 0 {threads}");
+        assert_eq!(live_userspace(stat.as_bytes()), Ok(live));
+    }
+    for malformed in [
+        b"missing".as_slice(),
+        b"42 (name) R 1",
+        b"42 (name) R 1 2 3 4 5 flags",
+    ] {
+        assert_eq!(live_userspace(malformed), Err(Errno::EPROTO));
+    }
+    assert!(
+        ProcessId::live_userspace()
+            .unwrap()
+            .contains(&current_process())
+    );
+}
+
+/// Ends only the calling main thread, leaving its process's other threads alive, for the sweep
+/// check's private child. libc's `_exit` would end the entire process.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn exit_main_thread() -> ! {
+    // SAFETY: the system call takes only an exit status and does not return.
+    unsafe { nix::libc::syscall(nix::libc::SYS_exit, 0) };
+    unreachable!("exit of the main thread does not return")
+}
+
 /// Forks a test's process, which the harness's threads keep [`fork`] from forking, for a test
 /// that the process runs alone, as `isolate_process_test` starts one. The child has only the
 /// calling thread, so [`fork`] works in it.
@@ -51,67 +106,6 @@ pub(crate) fn fork_isolated_test() -> Result<ForkResult, Errno> {
             Ok(ForkResult::Parent(ProcessId::from_pid(child)))
         }
     }
-}
-
-/// Starts a child that ends at once with `status`, before it could run a program, and that
-/// reports its end with no signal, as a child that `clone` starts with no exit signal does, for
-/// the tests of the waits that name such a child.
-pub(crate) fn spawn_child_without_exit_signal(status: u8) -> Result<ProcessId, Errno> {
-    let none: nix::libc::c_long = 0;
-    // SAFETY: without `CLONE_VM`, and with no stack of its own, the child runs in a copy of this
-    // process, as after `fork`, where it calls only `_exit`, which takes no lock that another of
-    // this process's threads could hold. No flag asks for an exit signal.
-    let child = unsafe { nix::libc::syscall(nix::libc::SYS_clone, none, none, none, none, none) };
-    match child {
-        0 => exit_immediately(status),
-        child if child < 0 => Err(Errno::last()),
-        child => {
-            let child = nix::libc::pid_t::try_from(child).map_err(|_| Errno::EOVERFLOW)?;
-            Ok(ProcessId::from_pid(Pid::from_raw(child)))
-        }
-    }
-}
-
-/// Forks a child that makes the calling thread its tracer, stops with `SIGSTOP`, and exits with
-/// `status` once its tracer continues it, or with 99 if it cannot be traced.
-///
-/// libc's `ptrace` is used because the crate does not enable `nix`'s.
-pub(crate) fn spawn_traced_child(status: u8) -> ProcessId {
-    // SAFETY: the child makes only the async-signal-safe `ptrace`, `raise`, and `_exit` calls,
-    // as a child of a multithreaded process may.
-    match unsafe { nix::unistd::fork() }.expect("fork") {
-        nix::unistd::ForkResult::Child => {
-            // SAFETY: `PTRACE_TRACEME` reads none of the other arguments.
-            let traced = unsafe {
-                nix::libc::ptrace(
-                    nix::libc::PTRACE_TRACEME,
-                    0,
-                    std::ptr::null_mut::<nix::libc::c_void>(),
-                    std::ptr::null_mut::<nix::libc::c_void>(),
-                )
-            };
-            if traced != 0 {
-                exit_immediately(99);
-            }
-            let _ = nix::sys::signal::raise(Signal::SIGSTOP);
-            exit_immediately(status)
-        }
-        nix::unistd::ForkResult::Parent { child } => ProcessId::from_pid(child),
-    }
-}
-
-/// Continues `process`, which the calling thread traces and which is stopped, without a signal.
-pub(crate) fn continue_traced(process: ProcessId) {
-    // SAFETY: `PTRACE_CONT` reads the process ID, and a null signal, which delivers none.
-    let result = unsafe {
-        nix::libc::ptrace(
-            nix::libc::PTRACE_CONT,
-            process.0.as_raw(),
-            std::ptr::null_mut::<nix::libc::c_void>(),
-            std::ptr::null_mut::<nix::libc::c_void>(),
-        )
-    };
-    assert_eq!(result, 0, "PTRACE_CONT: {}", Errno::last());
 }
 
 /// Makes the system call `number` fail with `EPERM` in the calling thread, and in every process
@@ -132,6 +126,34 @@ pub(crate) fn deny_system_call(number: nix::libc::c_long) {
             1,
             number as u32,
         ),
+        filter_statement(
+            libc::BPF_RET | libc::BPF_K,
+            0,
+            0,
+            libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+        ),
+        filter_statement(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+    ];
+    install_seccomp_filter(&mut filter);
+}
+
+/// Rejects negative-ID `kill` with `EPERM`, but leaves positive child IDs usable for cleanup.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn deny_group_kill() {
+    use nix::libc;
+
+    // kill takes a 32-bit pid_t: its sign bit is in the low word of seccomp_data.args[0],
+    // at byte 16 on x86-64, even when the caller has zero-extended that syscall argument.
+    let mut filter = [
+        filter_statement(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+        filter_statement(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+            0,
+            3,
+            libc::SYS_kill as u32,
+        ),
+        filter_statement(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 16),
+        filter_statement(libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K, 0, 1, 1 << 31),
         filter_statement(
             libc::BPF_RET | libc::BPF_K,
             0,
@@ -357,7 +379,6 @@ fn a_real_time_signal_goes_through_a_pidfd_and_to_a_process_group() {
         .spawn()
         .unwrap();
     let process = ProcessId::from_child(&leader);
-    assert_eq!(process_group_of(process), Ok(process));
     assert_eq!(signal_process_group(process, 65), Err(Errno::EINVAL));
     assert_eq!(signal_process_group(process, 41), Ok(()));
     assert_eq!(leader.wait().unwrap().signal(), Some(41));

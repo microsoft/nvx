@@ -4,7 +4,9 @@
 use std::ffi::{CStr, CString};
 use std::fmt::{self, Display};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::Phase;
 use super::api::Violation;
@@ -154,10 +156,10 @@ pub(crate) trait PrivilegedOps: Sync {
     /// Stops the VM with `status`, which in production does not return.
     fn power_off(&self, status: PowerOffStatus);
     /// Appends `record` to the kernel log, when the process may write it.
-    fn write_kernel_log(&self, record: &[u8]);
+    fn write_kernel_log(&self, record: &[u8], deadline: Option<Instant>);
     /// Writes `separator` and then `line` to the console, or to standard error when the console
     /// does not open.
-    fn write_console(&self, separator: &[u8], line: &[u8]);
+    fn write_console(&self, separator: &[u8], line: &[u8], deadline: Option<Instant>);
 }
 
 /// An MSR device, or the token of a test's fake.
@@ -217,25 +219,50 @@ impl PrivilegedOps for RealOps {
         sys::power_off(status.code())
     }
 
-    fn write_kernel_log(&self, record: &[u8]) {
-        let flags = OpenFlags::O_WRONLY | OpenFlags::O_CLOEXEC;
-        if let Ok(log) = sys::open(kernel::KERNEL_LOG_DEVICE, flags, Mode::empty()) {
-            let _ = log.write_all(record);
+    fn write_kernel_log(&self, record: &[u8], deadline: Option<Instant>) {
+        let flags = OpenFlags::O_WRONLY
+            | OpenFlags::O_CLOEXEC
+            | deadline.map_or(OpenFlags::empty(), |_| OpenFlags::O_NONBLOCK);
+        if FileLock::check_deadline(deadline).is_ok()
+            && let Ok(log) = sys::open(kernel::KERNEL_LOG_DEVICE, flags, Mode::empty())
+        {
+            let _ = log.write_all_until(record, deadline);
         }
     }
 
-    fn write_console(&self, separator: &[u8], line: &[u8]) {
-        let flags = OpenFlags::O_WRONLY | OpenFlags::O_NOCTTY | OpenFlags::O_CLOEXEC;
-        match sys::open(kernel::CONSOLE_DEVICE, flags, Mode::empty()) {
-            Ok(console) => {
-                let _ = console.write_all(separator);
-                let _ = console.write_all(line);
-            }
-            Err(_) => {
+    fn write_console(&self, separator: &[u8], line: &[u8], deadline: Option<Instant>) {
+        write_console_at(kernel::CONSOLE_DEVICE, separator, line, deadline);
+    }
+}
+
+/// Best-effort duplicate diagnostics cannot delay the structured failure returned to the caller.
+fn write_console_at(path: &CStr, separator: &[u8], line: &[u8], deadline: Option<Instant>) {
+    if FileLock::check_deadline(deadline).is_err() {
+        return;
+    }
+    let flags = OpenFlags::O_WRONLY
+        | OpenFlags::O_NOCTTY
+        | OpenFlags::O_CLOEXEC
+        | deadline.map_or(OpenFlags::empty(), |_| OpenFlags::O_NONBLOCK);
+    match sys::open(path, flags, Mode::empty()) {
+        Ok(console) => {
+            let _ = console.write_all_until(separator, deadline);
+            let _ = console.write_all_until(line, deadline);
+        }
+        Err(_) => match deadline {
+            None => {
                 sys::write_standard_error(separator);
                 sys::write_standard_error(line);
             }
-        }
+            Some(_) => {
+                // Reopen rather than duplicate: changing a shared stderr description's flags
+                // would also change other writers.
+                if let Ok(stderr) = sys::open(c"/proc/self/fd/2", flags, Mode::empty()) {
+                    let _ = stderr.write_all_until(separator, deadline);
+                    let _ = stderr.write_all_until(line, deadline);
+                }
+            }
+        },
     }
 }
 
@@ -256,6 +283,8 @@ pub(crate) struct Runtime<'a> {
     strict: bool,
     /// The first violation that the call reported in strict mode, which fails the call.
     violation: Mutex<Option<Violation>>,
+    /// The first port-revocation errno, or `u32::MAX` when none occurred.
+    release_failure: AtomicU32,
     /// Current VM generation.
     generation: AtomicU32,
     /// The declared TSC rate, `F`, in Hz, once known, or zero.
@@ -264,6 +293,8 @@ pub(crate) struct Runtime<'a> {
     async_output: AtomicBool,
     /// Serializes multi-destination violation records.
     report_lock: Mutex<()>,
+    /// One absolute pre-request deadline, absent for legacy calls and capture requests.
+    pub(crate) deadline: Option<Instant>,
 }
 
 impl<'a> Runtime<'a> {
@@ -274,10 +305,12 @@ impl<'a> Runtime<'a> {
             report_only,
             strict: false,
             violation: Mutex::new(None),
+            release_failure: AtomicU32::new(u32::MAX),
             generation: AtomicU32::new(0),
             tsc_hz: AtomicU64::new(0),
             async_output: AtomicBool::new(false),
             report_lock: Mutex::new(()),
+            deadline: None,
         }
     }
 
@@ -355,7 +388,34 @@ impl<'a> Runtime<'a> {
     /// Takes the calling thread's permission for the time ABI's ports, for one transaction,
     /// which [`PortAccess::release`] ends.
     pub(crate) fn open_ports(&self) -> Result<PortAccess<'a>, PortError> {
-        self.ops.open_ports()
+        if let Err(error) = sys::check_released() {
+            self.retain_release_failure(error);
+        }
+        self.ops
+            .open_ports()
+            .inspect_err(|&error| self.retain_release_failure(error))
+    }
+
+    /// Reports the first port-revocation failure, otherwise the thread's current
+    /// permission state. A later successful release cannot erase the call's original failure.
+    pub(crate) fn check_released(&self) -> Result<(), PortError> {
+        match self.release_failure.load(Ordering::Relaxed) {
+            u32::MAX => sys::check_released(),
+            errno => Err(PortError::Revoke(Errno::from_raw(errno as i32))),
+        }
+    }
+
+    /// Keeps the first revocation failure before diagnostics or later transactions can replace
+    /// the calling thread's current error.
+    fn retain_release_failure(&self, error: PortError) {
+        if let PortError::Revoke(errno) = error {
+            let _ = self.release_failure.compare_exchange(
+                u32::MAX,
+                errno as u32,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
     }
 
     /// Writes `error`, the failure of a transaction's end, to the kernel log, such as
@@ -364,9 +424,35 @@ impl<'a> Runtime<'a> {
     /// are on the null device. Until a later transaction revokes the permission, the thread
     /// starts nothing, as [`fork_process`] checks.
     pub(crate) fn log_release_failure(&self, error: PortError) {
+        self.retain_release_failure(error);
         let record = format!("nvx-time: {error}\n");
-        self.ops
-            .write_kernel_log(&[DIAGNOSTIC_PRIORITY, record.as_bytes()].concat());
+        self.ops.write_kernel_log(
+            &[DIAGNOSTIC_PRIORITY, record.as_bytes()].concat(),
+            self.deadline,
+        );
+    }
+
+    /// Acquires the reporting lock by the caller deadline. A poisoned lock keeps the legacy
+    /// guardless reporting behavior.
+    fn lock_reports(&self) -> Result<Option<MutexGuard<'_, ()>>, Errno> {
+        let Some(deadline) = self.deadline else {
+            return Ok(self.report_lock.lock().ok());
+        };
+        loop {
+            FileLock::check_deadline(Some(deadline))?;
+            match self.report_lock.try_lock() {
+                Ok(guard) => {
+                    FileLock::check_deadline(Some(deadline))?;
+                    return Ok(Some(guard));
+                }
+                Err(TryLockError::Poisoned(_)) => return Ok(None),
+                Err(TryLockError::WouldBlock) => thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(1)),
+                ),
+            }
+        }
     }
 
     /// Emits one serialized violation record to every ABI destination.
@@ -377,8 +463,9 @@ impl<'a> Runtime<'a> {
         phase: Phase,
         detail: &[u8],
     ) {
-        let _guard = self.report_lock.lock().ok();
-        self.emit_event_unlocked(code, source, phase, detail);
+        if let Ok(_guard) = self.lock_reports() {
+            self.emit_event_unlocked(code, source, phase, detail);
+        }
     }
 
     /// Emits an event while the caller already owns `report_lock`.
@@ -398,13 +485,20 @@ impl<'a> Runtime<'a> {
             clock_ns(sys::Clock::Boottime),
             detail,
         );
-        self.ops
-            .write_kernel_log(&[KERNEL_LOG_PRIORITY, line.as_bytes()].concat());
-        if let Ok(ports) = self.open_ports() {
+        self.ops.write_kernel_log(
+            &[KERNEL_LOG_PRIORITY, line.as_bytes()].concat(),
+            self.deadline,
+        );
+        if FileLock::check_deadline(self.deadline).is_ok()
+            && let Ok(ports) = self.open_ports()
+        {
             if self.async_output.load(Ordering::Relaxed) {
                 ports.write_u8(Port::PortbData, b'\n');
             }
             for byte in line.bytes() {
+                if FileLock::check_deadline(self.deadline).is_err() {
+                    break;
+                }
                 ports.write_u8(Port::PortbData, byte);
             }
             // The event goes on after a failure, which keeps the thread from starting anything,
@@ -418,15 +512,20 @@ impl<'a> Runtime<'a> {
         } else {
             b""
         };
-        self.ops.write_console(separator, line.as_bytes());
-        let _ = count_violation();
+        self.ops
+            .write_console(separator, line.as_bytes(), self.deadline);
+        let _ = count_violation(self.deadline);
     }
 
     /// Reports a conformance failure, and powers off unless report-only or strict.
     pub(crate) fn conformance_failure(&self, code: ViolationCode, phase: Phase, detail: &[u8]) {
-        let _guard = self.report_lock.lock().ok();
-        self.emit_event_unlocked(code, EventSource::Conformance, phase, detail);
-        self.stop(PowerOffStatus::Conformance, code, detail);
+        match self.lock_reports() {
+            Ok(_guard) => {
+                self.emit_event_unlocked(code, EventSource::Conformance, phase, detail);
+                self.stop(PowerOffStatus::Conformance, code, detail);
+            }
+            Err(_) => self.stop(PowerOffStatus::Conformance, code, detail),
+        }
     }
 
     /// Emits a fatal event and requests its typed power-off status, unless report-only or
@@ -524,10 +623,11 @@ pub(crate) fn replace_file(path: &CStr, temporary: &CStr, text: &[u8]) -> Result
     file.rename(path)
 }
 
-/// Opens or creates a runtime lock file and takes its exclusive advisory lock.
-pub(crate) fn lock_file(path: &CStr) -> Result<FileLock, Errno> {
+/// Takes a runtime lock using the caller's explicit pre-request deadline, if any.
+pub(crate) fn lock_file(path: &CStr, deadline: Option<Instant>) -> Result<FileLock, Errno> {
+    FileLock::check_deadline(deadline)?;
     make_runtime_directories();
-    sys::lock_file(path, PRIVATE_FILE_MODE)
+    FileLock::acquire(path, PRIVATE_FILE_MODE, deadline)
 }
 
 /// Loads and parses the published time state.
@@ -543,18 +643,29 @@ pub(crate) fn state_store(state: &TimeState) -> Result<(), Errno> {
 
 /// Applies one read-modify-write update to the time state under its lock.
 pub(crate) fn state_apply(update: impl FnOnce(&mut TimeState)) -> Result<(), Errno> {
-    let _lock = lock_file(STATE_LOCK_PATH)?;
+    state_apply_until(None, update)
+}
+
+/// Updates state under a runtime lock bounded by the same pre-request deadline.
+pub(crate) fn state_apply_until(
+    deadline: Option<Instant>,
+    update: impl FnOnce(&mut TimeState),
+) -> Result<(), Errno> {
+    let _lock = lock_file(STATE_LOCK_PATH, deadline)?;
     let mut state = state_load().unwrap_or_default();
+    FileLock::check_deadline(deadline)?;
     update(&mut state);
     state_store(&state)
 }
 
 /// Increments the persisted violation counter when state exists.
-fn count_violation() -> Result<(), Errno> {
+fn count_violation(deadline: Option<Instant>) -> Result<(), Errno> {
     if !sys::path_exists(STATE_PATH) {
         return Ok(());
     }
-    state_apply(|state| state.violations = state.violations.wrapping_add(1))
+    state_apply_until(deadline, |state| {
+        state.violations = state.violations.wrapping_add(1)
+    })
 }
 
 /// Loads validated TSC and LAPIC rates from state.
@@ -567,12 +678,11 @@ pub(crate) fn rates_load() -> Result<(u64, u64), Errno> {
     }
 }
 
-/// Saves the stall detectors' settings in the suppression record, and suppresses them for a
-/// snapshot capture; see [`Suppression::save`]. A record that exists already, of a pending
-/// capture, is `EEXIST`.
-pub(crate) fn suppression_save() -> Result<(), SaveError> {
+/// Saves suppression with explicitly bounded runtime-lock and detector operations.
+pub(crate) fn suppression_save_until(deadline: Option<Instant>) -> Result<(), SaveError> {
+    FileLock::check_deadline(deadline).map_err(SaveError::Undone)?;
     make_runtime_directories();
-    SUPPRESSION.save()
+    SUPPRESSION.save_until(deadline, sys::write_number)
 }
 
 /// Why a save of the stall detectors' settings failed.
@@ -593,10 +703,19 @@ fn describe(prefix: &[u8], error: Errno) -> Vec<u8> {
 }
 
 /// Restores the stall detectors' settings from the suppression record, and removes the record;
-/// see [`Suppression::restore`]. A missing record succeeds when `missing_ok`.
+/// see [`Suppression::restore_until`]. A missing record succeeds when `missing_ok`.
 pub(crate) fn suppression_restore(missing_ok: bool) -> Result<(), Vec<u8>> {
+    suppression_restore_until(missing_ok, None)
+}
+
+/// Restores suppression by an explicit deadline, absent after a capture request.
+pub(crate) fn suppression_restore_until(
+    missing_ok: bool,
+    deadline: Option<Instant>,
+) -> Result<(), Vec<u8>> {
+    FileLock::check_deadline(deadline).map_err(|error| describe(b"restore detectors: ", error))?;
     make_runtime_directories();
-    SUPPRESSION.restore(missing_ok)
+    SUPPRESSION.restore_until(missing_ok, deadline)
 }
 
 /// The suppression of the stall detectors for a capture: the detectors, the record of their
@@ -619,23 +738,17 @@ const SUPPRESSION: Suppression<'static> = Suppression {
 };
 
 impl Suppression<'_> {
-    /// Saves the detectors' settings in the record, and suppresses the detectors, under the
-    /// lock, so that no restore runs between its reads and its writes. A record that exists
-    /// already, of a pending capture, is `EEXIST`. A save that fails before it created the
-    /// record changes nothing; one that fails after undoes its changes and removes the record,
-    /// or keeps the record if it can't.
-    fn save(&self) -> Result<(), SaveError> {
-        self.save_with(sys::write_number)
-    }
-
-    /// Implements [`save`](Self::save), with `write` writing a detector's setting.
-    fn save_with(
+    /// Saves with one deadline shared by locking, reads, writes and any rollback.
+    fn save_until(
         &self,
+        deadline: Option<Instant>,
         mut write: impl FnMut(&CStr, i64) -> Result<(), Errno>,
     ) -> Result<(), SaveError> {
-        let _lock = sys::lock_file(self.lock, PRIVATE_FILE_MODE).map_err(SaveError::Undone)?;
+        let _lock =
+            FileLock::acquire(self.lock, PRIVATE_FILE_MODE, deadline).map_err(SaveError::Undone)?;
         let mut saved = Vec::new();
         for (index, &(path, suppressed)) in self.detectors.iter().enumerate() {
+            FileLock::check_deadline(deadline).map_err(SaveError::Undone)?;
             if let Err(error) = sys::check_exists(path) {
                 if index == 0 {
                     return Err(SaveError::Undone(error));
@@ -650,20 +763,29 @@ impl Suppression<'_> {
             text.extend_from_slice(path.to_bytes());
             text.extend_from_slice(format!("={value}\n").as_bytes());
         }
+        FileLock::check_deadline(deadline).map_err(SaveError::Undone)?;
         let record =
             CreatedFile::create(self.record, true, PRIVATE_FILE_MODE).map_err(SaveError::Undone)?;
         record.write_all(&text).map_err(SaveError::Undone)?;
         // As in the C program, a record that fails to close stays, and the suppression goes on.
         let _ = record.keep();
         for (written, &(path, _, suppressed)) in saved.iter().enumerate() {
-            if let Err(error) = write(path, suppressed) {
+            if let Err(error) =
+                FileLock::check_deadline(deadline).and_then(|()| write(path, suppressed))
+            {
                 // The record stays unless every earlier write is undone, so that a restore can
                 // still restore the settings.
                 let mut undone = true;
                 for &(path, value, _) in &saved[..written] {
-                    undone &= write(path, value).is_ok();
+                    undone &= FileLock::check_deadline(deadline)
+                        .and_then(|()| write(path, value))
+                        .is_ok();
                 }
-                if undone && sys::unlink(self.record).is_ok() {
+                if undone
+                    && FileLock::check_deadline(deadline)
+                        .and_then(|()| sys::unlink(self.record))
+                        .is_ok()
+                {
                     return Err(SaveError::Undone(error));
                 }
                 return Err(SaveError::Kept(error));
@@ -672,10 +794,10 @@ impl Suppression<'_> {
         Ok(())
     }
 
-    /// Restores the detectors' settings from the record, and removes it, under the lock. A
-    /// missing record succeeds when `missing_ok`.
-    fn restore(&self, missing_ok: bool) -> Result<(), Vec<u8>> {
-        let _lock = sys::lock_file(self.lock, PRIVATE_FILE_MODE)
+    /// Restores under the same explicit deadline as the failed preparation.
+    fn restore_until(&self, missing_ok: bool, deadline: Option<Instant>) -> Result<(), Vec<u8>> {
+        let expired = |error| describe(b"restore detectors: ", error);
+        let _lock = FileLock::acquire(self.lock, PRIVATE_FILE_MODE, deadline)
             .map_err(|error| describe(b"lock /run/nvx/time-suppression.lock: ", error))?;
         let text = match sys::read_file(self.record) {
             Ok(text) => text,
@@ -686,6 +808,7 @@ impl Suppression<'_> {
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
         {
+            FileLock::check_deadline(deadline).map_err(expired)?;
             let Some(equal) = line.iter().position(|byte| *byte == b'=') else {
                 break;
             };
@@ -700,6 +823,7 @@ impl Suppression<'_> {
                 ));
             }
         }
+        FileLock::check_deadline(deadline).map_err(expired)?;
         sys::unlink(self.record)
             .map_err(|error| describe(b"remove /run/nvx/time-suppression: ", error))
     }
@@ -715,7 +839,7 @@ pub(crate) fn portb_read(ports: &PortAccess<'_>, port: Port, buffer: &mut [u8]) 
 
 /// Locks the shared port-window transaction.
 pub(crate) fn lock_portb() -> Result<FileLock, Errno> {
-    lock_file(PORTB_LOCK_PATH)
+    lock_file(PORTB_LOCK_PATH, None)
 }
 
 /// Formats a failure of [`lock_portb`]: `portb lock: `, then the description of `error`.

@@ -155,27 +155,35 @@ mod transactions {
 
     #[test]
     fn a_thread_that_may_hold_the_permission_spawns_no_command() {
-        use crate::guest::spawn::Command;
-        use crate::guest::sys::{self, ChildStatus};
+        use std::io::Read;
 
-        let command = || Command::new(c"/bin/true".to_owned(), vec![c"true".to_owned()]);
-        let refusal = |command: Command| command.spawn().unwrap_err().raw_os_error();
+        use crate::guest::sys::{self, ChildSpec, ChildStatus, PreparedChild};
+
+        let spawn = || {
+            PreparedChild::new(ChildSpec::new(
+                c"/bin/true".to_owned(),
+                vec![c"true".to_owned()],
+            ))
+            .unwrap()
+            .spawn()
+        };
         let backend = FakePermission::default();
         let access = PortAccess::with_backend(&backend).unwrap();
-        assert_eq!(refusal(command()), Some(Errno::EPERM as i32));
+        assert_eq!(spawn().err(), Some(Errno::EPERM));
         backend.fail_revocations(Some(Errno::ENOMEM));
         assert_eq!(access.release(), Err(PortError::Revoke(Errno::ENOMEM)));
-        assert_eq!(refusal(command()), Some(Errno::EPERM as i32));
+        assert_eq!(spawn().err(), Some(Errno::EPERM));
         // A later transaction revokes the permission, and the thread starts a command again.
         backend.fail_revocations(None);
         PortAccess::with_backend(&backend)
             .unwrap()
             .release()
             .unwrap();
-        let spawned = command().spawn().unwrap();
-        let process = spawned.process();
-        assert_eq!(spawned.into_report().wait().unwrap(), None);
-        assert_eq!(sys::wait(process), Some(ChildStatus::Exited(0)));
+        let mut started = spawn().unwrap();
+        let mut report = Vec::new();
+        started.report.read_to_end(&mut report).unwrap();
+        assert!(report.is_empty());
+        assert_eq!(sys::wait(started.process), Some(ChildStatus::Exited(0)));
     }
 
     #[test]

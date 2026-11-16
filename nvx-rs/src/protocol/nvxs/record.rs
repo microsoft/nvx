@@ -15,7 +15,7 @@ use crate::protocol::{
 /// [`OUTER_MAX_PAYLOAD`] bytes; [`allows_length`](Self::allows_length) tells them apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
-pub enum RecordType {
+pub(crate) enum RecordType {
     /// Bootstrap record with which the guest attaches. Its payload is empty.
     GuestAttach = OUTER_GUEST_ATTACH,
     /// Bootstrap record with which the host attaches. Its payload is the [`CAPABILITY_LEN`]-byte
@@ -44,12 +44,12 @@ pub enum RecordType {
 
 impl RecordType {
     /// Returns the type's code, the byte at offset 6 of a record header.
-    pub const fn code(self) -> u8 {
+    pub(crate) const fn code(self) -> u8 {
         self as u8
     }
 
     /// Returns the type with `code`, or `None` if protocol version 1 defines no such type.
-    pub const fn from_code(code: u8) -> Option<Self> {
+    pub(crate) const fn from_code(code: u8) -> Option<Self> {
         match code {
             OUTER_GUEST_ATTACH => Some(Self::GuestAttach),
             OUTER_HOST_ATTACH => Some(Self::HostAttach),
@@ -66,12 +66,12 @@ impl RecordType {
 
     /// Returns whether records of this type are bootstrap records, whose instance ID, epoch, and
     /// sequence are zero.
-    pub const fn is_bootstrap(self) -> bool {
+    pub(crate) const fn is_bootstrap(self) -> bool {
         matches!(self, Self::GuestAttach | Self::HostAttach)
     }
 
     /// Returns whether a record of this type may carry a payload of `length` bytes.
-    pub const fn allows_length(self, length: usize) -> bool {
+    pub(crate) const fn allows_length(self, length: usize) -> bool {
         match self {
             Self::GuestAttach | Self::Reset | Self::Wait | Self::Ready => length == 0,
             Self::HostAttach => length == CAPABILITY_LEN,
@@ -81,7 +81,7 @@ impl RecordType {
     }
 
     /// Returns the protocol's name of the type, such as `GUEST_ATTACH`.
-    pub const fn name(self) -> &'static str {
+    pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::GuestAttach => "GUEST_ATTACH",
             Self::HostAttach => "HOST_ATTACH",
@@ -104,21 +104,21 @@ impl fmt::Display for RecordType {
 
 /// Code of an ERROR record. Protocol version 1 defines one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ErrorCode {
+pub(crate) enum ErrorCode {
     /// The broker refused the host's launch capability.
     Authentication,
 }
 
 impl ErrorCode {
     /// Returns the code's value, the payload of an ERROR record.
-    pub const fn code(self) -> u32 {
+    pub(crate) const fn code(self) -> u32 {
         match self {
             Self::Authentication => 1,
         }
     }
 
     /// Returns the code with value `code`, or `None` if protocol version 1 defines no such code.
-    pub const fn from_code(code: u32) -> Option<Self> {
+    pub(crate) const fn from_code(code: u32) -> Option<Self> {
         match code {
             1 => Some(Self::Authentication),
             _ => None,
@@ -138,8 +138,7 @@ impl fmt::Display for ErrorCode {
 ///
 /// A stream that carries one cannot be resynchronized, so the receiver ends it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum RecordError {
+pub(crate) enum RecordError {
     /// The header does not start with the magic `NVXS`.
     Magic([u8; 4]),
     /// The header names a protocol version other than 1.
@@ -221,7 +220,7 @@ impl std::error::Error for RecordError {}
 /// Its fields satisfy every rule that [`encode_record`] checks. `Debug` shows the payload's
 /// length rather than its bytes, so that a host's capability cannot reach a log through it.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Record {
+pub(crate) struct Record {
     /// Type of the record.
     record_type: RecordType,
     /// Instance ID of the session, zero in a bootstrap record.
@@ -236,47 +235,37 @@ pub struct Record {
 
 impl Record {
     /// Returns the record's type.
-    pub fn record_type(&self) -> RecordType {
+    pub(crate) fn record_type(&self) -> RecordType {
         self.record_type
     }
 
     /// Returns the session's instance ID, zero in a bootstrap record.
-    pub fn instance_id(&self) -> [u8; 16] {
+    pub(crate) fn instance_id(&self) -> [u8; 16] {
         self.instance_id
     }
 
     /// Returns the session's epoch, zero in a bootstrap record.
-    pub fn epoch(&self) -> u64 {
+    pub(crate) fn epoch(&self) -> u64 {
         self.epoch
     }
 
     /// Returns the record's sequence number in its direction, zero in a bootstrap record.
-    pub fn sequence(&self) -> u64 {
+    pub(crate) fn sequence(&self) -> u64 {
         self.sequence
     }
 
     /// Returns the record's payload.
-    pub fn payload(&self) -> &[u8] {
+    pub(crate) fn payload(&self) -> &[u8] {
         &self.payload
     }
 
     /// Returns the record's payload, consuming the record.
-    pub fn into_payload(self) -> Vec<u8> {
+    pub(crate) fn into_payload(self) -> Vec<u8> {
         self.payload
     }
 
-    /// Returns the initial receive window of an ACK record, or `None` for another type.
-    pub fn window(&self) -> Option<u32> {
-        (self.record_type == RecordType::Ack).then(|| value(&self.payload))
-    }
-
-    /// Returns the number of bytes that a CREDIT record returns, or `None` for another type.
-    pub fn credit(&self) -> Option<u32> {
-        (self.record_type == RecordType::Credit).then(|| value(&self.payload))
-    }
-
     /// Returns the code of an ERROR record, or `None` for another type.
-    pub fn error_code(&self) -> Option<ErrorCode> {
+    pub(crate) fn error_code(&self) -> Option<ErrorCode> {
         if self.record_type == RecordType::Error {
             ErrorCode::from_code(value(&self.payload))
         } else {
@@ -303,7 +292,7 @@ impl fmt::Debug for Record {
 /// It checks what [`RecordParser`] checks: the payload length that `record_type` allows, the zero
 /// identity of a bootstrap record, the code of an ERROR record, and the byte counts of ACK and
 /// CREDIT records. On an error, `output` is unchanged.
-pub fn encode_record(
+pub(crate) fn encode_record(
     record_type: RecordType,
     instance_id: &[u8; 16],
     epoch: u64,
@@ -443,7 +432,7 @@ fn value(payload: &[u8]) -> u32 {
 /// cannot be resynchronized: the parser discards its partial record and fails every later call
 /// with the same error.
 #[derive(Clone)]
-pub struct RecordParser {
+pub(crate) struct RecordParser {
     /// Header bytes of the record in progress.
     header: [u8; OUTER_HEADER_LEN],
     /// Number of bytes of `header` that arrived.
@@ -456,7 +445,7 @@ pub struct RecordParser {
 
 impl RecordParser {
     /// Creates a parser at the start of a stream.
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             header: [0; OUTER_HEADER_LEN],
             header_len: 0,
@@ -469,7 +458,7 @@ impl RecordParser {
     ///
     /// Returns the number of bytes consumed and the record that the last of them completed, if
     /// any. Bytes after that record are not consumed. A failure ends the stream.
-    pub fn push(&mut self, input: &[u8]) -> Result<(usize, Option<Record>), RecordError> {
+    pub(crate) fn push(&mut self, input: &[u8]) -> Result<(usize, Option<Record>), RecordError> {
         if let Some(error) = &self.error {
             return Err(error.clone());
         }
@@ -485,7 +474,7 @@ impl RecordParser {
     ///
     /// A reader that never reads more than this leaves every byte after the record in progress
     /// unread, for example so that polling the stream for readiness stays accurate.
-    pub fn needed(&self) -> usize {
+    pub(crate) fn needed(&self) -> usize {
         match &self.body {
             Some((header, payload)) => header.length - payload.len(),
             None => OUTER_HEADER_LEN - self.header_len,
@@ -493,7 +482,7 @@ impl RecordParser {
     }
 
     /// Returns the number of bytes of the partial record that the parser holds.
-    pub fn buffered(&self) -> usize {
+    pub(crate) fn buffered(&self) -> usize {
         match &self.body {
             Some((_, payload)) => OUTER_HEADER_LEN + payload.len(),
             None => self.header_len,

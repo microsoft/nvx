@@ -1,5 +1,5 @@
-//! `nvx-init TIME_DAEMON [ANNOUNCER]`: NVX's PID 1 for layered roots, which runs ahead of the
-//! workloads.
+//! `nvx-init TIME_DAEMON [ANNOUNCER]`: NVX's PID 1, which initializes a layered root and serves
+//! its managed control session through the same dispatcher as blockless VMs.
 //!
 //! A layered root's early boot, which the shell `/init` runs, mounts the kernel's file systems,
 //! runs `nvx-time boot`, whose child becomes the time daemon, configures the network, and, when
@@ -7,6 +7,9 @@
 //! To hand PID 1 over to `nvx-init`, the early boot replaces itself with it, so that `nvx-init`
 //! inherits both helpers as its children, and passes it their process IDs: `TIME_DAEMON`, and
 //! `ANNOUNCER` when the announcer runs. Each is a decimal process ID above 1, and the two differ.
+//! It reads the layered root, decoded view, shares and mapping count from the kernel command
+//! line, mounts the root's runtime with the time status, and switches once. The control terminal,
+//! mapping descriptors, table and resolved account defaults stay open across that switch.
 //! As PID 1, `nvx-init`:
 //!
 //! - reads `SIGCHLD` and `SIGTERM` from a signal descriptor. `SIGCHLD` wakes it to collect the
@@ -27,26 +30,45 @@
 //!   nothing from it;
 //! - ends the VM itself, without another guest program: it writes every file system's modified
 //!   data to its storage, with `sync`, and then stops the VM through OpenVMM's control port with a
-//!   status: 0 after `SIGTERM`, or 125, as `nvx-init-agent`'s failures do, after a failure, which
-//!   an `NVX-INIT-ERROR:` line on the console names first.
+//!   status: 0 after a host `STOP` or `SIGTERM`; after its restored activation failed, which a
+//!   deadline that passed before Ready and an activate request that it refused also are, the
+//!   status of `nvx::protocol::status` of the failure's class, such as 54, `GUEST_RESTORE_ROOT`,
+//!   for a root that does not assemble over its upper, or 51, `GUEST_RESTORE_PROTOCOL`, for an
+//!   activate request that changes the accepted one, which an `NVX-INIT-ACTIVATION:` line on the
+//!   console names first; or 125 after another failure, which an
+//!   `NVX-INIT-ERROR:` line on the console names first.
 //!
 //! Outside PID 1, `nvx-init` changes nothing: it fails with status 2 and a message.
 
-use std::ffi::{CStr, CString};
-use std::process::ExitCode;
-use std::time::Duration;
+use std::ffi::{CStr, CString, OsStr};
+use std::io;
+use std::net::Ipv4Addr;
+use std::os::fd::BorrowedFd;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::process::ExitStatusExt;
+use std::path::{Path, PathBuf};
+use std::process::{ExitCode, ExitStatus as ProcessStatus};
+use std::time::{Duration, Instant};
+
+use crate::guest_restore::Publication;
+use crate::protocol::cmdline;
+use crate::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
 
 use super::parse::parse_decimal;
+use super::snapshot::{self, CaptureFailure, Captured, Devices, Disks, Repaired};
 use super::status::ExitStatus;
 use super::sys::{
-    self, ChildStatus, Errno, Mode, OpenFlags, Pollable, ProcessId, Signal, SignalDescriptor,
-    kernel,
+    self, ChildStatus, Errno, FileDescriptor, Mode, OpenFlags, Pollable, ProcessId, Signal,
+    SignalDescriptor, kernel,
 };
+
+mod boot;
+pub(crate) use boot::{RestoreHandoff, Restored};
 
 /// The process ID of the init process.
 const INIT_PROCESS: i32 = 1;
-/// The VM's exit status after a failure of PID 1 or the end of a helper: that of
-/// `nvx-init-agent`'s failures.
+/// The VM's exit status after a failure of PID 1 or the end of a helper, but for a failed restored
+/// activation's.
 const FAILURE: u8 = 125;
 /// The out-of-memory score adjustment of PID 1 and its helpers, Linux's `OOM_SCORE_ADJ_MIN`,
 /// which exempts them from the out-of-memory killer.
@@ -56,8 +78,6 @@ const NICE: i32 = -10;
 /// The signals that PID 1 reads from its signal descriptor: the end of a child, and the request
 /// to end the VM.
 const SIGNALS: [Signal; 2] = [Signal::SIGCHLD, Signal::SIGTERM];
-/// Pause before PID 1 polls its signal descriptor again after `poll` failed.
-const POLL_RETRY: Duration = Duration::from_secs(1);
 
 /// The helpers that the shell `/init` hands over: the only processes whose end ends the VM.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +124,694 @@ impl Helpers {
             .find(|&(_, helper)| helper == process)
             .map(|(name, _)| name)
     }
+
+    /// Kills every remaining userspace process but PID 1 and the registered helpers, repeating
+    /// until none remains or the deadline expires, including descendants that left their
+    /// execution's process group.
+    pub(crate) fn sweep(self, deadline: Instant) -> Result<(), Errno> {
+        if sys::current_process().raw() != INIT_PROCESS {
+            return Err(Errno::EPERM);
+        }
+        self.sweep_with(ProcessId::live_userspace, sys::kill_process, || {
+            sys::FileLock::check_deadline(Some(deadline))
+        })
+    }
+
+    /// A capture without permission to kill must leave no unregistered process running.
+    fn prepare_capture(self, kill: bool, deadline: Instant) -> Result<(), Errno> {
+        if kill {
+            return self.sweep(deadline);
+        }
+        if sys::current_process().raw() != INIT_PROCESS {
+            return Err(Errno::EPERM);
+        }
+        if ProcessId::live_userspace()?
+            .into_iter()
+            .any(|process| process.raw() != INIT_PROCESS && self.name(process).is_none())
+        {
+            return Err(Errno::EBUSY);
+        }
+        Ok(())
+    }
+
+    /// Runs the narrow process-table sweep with the supplied walk, kill and deadline checks.
+    fn sweep_with(
+        self,
+        mut processes: impl FnMut() -> Result<Vec<ProcessId>, Errno>,
+        mut kill: impl FnMut(ProcessId) -> Result<(), Errno>,
+        mut check_deadline: impl FnMut() -> Result<(), Errno>,
+    ) -> Result<(), Errno> {
+        loop {
+            check_deadline()?;
+            let mut found = false;
+            for process in processes()? {
+                check_deadline()?;
+                if process.raw() == INIT_PROCESS || self.name(process).is_some() {
+                    continue;
+                }
+                found = true;
+                match kill(process) {
+                    Ok(()) | Err(Errno::ESRCH) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            check_deadline()?;
+            if !found {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+/// The capture request's one pre-request deadline, including workload cleanup.
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Init's capture inputs and outcome, retained across the existing control session's reset.
+pub(crate) struct Capture {
+    /// The only processes that capture cleanup spares besides PID 1.
+    helpers: Helpers,
+    /// This boot has not assembled a root.
+    fresh: bool,
+    /// Request ID, kill flag and the original pre-request deadline.
+    pending: Option<(u64, bool, Instant)>,
+    /// The repair whose RESET must be acknowledged before later activation.
+    pub(crate) restored: Option<Restored>,
+    /// A fatal capture disposition, whose status PID 1 must preserve.
+    shutdown: Option<u8>,
+}
+
+/// Preparation refused the request, or the acknowledged snapshot call returned.
+pub(crate) enum CaptureStep {
+    /// Workload preparation failed before the request was acknowledged.
+    Refused {
+        /// The original capture request.
+        request_id: u64,
+        /// The preparation failure.
+        error: Errno,
+    },
+    /// The acknowledged, synchronous snapshot call returned.
+    Returned {
+        /// The original capture request, still on the same session.
+        request_id: u64,
+        /// The snapshot library's unchanged outcome and disposition.
+        result: Result<Captured, CaptureFailure>,
+    },
+}
+
+impl Capture {
+    /// Retains init's helpers, without constructing any space.
+    fn new(helpers: Helpers, fresh: bool) -> Self {
+        Self {
+            helpers,
+            fresh,
+            pending: None,
+            restored: None,
+            shutdown: None,
+        }
+    }
+
+    /// Keeps one pending request and anchors its deadline before cleanup.
+    pub(crate) fn queue(&mut self, request_id: u64, kill: bool) -> bool {
+        if self.pending.is_some() || self.restored.is_some() || self.shutdown.is_some() {
+            return false;
+        }
+        self.pending = Some((request_id, kill, Instant::now() + CAPTURE_TIMEOUT));
+        true
+    }
+
+    /// Whether the active execution must hand back a capture request.
+    pub(crate) fn pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Drops an old epoch's request, not the repaired state.
+    pub(crate) fn reset(&mut self) {
+        self.pending = None;
+    }
+
+    /// Whether this session must admit no root-dependent operation.
+    pub(crate) fn rootless(&self) -> bool {
+        self.restored.as_ref().map_or(self.fresh, |restored| {
+            restored.activation.established().is_none()
+        })
+    }
+
+    /// Starts one activation from the repair's original acknowledgement.
+    pub(crate) fn restored(&mut self, repaired: Repaired) {
+        self.restored = Some(Restored::new(&repaired, Instant::now()));
+    }
+
+    /// Records the fatal status before the loop returns directly to PID 1.
+    pub(crate) fn must_end(&mut self, status: u8) {
+        self.shutdown = Some(status);
+    }
+
+    /// The snapshot library's fatal status, if capture ended the loop.
+    pub(crate) fn shutdown_status(&self) -> Option<u8> {
+        self.shutdown
+    }
+
+    /// Performs the existing repeated sweep after group termination.
+    pub(crate) fn sweep(&self) -> Result<(), Errno> {
+        let (_, _, deadline) = self.pending.ok_or(Errno::EINVAL)?;
+        self.helpers.sweep(deadline)
+    }
+
+    /// Prepares workloads, acknowledges the request, then calls the snapshot library once.
+    pub(crate) fn perform(
+        &mut self,
+        acknowledge: impl FnOnce(u64) -> Result<(), Errno>,
+    ) -> Result<Option<CaptureStep>, Errno> {
+        let helpers = self.helpers;
+        self.perform_with(
+            |kill, deadline| helpers.prepare_capture(kill, deadline),
+            acknowledge,
+            snapshot::capture,
+        )
+    }
+
+    /// The transport is invoked only before the one synchronous snapshot call.
+    pub(crate) fn perform_with(
+        &mut self,
+        prepare: impl FnOnce(bool, Instant) -> Result<(), Errno>,
+        acknowledge: impl FnOnce(u64) -> Result<(), Errno>,
+        capture: impl FnOnce(&Devices, Disks, Instant) -> Result<Captured, CaptureFailure>,
+    ) -> Result<Option<CaptureStep>, Errno> {
+        let Some((request_id, kill, deadline)) = self.pending.take() else {
+            return Ok(None);
+        };
+        let prepared = sys::FileLock::check_deadline(Some(deadline))
+            .and_then(|()| prepare(kill, deadline))
+            .and_then(|()| sys::FileLock::check_deadline(Some(deadline)));
+        if let Err(error) = prepared {
+            return Ok(Some(CaptureStep::Refused { request_id, error }));
+        }
+        acknowledge(request_id)?;
+        let devices = Devices {
+            distro: DISTRO_MMIO_BASE,
+            scratch: SCRATCH_MMIO_BASE,
+            filesystem_tag: "microvm".to_owned(),
+        };
+        Ok(Some(CaptureStep::Returned {
+            request_id,
+            result: capture(&devices, Disks::Fresh, deadline),
+        }))
+    }
+}
+
+/// Reports capture detail without driving the control transport or starting a helper.
+pub(crate) fn report_capture(failure: impl std::fmt::Display) {
+    write_console(
+        kernel::CONSOLE_DEVICE,
+        format!("NVX-INIT-CAPTURE: {failure}\n").as_bytes(),
+    );
+}
+
+/// Reports a guest restore failure before PID 1 ends the VM.
+pub(crate) fn report_activation(failure: impl std::fmt::Display) {
+    write_console(
+        kernel::CONSOLE_DEVICE,
+        format!("NVX-INIT-ACTIVATION: {failure}\n").as_bytes(),
+    );
+}
+
+/// One output pipe of a plain execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stream {
+    Stdout,
+    Stderr,
+}
+
+/// A descriptor that moves the execution on; status comes only from PID 1's collector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Source {
+    Launch,
+    Output(Stream),
+}
+
+/// Why an execution was ended rather than completing on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Cause {
+    Cancelled,
+    Terminated,
+    TimedOut,
+    Disconnected,
+}
+
+/// A target of ending-only termination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KillTarget {
+    Program,
+    ProcessGroup,
+}
+
+/// A failed child setup operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LaunchFailure {
+    /// The syscall boundary's stage number.
+    pub(crate) stage: u32,
+    pub(crate) error: i32,
+}
+
+/// A failed start and, after a fork, the child still owned by the caller's sole collector.
+///
+/// The owner retains this failure and services its collector until `process` has a terminal
+/// status before returning to idle. Killing a child does not collect its status.
+#[derive(Debug)]
+pub(crate) struct StartFailure {
+    /// The first failure; cleanup never replaces it.
+    pub(crate) error: io::Error,
+    /// The child whose terminal status still belongs to the caller's collector.
+    pub(crate) process: Option<ProcessId>,
+    /// A failed attempt to end the child or its process group.
+    pub(crate) cleanup: Option<Errno>,
+}
+
+impl StartFailure {
+    /// Checks without collecting. The owner hands over queued terminal statuses first; `false`
+    /// without one means the child's status was lost, including automatic kernel collection.
+    pub(crate) fn is_pending(&self) -> Result<bool, Errno> {
+        self.process.map_or(Ok(false), ProcessId::is_unreaped)
+    }
+}
+
+impl From<io::Error> for StartFailure {
+    fn from(error: io::Error) -> Self {
+        Self {
+            error,
+            process: None,
+            cleanup: None,
+        }
+    }
+}
+
+impl From<Errno> for StartFailure {
+    fn from(error: Errno) -> Self {
+        io::Error::from(error).into()
+    }
+}
+
+impl std::fmt::Display for LaunchFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "launch stage {}: {}",
+            self.stage,
+            io::Error::from_raw_os_error(self.error)
+        )
+    }
+}
+
+/// One nonblocking step of the init-owned execution.
+#[derive(Debug)]
+pub(crate) enum Event<'a> {
+    Launch(io::Result<Option<LaunchFailure>>),
+    Output(Stream, &'a [u8]),
+    Closed,
+    ReadFailed,
+    KillFailed(KillTarget, io::Error),
+    /// The terminal status, after launch and output have settled.
+    Ended(ProcessStatus),
+}
+
+/// The inputs of one plain-process execution in the VM's shared root.
+pub(crate) struct ExecRequest {
+    /// Program path.
+    pub(crate) program: CString,
+    /// Arguments, including argument zero.
+    pub(crate) arguments: Vec<CString>,
+    /// Exact environment.
+    pub(crate) environment: Vec<CString>,
+    /// Absolute working directory in the shared root.
+    pub(crate) directory: CString,
+    /// Real, effective, and saved user ID.
+    pub(crate) uid: u32,
+    /// Real, effective, and saved group ID.
+    pub(crate) gid: u32,
+    /// How long the leader may run.
+    pub(crate) timeout: Option<Duration>,
+    /// A pipe for streaming input, or the null device.
+    pub(crate) input: bool,
+    /// The program search, when requested by the caller.
+    pub(crate) search_path: Option<CString>,
+    /// Whether the child records its physical working directory in `PWD`.
+    pub(crate) physical_pwd: bool,
+}
+
+impl ExecRequest {
+    fn check(&self) -> io::Result<()> {
+        if self.arguments.is_empty()
+            || self.directory.as_bytes().first() != Some(&b'/')
+            || self.uid == u32::MAX
+            || self.gid == u32::MAX
+        {
+            return Err(Errno::EINVAL.into());
+        }
+        Ok(())
+    }
+}
+
+/// The parent's nonblocking, fixed-size launch report; only the child owns its writer.
+struct LaunchReport {
+    reader: FileDescriptor,
+    bytes: [u8; sys::REPORT_LENGTH],
+    length: usize,
+}
+
+impl LaunchReport {
+    fn read(&mut self) -> Option<io::Result<Option<LaunchFailure>>> {
+        while self.length < self.bytes.len() {
+            match self.reader.read(&mut self.bytes[self.length..]) {
+                Ok(0) if self.length == 0 => return Some(Ok(None)),
+                Ok(0) => return Some(Err(Errno::EPROTO.into())),
+                Ok(length) => self.length += length,
+                Err(Errno::EINTR) => continue,
+                Err(Errno::EAGAIN) => return None,
+                Err(error) => return Some(Err(error.into())),
+            }
+        }
+        let code = u32::from_ne_bytes(self.bytes[..4].try_into().expect("four bytes"));
+        let error = i32::from_ne_bytes(self.bytes[4..].try_into().expect("four bytes"));
+        Some(
+            matches!(code, 1 | 4 | 13..=16 | 18..=21)
+                .then_some(Some(LaunchFailure { stage: code, error }))
+                .ok_or_else(|| Errno::EPROTO.into()),
+        )
+    }
+}
+
+/// One execution, with no arbitrary-signal interface or per-execution containment.
+pub(crate) struct Exec {
+    leader: ProcessId,
+    /// Pins the original group even after PID 1 collects the leader and its number is reused.
+    group: FileDescriptor,
+    launch: Option<LaunchReport>,
+    input: Option<FileDescriptor>,
+    outputs: [Option<FileDescriptor>; 2],
+    turn: usize,
+    status: Option<ProcessStatus>,
+    status_lost: bool,
+    cause: Option<Cause>,
+    deadline: Option<Instant>,
+    failures: [Option<io::Error>; 2],
+    ended: bool,
+}
+
+impl Exec {
+    /// Forks the program in its own process group, resetting its priority before taking its
+    /// identity, with empty groups and capabilities and `no_new_privs`, before entering its cwd.
+    pub(crate) fn start(request: ExecRequest) -> Result<Self, StartFailure> {
+        request.check()?;
+        let mut spec = sys::ChildSpec::new(request.program, request.arguments);
+        spec.set_environment(request.environment);
+        spec.set_directory(request.directory);
+        spec.set_workload(request.uid, request.gid);
+        if let Some(path) = request.search_path {
+            spec.set_search_path(path);
+        }
+        if request.physical_pwd {
+            spec.export_physical_pwd();
+        }
+        #[cfg(test)]
+        tests::prepare_child(&mut spec);
+        let input = if request.input {
+            let (reader, writer) = sys::create_pipe()?;
+            writer.set_nonblocking()?;
+            spec.set_stream(0, reader);
+            Some(writer)
+        } else {
+            spec.set_stream(
+                0,
+                sys::open(
+                    c"/dev/null",
+                    OpenFlags::O_RDONLY | OpenFlags::O_CLOEXEC,
+                    Mode::empty(),
+                )?,
+            );
+            None
+        };
+        let (stdout, writer) = sys::create_pipe()?;
+        stdout.set_nonblocking()?;
+        spec.set_stream(1, writer);
+        let (stderr, writer) = sys::create_pipe()?;
+        stderr.set_nonblocking()?;
+        spec.set_stream(2, writer);
+        let started = sys::PreparedChild::new(spec)?.spawn()?;
+        Self::from_started(
+            started.process,
+            started.report,
+            input,
+            [Some(stdout), Some(stderr)],
+            request.timeout,
+        )
+    }
+
+    /// Finishes parent-side descriptors without surrendering the collector's child on failure.
+    fn from_started(
+        leader: ProcessId,
+        report: FileDescriptor,
+        input: Option<FileDescriptor>,
+        outputs: [Option<FileDescriptor>; 2],
+        timeout: Option<Duration>,
+    ) -> Result<Self, StartFailure> {
+        let group = match sys::open_pidfd(leader).and_then(|group| {
+            report.set_nonblocking()?;
+            Ok(group)
+        }) {
+            Ok(group) => group,
+            Err(error) => {
+                let cleanup = [sys::kill_process(leader), sys::kill_process_group(leader)]
+                    .into_iter()
+                    .filter_map(Result::err)
+                    .find(|error| *error != Errno::ESRCH);
+                return Err(StartFailure {
+                    error: error.into(),
+                    process: Some(leader),
+                    cleanup,
+                });
+            }
+        };
+        Ok(Self {
+            leader,
+            group,
+            launch: Some(LaunchReport {
+                reader: report,
+                bytes: [0; sys::REPORT_LENGTH],
+                length: 0,
+            }),
+            input,
+            outputs,
+            turn: 0,
+            status: None,
+            status_lost: false,
+            cause: None,
+            deadline: timeout.and_then(|timeout| Instant::now().checked_add(timeout)),
+            failures: [None, None],
+            ended: false,
+        })
+    }
+
+    /// Returns the leader's process ID.
+    pub(crate) fn id(&self) -> u32 {
+        self.leader.raw().unsigned_abs()
+    }
+
+    /// Takes the leader's terminal status from PID 1's sole collector and kills the rest of its
+    /// group even after a normal exit, before waiting for the pipes to close.
+    ///
+    /// The collector hands the status over before driving the execution again. Otherwise the
+    /// non-reaping lost-status check can correctly see that a collector took it but not who did.
+    pub(crate) fn observe(&mut self, id: u32, status: ProcessStatus) -> bool {
+        if id != self.id()
+            || self.status.is_some()
+            || (status.code().is_none() && status.signal().is_none())
+        {
+            return false;
+        }
+        self.status = Some(status);
+        self.input = None;
+        self.kill_group();
+        true
+    }
+
+    /// Takes the next launch, pipe, kill-failure, or status event, including timeout termination.
+    pub(crate) fn next_event<'a>(&mut self, buffer: &'a mut [u8]) -> io::Result<Option<Event<'a>>> {
+        if self.ended {
+            return Ok(None);
+        }
+        if self.status.is_none() && !self.status_lost && !sys::is_unreaped(self.group.borrowed())? {
+            self.status_lost = true;
+            self.input = None;
+            self.kill_group();
+            return Err(Errno::ECHILD.into());
+        }
+        if self
+            .deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.end_with(Cause::TimedOut);
+        }
+        if let Some(event) = self.kill_failure() {
+            return Ok(Some(event));
+        }
+        if let Some(result) = self.launch.as_mut().and_then(LaunchReport::read) {
+            self.launch = None;
+            return Ok(Some(Event::Launch(result)));
+        }
+        for _ in 0..2 {
+            let index = self.turn;
+            self.turn ^= 1;
+            let stream = [Stream::Stdout, Stream::Stderr][index];
+            let Some(reader) = &self.outputs[index] else {
+                continue;
+            };
+            if buffer.is_empty() {
+                continue;
+            }
+            match reader.read(buffer) {
+                Ok(0) => {
+                    self.outputs[index] = None;
+                    return Ok(Some(Event::Closed));
+                }
+                Ok(length) => return Ok(Some(Event::Output(stream, &buffer[..length]))),
+                Err(Errno::EINTR) => self.turn = index,
+                Err(Errno::EAGAIN) => {}
+                Err(_) => {
+                    self.outputs[index] = None;
+                    return Ok(Some(Event::ReadFailed));
+                }
+            }
+        }
+        if let Some(status) = self.status
+            && self.launch.is_none()
+            && !self.has_open_output()
+        {
+            self.ended = true;
+            return Ok(Some(Event::Ended(status)));
+        }
+        Ok(None)
+    }
+
+    /// Lends the descriptors that the caller polls readable.
+    pub(crate) fn descriptors(&self) -> impl Iterator<Item = (Source, BorrowedFd<'_>)> {
+        let outputs = self
+            .outputs
+            .iter()
+            .zip([Stream::Stdout, Stream::Stderr])
+            .filter_map(|(reader, stream)| {
+                Some((Source::Output(stream), reader.as_ref()?.borrowed()))
+            });
+        self.launch
+            .iter()
+            .map(|report| (Source::Launch, report.reader.borrowed()))
+            .chain(outputs)
+    }
+
+    /// Lends the input pipe, which the caller polls writable.
+    pub(crate) fn input(&self) -> Option<BorrowedFd<'_>> {
+        self.input.as_ref().map(FileDescriptor::borrowed)
+    }
+
+    /// Writes input without blocking or raising `SIGPIPE`.
+    pub(crate) fn write_input(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let input = self.input.as_ref().ok_or(Errno::EPIPE)?;
+        loop {
+            match sys::write_without_sigpipe(input, bytes) {
+                Err(Errno::EINTR) => {}
+                Err(Errno::EPIPE) => {
+                    self.input = None;
+                    return Err(Errno::EPIPE.into());
+                }
+                result => return result.map_err(Into::into),
+            }
+        }
+    }
+
+    /// Delivers end of input.
+    pub(crate) fn close_input(&mut self) {
+        self.input = None;
+    }
+
+    /// Returns the pending timeout's deadline.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.deadline
+            .filter(|_| self.status.is_none() && !self.status_lost && self.cause.is_none())
+    }
+
+    /// Ends the execution and kills its process group.
+    pub(crate) fn end(&mut self) {
+        self.end_with(Cause::Terminated);
+    }
+
+    /// Cancels the execution and kills its process group.
+    pub(crate) fn cancel(&mut self) {
+        self.end_with(Cause::Cancelled);
+    }
+
+    /// Ends the execution on session reset, killing its group and closing its output unread,
+    /// including pipes that an escaped process keeps open.
+    pub(crate) fn reset(&mut self) {
+        self.outputs = [None, None];
+        self.end_with(Cause::Disconnected);
+    }
+
+    pub(crate) fn status(&self) -> Option<ProcessStatus> {
+        self.status
+    }
+
+    pub(crate) fn has_open_output(&self) -> bool {
+        self.outputs.iter().any(Option::is_some)
+    }
+
+    pub(crate) fn kill_failure(&mut self) -> Option<Event<'static>> {
+        self.failures
+            .iter_mut()
+            .zip([KillTarget::Program, KillTarget::ProcessGroup])
+            .find_map(|(error, target)| error.take().map(|error| Event::KillFailed(target, error)))
+    }
+
+    fn end_with(&mut self, cause: Cause) {
+        if self.ended {
+            return;
+        }
+        self.input = None;
+        self.deadline = None;
+        if self.status.is_none() && !self.status_lost {
+            match sys::kill_through_pidfd(self.group.borrowed(), false) {
+                Err(Errno::ESRCH) => {}
+                result => {
+                    if self.cause.is_none() {
+                        self.cause = Some(cause);
+                    }
+                    if let Err(error) = result {
+                        self.failures[0] = Some(error.into());
+                    }
+                }
+            }
+        }
+        self.kill_group();
+    }
+
+    fn kill_group(&mut self) {
+        match sys::kill_through_pidfd(self.group.borrowed(), true) {
+            Ok(()) | Err(Errno::ESRCH) => {}
+            Err(error) => self.failures[1] = Some(error.into()),
+        }
+    }
+}
+
+impl Drop for Exec {
+    fn drop(&mut self) {
+        if !self.ended {
+            self.reset();
+            while let Some(Event::KillFailed(target, error)) = self.kill_failure() {
+                sys::write_standard_error(
+                    format!("nvx-init: cannot end {target:?}: {error}\n").as_bytes(),
+                );
+            }
+        }
+    }
 }
 
 /// The operations of PID 1 on the system, which tests replace.
@@ -118,9 +826,7 @@ trait System {
     fn adopt(&mut self, process: ProcessId) -> Result<Option<ChildStatus>, Errno>;
     /// Collects the status of one child that ended, without waiting, or returns `None` when none
     /// did.
-    fn reap(&mut self) -> Option<(ProcessId, ChildStatus)>;
-    /// Waits for one of [`SIGNALS`], and returns it.
-    fn wait_signal(&mut self) -> Option<Signal>;
+    fn reap(&mut self) -> Option<(ProcessId, ChildStatus, i32)>;
     /// Writes the diagnostic `line` to the console.
     fn report(&mut self, line: &[u8]);
     /// Writes every file system's modified data to its storage, and then stops the VM with
@@ -157,21 +863,8 @@ impl System for RealSystem {
         sys::try_wait(process)
     }
 
-    fn reap(&mut self) -> Option<(ProcessId, ChildStatus)> {
-        sys::reap_any_nonblocking().map(|child| (child.process, child.status))
-    }
-
-    fn wait_signal(&mut self) -> Option<Signal> {
-        let signals = self.signals.as_ref()?;
-        loop {
-            if let Some(event) = signals.read() {
-                return event.signal;
-            }
-            match sys::poll([Pollable::Signals(signals)], None) {
-                Ok(_) | Err(Errno::EINTR) => {}
-                Err(_) => std::thread::sleep(POLL_RETRY),
-            }
-        }
+    fn reap(&mut self) -> Option<(ProcessId, ChildStatus, i32)> {
+        sys::reap_any_nonblocking().map(|child| (child.process, child.status, child.wait_status))
     }
 
     fn report(&mut self, line: &[u8]) {
@@ -181,6 +874,100 @@ impl System for RealSystem {
     fn shut_down(&mut self, status: u8) {
         kernel::sync();
         sys::power_off(status)
+    }
+}
+
+/// The existing PID-1 signal and helper owner, shared with the control loop.
+pub(crate) struct Runtime {
+    system: RealSystem,
+    helpers: Helpers,
+    terminating: bool,
+}
+
+impl Runtime {
+    pub(crate) fn new(arguments: &[CString]) -> Result<Self, String> {
+        let mut system = RealSystem { signals: None };
+        let helpers = prepare(&mut system, arguments)?;
+        Ok(Self {
+            system,
+            helpers,
+            terminating: false,
+        })
+    }
+
+    /// Starts ingress from the applied root's publication and gateway, before its root switch.
+    /// The fork keeps the initramfs root and PID 1's priority; the sole collector owns its exit.
+    pub(crate) fn restore_announcer(
+        &mut self,
+        publication: Publication,
+        gateway: Option<Ipv4Addr>,
+    ) -> crate::Result<()> {
+        if publication == Publication::Unpublished {
+            return Ok(());
+        }
+        if self.helpers.announcer.is_some() {
+            return Err(crate::Error::unsupported(
+                "an announcer is already registered",
+            ));
+        }
+        let gateway = gateway
+            .ok_or_else(|| crate::Error::unsupported("published listeners require a gateway"))?;
+        let program = c"/sbin/nvx-ingress".to_owned();
+        #[cfg(test)]
+        let program = tests::restore::announcer_program(program);
+        let arguments = [
+            c"nvx-ingress".to_owned(),
+            CString::new(gateway.to_string()).expect("an IPv4 address has no NUL"),
+        ];
+        sys::check_released().map_err(|error| {
+            crate::Error::io("cannot fork the restored announcer with port permission")
+                .with_source(error)
+        })?;
+        let fork = sys::fork().map_err(|error| {
+            crate::Error::io("cannot fork the restored announcer")
+                .with_source(io::Error::from(error))
+        })?;
+        if let sys::ForkResult::Parent(process) = fork {
+            self.helpers.announcer = Some(process);
+            return Ok(());
+        }
+        if let Err(error) = sys::reset_signals() {
+            write_console(
+                kernel::CONSOLE_DEVICE,
+                format!("NVX-INIT-ERROR: cannot reset announcer signals: {error}\n").as_bytes(),
+            );
+            sys::exit_immediately(FAILURE);
+        }
+        let error = sys::exec(&program, &arguments, None);
+        write_console(
+            kernel::CONSOLE_DEVICE,
+            format!("NVX-INIT-ERROR: cannot exec /sbin/nvx-ingress: {error}\n").as_bytes(),
+        );
+        sys::exit_immediately(FAILURE);
+    }
+
+    /// Poll alongside control input so a blocked peer cannot hide a helper's end.
+    pub(crate) fn wake(&self) -> Pollable<'_> {
+        Pollable::Signals(self.system.signals.as_ref().expect("listening"))
+    }
+
+    /// Hands the same helper registry to the shared loop's capture caller.
+    pub(crate) fn capture(&self, fresh: bool) -> Capture {
+        Capture::new(self.helpers, fresh)
+    }
+
+    /// Hands terminal statuses to the active execution; a helper failure wins over shutdown.
+    pub(crate) fn service(
+        &mut self,
+        mut observed: impl FnMut(u32, ProcessStatus),
+    ) -> Result<bool, String> {
+        collect(&mut self.system, self.helpers, &mut observed)?;
+        let signals = self.system.signals.as_ref().expect("listening");
+        while let Some(event) = signals.read() {
+            self.terminating |= event.signal == Some(Signal::SIGTERM);
+        }
+        collect(&mut self.system, self.helpers, observed)?;
+        Ok(self.terminating)
     }
 }
 
@@ -194,18 +981,116 @@ pub fn main() -> ExitCode {
         return ExitStatus::Usage.into();
     }
     let arguments = sys::args();
-    init(
-        &mut RealSystem { signals: None },
-        arguments.get(1..).unwrap_or_default(),
-    );
+    match Runtime::new(arguments.get(1..).unwrap_or_default()) {
+        Ok(mut runtime) => {
+            let result = serve_boot(&mut runtime);
+            finish(&mut runtime.system, result);
+        }
+        Err(failure) => finish(&mut RealSystem { signals: None }, Err(failure)),
+    }
     ExitStatus::Failure.into()
 }
 
-/// Serves as PID 1 with the helpers that `arguments` name until the VM must end, and then ends
-/// it: with 0 after `SIGTERM`, or with [`FAILURE`] after the diagnostic of a failure.
-fn init(system: &mut impl System, arguments: &[CString]) {
-    let status = match serve(system, arguments) {
-        Ok(()) => 0,
+fn serve_boot(runtime: &mut Runtime) -> Result<u8, String> {
+    let command_line = std::fs::read("/proc/cmdline")
+        .map_err(|error| format!("cannot read the boot command line: {error}"))?;
+    if let Some(control) = fresh_capture_control(&command_line)? {
+        let control = super::terminal::Terminal::open(&control)
+            .map_err(|error| format!("cannot open capture control: {error}"))?;
+        control
+            .configure_raw()
+            .map_err(|error| format!("cannot configure capture control: {error}"))?;
+        runtime.system.report(b"NVX-INIT-CAPTURE: waiting\n");
+        return super::managed_agent::AgentConfig::serve_capture(
+            runtime,
+            control.into_descriptor(),
+        );
+    }
+    let boot = boot::cold_boot(&command_line).map_err(|error| error.to_string())?;
+    // Keeps the switched root, with its runtime directory's lock and the descriptors of its view
+    // and live shares, until the VM's service ends.
+    let _root = boot.root;
+    runtime.system.report(
+        format!(
+            "NVX-INIT-ROOT: switched mappings={}\n",
+            boot.table.expected()
+        )
+        .as_bytes(),
+    );
+    super::managed_agent::AgentConfig::layered(&boot.command_line, boot.user, boot.home)
+        .map_err(|error| format!("invalid layered identity: {}", error.desc()))?
+        .serve_layered(
+            runtime,
+            boot.control,
+            (boot.table, boot.mapper, boot.export),
+        )
+}
+
+/// Selects only the fixed rootless Fresh entry; malformed capture tokens never fall back.
+fn fresh_capture_control(command_line: &[u8]) -> Result<Option<PathBuf>, String> {
+    let tokens: Vec<_> = cmdline::init_tokens(command_line).collect();
+    let parameter = |name: &[u8]| {
+        let mut matching = tokens.iter().filter(|token| token.name == name);
+        let Some(token) = matching.next() else {
+            return Ok(None);
+        };
+        if matching.next().is_some() || token.value.is_none() {
+            return Err(format!(
+                "{} is repeated or has no value",
+                name.escape_ascii()
+            ));
+        }
+        Ok(token.value)
+    };
+    match parameter(b"nvx_snapshot_tier")? {
+        None => return Ok(None),
+        Some(b"platform") => {}
+        Some(_) => return Err("nvx_snapshot_tier must be platform".to_owned()),
+    }
+    if parameter(b"nvx_sandbox")? != Some(b"1") {
+        return Err("a Fresh capture needs nvx_sandbox=1".to_owned());
+    }
+    for token in &tokens {
+        if matches!(
+            token.name,
+            b"nvx_layer"
+                | b"nvx_scratch"
+                | b"nvx_overlay_upper"
+                | b"nvx_overlay_mode"
+                | b"nvx_scratch_journal"
+                | b"nvx_first_partition_bound"
+                | b"nvx_ram_upper_percent"
+                | b"nvx_hostname"
+                | b"nvx_machine_id"
+                | b"nvx_maps"
+                | b"nvx_share"
+                | b"nvx_identity"
+                | b"nvx_workload_account"
+                | b"nvx_entrypoint"
+                | b"nvx_arg"
+                | b"nvx_env"
+                | b"nvx_cwd"
+                | b"nvx_lifecycle"
+                | b"nvx_workload_uid"
+                | b"nvx_workload_gid"
+        ) || token.name.starts_with(b"virtfs_")
+        {
+            return Err(format!(
+                "a Fresh capture cannot carry {}",
+                token.name.escape_ascii()
+            ));
+        }
+    }
+    let control = parameter(b"nvx_control_tty")?
+        .filter(|value| !value.is_empty() && value.iter().all(u8::is_ascii_alphanumeric))
+        .ok_or("a Fresh capture needs nvx_control_tty naming a device in /dev")?;
+    Ok(Some(Path::new("/dev").join(OsStr::from_bytes(control))))
+}
+
+/// Keeps diagnostics, sync and direct power-off with the original PID-1 owner.
+fn finish(system: &mut impl System, result: Result<u8, String>) {
+    let status = match result {
+        Ok(status) => status,
         Err(failure) => {
             system.report(format!("NVX-INIT-ERROR: {failure}\n").as_bytes());
             FAILURE
@@ -214,9 +1099,8 @@ fn init(system: &mut impl System, arguments: &[CString]) {
     system.shut_down(status);
 }
 
-/// Takes over as PID 1, and collects the status of every child that ends, until `SIGTERM` asks
-/// it to end the VM and no helper ended before, or fails with what ends the VM otherwise.
-fn serve(system: &mut impl System, arguments: &[CString]) -> Result<(), String> {
+/// Takes over the existing helpers before the idle or control loop begins.
+fn prepare(system: &mut impl System, arguments: &[CString]) -> Result<Helpers, String> {
     system
         .listen()
         .map_err(|error| format!("cannot read signals: {}", error.desc()))?;
@@ -243,21 +1127,22 @@ fn serve(system: &mut impl System, arguments: &[CString]) -> Result<(), String> 
             )
         })?;
     }
-    let mut terminating = false;
-    loop {
-        while let Some((process, status)) = system.reap() {
-            if let Some(name) = helpers.name(process) {
-                return Err(ended(name, process, status));
-            }
+    Ok(helpers)
+}
+
+/// The one waitpid loop, which keeps helper failure policy and forwards raw terminal statuses.
+fn collect(
+    system: &mut impl System,
+    helpers: Helpers,
+    mut observed: impl FnMut(u32, ProcessStatus),
+) -> Result<(), String> {
+    while let Some((process, status, raw)) = system.reap() {
+        if let Some(name) = helpers.name(process) {
+            return Err(ended(name, process, status));
         }
-        if terminating {
-            return Ok(());
-        }
-        // The descriptor returns the lower of two pending signals first, `SIGTERM` before
-        // `SIGCHLD`: a helper may have ended just before `SIGTERM` came, so PID 1 collects once
-        // more before it accepts `SIGTERM`.
-        terminating = system.wait_signal() == Some(Signal::SIGTERM);
+        observed(process.raw().unsigned_abs(), ProcessStatus::from_raw(raw));
     }
+    Ok(())
 }
 
 /// Describes the end of the helper `name`, process `process`, with `status`.

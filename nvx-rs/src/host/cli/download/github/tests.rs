@@ -1,5 +1,10 @@
 //! The tests of the client of the GitHub REST API: its messages, its configuration of `curl`,
 //! and its requests, which a real `curl` sends to servers on the loopback interface.
+//!
+//! Each test that runs `curl` holds the tests' spawn lock while it does: the CLI downloads before
+//! it launches a VM, but these tests run beside tests that launch stand-in VMs, and on Windows a
+//! `curl` that starts during a VM's start inherits that VM's handles, such as its log, which it
+//! holds until it exits.
 
 use std::io::{BufRead, BufReader};
 use std::net::{TcpListener, TcpStream};
@@ -9,6 +14,7 @@ use std::thread;
 use serde_json::json;
 
 use super::*;
+use crate::host::tests::hold_spawns;
 
 impl Curl {
     /// Returns a `curl` that also speaks plain HTTP, to the servers of tests.
@@ -134,6 +140,7 @@ fn answer(
 
 #[test]
 fn queries_and_downloads_carry_the_token_to_the_origin_of_the_api_alone() {
+    let _spawns = hold_spawns();
     let (api_listener, api) = Server::bind();
     let (asset_listener, assets) = Server::bind();
     let asset_url = format!("{api}/repos/octo/nvx/releases/assets/7");
@@ -253,6 +260,7 @@ fn queries_and_downloads_carry_the_token_to_the_origin_of_the_api_alone() {
 
 #[test]
 fn requests_without_a_token_carry_none() {
+    let _spawns = hold_spawns();
     let (listener, api) = Server::bind();
     let server = Server::serve(listener, Vec::new());
     let scratch = tempfile::tempdir().unwrap();
@@ -275,6 +283,7 @@ fn requests_without_a_token_carry_none() {
 
 #[test]
 fn redirects_resolve_relative_locations_against_the_urls_of_their_requests() {
+    let _spawns = hold_spawns();
     let (listener, api) = Server::bind();
     let server = Server::serve(
         listener,
@@ -329,6 +338,7 @@ fn redirects_resolve_relative_locations_against_the_urls_of_their_requests() {
 
 #[test]
 fn the_last_response_to_a_retried_request_counts() {
+    let _spawns = hold_spawns();
     let (listener, api) = Server::bind();
     let path = "/repos/octo/nvx/releases/tags/v0.1.0-dev.a1b2c3d4e5f6";
     // The status, the header, and the message of the first response, which `curl` retries, would
@@ -396,6 +406,32 @@ fn requests_to_github_speak_https_alone() {
             "GitHub release query failed: http://127.0.0.1:9/repos/octo/nvx/releases/tags/v1 is \
              not an HTTPS URL"
         )
+    );
+}
+
+#[test]
+fn a_missing_curl_reports_the_program_and_query_context() {
+    let scratch = tempfile::tempdir().unwrap();
+    let program = scratch.path().join("not-installed-curl");
+    let github = GitHub::at(
+        API,
+        "octo/nvx",
+        None,
+        scratch.path(),
+        Curl {
+            program: program.clone(),
+            ..Curl::new()
+        },
+    )
+    .unwrap();
+    let error = Exit::from(github.release("v1").unwrap_err());
+    assert_eq!(error.code(), Some(ErrorCode::Unavailable));
+    assert!(
+        error.message().unwrap().starts_with(&format!(
+            "GitHub release query needs curl, which did not run: {}: ",
+            program.display()
+        )),
+        "{error:?}"
     );
 }
 

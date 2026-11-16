@@ -1,18 +1,17 @@
-use std::fs::{self, File};
+#[cfg(feature = "cli")]
+use std::fs;
+use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use super::Transport;
+use super::hypervisor::Hypervisor;
 use super::inherit::Inherited;
-use crate::hypervisor::Hypervisor;
 
 #[cfg(all(feature = "cli", unix))]
 pub(crate) use crate::host::sys::{interrupted, watch_interrupts, write_interruptibly};
-
-/// Whether this host can run NVX microVMs.
-pub const SUPPORTED: bool = false;
 
 /// Does nothing: this host has no console interrupts to watch.
 #[cfg(all(feature = "cli", not(unix)))]
@@ -34,7 +33,8 @@ fn unsupported() -> io::Error {
 }
 
 /// Reports every process as gone: this host runs no OpenVMM processes.
-pub fn process_start_time(_pid: u32) -> io::Result<Option<u64>> {
+#[cfg(feature = "cli")]
+pub(crate) fn process_start_time(_pid: u32) -> io::Result<Option<u64>> {
     Ok(None)
 }
 
@@ -94,37 +94,40 @@ pub(crate) fn monotonic_ns() -> io::Result<u64> {
 }
 
 /// Fails: this host cannot export host paths.
-pub fn file_identity(_path: &Path) -> io::Result<(u64, u64)> {
+#[cfg(any(test, feature = "cli"))]
+pub(crate) fn file_identity(_path: &Path) -> io::Result<(u64, u64)> {
     Err(unsupported())
 }
 
 /// Returns whether the file at `path` is deleted: whether no file has that name, which a removal
 /// takes at once.
+#[cfg(feature = "cli")]
 pub(crate) fn is_deleted(path: &Path) -> bool {
     fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn opened_file_identity(_file: &File) -> io::Result<(u64, u64)> {
     Err(unsupported())
 }
 
 /// Fails: this host keeps no store.
+#[cfg(feature = "cli")]
 pub(crate) fn file_id(_path: &Path) -> io::Result<(u64, u128)> {
     Err(unsupported())
 }
 
 /// Fails: this host keeps no store.
+#[cfg(feature = "cli")]
 pub(crate) fn opened_file_id(_file: &File) -> io::Result<(u64, u128)> {
     Err(unsupported())
 }
 
-pub(crate) fn link_count(_file: &File) -> io::Result<u64> {
-    Err(unsupported())
-}
-
 /// An open directory, which this host never holds: it keeps no sandbox's store.
+#[cfg(feature = "cli")]
 pub(crate) enum Directory {}
 
+#[cfg(feature = "cli")]
 impl Directory {
     /// Fails: this host keeps no sandbox's store.
     pub(crate) fn open(_path: &Path) -> io::Result<Self> {
@@ -133,26 +136,6 @@ impl Directory {
 
     /// Never called: no directory is open.
     pub(crate) fn entry_id(&self, _name: &str) -> io::Result<Option<(u64, u128)>> {
-        match *self {}
-    }
-
-    /// Never called: no directory is open.
-    pub(crate) fn open_file(&self, _name: &str) -> io::Result<Option<File>> {
-        match *self {}
-    }
-
-    /// Never called: no directory is open.
-    pub(crate) fn open_dir(&self, _name: &str) -> io::Result<Option<Self>> {
-        match *self {}
-    }
-
-    /// Fails: this host keeps no store.
-    pub(crate) fn search(_path: &Path) -> io::Result<Option<Self>> {
-        Err(unsupported())
-    }
-
-    /// Never called: no directory is open.
-    pub(crate) fn search_dir(&self, _name: &str) -> io::Result<Option<Self>> {
         match *self {}
     }
 
@@ -167,14 +150,17 @@ impl Directory {
     }
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn claim_log(_file: &File) -> io::Result<()> {
     Err(unsupported())
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn log_claim_held(_path: &Path, _identity: (u64, u64)) -> io::Result<bool> {
     Err(unsupported())
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn serves_launch(_pid: u32, _start_time: u64, _log: (u64, u64)) -> io::Result<bool> {
     Err(unsupported())
 }
@@ -184,11 +170,6 @@ pub(crate) fn create_store_dir(_path: &Path) -> io::Result<Option<String>> {
 }
 
 pub(crate) fn check_store_dir(_path: &Path) -> io::Result<Option<String>> {
-    Err(unsupported())
-}
-
-/// Fails: this host cannot check who may access a directory.
-pub(crate) fn create_owner_only_dir(_path: &Path) -> io::Result<Option<String>> {
     Err(unsupported())
 }
 
@@ -207,17 +188,13 @@ pub(crate) fn check_snapshot_dir(path: &Path) -> io::Result<Option<String>> {
     check_owner_only_dir(path)
 }
 
-/// Fails: this host cannot check who may change a file.
-pub(crate) fn foreign_writer_problem(_file: &File) -> io::Result<Option<String>> {
-    Err(unsupported())
-}
-
 /// Fails: this host makes no template's files.
 pub(crate) fn make_sparse(_file: &File) -> io::Result<()> {
     Err(unsupported())
 }
 
 /// Fails: this host makes no template's files.
+#[cfg(feature = "cli")]
 pub(crate) fn rename_no_replace(_from: &Path, _to: &Path) -> io::Result<()> {
     Err(unsupported())
 }
@@ -242,19 +219,7 @@ pub(crate) fn probe_hypervisor(_hypervisor: Hypervisor) -> Result<(), String> {
     Err(unsupported().to_string())
 }
 
-/// Creates `path` if needed.
-pub fn create_private_dir(path: &Path) -> io::Result<()> {
-    match fs::create_dir(path) {
-        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => Err(error),
-        _ => Ok(()),
-    }
-}
-
-pub(crate) fn control_endpoint(_socket_path: &Path) -> io::Result<String> {
-    Err(unsupported())
-}
-
-/// The listener of the restore-ready endpoint of a clone's launch, which this host never makes.
+/// The listener of the restore-ready endpoint of a restore, which this host never makes.
 #[derive(Debug)]
 pub(crate) struct ReadyListener;
 
@@ -282,6 +247,13 @@ pub(crate) fn connect_endpoint(
     Err(unsupported())
 }
 
-pub(crate) fn endpoint_server_pid(_endpoint: &str) -> io::Result<Option<u32>> {
-    Ok(None)
+#[cfg(feature = "cli")]
+pub(crate) fn endpoint_server_pid_until(
+    _endpoint: &str,
+    deadline: Instant,
+) -> io::Result<Option<u32>> {
+    if Instant::now() >= deadline {
+        return Err(io::ErrorKind::TimedOut.into());
+    }
+    Err(unsupported())
 }

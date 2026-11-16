@@ -9,12 +9,13 @@ package's ``.cargo_vcs_info.json`` records the run's commit, as dirty when the
 version differs from the declared one.
 
 Before the upload, the package must hold the commit's files byte for byte, but
-for the version, and must build with every feature, ``bundled`` included,
-which downloads and verifies the release that ``artifacts.json`` pins. The
-package job checks and builds the package without the right to publish it, so
-that no build script or procedural macro can publish either. The publish job
-builds nothing: it packs the same bytes again and uploads them, and then
-crates.io must serve those very bytes.
+for the version, must build with every feature, and must install its guest
+tool, nvx-ingress, with the guest feature and profile, from a directory that
+CI keeps outside the checkout, which must then run. The package job checks,
+builds, and installs the package without the right to publish it, so that no
+build script or procedural macro can publish either. The publish job builds
+nothing: it packs the same bytes again and uploads them, and then crates.io
+must serve those very bytes.
 """
 
 from __future__ import annotations
@@ -24,7 +25,6 @@ import json
 import os
 import re
 import shutil
-import sys
 import tarfile
 import time
 import urllib.error
@@ -64,7 +64,8 @@ GENERATED_FILES = frozenset({".cargo_vcs_info.json", "Cargo.toml"})
 # here, whose version a run that publishes another version than the declared
 # one rewrites.
 VERSIONED_FILES = {"Cargo.toml.orig": "Cargo.toml", "Cargo.lock": "Cargo.lock"}
-# Files without which the package does not build, document, or license itself.
+# Files without which the package does not build, document, or license itself,
+# or let its users check its public API against the snapshots that list it.
 REQUIRED_FILES = (
     ".cargo_vcs_info.json",
     "Cargo.toml",
@@ -72,13 +73,22 @@ REQUIRED_FILES = (
     "Cargo.lock",
     "LICENSE",
     "README.md",
-    "build.rs",
-    "artifacts.json",
+    "public-api/linux.txt",
+    "public-api/windows.txt",
     "src/lib.rs",
 )
-# Environment variables that would make `bundled` stage something else than
-# the release that artifacts.json pins.
-BUNDLE_VARIABLES = ("NVX_BUNDLE", "NVX_BUNDLE_DIR", "NVX_BUNDLE_HYPERVISOR")
+# The guest tool that the package job installs from the package's files, with
+# the guest feature and profile, as a user installs the guest tools from the
+# published crate, and runs.
+GUEST_TOOL = "nvx-ingress"
+# The socket tables of a snapshot that holds no socket, which the tool's test
+# mode reads, and what it prints for them: a scan at time 0 that announces no
+# listener, the conformance vector NONE of nvx-rs/tests/vectors/nvxl-v1.txt.
+GUEST_TOOL_TABLES = ("tcp", "tcp6", "udp", "udp6")
+GUEST_TOOL_TABLE_HEADER = (
+    b"  sl  local_address rem_address st tx rx tr tm retr uid timeout inode\n"
+)
+GUEST_TOOL_OUTPUT = b"0 4e56584c01000000\n"
 # The state that the package step hands to the publish step.
 STATE_FILE = "state.json"
 # The most problems that a failed package check lists.
@@ -720,23 +730,14 @@ def cargo_package(
     return package
 
 
-def bundle_hypervisors(platform: str = sys.platform) -> tuple[str | None, ...]:
-    """Return the values of NVX_BUNDLE_HYPERVISOR with which to build the
-    package: Linux has a KVM and an MSHV package, and Windows one."""
-    return ("kvm", "mshv") if platform.startswith("linux") else (None,)
-
-
 def build_package(
     files: Mapping[str, bytes],
     root: str,
     work_dir: Path,
     environment: Mapping[str, str],
-    *,
-    platform: str = sys.platform,
-) -> None:
-    """Build the package's files with every feature, as a dependent would.
-    `bundled` downloads the release that the package's artifacts.json pins,
-    which must match its digest and declare the crate's control contract."""
+) -> Path:
+    """Build the package's files with every feature, as a dependent would, and
+    return the directory that holds them."""
     source = work_dir / "build" / root
     if source.exists():
         shutil.rmtree(source)
@@ -744,29 +745,69 @@ def build_package(
         destination = source.joinpath(*PurePosixPath(relative).parts)
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(data)
-    base = {
-        key: value for key, value in environment.items() if key not in BUNDLE_VARIABLES
-    }
-    for hypervisor in bundle_hypervisors(platform):
-        build_environment = dict(base)
-        description = "with every feature"
-        if hypervisor is not None:
-            build_environment["NVX_BUNDLE_HYPERVISOR"] = hypervisor
-            description += f", bundling the {hypervisor} release"
-        print(f">> building {root} {description}")
-        run_checked(
-            [
-                "cargo",
-                "build",
-                "--locked",
-                "--all-features",
-                "--manifest-path",
-                source / "Cargo.toml",
-                "--target-dir",
-                work_dir / "build-target",
-            ],
-            env=build_environment,
+    print(f">> building {root} with every feature")
+    run_checked(
+        [
+            "cargo",
+            "build",
+            "--locked",
+            "--all-features",
+            "--manifest-path",
+            source / "Cargo.toml",
+            "--target-dir",
+            work_dir / "build-target",
+        ],
+        env=environment,
+    )
+    return source
+
+
+def install_guest_tool(
+    source: Path, work_dir: Path, environment: Mapping[str, str]
+) -> None:
+    """Install the guest tool from the package's files in `source`, from
+    `work_dir`, which CI keeps outside the checkout, with `cargo install
+    --no-default-features --features guest --profile guest`, as a user would
+    from the published crate, and run its test mode, which must print what it
+    prints for a snapshot without sockets."""
+    tools = work_dir / "guest-tools"
+    run_checked(
+        [
+            "cargo",
+            "install",
+            "--locked",
+            "--path",
+            source,
+            "--no-default-features",
+            "--features",
+            "guest",
+            "--profile",
+            "guest",
+            "--bin",
+            GUEST_TOOL,
+            "--root",
+            tools,
+            "--target-dir",
+            work_dir / "guest-target",
+        ],
+        cwd=work_dir,
+        env=environment,
+    )
+    snapshot = work_dir / "guest-snapshot"
+    tables = snapshot / "0" / "net"
+    tables.mkdir(parents=True, exist_ok=True)
+    (snapshot / "0" / "time").write_bytes(b"0\n")
+    for table in GUEST_TOOL_TABLES:
+        (tables / table).write_bytes(GUEST_TOOL_TABLE_HEADER)
+    result = run_capture(
+        [tools / "bin" / GUEST_TOOL, "test", snapshot], cwd=work_dir, env=environment
+    )
+    require_success(result, f"{GUEST_TOOL} test")
+    if result.stdout != GUEST_TOOL_OUTPUT:
+        raise ScriptError(
+            f"{GUEST_TOOL} test printed {result.stdout!r}, not {GUEST_TOOL_OUTPUT!r}"
         )
+    print(f">> installed {GUEST_TOOL} from the package's files, and ran it")
 
 
 @dataclass(frozen=True)
@@ -974,13 +1015,13 @@ def package_release(
     *,
     registry: Registry | None = None,
     environment: Mapping[str, str] | None = None,
-    platform: str = sys.platform,
 ) -> Plan:
     """The package job: decide whether the checkout's commit needs a new
     version, and if so, pack the crate with that version, check the package,
-    and build it with every feature. Its outputs give the publish job the
-    version and the SHA-256 of the package. The job never publishes, so the
-    build scripts and procedural macros that its build runs cannot either."""
+    build it with every feature, install its guest tool from it with the guest
+    profile, and run that tool. Its outputs give the publish job the version
+    and the SHA-256 of the package. The job never publishes, so the build
+    scripts and procedural macros that its builds run cannot either."""
     environment = dict(os.environ) if environment is None else environment
     registry = Registry() if registry is None else registry
     checkout = Checkout.open(crate_dir)
@@ -1006,13 +1047,10 @@ def package_release(
         f"{checkout.commit}"
     )
     package, files = checkout.pack(plan.version, work_dir, environment)
-    build_package(
-        files,
-        f"{manifest.name}-{plan.version}",
-        work_dir,
-        environment,
-        platform=platform,
+    source = build_package(
+        files, f"{manifest.name}-{plan.version}", work_dir, environment
     )
+    install_guest_tool(source, work_dir, environment)
     sha256 = sha256_file(package)
     for name, value in (
         ("publish", "true"),

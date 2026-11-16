@@ -11,15 +11,15 @@ const ALL: [u8; 18] = [
     REPAIR_MEMORY,
     REPAIR_RESEED,
     REPAIR_FINISH,
-    ACTIVATION_DEADLINE,
-    ACTIVATION_PROTOCOL,
-    ACTIVATION_RECORD,
-    ACTIVATION_RESOURCES,
-    ACTIVATION_ROOT,
-    ACTIVATION_WORKLOAD,
-    ACTIVATION_EXPORT,
-    ACTIVATION_NETWORK,
-    ACTIVATION_ORDER,
+    GUEST_RESTORE_DEADLINE,
+    GUEST_RESTORE_PROTOCOL,
+    GUEST_RESTORE_RECORD,
+    GUEST_RESTORE_RESOURCES,
+    GUEST_RESTORE_ROOT,
+    GUEST_RESTORE_WORKLOAD,
+    GUEST_RESTORE_EXPORT,
+    GUEST_RESTORE_NETWORK,
+    GUEST_RESTORE_ORDER,
 ];
 
 #[test]
@@ -32,14 +32,14 @@ fn the_statuses_are_pinned() {
     );
     assert_eq!(TIME_STATUSES, 193..=195);
     assert_eq!(REPAIR_STATUSES, 40..=45);
-    assert_eq!(ACTIVATION_STATUSES, 50..=58);
+    assert_eq!(GUEST_RESTORE_STATUSES, 50..=58);
 }
 
 #[test]
 fn each_status_has_a_class_and_a_meaning_of_its_own() {
     let mut meanings = Vec::new();
     for status in ALL {
-        let classes = [&TIME_STATUSES, &REPAIR_STATUSES, &ACTIVATION_STATUSES]
+        let classes = [&TIME_STATUSES, &REPAIR_STATUSES, &GUEST_RESTORE_STATUSES]
             .into_iter()
             .filter(|statuses| statuses.contains(&status))
             .count();

@@ -6,6 +6,8 @@
 //! nvx-rs [-h] [--root PATH] egress compile PATH
 //! nvx-rs [-h] [--root PATH] run [OPTIONS]
 //! nvx-rs [-h] [--root PATH] sandbox [run|provision|start|exec|stop|deprovision] [OPTIONS]
+//! nvx-rs [-h] [--root PATH] snapshot capture NAME [OPTIONS]
+//! nvx-rs [-h] [--root PATH] snapshot restore NAME [OPTIONS]
 //! ```
 //!
 //! - `artifacts` prints the paths of the artifacts of the artifact root as JSON.
@@ -14,10 +16,13 @@
 //!   `nvx.py download` that it replaced; it leaves `nvx-rs` itself alone.
 //! - `egress compile PATH` compiles an egress policy file of `--network-egress-policy-file` and
 //!   prints its native rules as JSON.
-//! - `run` boots or restores a microVM on the terminal, with the options, checks, outputs, and
-//!   exit statuses of the `nvx.py run` that it replaced.
+//! - `run` boots a microVM on the terminal, with the options, checks, outputs, and exit statuses
+//!   of the `nvx.py run` that it replaced, or restores a named snapshot once, as
+//!   `snapshot restore` restores one.
 //! - `sandbox` runs or manages a sandbox, with the options, outputs, exit statuses, outcome
 //!   reports, and state directories of the `nvx.py sandbox` that it replaced.
+//! - `snapshot capture` captures a blockless VM into an immutable named snapshot, and
+//!   `snapshot restore` starts a new managed sandbox from one.
 //!
 //! The artifact root is `--root`, or else the release or repository checkout that holds the
 //! executable, and the `NVX_OPENVMM` environment variable names another OpenVMM executable.
@@ -26,7 +31,7 @@
 //! is `0`.
 //!
 //! Errors print `error[CODE]: MESSAGE` to standard error and exit with status 1, as `nvx.py`
-//! reports a `ScriptError`, with the stable [`ErrorCode`] of the failure. Usage errors print the
+//! reports a `ScriptError`, with the stable `ErrorCode` of the failure. Usage errors print the
 //! one-line usage of the parser and `PROG: error[CODE]: MESSAGE`, where `PROG` is the parser's
 //! name, such as `nvx-rs run`, with one of the `argument-*` codes, and exit with status 2, as
 //! `argparse` does. Help prints the usage and every option of the parser, and exits with status 0.
@@ -40,6 +45,7 @@ mod cpu_profile;
 mod deadline;
 mod download;
 mod egress;
+mod exec_lock;
 mod json;
 mod network;
 mod output;
@@ -47,36 +53,84 @@ mod run;
 mod sandbox;
 mod session;
 mod shell;
+mod snapshots;
 mod store;
 
 use std::borrow::Cow;
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use self::args::{Parser, Receiver, Spec, Stop, Syntax};
 use crate::ErrorCode;
 use crate::host::platform;
 
+/// Returns the name of a temporary file next to `path`: `.NAME.UUID.tmp`, with a fresh UUID4 in
+/// hexadecimal.
+pub(crate) fn temporary_path(path: &Path) -> Result<PathBuf> {
+    let Some(name) = path.file_name() else {
+        return Err(Exit::error(
+            ErrorCode::Other,
+            format!("{} has an empty name", path.display()),
+        ));
+    };
+    let mut temporary = OsString::from(".");
+    temporary.push(name);
+    temporary.push(format!(".{}.tmp", uuid4_hex()?));
+    Ok(path.with_file_name(temporary))
+}
+
+/// Returns 32 lowercase hexadecimal digits of 122 random bits, with the version and variant bits
+/// of a version-4 UUID.
+fn uuid4_hex() -> Result<String> {
+    let mut bytes = random_bytes::<16>()?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(hex(&bytes))
+}
+
+/// Returns `N` random bytes from the operating system.
+pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N]> {
+    let mut bytes = [0u8; N];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        Exit::error(ErrorCode::Io, format!("cannot read random bytes: {error}"))
+    })?;
+    Ok(bytes)
+}
+
+/// Returns `bytes` in lowercase hexadecimal.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// The commands, in the order in which usage messages list them.
-const COMMANDS: [&str; 5] = ["artifacts", "download", "egress", "run", "sandbox"];
+const COMMANDS: [&str; 6] = [
+    "artifacts",
+    "download",
+    "egress",
+    "run",
+    "sandbox",
+    "snapshot",
+];
 /// The options of the top-level parser.
 const OPTIONS: [Spec; 1] = [Spec::one("--root")];
 /// The usage and help of the top-level parser.
 const SYNTAX: Syntax = Syntax {
     command: "",
-    arguments: "[-h] [--root PATH] {artifacts,download,egress,run,sandbox} ...",
+    arguments: "[-h] [--root PATH] {artifacts,download,egress,run,sandbox,snapshot} ...",
     help: "\
 Run NVX microVMs and sandboxes, download and look up NVX artifacts, and compile
 egress policies.
 
 positional arguments:
-  {artifacts,download,egress,run,sandbox}
+  {artifacts,download,egress,run,sandbox,snapshot}
     artifacts           print the paths of the NVX artifacts as JSON
     download            download and install the NVX release of the checkout
     egress              compile egress policy files
     run                 run an OpenVMM microVM
     sandbox             run or manage workloads over EROFS layers and private
                         ext4 scratch
+    snapshot            capture an immutable named snapshot, or restore a
+                        managed sandbox from one
 
 options:
   -h, --help            show this help message and exit
@@ -295,6 +349,8 @@ enum Command {
     Run(Box<run::Options>),
     /// `sandbox ...`.
     Sandbox(Box<sandbox::Options>),
+    /// `snapshot capture ...` or `snapshot restore ...`.
+    Snapshot(snapshots::Command),
 }
 
 /// The top-level options.
@@ -350,6 +406,10 @@ fn run(arguments: &[OsString]) -> Result {
             let (options, unrecognized) = sandbox::parse(rest)?;
             (Command::Sandbox(Box::new(options)), unrecognized)
         }
+        "snapshot" => {
+            let (command, unrecognized) = snapshots::parse(rest)?;
+            (Command::Snapshot(command), unrecognized)
+        }
         other => {
             return Err(usage(
                 ErrorCode::ArgumentInvalid,
@@ -374,6 +434,7 @@ fn run(arguments: &[OsString]) -> Result {
         Command::EgressCompile(path) => egress::run(&path),
         Command::Run(options) => run::run(root, *options),
         Command::Sandbox(options) => sandbox::run(root, *options),
+        Command::Snapshot(command) => snapshots::run(root, command),
     }
 }
 

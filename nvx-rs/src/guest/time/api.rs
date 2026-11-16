@@ -6,6 +6,7 @@ use std::io;
 use std::net::IpAddr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use super::checks::{self, Checks};
 use super::cpu_mask::CpuMask;
@@ -35,8 +36,9 @@ const REPORT_ONLY_TOKEN: Token<'static> = Token {
 };
 
 /// The guest side of NVX time ABI version one: its cold-boot time step and the start of its time
-/// daemon, its VM generation ID, the capture request with the repair of a restore, and the
-/// restore's finish, which run in the calling process.
+/// daemon, and its VM generation ID, which run in the calling process. Its capture request, with
+/// the repair of a restore, and the restore's finish are private: `nvx-time` and
+/// [`snapshot::capture`](crate::guest::snapshot::capture) run them.
 ///
 /// A call needs the privileges of `nvx-time`: `CAP_SYS_RAWIO` for OpenVMM's I/O ports, and
 /// write access to `/run/nvx`; the cold boot and the capture request, which set the wall clock or
@@ -45,8 +47,8 @@ const REPORT_ONLY_TOKEN: Token<'static> = Token {
 /// permission for the ports only for each of its port transactions, on the calling thread, and
 /// returns only once the thread holds none of it, or fails with [`TimeError::PortRelease`],
 /// after which the thread must start neither a thread nor a process, which would inherit the
-/// permission; [`Command`](crate::guest::spawn::Command) refuses to start one from it. No call
-/// waits for a child that it did not start.
+/// permission, as NVX's guest programs start none from it. No call waits for a child that it did
+/// not start.
 ///
 /// A violation of the time ABI is reported by a violation event on the console, in the kernel
 /// log, and on OpenVMM's debug console. In enforcing mode, the event stops the VM, so the call
@@ -90,8 +92,8 @@ impl TimeAbi {
     /// enforcing mode.
     ///
     /// The time daemon that [`start_daemon`](Self::start_daemon) starts enforces the ABI even
-    /// then, since no caller owns its failures, and so does the preparation of a capture that
-    /// `nvx::guest::clone` runs, as `nvx-time pre-capture` does.
+    /// then, since no caller owns its failures, while
+    /// [`snapshot::capture`](crate::guest::snapshot::capture) prepares its capture strictly.
     pub fn strict(self) -> Self {
         Self {
             strict: !self.report_only,
@@ -145,14 +147,13 @@ impl TimeAbi {
     ///
     /// The child runs the deferred boot checks in the background, at idle priority, and then
     /// becomes the time daemon: it disciplines the wall clock, watches the kernel log for
-    /// violations, and runs repair step 7 of the restores that
-    /// [`restore_finish`](Self::restore_finish) hands it. It runs in a session of its own, with
-    /// its standard streams on the null device, until the VM stops or `SIGTERM` stops it, and
-    /// waits only for the children that it starts itself. It takes the command name `nvx-time`,
-    /// by which the calls of the time ABI recognize it. The caller supervises it and collects
-    /// its status: no call of the time ABI waits for it. The child enforces the ABI even when it
-    /// is [strict](Self::strict), since no caller owns its failures: a violation that it reports
-    /// stops the VM, unless the ABI is report-only.
+    /// violations, and runs repair step 7 of the restores whose finish hands it over. It runs in a
+    /// session of its own, with its standard streams on the null device, until the VM stops or
+    /// `SIGTERM` stops it, and waits only for the children that it starts itself. It takes the
+    /// command name `nvx-time`, by which the calls of the time ABI recognize it. The caller
+    /// supervises it and collects its status: no call of the time ABI waits for it. The child
+    /// enforces the ABI even when it is [strict](Self::strict), since no caller owns its failures:
+    /// a violation that it reports stops the VM, unless the ABI is report-only.
     ///
     /// The call returns when the child starts, so the boot checks' failures, which the child
     /// reports by their events, do not fail it.
@@ -174,9 +175,19 @@ impl TimeAbi {
         }
     }
 
-    /// Reads the VM generation ID, which a [capture](Self::capture) needs.
+    /// Reads the VM generation ID, which a capture request needs.
     pub fn generation_id(&self) -> Result<GenerationId, TimeError> {
         let runtime = self.runtime();
+        settled(&runtime, read_generation_id(&runtime))
+    }
+
+    /// Reads the generation ID using the same deadline as the capture's preparation.
+    pub(crate) fn generation_id_until(
+        &self,
+        deadline: Option<Instant>,
+    ) -> Result<GenerationId, TimeError> {
+        let mut runtime = self.runtime();
+        runtime.deadline = deadline;
         settled(&runtime, read_generation_id(&runtime))
     }
 
@@ -207,9 +218,21 @@ impl TimeAbi {
     /// requested it, in which the call does not return. With [`CaptureRequest::finish`],
     /// [`Restore::finished`] tells whether the call finished the restore, and how it reports a
     /// failed handoff of repair step 7.
-    pub fn capture(&self, request: CaptureRequest) -> Result<CaptureOutcome, TimeError> {
-        let runtime = self.runtime();
-        settled(&runtime, capture(&runtime, request))
+    pub(crate) fn capture(&self, request: CaptureRequest) -> Result<CaptureOutcome, TimeError> {
+        self.capture_until(request, None)
+            .map_err(|(error, _)| error)
+    }
+
+    /// Bounds capture preflight and reports whether cleanup has entered the unbounded phase.
+    pub(crate) fn capture_until(
+        &self,
+        request: CaptureRequest,
+        deadline: Option<Instant>,
+    ) -> Result<CaptureOutcome, (TimeError, bool)> {
+        let mut runtime = self.runtime();
+        runtime.deadline = deadline;
+        let result = capture(&mut runtime, request);
+        finished_capture(&runtime, result, deadline.is_some())
     }
 
     /// Finishes a restore that [`capture`](Self::capture) left unfinished, after the caller
@@ -225,7 +248,7 @@ impl TimeAbi {
     /// passes to init, or to the nearest subreaper, without the process's descriptors. The call
     /// returns when step 7 ends, which reports its failures by their events only, as
     /// `nvx-time restore-finish` does.
-    pub fn restore_finish(&self, request: RestoreFinish) -> Result<(), TimeError> {
+    pub(crate) fn restore_finish(&self, request: RestoreFinish) -> Result<(), TimeError> {
         let runtime = self.runtime();
         settled(&runtime, restore_finish(&runtime, request))
     }
@@ -249,7 +272,18 @@ impl TimeAbi {
         released_preparation(
             pre_capture(&self.enforcing_runtime()),
             sys::check_released(),
+            None,
         )
+    }
+
+    /// Prepares strictly by one deadline and retains suppression ownership on every failure.
+    pub(crate) fn pre_capture_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), (PreCaptureError, bool)> {
+        let mut runtime = self.runtime();
+        runtime.deadline = Some(deadline);
+        finished_preparation(&runtime, pre_capture(&runtime))
     }
 
     /// Restores the stall detectors' settings that [`pre_capture`](Self::pre_capture) saved, and
@@ -258,6 +292,11 @@ impl TimeAbi {
     /// permission for the ports.
     pub(crate) fn cancel_capture(&self) -> Result<(), Vec<u8>> {
         system::suppression_restore(false)
+    }
+
+    /// Restores detectors with a deadline only before the capture request.
+    pub(crate) fn cancel_capture_until(&self, deadline: Option<Instant>) -> Result<(), Vec<u8>> {
+        system::suppression_restore_until(false, deadline)
     }
 }
 
@@ -295,15 +334,49 @@ fn settled<T>(runtime: &Runtime<'_>, result: Result<T, TimeError>) -> Result<T, 
     })
 }
 
+/// Ends a capture with its original revocation cause before strict violations, for bounded
+/// callers only. The request and its cleanup remain unbounded after the deadline was cleared.
+fn finished_capture(
+    runtime: &Runtime<'_>,
+    result: Result<CaptureOutcome, TimeError>,
+    bounded: bool,
+) -> Result<CaptureOutcome, (TimeError, bool)> {
+    let unbounded = runtime.deadline.is_none();
+    if bounded {
+        runtime
+            .check_released()
+            .map_err(|error| (TimeError::from(error), unbounded))?;
+    }
+    settled(runtime, result).map_err(|error| (error, unbounded))
+}
+
+/// Ends bounded preparation with its original revocation cause and suppression ownership.
+fn finished_preparation(
+    runtime: &Runtime<'_>,
+    result: Result<(), PreCaptureError>,
+) -> Result<(), (PreCaptureError, bool)> {
+    let suppressed = result
+        .as_ref()
+        .map_or_else(PreCaptureError::holds_suppression, |()| true);
+    released_preparation(result, runtime.check_released(), runtime.take_violation())
+        .map_err(|error| (error, suppressed))
+}
+
 /// Ends a preparation of a capture with `result`, unless the calling thread may still hold port
 /// permission, as `released` tells, which the preparation reports instead, with whether it holds
 /// the stall detectors' suppression.
 fn released_preparation(
     result: Result<(), PreCaptureError>,
     released: Result<(), PortError>,
+    violation: Option<Violation>,
 ) -> Result<(), PreCaptureError> {
     let Err(error) = released else {
-        return result;
+        return match violation {
+            Some(violation) if !matches!(result, Err(PreCaptureError::BootChecks(_))) => Err(
+                PreCaptureError::CaptureChecks(TimeError::Violation(violation)),
+            ),
+            _ => result,
+        };
     };
     let suppressed = result
         .as_ref()
@@ -377,16 +450,19 @@ fn cold_boot(runtime: &Runtime<'_>) -> Result<ColdBoot, TimeError> {
 
 /// The read of [`TimeAbi::generation_id`].
 fn read_generation_id(runtime: &Runtime<'_>) -> Result<GenerationId, TimeError> {
+    sys::FileLock::check_deadline(runtime.deadline).map_err(|_| TimeError::Deadline)?;
     let ports = runtime.open_ports()?;
     if ports.read_u8(Port::PortbStatus) & PORTB_GENERATION_ID_AVAILABLE == 0 {
         return Err(TimeError::GenerationIdUnavailable);
     }
     let mut id = [0_u8; GenerationId::LENGTH];
     {
-        let _lock = system::lock_portb().map_err(|error| TimeError::PortLock(error.into()))?;
+        let _lock = system::lock_file(system::PORTB_LOCK_PATH, runtime.deadline)
+            .map_err(|error| TimeError::PortLock(error.into()))?;
         ports.write_u8(Port::PortbStatus, SELECT_GENERATION_ID);
         portb_read(&ports, Port::PortbData, &mut id);
     }
+    sys::FileLock::check_deadline(runtime.deadline).map_err(|_| TimeError::Deadline)?;
     Ok(GenerationId::from_bytes(id))
 }
 
@@ -437,8 +513,13 @@ impl PreCaptureError {
 
 /// The preparation of [`TimeAbi::pre_capture`].
 fn pre_capture(runtime: &Runtime<'_>) -> Result<(), PreCaptureError> {
-    let (state, completed) = checks::wait_for_checks(true);
+    sys::FileLock::check_deadline(runtime.deadline)
+        .map_err(|_| PreCaptureError::BootChecks(TimeError::Deadline))?;
+    let (state, completed) = checks::wait_for_checks_until(true, runtime.deadline);
     if !completed {
+        if sys::FileLock::check_deadline(runtime.deadline).is_err() {
+            return Err(PreCaptureError::BootChecks(TimeError::Deadline));
+        }
         return Err(PreCaptureError::BootChecks(check_failed(
             runtime,
             Phase::Capture,
@@ -446,6 +527,8 @@ fn pre_capture(runtime: &Runtime<'_>) -> Result<(), PreCaptureError> {
             "the boot checks are still pending",
         )));
     }
+    sys::FileLock::check_deadline(runtime.deadline)
+        .map_err(|_| PreCaptureError::BootChecks(TimeError::Deadline))?;
     let start = clock_ns(sys::Clock::Monotonic);
     let cpu_start = cpu_time_ns();
     runtime.set_generation(state.generation as u32);
@@ -457,10 +540,16 @@ fn pre_capture(runtime: &Runtime<'_>) -> Result<(), PreCaptureError> {
             "cannot read the CPU sets",
         ))
     })?;
-    checks::run_capture_checks(runtime, &mut checks);
+    checks::run_capture_checks_until(runtime, &mut checks, runtime.deadline)
+        .map_err(|_| PreCaptureError::CaptureChecks(TimeError::Deadline))?;
+    if let Some(violation) = runtime.take_violation() {
+        return Err(PreCaptureError::CaptureChecks(TimeError::Violation(
+            violation,
+        )));
+    }
     let elapsed = clock_ns(sys::Clock::Monotonic).wrapping_sub(start);
     let cpu = cpu_time_ns().wrapping_sub(cpu_start);
-    match system::suppression_save() {
+    match system::suppression_save_until(runtime.deadline) {
         Ok(()) => {}
         Err(SaveError::Undone(Errno::EEXIST)) => return Err(PreCaptureError::Pending),
         Err(SaveError::Undone(error)) => return Err(PreCaptureError::Suppression(error)),
@@ -473,19 +562,21 @@ fn pre_capture(runtime: &Runtime<'_>) -> Result<(), PreCaptureError> {
         cpu / NSEC_PER_USEC,
         0,
         0,
-    ) {
+    ) && (error != Errno::ETIMEDOUT || sys::FileLock::check_deadline(runtime.deadline).is_ok())
+    {
         checks.fail(
             runtime,
             CheckId::C10,
             format!("cannot record the capture check: {}", error.desc()),
         );
     }
+    sys::FileLock::check_deadline(runtime.deadline).map_err(PreCaptureError::Unrestored)?;
     Ok(())
 }
 
 /// How a snapshot treats the guest's scratch disk, which the capture request selects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ScratchPolicy {
+pub(crate) enum ScratchPolicy {
     /// The snapshot keeps no scratch disk: the capture happens before the scratch disk is
     /// mounted, and a restore attaches a new one.
     Fresh,
@@ -509,7 +600,7 @@ impl ScratchPolicy {
 /// [`in_memory`](Self::in_memory), which writes no file, and returns it as the [`Restore`]'s
 /// owned [`Seed`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CaptureRequest {
+pub(crate) struct CaptureRequest {
     /// The snapshot's scratch policy.
     scratch: ScratchPolicy,
     /// The VM generation ID before the capture, which a restore must replace.
@@ -536,7 +627,11 @@ impl CaptureRequest {
     /// generation ID, from [`TimeAbi::generation_id`], is `generation_id`. A restore writes the
     /// 64 bytes of fresh entropy of its restore packet, which start with the new generation ID,
     /// to a file at `entropy_path` that only its owner may read and write.
-    pub fn new(scratch: ScratchPolicy, generation_id: GenerationId, entropy_path: PathBuf) -> Self {
+    pub(crate) fn new(
+        scratch: ScratchPolicy,
+        generation_id: GenerationId,
+        entropy_path: PathBuf,
+    ) -> Self {
         Self {
             scratch,
             generation_id,
@@ -550,7 +645,7 @@ impl CaptureRequest {
     /// writes no file: its [`Restore`] holds the 64 bytes of fresh entropy of its restore
     /// packet, which start with the new generation ID, as an owned [`Seed`], which
     /// [`Restore::take_seed`] hands over.
-    pub fn in_memory(scratch: ScratchPolicy, generation_id: GenerationId) -> Self {
+    pub(crate) fn in_memory(scratch: ScratchPolicy, generation_id: GenerationId) -> Self {
         Self {
             scratch,
             generation_id,
@@ -565,7 +660,7 @@ impl CaptureRequest {
     /// then stay with the caller, who has no further step to run before the acknowledgement.
     /// Without a running daemon, or when the calling thread cannot take the permission for the
     /// acknowledgement, the restore stays unfinished, as [`Restore::finished`] tells.
-    pub fn finish(mut self) -> Self {
+    pub(crate) fn finish(mut self) -> Self {
         self.finish = true;
         self
     }
@@ -573,7 +668,7 @@ impl CaptureRequest {
 
 /// How a capture request ended, in the VM process in which it returned.
 #[derive(Debug)]
-pub enum CaptureOutcome {
+pub(crate) enum CaptureOutcome {
     /// The VM continued without a restore: no snapshot was taken, or the restore packet was of
     /// the recorded generation. The entropy file of the file mode is removed.
     Continued,
@@ -588,7 +683,7 @@ pub enum CaptureOutcome {
 /// [`take_seed`](Self::take_seed) hands it over, so it is neither `Clone` nor comparable: the
 /// seed has one owner.
 #[derive(Debug)]
-pub struct Restore {
+pub(crate) struct Restore {
     /// The packet's flags.
     flags: u8,
     /// The packet's online processor count, or zero for no processor target.
@@ -599,8 +694,6 @@ pub struct Restore {
     memory_ranges: Vec<MemoryRange>,
     /// The network settings that the restore packet carries, if any.
     network: Option<RestoreNetwork>,
-    /// The activation record that the restore packet ends with, if any, undecoded.
-    activation: Option<Vec<u8>>,
     /// Whether the call finished the restore.
     finished: bool,
     /// The restore's fresh entropy, in the in-memory mode, until the caller takes it.
@@ -616,35 +709,35 @@ impl Restore {
     /// A restore whose handoff of step 7 fails after its acknowledgement counts as finished,
     /// since finishing it again would acknowledge it twice, as `nvx-time capture --finish`
     /// does: in report-only mode, a violation of check C10 is the failure's only report.
-    pub fn finished(&self) -> bool {
+    pub(crate) fn finished(&self) -> bool {
         self.finished
     }
 
     /// Returns whether the host gates its input until the guest acknowledges the restore, which
     /// [`RestoreFinish::acknowledge`] does.
-    pub fn acknowledgement_required(&self) -> bool {
+    pub(crate) fn acknowledgement_required(&self) -> bool {
         self.flags & decoders::PACKET_ACK_REQUIRED != 0
     }
 
     /// Returns the number of online processors that the restore requests, 1, 2, 4, or 8, or
     /// `None` for none.
-    pub fn processor_target(&self) -> Option<u8> {
+    pub(crate) fn processor_target(&self) -> Option<u8> {
         (self.online_vp_count != 0).then_some(self.online_vp_count)
     }
 
     /// Returns whether the restore requests an explicit memory target, whose expansion ranges
     /// [`memory_ranges`](Self::memory_ranges) lists.
-    pub fn memory_target(&self) -> bool {
+    pub(crate) fn memory_target(&self) -> bool {
         self.flags & decoders::PACKET_MEMORY_TARGET != 0
     }
 
     /// Returns the memory ranges that the guest adds and onlines, in order.
-    pub fn memory_ranges(&self) -> &[MemoryRange] {
+    pub(crate) fn memory_ranges(&self) -> &[MemoryRange] {
         &self.memory_ranges
     }
 
     /// Returns the new VM generation ID, with which the restore's fresh entropy starts.
-    pub fn generation_id(&self) -> GenerationId {
+    pub(crate) fn generation_id(&self) -> GenerationId {
         self.generation_id
     }
 
@@ -655,7 +748,7 @@ impl Restore {
     /// The seed moves to the caller without a copy of its bytes, which it zeroes when it is
     /// dropped, so the caller drops it once it reseeded the kernel's random number generator
     /// with it, through [`reseed`](crate::guest::reseed::reseed).
-    pub fn take_seed(&mut self) -> Option<Seed> {
+    pub(crate) fn take_seed(&mut self) -> Option<Seed> {
         self.seed.take()
     }
 
@@ -672,18 +765,8 @@ impl Restore {
     /// Returns the network settings that the restore packet carries: those of a restore that
     /// replaced the network policy of a snapshot without a tier, which the guest applies before it
     /// finishes the restore, or `None` for a restore that carries none.
-    pub fn network(&self) -> Option<RestoreNetwork> {
+    pub(crate) fn network(&self) -> Option<RestoreNetwork> {
         self.network
-    }
-
-    /// Returns the activation record that the restore packet ends with: the bytes, 1 to
-    /// [`MAX_RECORD_BYTES`](crate::activation::MAX_RECORD_BYTES) of them, that the host handed a
-    /// platform clone with its restore, which the time ABI does not decode, or `None` for a
-    /// restore that handed over none. A clone's repair hands them to the repaired clone, whose
-    /// activation decodes them with
-    /// [`ActivationRecord::decode`](crate::activation::ActivationRecord::decode).
-    pub fn activation_record(&self) -> Option<&[u8]> {
-        self.activation.as_deref()
     }
 }
 
@@ -692,7 +775,7 @@ impl Restore {
 /// announces its listeners under it, as a cold boot under that policy learns them from the
 /// `virtnet_dns=` and `virtnet_ingress=` tokens of its command line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct RestoreNetwork {
+pub(crate) struct RestoreNetwork {
     /// The DNS server, one of the gateway's addresses, or `None` when the policy lets the guest
     /// reach no DNS service of the gateway.
     dns_server: Option<IpAddr>,
@@ -710,20 +793,20 @@ impl RestoreNetwork {
     }
 
     /// Returns the DNS server that the guest's resolver names, or `None` for none.
-    pub fn dns_server(&self) -> Option<IpAddr> {
+    pub(crate) fn dns_server(&self) -> Option<IpAddr> {
         self.dns_server
     }
 
     /// Returns whether the guest announces its listeners to its IPv4 gateway, which publishes
     /// them.
-    pub fn announces_listeners(&self) -> bool {
+    pub(crate) fn announces_listeners(&self) -> bool {
         self.announce_listeners
     }
 }
 
 /// A range of guest physical memory that a restore adds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MemoryRange {
+pub(crate) struct MemoryRange {
     /// The range's first guest physical address.
     start: u64,
     /// The range's length in bytes.
@@ -732,12 +815,12 @@ pub struct MemoryRange {
 
 impl MemoryRange {
     /// Returns the range's first guest physical address.
-    pub fn start(&self) -> u64 {
+    pub(crate) fn start(&self) -> u64 {
         self.start
     }
 
     /// Returns the range's length in bytes, which is not zero.
-    pub fn length(&self) -> u64 {
+    pub(crate) fn length(&self) -> u64 {
         self.length
     }
 }
@@ -751,7 +834,11 @@ const ENTROPY_FLAGS: OpenFlags = OpenFlags::O_WRONLY
     .union(OpenFlags::O_CLOEXEC);
 
 /// The capture request and repair of [`TimeAbi::capture`].
-fn capture(runtime: &Runtime<'_>, request: CaptureRequest) -> Result<CaptureOutcome, TimeError> {
+fn capture(
+    runtime: &mut Runtime<'_>,
+    request: CaptureRequest,
+) -> Result<CaptureOutcome, TimeError> {
+    sys::FileLock::check_deadline(runtime.deadline).map_err(|_| TimeError::Deadline)?;
     let CaptureRequest {
         scratch,
         generation_id,
@@ -790,7 +877,7 @@ fn capture(runtime: &Runtime<'_>, request: CaptureRequest) -> Result<CaptureOutc
         },
         None => EntropySink::Seed,
     };
-    let _lock = match system::lock_portb() {
+    let _lock = match system::lock_file(system::PORTB_LOCK_PATH, runtime.deadline) {
         Ok(lock) => lock,
         Err(error) => {
             entropy.discard();
@@ -814,6 +901,7 @@ fn capture(runtime: &Runtime<'_>, request: CaptureRequest) -> Result<CaptureOutc
             ));
         }
     };
+    runtime.deadline = None;
     ports.write_u8(Port::Snapshot, scratch.request());
     let start = clock_ns(sys::Clock::Monotonic);
     let read = (ports.read_u8(Port::PortbStatus) & PORTB_PACKET_AVAILABLE != 0)
@@ -1008,12 +1096,15 @@ fn repair_restore(
     };
     let (packet, sample) = packet
         .map_err(|error| repair_failed(runtime, ViolationCode::RepairPacket, error.to_string()))?;
+    // The packet's reads take any activation record that it ends with, which only a host that
+    // hands one over with `--restore-activation-record` sends; NVX's host activates a restored
+    // guest over its control session instead.
     let RestorePacket {
         header,
         ranges,
         entropy,
         network,
-        activation,
+        activation: _,
     } = packet;
     let generation_id = entropy.generation_id();
     if generation_id == target.previous_id {
@@ -1096,7 +1187,6 @@ fn repair_restore(
             .map(|&(start, length)| MemoryRange { start, length })
             .collect(),
         network,
-        activation,
         finished,
         seed,
     }))
@@ -1143,38 +1233,18 @@ fn apply_repair(
 /// Its `Display` form is a CPU list in the kernel's syntax, such as `1-3,6`, or `none` for the
 /// empty set.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct CpuSet(CpuMask);
+pub(crate) struct CpuSet(CpuMask);
 
 impl CpuSet {
     /// Returns the empty set.
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self(CpuMask::EMPTY)
     }
 
     /// Returns the set with `cpu` added, or `None` for a CPU that the time ABI does not cover.
     #[must_use]
-    pub fn with(self, cpu: usize) -> Option<Self> {
+    pub(crate) fn with(self, cpu: usize) -> Option<Self> {
         (cpu < super::MAX_CPUS).then(|| Self(self.0.with(cpu)))
-    }
-
-    /// Returns whether the set has `cpu`.
-    pub fn contains(&self, cpu: usize) -> bool {
-        self.0.contains(cpu)
-    }
-
-    /// Returns the number of CPUs in the set.
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Returns whether the set has no CPUs.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Returns the set's CPUs in ascending order.
-    pub fn iter(&self) -> impl Iterator<Item = usize> + use<> {
-        self.0.iter()
     }
 }
 
@@ -1194,7 +1264,7 @@ impl Display for CpuSet {
 
 /// The finish of a restore, [`TimeAbi::restore_finish`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RestoreFinish {
+pub(crate) struct RestoreFinish {
     /// Whether to acknowledge the restore through the snapshot port.
     acknowledge: bool,
     /// The CPUs that the restore brought online.
@@ -1203,20 +1273,20 @@ pub struct RestoreFinish {
 
 impl RestoreFinish {
     /// Describes a finish that records no new CPUs and sends no acknowledgement.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Acknowledges the restore through the snapshot port, which a restore whose host gates its
     /// input until then needs.
-    pub fn acknowledge(mut self) -> Self {
+    pub(crate) fn acknowledge(mut self) -> Self {
         self.acknowledge = true;
         self
     }
 
     /// Records `cpus` as the CPUs that the restore brought online, which repair step 7's
     /// restore checks check too.
-    pub fn new_cpus(mut self, cpus: CpuSet) -> Self {
+    pub(crate) fn new_cpus(mut self, cpus: CpuSet) -> Self {
         self.new_cpus = cpus;
         self
     }
@@ -1373,12 +1443,14 @@ impl Display for Violation {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum TimeError {
+    /// The caller's absolute deadline expired.
+    Deadline,
     /// The calling thread could not take the permission for OpenVMM's ports, which needs
     /// `CAP_SYS_RAWIO`.
     PortAccess(io::Error),
     /// The kernel did not revoke the calling thread's permission for OpenVMM's ports. The
     /// thread may still hold some of it, and must start neither a thread nor a process, which
-    /// [`Command`](crate::guest::spawn::Command) refuses to start from it.
+    /// would inherit it.
     PortRelease(io::Error),
     /// The lock that serializes the transactions of port B's window failed.
     PortLock(io::Error),
@@ -1415,6 +1487,7 @@ impl From<PortError> for TimeError {
 impl Display for TimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Deadline => formatter.write_str("the caller deadline expired"),
             Self::PortAccess(error) => write!(formatter, "ioperm: {}", sys::describe(error)),
             Self::PortRelease(error) => {
                 write!(formatter, "ioperm revoke: {}", sys::describe(error))
@@ -1444,7 +1517,10 @@ impl std::error::Error for TimeError {
             | Self::PortLock(error)
             | Self::Spawn(error)
             | Self::EntropyFile { source: error, .. } => Some(error),
-            Self::StateUnavailable | Self::GenerationIdUnavailable | Self::Violation(_) => None,
+            Self::Deadline
+            | Self::StateUnavailable
+            | Self::GenerationIdUnavailable
+            | Self::Violation(_) => None,
         }
     }
 }

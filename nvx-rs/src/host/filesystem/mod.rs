@@ -1,22 +1,25 @@
-//! Host paths exposed to the guest through OpenVMM's aggregate virtio-fs export, as the one
-//! planner of every NVX caller plans them, for the blockless root and for the container root of a
-//! layered sandbox alike.
+//! Host paths exposed to the guest through OpenVMM's aggregate virtio-fs export, for the blockless
+//! root and for the container root of a layered sandbox alike: the [`ExportPlan`] that a caller
+//! records and checks, and that a VM's configuration lowers into OpenVMM's options and the guest's
+//! mapping table. The planner that makes a plan of host paths, with its path rules, the pins of
+//! the objects that a workload could move, and the checks of a plan's host objects before each
+//! start belong to NVX's CLI, private to the crate (feature `cli`).
 //!
-//! OpenVMM offers one virtio-fs device. [`plan`] attaches it as an aggregate: a synthetic,
+//! OpenVMM offers one virtio-fs device, which a plan attaches as an aggregate: a synthetic,
 //! read-only root that lists one child per exported host directory or file, named by its index,
 //! which the guest mounts at a directory that only the guest's root can enter. The guest then
 //! bind-mounts each mapped path at its target, read-only or read-write, in the order of the plan's
 //! [`Bind`]s: from the mapping table that it receives over the control channel, or from boot
 //! tokens that a caller renders from the same binds.
 //!
-//! An [`ExportRequest`] names the mapped host paths, each read-only or read-write at its guest
-//! target; the host paths that OpenVMM hides inside them, and the paths inside those that stay
-//! visible; the paths to which the writes of a read-write directory are narrowed; the host
-//! identity of the file operations; and the guest targets that the guest's root keeps for itself.
+//! A plan names the mapped host paths, each read-only or read-write at its guest target; the host
+//! paths that OpenVMM hides inside them, and the paths inside those that stay visible; the paths to
+//! which the writes of a read-write directory are narrowed; and the host identity of the file
+//! operations. It names paths only, never the objects at them.
 //!
-//! - A caller gives each target, or lets MXC's convention for Linux guests derive it from the
-//!   resolved host path: a Windows path `C:\work\src` appears at `/mnt/c/work/src`, and a Linux
-//!   path at the same path ([`fn@guest_path`]).
+//! - A caller gives each target, such as the guest path that MXC's convention for Linux guests
+//!   derives from a resolved host path ([`fn@guest_path`]): a Windows path `C:\work\src` appears
+//!   at `/mnt/c/work/src`, and a Linux path at the same path.
 //! - The reserved targets depend on the root, and the caller supplies them ([`ReservedTargets`]):
 //!   the blockless root keeps the guest's system trees, and the container root of a layered
 //!   sandbox keeps the trees of its runtime.
@@ -29,11 +32,32 @@
 //! cannot keep a path read-only inside a writable part, so a read-only path there is refused on
 //! every host, while a read-write path inside a read-only directory is not. OpenVMM also hides the
 //! denied paths, except for the allowed paths inside them.
-//!
-//! The plan records the identities of the mapped and denied paths that a workload could move,
-//! those inside a writable part, and [`ExportPlan::verify`] checks them again before each start.
 //! A policy that would need more children than OpenVMM offers is refused rather than served
 //! through the directories of its files, which would grant more than the files.
+//!
+//! # What the caller keeps stable
+//!
+//! `nvx` reads nothing on the host when it checks or lowers a plan, and OpenVMM resolves the
+//! plan's paths only when it starts, so the caller keeps them naming the objects that it means:
+//!
+//! - **The launch race.** From its own last check of the host until OpenVMM has opened the paths,
+//!   the caller keeps each path naming the object that it checked: an object that is renamed in
+//!   between, with another put at its path, leaves OpenVMM to export, hide, or show the other.
+//!   NVX's CLI checks a recorded plan just before it starts the VM, while no workload of the plan
+//!   runs. OpenVMM checks each child's kind again when it opens it.
+//! - **The writable-part recheck.** A workload that may write a part of a child, all of a writable
+//!   child without write paths or one of its write paths, can rename a mapped or denied object
+//!   strictly inside that part and put a decoy at its path, which a later launch of the same plan
+//!   would bind or hide instead. Before each launch of a plan with which a workload has run, the
+//!   caller checks that each such path still names the object that it named when the caller made
+//!   the plan. NVX's CLI pins the identities of those objects when it plans an export, and checks
+//!   them before each start; it pins no other object, since host edits often replace files.
+//! - **Durable denial.** A denial holds only while its path names the object that it hides: once
+//!   the object moves, a later launch hides whatever lies at the path then, and shows the object
+//!   wherever the export reaches it, and a denied path that names no object hides nothing that a
+//!   workload creates at it later. The caller keeps each denied object at its path for as long as
+//!   its denial is to hold, out of the reach of workloads or rechecked as above. NVX's CLI refuses
+//!   a denied path inside a mapped path that does not exist.
 
 mod guest_path;
 mod host_path;
@@ -41,22 +65,30 @@ mod limits;
 mod policy;
 mod verify;
 
+#[cfg(feature = "cli")]
 use std::fs;
 use std::path::{Component, Path, PathBuf, Prefix};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "cli")]
 use crate::error::{Error, Result};
+#[cfg(feature = "cli")]
 use crate::protocol::MAX_HOST_MAPPINGS;
 use crate::protocol::export::EXPORT_DIRECTORY;
 use crate::protocol::share::{RESERVED_EXACT_MOUNT_TARGETS, RESERVED_MOUNT_TARGETS};
 
+#[cfg(feature = "cli")]
+use self::guest_path::depth;
+pub use self::guest_path::guest_path;
+use self::guest_path::guest_source;
 pub(crate) use self::guest_path::within;
-use self::guest_path::{depth, guest_source};
-pub use self::guest_path::{guest_path, resolve_guest_path};
 pub(crate) use self::host_path::{canonicalize, is_reparse_point};
+#[cfg(feature = "cli")]
 use self::host_path::{identity, relative_text};
+#[cfg(feature = "cli")]
 use self::limits::{check_policy_paths, check_root};
+#[cfg(feature = "cli")]
 use self::policy::{
     Writable, allowed_paths, canonicals, check_allowed_paths, check_read_only, check_write_paths,
     denied_paths, distinct_roots, nearest_rule, needed_denied_paths, writable_part, write_paths,
@@ -89,6 +121,7 @@ pub const RESERVED_TARGETS: [&str; 13] = [
 ];
 
 /// Why a request for the caller owner fails on a Windows host.
+#[cfg(feature = "cli")]
 const CALLER_OWNER_ON_WINDOWS: &str = "the caller owner requires a Linux host; Windows has no \
                                        per-request POSIX identity for OpenVMM to switch to";
 
@@ -160,8 +193,10 @@ impl Owner {
     }
 }
 
-/// The host paths of one sandbox, as [`plan`] exports them: the children of OpenVMM's aggregate
-/// export, the bind mounts of the guest, and the host identity of the file operations.
+/// The host paths of one sandbox, as OpenVMM's aggregate export exports them: the children of the
+/// export, the bind mounts of the guest, and the host identity of the file operations. It names
+/// paths only, which the caller keeps stable, as [`host::filesystem`](crate::host::filesystem)
+/// describes.
 ///
 /// Callers record the plan, so its serde form is part of their state: a caller versions its
 /// records, and a record of another version is not read.
@@ -192,9 +227,6 @@ pub struct ExportChild {
     /// Canonical host paths inside the child that OpenVMM hides; the root itself, when it shows
     /// only its allowed paths.
     pub denied: Vec<PathBuf>,
-    /// Identities, at provision, of the denied paths that a workload could move: those inside a
-    /// writable part.
-    pub denied_identities: Vec<Option<FileIdentity>>,
     /// Canonical paths inside denied paths that stay visible.
     pub allowed: Vec<PathBuf>,
     /// Canonical paths to which OpenVMM limits the guest's writes; empty if the guest may modify
@@ -203,13 +235,40 @@ pub struct ExportChild {
 }
 
 /// Device and file index of a host object, which survive renames.
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct FileIdentity {
+pub(crate) struct FileIdentity {
     /// Device, or the volume serial number on Windows.
-    pub device: u64,
+    pub(crate) device: u64,
     /// Inode, or the file index on Windows.
-    pub index: u64,
+    pub(crate) index: u64,
+}
+
+/// An export that the CLI's planner made: the description of its paths, which the CLI passes to a
+/// VM's configuration, and the pins of the objects in it that a workload could move, which the CLI
+/// records beside the description and checks before each start.
+#[cfg(feature = "cli")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlannedExport {
+    /// The paths of the export.
+    pub(crate) description: ExportPlan,
+    /// The identities of the objects in it that a workload could move.
+    pub(crate) pins: Pins,
+}
+
+/// The identities, when the CLI planned an export, of the denied and mapped objects that a
+/// workload could move: those strictly inside a part of a child that the guest may write.
+#[cfg(feature = "cli")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Pins {
+    /// For each child of the export, in order, the identity of each of its denied paths, in order,
+    /// that a workload could move, and `None` for each other.
+    pub(crate) denied: Vec<Vec<Option<FileIdentity>>>,
+    /// For each bind of the export, in order, the identity of the object that it maps, if a
+    /// workload could move it.
+    pub(crate) binds: Vec<Option<FileIdentity>>,
 }
 
 /// One mapped host path.
@@ -224,10 +283,6 @@ pub struct Bind {
     pub target: String,
     /// Whether the guest mounts it read-only.
     pub read_only: bool,
-    /// Identity of the host object at provision, when it lies inside a writable part and a
-    /// workload could therefore move it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub identity: Option<FileIdentity>,
 }
 
 impl Bind {
@@ -238,104 +293,70 @@ impl Bind {
 }
 
 /// Where the guest sees a mapped host path.
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Target<'a> {
-    /// At the guest path that [`fn@guest_path`] derives from the resolved host path.
-    Convention,
+pub(crate) enum Target<'a> {
     /// At this absolute guest path: a path other than the root, of at most 4,095 bytes, without
     /// NUL characters or empty, `.`, or `..` components.
     Guest(&'a str),
 }
 
 /// A host directory or regular file that the guest reads, or reads and writes, at a target.
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, Copy)]
-pub struct Mapping<'a> {
+pub(crate) struct Mapping<'a> {
     /// How messages name the list or option that requested the mapping, such as
     /// `filesystem.readonlyPaths`.
-    pub name: &'a str,
+    pub(crate) name: &'a str,
     /// The host path.
-    pub path: &'a Path,
+    pub(crate) path: &'a Path,
     /// Where the guest sees it.
-    pub target: Target<'a>,
+    pub(crate) target: Target<'a>,
     /// Whether the guest may only read it.
-    pub read_only: bool,
-}
-
-impl<'a> Mapping<'a> {
-    /// Returns the mappings of the paths of `list`, under its name, at the guest paths of the
-    /// convention, read-only or read-write.
-    pub fn convention(list: PathList<'a>, read_only: bool) -> impl Iterator<Item = Self> + 'a {
-        list.paths.iter().map(move |path| Self {
-            name: list.name,
-            path,
-            target: Target::Convention,
-            read_only,
-        })
-    }
+    pub(crate) read_only: bool,
 }
 
 /// A list of host paths, and the name by which messages refer to its entries, such as
 /// `readOnly`.
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, Copy)]
-pub struct PathList<'a> {
+pub(crate) struct PathList<'a> {
     /// The name of the list in messages.
-    pub name: &'a str,
+    pub(crate) name: &'a str,
     /// The host paths.
-    pub paths: &'a [PathBuf],
-}
-
-impl PathList<'static> {
-    /// A list without paths.
-    pub const EMPTY: Self = Self {
-        name: "",
-        paths: &[],
-    };
+    pub(crate) paths: &'a [PathBuf],
 }
 
 /// The host paths that a sandbox maps, those that it hides inside them and shows again inside
 /// those, the paths to which it narrows writes, the host identity of the file operations, and the
 /// guest targets that the guest's root keeps for itself.
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, Copy)]
-pub struct ExportRequest<'a> {
+pub(crate) struct ExportRequest<'a> {
     /// The mapped host paths, each at its target with its access.
-    pub mappings: &'a [Mapping<'a>],
+    pub(crate) mappings: &'a [Mapping<'a>],
     /// Host paths hidden inside the mapped paths. A mapped directory may be denied itself when
     /// allowed paths inside it stay visible.
-    pub denied: PathList<'a>,
+    pub(crate) denied: PathList<'a>,
     /// Host paths inside denied paths that stay visible, with the directories on the way to
     /// them listing only them.
-    pub allowed: PathList<'a>,
+    pub(crate) allowed: PathList<'a>,
     /// Host paths to which the guest's writes are narrowed inside the read-write directory that
     /// they lie in, which must be mapped whole: the guest may then write only them and the
     /// read-write mappings inside that directory.
-    pub write: PathList<'a>,
+    pub(crate) write: PathList<'a>,
     /// The host identity of the file operations.
-    pub owner: Owner,
+    pub(crate) owner: Owner,
     /// The guest targets that the guest's root keeps for itself.
-    pub reserved: ReservedTargets<'a>,
+    pub(crate) reserved: ReservedTargets<'a>,
 }
 
-impl<'a> ExportRequest<'a> {
-    /// Returns the request that maps `mappings` into a root that reserves `reserved`, without
-    /// denied, allowed, or write paths, as the VMM.
-    pub fn new(mappings: &'a [Mapping<'a>], reserved: ReservedTargets<'a>) -> Self {
-        Self {
-            mappings,
-            denied: PathList::EMPTY,
-            allowed: PathList::EMPTY,
-            write: PathList::EMPTY,
-            owner: Owner::Vmm,
-            reserved,
-        }
-    }
-}
-
-/// Plans the export of `request`, or returns `None` if it maps nothing.
+/// Plans the export of `request`, with the pins of the objects in it that a workload could move,
+/// or returns `None` if it maps nothing.
 ///
-/// Mapped paths must exist, and resolve to paths that are valid UTF-8. A mapping's target is the
-/// one that the request gives, or the guest path that the convention derives from the resolved
-/// host path, so two spellings of one object (links, letter case, or short names) map to one guest
-/// path; either must be free in the request's [`ReservedTargets`]. An object mapped twice at one
+/// Mapped paths must exist, and resolve to paths that are valid UTF-8, so two spellings of one
+/// object (links, letter case, or short names) name one object. A mapping's target, which the
+/// request gives, must be free in the request's [`ReservedTargets`]. An object mapped twice at one
 /// target is mapped once, read-only if either mapping is. Two objects never share a target, and a
 /// target inside another mapping's must show the very object that the other mapping shows there.
 /// A whole volume cannot be mapped, and a policy that would need more children than OpenVMM
@@ -355,9 +376,13 @@ impl<'a> ExportRequest<'a> {
 /// path between them, and a write path must not be hidden. The caller owner needs a Linux host,
 /// on which no exported directory or file may belong to UID 0 or GID 0.
 ///
+/// The pins hold the identity of each denied and mapped object strictly inside a part of a child
+/// that the guest may write, which [`PlannedExport::verify`] checks before each start.
+///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when the request breaks
 /// these rules or exceeds a limit of OpenVMM or the guest agent.
-pub fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
+#[cfg(feature = "cli")]
+pub(crate) fn plan(request: &ExportRequest<'_>) -> Result<Option<PlannedExport>> {
     let unsupported = |message: String| Err(Error::unsupported(message));
     if request.owner == Owner::Caller && cfg!(windows) {
         return unsupported(CALLER_OWNER_ON_WINDOWS.to_owned());
@@ -451,6 +476,7 @@ pub fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
             .any(|(root, part)| path.starts_with(root) && part.moves(root, path))
     };
     let mut children = Vec::with_capacity(roots.len());
+    let mut denied_pins = Vec::with_capacity(roots.len());
     let mut policy_bytes = 0;
     for (root, part) in roots.iter().zip(&parts) {
         // Every root is a mapping itself, so the guest reaches all of it.
@@ -477,12 +503,12 @@ pub fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
             .iter()
             .map(|path| movable(path).then(|| identity(path)).transpose())
             .collect::<Result<Vec<_>>>()?;
+        denied_pins.push(denied_identities);
         children.push(ExportChild {
             root: root.clone(),
             file: !own.directory,
             writable: part.writable,
             denied: child_denied,
-            denied_identities,
             allowed: child_allowed,
             write: part.write.clone(),
         });
@@ -516,47 +542,58 @@ pub fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
                 entry.given.display()
             ));
         }
-        binds.push(Bind {
-            child,
-            source,
-            target: entry.target.clone(),
-            read_only: entry.read_only,
-            identity: movable(&entry.canonical)
+        binds.push((
+            Bind {
+                child,
+                source,
+                target: entry.target.clone(),
+                read_only: entry.read_only,
+            },
+            movable(&entry.canonical)
                 .then(|| identity(&entry.canonical))
                 .transpose()?,
-        });
+        ));
     }
-    binds.sort_by(|left, right| {
+    // The pins follow the binds into their order.
+    binds.sort_by(|(left, _), (right, _)| {
         depth(&left.target)
             .cmp(&depth(&right.target))
             .then_with(|| left.target.cmp(&right.target))
     });
+    let (binds, bind_pins) = binds.into_iter().unzip();
     if request.owner == Owner::Caller {
         check_caller_roots(&children, unsupported_inspection)?;
     }
-    let plan = ExportPlan {
-        children,
-        binds,
-        owner: request.owner,
+    let planned = PlannedExport {
+        description: ExportPlan {
+            children,
+            binds,
+            owner: request.owner,
+        },
+        pins: Pins {
+            denied: denied_pins,
+            binds: bind_pins,
+        },
     };
-    // Callers read a record of the plan back through `check`, which accepts every plan that this
-    // function makes.
+    // The CLI reads a record of the plan and its pins back through `check`, which accepts every
+    // plan that this function makes.
     debug_assert!(
-        plan.check(request.reserved).is_ok(),
+        planned.check(request.reserved).is_ok(),
         "the planner made a plan that its check refuses: {:?}",
-        plan.check(request.reserved)
+        planned.check(request.reserved)
     );
-    Ok(Some(plan))
+    Ok(Some(planned))
 }
 
 /// Resolves one requested mapping: its host path must exist as a directory or regular file that
 /// is not a whole volume, and its target must be a guest path that `reserved` leaves free.
+#[cfg(feature = "cli")]
 fn resolve_mapping<'a>(mapping: &Mapping<'a>, reserved: ReservedTargets<'_>) -> Result<Mapped<'a>> {
     let unsupported = |message: String| Err(Error::unsupported(message));
     let Mapping {
         name,
         path,
-        target,
+        target: Target::Guest(target),
         read_only,
     } = *mapping;
     let canonical = canonicalize(path).map_err(|error| {
@@ -584,44 +621,24 @@ fn resolve_mapping<'a>(mapping: &Mapping<'a>, reserved: ReservedTargets<'_>) -> 
     {
         return unsupported(format!("{name} entry {} {reason}", path.display()));
     }
-    let target = match target {
-        Target::Convention => {
-            let Some(target) = guest_path(&canonical) else {
-                return unsupported(format!(
-                    "{name} entry {} has no guest path; use an absolute local path",
-                    path.display()
-                ));
-            };
-            if let Some(reserved) = reserved.reservation(&target) {
-                return unsupported(format!(
-                    "{name} entry {} would cover the guest's {reserved}",
-                    path.display()
-                ));
-            }
-            target
-        }
-        Target::Guest(target) => {
-            if let Some(problem) = target_problem(target) {
-                return unsupported(format!(
-                    "{name} entry {} has the guest target {target:?}, which {problem}",
-                    path.display()
-                ));
-            }
-            if let Some(reserved) = reserved.reservation(target) {
-                return unsupported(format!(
-                    "{name} entry {} has the guest target {target}, which would cover the \
-                     guest's {reserved}",
-                    path.display()
-                ));
-            }
-            target.to_owned()
-        }
-    };
+    if let Some(problem) = target_problem(target) {
+        return unsupported(format!(
+            "{name} entry {} has the guest target {target:?}, which {problem}",
+            path.display()
+        ));
+    }
+    if let Some(reserved) = reserved.reservation(target) {
+        return unsupported(format!(
+            "{name} entry {} has the guest target {target}, which would cover the guest's \
+             {reserved}",
+            path.display()
+        ));
+    }
     Ok(Mapped {
         name,
         given: path.to_path_buf(),
         canonical,
-        target,
+        target: target.to_owned(),
         read_only,
         directory: metadata.is_dir(),
     })
@@ -655,6 +672,7 @@ fn target_problem(target: &str) -> Option<&'static str> {
 /// Refuses mappings whose targets collide: two objects at one target, or a target inside another
 /// mapping's that does not show the very object that the other mapping shows there, which it
 /// would hide.
+#[cfg(feature = "cli")]
 fn check_targets(mapped: &[Mapped<'_>]) -> Result<()> {
     for (index, entry) in mapped.iter().enumerate() {
         for other in &mapped[..index] {
@@ -698,6 +716,7 @@ fn check_targets(mapped: &[Mapped<'_>]) -> Result<()> {
 /// host path from `outer`'s object to `inner`'s, as a plan's bind sources spell it. A Windows host
 /// reads a backslash in a name as a separator, and a name with a root or a drive as another path,
 /// so such a guest name never matches.
+#[cfg(feature = "cli")]
 fn shows(outer: &Mapped<'_>, inner: &Mapped<'_>) -> bool {
     let Some(rest) = inner
         .target
@@ -713,6 +732,7 @@ fn shows(outer: &Mapped<'_>, inner: &Mapped<'_>) -> bool {
 /// Refuses an exported directory or file that belongs to UID 0 or GID 0, to which the caller
 /// owner would squash guest root, and fails as `uninspected` returns for one whose owner cannot be
 /// read, with its path and the failure.
+#[cfg(feature = "cli")]
 fn check_caller_roots(
     children: &[ExportChild],
     uninspected: fn(&Path, std::io::Error) -> Error,
@@ -738,12 +758,14 @@ fn check_caller_roots(
 
 /// Returns the failure of a plan that cannot inspect `path`, with `error`, which refuses the
 /// request.
+#[cfg(feature = "cli")]
 fn unsupported_inspection(path: &Path, error: std::io::Error) -> Error {
     Error::unsupported(format!("cannot inspect {}", path.display())).with_source(error)
 }
 
-/// Returns the failure of [`ExportPlan::verify`] for `path`, which no longer names the host object
-/// that the plan found there.
+/// Returns the failure of [`PlannedExport::verify`] for `path`, which no longer names the host
+/// object that the plan found there.
+#[cfg(feature = "cli")]
 fn changed_object(path: &Path) -> Error {
     Error::other(format!(
         "{} no longer names the host object it named at provision; deprovision the sandbox and \
@@ -752,11 +774,12 @@ fn changed_object(path: &Path) -> Error {
     ))
 }
 
-/// Returns the failure of [`ExportPlan::verify`] that cannot inspect `path`, an object that the
+/// Returns the failure of [`PlannedExport::verify`] that cannot inspect `path`, an object that the
 /// plan found, with `error`: a path that no longer reaches the object, as the host sees it, whose
 /// object went, a component of which is no longer a directory or is a link that [`loops`], or
 /// that the host may no longer search or open, names it no longer, [`changed_object`], and any
 /// other failure is the host's own, which shows nothing of the object.
+#[cfg(feature = "cli")]
 fn uninspected(path: &Path, error: std::io::Error) -> Error {
     if matches!(
         error.kind(),
@@ -774,6 +797,7 @@ fn uninspected(path: &Path, error: std::io::Error) -> Error {
 /// Returns whether `error` is the host's refusal to resolve a path whose links loop, or nest
 /// deeper than the host follows them, as a link that names itself does: the failure that the
 /// standard library's unstable `ErrorKind::FilesystemLoop` names.
+#[cfg(feature = "cli")]
 fn loops(error: &std::io::Error) -> bool {
     #[cfg(unix)]
     let code = Some(nix::errno::Errno::ELOOP as i32);
@@ -838,6 +862,7 @@ fn outermost(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 /// Canonicalized, validated form of one requested host mapping.
+#[cfg(feature = "cli")]
 struct Mapped<'a> {
     /// How messages name the list or option that requested it.
     name: &'a str,

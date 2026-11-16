@@ -5,21 +5,22 @@ use super::*;
 use crate::guest::sys::{self, ChildStatus};
 
 /// Capability to bypass file read, write, and execute permission checks.
+#[cfg(feature = "cli")]
 pub(crate) const CAP_DAC_OVERRIDE: u32 = 1;
 
 /// Capability to bypass file read permission and directory read and search permission checks.
+#[cfg(feature = "cli")]
 pub(crate) const CAP_DAC_READ_SEARCH: u32 = 2;
 
 /// Capability to change group IDs and supplementary groups.
+#[cfg(feature = "cli")]
 pub(crate) const CAP_SETGID: u32 = 6;
 
 /// Capability to change user IDs.
+#[cfg(feature = "cli")]
 pub(crate) const CAP_SETUID: u32 = 7;
 
-/// Capability to change the root directory.
-pub(crate) const CAP_SYS_CHROOT: u32 = 18;
-
-/// Capability to mount, and to enter new namespaces, which an execution's entry needs.
+/// Capability to mount, and to enter new namespaces.
 pub(crate) const CAP_SYS_ADMIN: u32 = 21;
 
 /// Capability to lower nice values.
@@ -47,61 +48,6 @@ impl ChildSpec {
     /// Replaces the child's credential system calls, which then succeed, or fail with `failure`.
     pub(crate) fn simulate_credentials(&mut self, failure: Option<Errno>) {
         self.simulated_credentials = Some(failure);
-    }
-}
-
-impl PreparedChild {
-    /// Returns the prepared executable path for focused launch tests.
-    pub(crate) fn program(&self) -> &CString {
-        &self.program
-    }
-
-    /// Returns the prepared arguments for focused launch tests.
-    pub(crate) fn arguments(&self) -> &[CString] {
-        &self.arguments
-    }
-
-    /// Returns the prepared exact environment, without the physical `PWD` entry, for focused
-    /// launch tests.
-    pub(crate) fn environment(&self) -> &[CString] {
-        self.environment.as_deref().unwrap_or_default()
-    }
-
-    /// Returns the preallocated physical `PWD` entry for focused launch tests.
-    pub(crate) fn physical_pwd(&self) -> Option<&[u8]> {
-        self.physical_pwd
-            .as_ref()
-            .map(|physical_pwd| physical_pwd.entry.as_ref())
-    }
-
-    /// Returns the environment position of the physical `PWD` entry for focused launch tests.
-    pub(crate) fn physical_pwd_index(&self) -> Option<usize> {
-        self.physical_pwd
-            .as_ref()
-            .map(|physical_pwd| physical_pwd.index)
-    }
-
-    /// Returns whether the child joins a cgroup, for focused launch tests.
-    pub(crate) fn has_cgroup(&self) -> bool {
-        self.cgroup.is_some()
-    }
-
-    /// Returns a close-on-exec copy of the launch report's writer, which holds the report back
-    /// while it is open, as a process that another thread forks before the child does, for
-    /// focused tests.
-    pub(crate) fn report_writer_copy(&self) -> Result<FileDescriptor, Errno> {
-        let copy = nix::fcntl::fcntl(
-            self.report_writer.borrowed(),
-            FcntlArg::F_DUPFD_CLOEXEC(FIRST_NONSTANDARD),
-        )?;
-        // SAFETY: `F_DUPFD_CLOEXEC` returned a new descriptor, which nothing else owns.
-        Ok(unsafe { FileDescriptor::from_raw(copy) })
-    }
-
-    /// Returns whether the child waits at a barrier, enters an execution, and leads a new
-    /// session, for focused launch tests.
-    pub(crate) fn barrier_entry_and_session(&self) -> (bool, bool, bool) {
-        (self.barrier.is_some(), self.entry.is_some(), self.session)
     }
 }
 
@@ -212,17 +158,13 @@ fn invalid_specs_are_refused_before_forking() {
     assert_eq!(PreparedChild::new(spec).err(), Some(Errno::EINVAL));
 
     let mut spec = shell("exit 0");
-    spec.credentials = Some((1000, 1000));
-    assert_eq!(PreparedChild::new(spec).err(), Some(Errno::EINVAL));
-
-    let mut spec = shell("exit 0");
     spec.physical_pwd = true;
     assert_eq!(PreparedChild::new(spec).err(), Some(Errno::EINVAL));
 }
 
 #[test]
 fn stream_sources_below_the_standard_streams_are_raised_and_kept_from_the_program() {
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_SPAWN_LOW_STREAM_TEST_CHILD",
         "guest::sys::spawn::tests::stream_sources_below_the_standard_streams_are_raised_and_kept_from_the_program",
     ) {
@@ -240,24 +182,15 @@ fn stream_sources_below_the_standard_streams_are_raised_and_kept_from_the_progra
     let mut spec = shell("printf placed; test ! -e /proc/self/fd/0");
     spec.streams[1] = Some(FileDescriptor::from_owned(file.into()));
     let outcome = run(spec);
-
-    // An inherited descriptor keeps its number, which must not be a standard stream's.
-    let file = std::fs::File::open(output.path()).unwrap();
-    assert_eq!(file.as_raw_fd(), 0);
-    let mut spec = shell("exit 0");
-    spec.inherited
-        .push(FileDescriptor::from_owned(OwnedFd::from(file)));
-    let refused = PreparedChild::new(spec).err();
     drop(streams);
 
     assert_eq!(outcome, (None, Some(ChildStatus::Exited(0))));
     assert_eq!(std::fs::read(output.path()).unwrap(), b"placed");
-    assert_eq!(refused, Some(Errno::EINVAL));
 }
 
 #[test]
 fn the_report_writer_is_raised_above_the_standard_streams() {
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_SPAWN_LOW_REPORT_TEST_CHILD",
         "guest::sys::spawn::tests::the_report_writer_is_raised_above_the_standard_streams",
     ) {
@@ -304,46 +237,6 @@ fn a_new_process_group_is_led_by_the_child() {
     }
 }
 
-#[test]
-fn a_child_enters_its_root_or_reports_why_not() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::create_dir(root.path().join("inside")).unwrap();
-    let mut spec = ChildSpec::new(c"/bin/sh".to_owned(), vec![c"sh".to_owned()]);
-    spec.root = Some(
-        sys::open(
-            &sys::path_c_string(root.path()).unwrap(),
-            sys::OpenFlags::O_RDONLY | sys::OpenFlags::O_DIRECTORY | sys::OpenFlags::O_CLOEXEC,
-            sys::Mode::empty(),
-        )
-        .unwrap(),
-    );
-    spec.directory = Some(c"/inside".to_owned());
-    let (report, status) = run(spec);
-    assert_eq!(status, Some(ChildStatus::Exited(LAUNCH_FAILURE_STATUS)));
-    // Without the privilege to change its root, the child stops there. With it, the child
-    // finds `/inside` in the new root, which has no `/bin/sh`.
-    let (stage, error) = if holds_capability(CAP_SYS_CHROOT).unwrap() {
-        (LaunchStage::Exec, Errno::ENOENT)
-    } else {
-        (LaunchStage::Root, Errno::EPERM)
-    };
-    assert_eq!(report, Some((stage.code(), error as i32)));
-}
-
-#[test]
-fn the_check_s_credentials_keep_the_parent_s_supplementary_groups() {
-    let mut spec = shell("exit 0");
-    spec.directory = Some(c"/".to_owned());
-    spec.credentials = Some((1000, 1001));
-    let prepared = PreparedChild::new(spec).unwrap();
-    let credentials = prepared.credentials.as_ref().unwrap();
-    assert_eq!(credentials.groups, nix::unistd::getgroups().unwrap());
-    assert_eq!(
-        (credentials.uid, credentials.gid),
-        (Uid::from_raw(1000), Gid::from_raw(1001))
-    );
-}
-
 /// Returns a spec that records the physical path of the working directory that the child
 /// inherits.
 fn inherited_physical_pwd() -> ChildSpec {
@@ -355,7 +248,7 @@ fn inherited_physical_pwd() -> ChildSpec {
 
 #[test]
 fn a_physical_path_longer_than_the_entry_fails_its_stage() {
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_SPAWN_LONG_PHYSICAL_PWD_TEST_CHILD",
         "guest::sys::spawn::tests::a_physical_path_longer_than_the_entry_fails_its_stage",
     ) {
@@ -392,7 +285,7 @@ fn a_physical_path_longer_than_the_entry_fails_its_stage() {
 
 #[test]
 fn a_working_directory_outside_the_root_has_no_physical_path() {
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_SPAWN_UNREACHABLE_PWD_TEST_CHILD",
         "guest::sys::spawn::tests::a_working_directory_outside_the_root_has_no_physical_path",
     ) {
@@ -427,11 +320,9 @@ fn a_working_directory_outside_the_root_has_no_physical_path() {
 #[test]
 fn the_launch_descriptors_are_close_on_exec() {
     let mut spec = shell("exit 0");
-    spec.cgroup = Some(descriptor());
     spec.streams[2] = Some(descriptor());
     let prepared = PreparedChild::new(spec).unwrap();
     for descriptor in [
-        prepared.cgroup.as_ref().unwrap(),
         prepared.streams[2].as_ref().unwrap(),
         &prepared.report_reader,
         &prepared.report_writer,
@@ -558,31 +449,5 @@ fn the_kernel_refuses_every_path_that_a_search_s_buffer_cannot_hold() {
             ),
             "{length}"
         );
-    }
-}
-
-#[test]
-fn an_entry_leads_a_session_and_keeps_its_barrier_from_the_program() {
-    if crate::guest::managed_agent::tests::isolate_process_test(
-        "NVX_SPAWN_ENTRY_BARRIER_TEST_CHILD",
-        "guest::sys::spawn::tests::an_entry_leads_a_session_and_keeps_its_barrier_from_the_program",
-    ) {
-        return;
-    }
-    // With the standard streams closed, the barrier's ends take their numbers.
-    let streams = ClosedStreams::new(&[0, 1, 2]);
-    let mut spec = shell("exit 0");
-    spec.barrier = true;
-    spec.entry = Some(EntryChild::default());
-    let prepared = PreparedChild::new(spec);
-    drop(streams);
-    let prepared = prepared.unwrap();
-    assert!(prepared.session && !prepared.process_group);
-    assert!(prepared.entry.is_some());
-    let (reader, writer) = prepared.barrier.as_ref().unwrap();
-    for descriptor in [reader, writer] {
-        assert!(descriptor.raw() >= FIRST_NONSTANDARD);
-        let flags = nix::fcntl::fcntl(descriptor.borrowed(), FcntlArg::F_GETFD).unwrap();
-        assert!(FdFlag::from_bits_retain(flags).contains(FdFlag::FD_CLOEXEC));
     }
 }

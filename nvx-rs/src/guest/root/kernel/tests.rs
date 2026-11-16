@@ -10,7 +10,8 @@ use crate::gpt::{Disk, Expected};
 use crate::guest::gpt::DeviceError;
 use crate::guest::mappings::{Access, Kernel as MappingKernel};
 use crate::guest::sys::{
-    self, Errno, FileDescriptor, FileKind, FileStatus, Mode, MountAttributes, MountFlags, OpenFlags,
+    self, Errno, FileDescriptor, FileKind, FileStatus, FileSystem, Mode, MountAttributes,
+    MountFlags, OpenFlags,
 };
 
 /// The unique ID of the mount that every path is on that none of the fake kernel's mounts
@@ -38,8 +39,6 @@ pub(crate) enum Operation {
     SyncFileSystem,
     /// A reread of a disk's partition table, which the disk's block device names.
     Reread,
-    /// A write of a control file, which its path names.
-    Write,
     /// An open beneath a directory, which the opened path names.
     Open,
     /// A creation of a directory or of a regular file, which its path names.
@@ -61,6 +60,11 @@ pub(crate) enum Operation {
     Detach,
     /// A read of a mount's options, which its mount point names.
     Options,
+    /// A new mount of a file system, which its type names.
+    NewMount,
+    /// An entry into a directory as the root directory and the working directory, which the
+    /// directory names.
+    EnterRoot,
 }
 
 /// One operation that the fake kernel recorded, with its paths and options as text.
@@ -89,8 +93,6 @@ pub(crate) enum Call {
     Reread(String),
     /// A read of the partition table of the GPT disk on a block device, which its node names.
     ReadDisk(String),
-    /// A write of a value to a control file.
-    Write(String, String),
     /// A copy, or an open, of the mount of a file by `open_tree`.
     OpenTree {
         /// The file's path.
@@ -116,6 +118,23 @@ pub(crate) enum Call {
     },
     /// A detachment of a tree from its mount point, as a lazy unmount does.
     Detach(String),
+    /// A new mount of a file system, detached.
+    NewMount {
+        /// The file system's type.
+        kind: String,
+        /// The file system's parameters, each as `key=value`.
+        parameters: Vec<String>,
+        /// The mount's attributes, `MOUNT_ATTR_*`.
+        attributes: u64,
+    },
+    /// A restriction of a directory's mount and every mount below it to `nosuid` and `nodev`,
+    /// which the directory names.
+    RestrictTree(String),
+    /// A creation of the device nodes and the links of a `/dev`, which its directory names.
+    CreateDevices(String),
+    /// An entry into a directory as the root directory and the working directory, which the
+    /// directory names.
+    EnterRoot(String),
 }
 
 /// The type of the action that runs after each sleep.
@@ -125,10 +144,11 @@ type MoveAction = Box<dyn FnMut(&Path) + Send>;
 /// The type of the action that runs after each creation of a file, with its path.
 type CreateAction = Box<dyn FnMut(&Path) + Send>;
 
-/// A mount that `open_tree` returned a descriptor of.
+/// A mount that `open_tree` or a new mount returned a descriptor of.
 #[derive(Clone, Debug)]
 struct Tree {
-    /// The path of the file whose mount the tree is, or copies.
+    /// The path of the file whose mount the tree is, or copies, or a new mount's file system
+    /// type.
     source: PathBuf,
     /// The kind of that file.
     kind: FileKind,
@@ -143,9 +163,6 @@ struct State {
     calls: Vec<Call>,
     /// The operations that fail, with their error, each at the path that names it.
     failures: Vec<(Operation, PathBuf, Errno)>,
-    /// The processes that writes of their ID to a membership file leave where they are, each
-    /// with the number of such writes left.
-    unmovable: Vec<(u32, usize)>,
     /// The mounts that no unmount has undone, in mount order: each mount point, with the
     /// mount's unique ID.
     mounted: Vec<(PathBuf, u64)>,
@@ -201,10 +218,6 @@ impl State {
 /// A kernel that records each mount operation, performs no mount, unmount, flush, sync, or
 /// reread of a partition table, and fails the operations that a test chooses.
 ///
-/// A write of a control file writes the regular file at its path, which it creates if
-/// needed, except that a write of a process ID to a cgroup's `cgroup.procs` moves the ID
-/// there from the `cgroup.procs` of the cgroup's parent, as the kernel moves the process.
-///
 /// It simulates its mounts by their mount points and unique IDs: a mount, a move of a tree
 /// onto a file, and a test's [`add_mount`](Self::add_mount) put a mount on a path, and an
 /// unmount takes it off. Each shows its whole file system, but one that a test adds with
@@ -244,12 +257,6 @@ impl FakeKernel {
                 .failures
                 .retain(|(failing, failing_path, _)| *failing != operation || failing_path != path);
         });
-    }
-
-    /// Makes the next `writes` writes of the ID `process` to a membership file leave the
-    /// process where it is, as for a process that reappears as fast as it is moved.
-    pub(crate) fn pin(&self, process: u32, writes: usize) {
-        self.with(|state| state.unmovable.push((process, writes)));
     }
 
     /// Makes the kernel show `options` as the options of the mounts at `path` from now on.
@@ -348,17 +355,6 @@ impl FakeKernel {
             .into_iter()
             .filter_map(|call| match call {
                 Call::MoveMount { target, .. } => Some(target),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Returns the paths and values of the writes so far, in order.
-    pub(crate) fn writes(&self) -> Vec<(String, String)> {
-        self.calls()
-            .into_iter()
-            .filter_map(|call| match call {
-                Call::Write(path, value) => Some((path, value)),
                 _ => None,
             })
             .collect()
@@ -475,6 +471,14 @@ fn path(path: &CStr) -> PathBuf {
     PathBuf::from(OsStr::from_bytes(path.to_bytes()))
 }
 
+/// Returns a memory file that stands for the tree of number `number`.
+fn tree_file(number: usize) -> Result<FileDescriptor, Errno> {
+    let name = format!("nvx-fake-tree-{number}");
+    let flags = nix::sys::memfd::MFdFlags::MFD_CLOEXEC;
+    let file = nix::sys::memfd::memfd_create(name.as_str(), flags)?;
+    Ok(FileDescriptor::from_owned(file))
+}
+
 /// Returns the path that leads to the file that `descriptor` opened now, from the calling
 /// thread's descriptors in procfs.
 fn path_of(descriptor: &FileDescriptor) -> Result<PathBuf, Errno> {
@@ -485,27 +489,6 @@ fn path_of(descriptor: &FileDescriptor) -> Result<PathBuf, Errno> {
         descriptor.borrowed().as_raw_fd()
     ))
     .map_err(|error| sys::errno_of(&error))
-}
-
-/// Moves the ID `process` into the membership file `path`, from that of the parent of
-/// `path`'s cgroup.
-fn move_process(path: &Path, process: u32) -> Result<(), Errno> {
-    let source = path
-        .parent()
-        .and_then(Path::parent)
-        .map(|parent| parent.join("cgroup.procs"))
-        .ok_or(Errno::EINVAL)?;
-    let listed = std::fs::read_to_string(&source).map_err(|_| Errno::ENOENT)?;
-    let line = process.to_string();
-    let remaining: String = listed
-        .lines()
-        .filter(|listed| *listed != line)
-        .map(|listed| format!("{listed}\n"))
-        .collect();
-    std::fs::write(&source, remaining).map_err(|_| Errno::EIO)?;
-    let mut members = std::fs::read_to_string(path).unwrap_or_default();
-    members.push_str(&format!("{process}\n"));
-    std::fs::write(path, members).map_err(|_| Errno::EIO)
 }
 
 impl Kernel for FakeKernel {
@@ -580,33 +563,6 @@ impl Kernel for FakeKernel {
         Disk::read(file, LOGICAL_BLOCK_SIZE, size, expected).map_err(DeviceError::Table)
     }
 
-    fn write(&mut self, file: &CStr, value: &[u8]) -> Result<(), Errno> {
-        let call = Call::Write(text(file), String::from_utf8_lossy(value).into_owned());
-        let file = path(file);
-        self.record(call, Operation::Write, &file)?;
-        let process = std::str::from_utf8(value)
-            .ok()
-            .and_then(|value| value.trim_end().parse::<u32>().ok());
-        match process {
-            Some(process) if file.ends_with("cgroup.procs") => {
-                let pinned = self.with(|state| {
-                    state
-                        .unmovable
-                        .iter_mut()
-                        .find(|(pinned, writes)| *pinned == process && *writes > 0)
-                        .map(|(_, writes)| *writes -= 1)
-                        .is_some()
-                });
-                if pinned {
-                    Ok(())
-                } else {
-                    move_process(&file, process)
-                }
-            }
-            _ => std::fs::write(&file, value).map_err(|_| Errno::EIO),
-        }
-    }
-
     fn is_mount_point(&mut self, path: &Path) -> std::io::Result<bool> {
         // The kernel's answer needs the directory, too.
         std::fs::metadata(path)?;
@@ -669,6 +625,49 @@ impl Kernel for FakeKernel {
                 state.on_sleep = action;
             }
         });
+    }
+
+    fn new_mount(&mut self, file_system: &FileSystem) -> Result<FileDescriptor, Errno> {
+        let kind = text(file_system.kind);
+        let parameters = file_system
+            .parameters
+            .iter()
+            .map(|(key, value)| format!("{}={}", text(key), text(value)))
+            .collect();
+        let call = Call::NewMount {
+            kind: kind.clone(),
+            parameters,
+            attributes: file_system.attributes,
+        };
+        self.record(call, Operation::NewMount, Path::new(&kind))?;
+        let number = self.with(|state| {
+            let mount = state.next_mount();
+            state.trees.push(Tree {
+                source: PathBuf::from(kind),
+                kind: FileKind::Directory,
+                mount,
+            });
+            state.trees.len() - 1
+        });
+        tree_file(number)
+    }
+
+    fn restrict_tree(&mut self, directory: &FileDescriptor) -> Result<(), Errno> {
+        let path = path_of(directory)?;
+        let call = Call::RestrictTree(path.display().to_string());
+        self.record(call, Operation::SetAttributes, &path)
+    }
+
+    fn create_devices(&mut self, dev: &FileDescriptor) -> Result<(), Errno> {
+        let path = path_of(dev)?;
+        let call = Call::CreateDevices(path.display().to_string());
+        self.record(call, Operation::Create, &path)
+    }
+
+    fn enter_root(&mut self, root: &FileDescriptor) -> Result<(), Errno> {
+        let path = path_of(root)?;
+        let call = Call::EnterRoot(path.display().to_string());
+        self.record(call, Operation::EnterRoot, &path)
     }
 }
 
@@ -776,10 +775,7 @@ impl MappingKernel for FakeKernel {
             });
             state.trees.len() - 1
         });
-        let name = format!("nvx-fake-tree-{number}");
-        let flags = nix::sys::memfd::MFdFlags::MFD_CLOEXEC;
-        let file = nix::sys::memfd::memfd_create(name.as_str(), flags)?;
-        Ok(FileDescriptor::from_owned(file))
+        tree_file(number)
     }
 
     fn set_attributes(

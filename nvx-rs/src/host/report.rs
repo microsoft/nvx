@@ -9,6 +9,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::{Error, Result};
+
 /// Summary of an outcome report.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
@@ -20,9 +22,24 @@ pub struct Report {
     pub teardown_complete: Option<bool>,
 }
 
-/// Reads the report at `path`, or returns `None` if it is missing or not JSON.
-pub fn read(path: &Path) -> Option<Report> {
-    let report: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+/// Reads the report at `path`, or returns `Ok(None)` if it is missing.
+///
+/// An unreadable or malformed report fails with [`ErrorKind::Io`](crate::ErrorKind::Io),
+/// retaining the underlying filesystem or JSON error.
+pub fn read(path: &Path) -> Result<Option<Report>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(
+                Error::io(format!("cannot read outcome report {}", path.display()))
+                    .with_source(error),
+            );
+        }
+    };
+    let report: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        Error::io(format!("cannot parse outcome report {}", path.display())).with_source(error)
+    })?;
     let mut summary = Report::default();
     if let Some(outcome) = report.get("outcome") {
         summary.category = outcome
@@ -35,7 +52,7 @@ pub fn read(path: &Path) -> Option<Report> {
         let complete = teardown.values().all(|step| step.as_bool() == Some(true));
         summary.teardown_complete = Some(complete);
     }
-    Some(summary)
+    Ok(Some(summary))
 }
 
 #[cfg(test)]

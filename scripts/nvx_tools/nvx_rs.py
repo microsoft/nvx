@@ -108,14 +108,13 @@ def release_target() -> str:
 def source_files(root: Path | None = None) -> tuple[Path, ...]:
     """Return the files that determine the nvx-rs executable of the checkout at
     `root`, this one by default, in path order: the crate's manifest, lock
-    file, build script, and sources, and rust-toolchain.toml, which pins the
-    Rust release that builds it."""
+    file, and sources, and rust-toolchain.toml, which pins the Rust release
+    that builds it."""
     root = DIRECTORY.parent if root is None else root
     crate = root / DIRECTORY.name
     files = [
         crate / "Cargo.toml",
         crate / "Cargo.lock",
-        crate / "build.rs",
         root / "rust-toolchain.toml",
     ]
     sources = crate / "src"
@@ -389,8 +388,8 @@ def query(arguments: Sequence[str]) -> object:
     """Run `nvx-rs --root ROOT ARGUMENTS`, and return the JSON that it prints.
 
     A failure raises NvxRsError with the code and the message of the error
-    that nvx-rs reported, which nvx.py prints after `error: ` as it printed the
-    message of the Python code that nvx-rs replaced.
+    that nvx-rs reported, which nvx.py prints after `error: `. Callers tell
+    failures apart by the code, since the message may change.
     """
     command = command_line(arguments)
     try:

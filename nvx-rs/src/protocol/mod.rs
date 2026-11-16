@@ -1,18 +1,14 @@
-//! Codec of the OpenVMM control-console protocol.
+//! The wire formats and boot tokens that the host and the guest share.
 //!
-//! OpenVMM brokers an authenticated stream of outer records (magic `NVXS`) between one host
-//! client and the Rust guest agent. Data records carry application frames (magic `NVXC`) that
-//! the host and guest share from this module. All integers are little-endian.
+//! OpenVMM brokers an authenticated stream of records (magic `NVXS`) between one host client and
+//! the guest's agent. Data records carry the bytes of an application protocol, which the host and
+//! its guest choose. The records, their session, and NVX's own application protocol are private
+//! to this crate: a program speaks its protocol over the bytes of the VM's control connection, the
+//! host's `nvx::host::vm::Connection` (feature `host`) and the guest's
+//! `nvx::guest::control::Connection` (feature `guest`, Linux). All integers are little-endian.
 //!
-//! - Outer records: [`encode_outer`] and [`decode_outer_header`], and the `OUTER_*` record types.
-//! - Application frames: [`encode_app`] and [`decode_app`], the `APP_*` request and response
-//!   kinds, the error categories with which the guest agent refuses a request, and the
-//!   [`ExitCategory`] of a workload.
-//! - `EXEC` payloads: the [`Workload`] that the host encodes with [`encode_exec_payload`], and
-//!   the [`ExecPayload`] that the guest agent decodes with [`decode_exec_payload`].
 //! - `MAPS` payloads: the [`HostMap`] table that the host encodes with [`encode_maps_payloads`],
 //!   and the [`MapsPayload`] that the guest agent decodes with [`decode_maps_payload`].
-//! - [`GuestFeatures`]: the control features that a guest image advertises.
 //! - The kernel command-line tokens through which the host configures the guest agent at boot,
 //!   such as [`MAPS_TOKEN`].
 //! - [`cmdline`]: the kernel command line as Linux reads it, for the readers that need the
@@ -21,18 +17,16 @@
 //!   server, which OpenVMM's `virtnet_dns=` token names, with the resolver file that names it.
 //! - [`root`]: the boot tokens of a layered root, which name its image's format and identity and
 //!   its upper, with the host's renderer and the guest's parser.
+//! - [`view`]: a cold boot's hostname bytes and machine-ID mode, with their renderer and parser.
 //! - [`export`]: the boot tokens of the host export, the aggregate virtio-fs device from which a
 //!   guest maps host paths, and the guest's strict parser of them.
 //! - [`share`]: the guest targets that a sandbox's live shares may not take, which the host and
 //!   the guest both refuse.
-//! - [`nvxs`]: the NVXS session without I/O: validated records, incremental parsing, and the
-//!   state machines of the host's and the guest's roles, which carry application bytes of any
-//!   protocol.
 //! - [`status`]: the exit statuses with which a clone's guest ends its VM once its repair or its
-//!   activation failed, the time ABI's included, from which the host classifies a clone's end.
+//!   guest restore failed, the time ABI's included, from which the host classifies a clone's end.
 //!
 //! The module depends on nothing outside the standard library, so the host, the guest, and test
-//! doubles share it. Tests pin its wire constants as literals, and its records, frames, and
+//! doubles share it. Tests pin its wire constants and frames as literals, and its records and
 //! payloads with the conformance vectors of the crate's `tests/vectors/`, whose bytes no codec
 //! produced.
 
@@ -41,43 +35,131 @@ use std::fmt;
 mod app;
 mod boot;
 pub mod cmdline;
-mod exec;
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) mod exec;
 pub mod export;
-mod features;
-mod maps;
-pub mod nvxs;
+pub mod maps;
+#[cfg_attr(
+    not(all(
+        feature = "host",
+        feature = "testing",
+        feature = "guest",
+        target_os = "linux",
+        target_arch = "x86_64"
+    )),
+    allow(
+        dead_code,
+        unused_imports,
+        reason = "the host, the fake OpenVMM, and the guest each use part of NVXS"
+    )
+)]
+pub(crate) mod nvxs;
+#[cfg_attr(
+    not(all(
+        feature = "host",
+        feature = "testing",
+        feature = "guest",
+        target_os = "linux",
+        target_arch = "x86_64"
+    )),
+    allow(
+        dead_code,
+        reason = "the host, the fake OpenVMM, and the guest each use part of NVXS"
+    )
+)]
 mod outer;
+pub mod restore_ready;
 pub mod root;
 pub mod share;
 pub mod status;
 #[cfg(test)]
 mod tests;
+pub mod view;
 
-pub use app::{
-    APP_CANCEL, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_HEADER_LEN, APP_MAGIC, APP_MAPS,
-    APP_PING, APP_READY, APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, APP_VERSION, AppFrame,
-    BUSY, CWD_FAILED, ExitCategory, INVALID_REQUEST, LAUNCH_FAILED, MAPPING_FAILED,
-    MAPPINGS_INCOMPLETE, UNSUPPORTED_OPERATION, decode_app, encode_app,
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+pub(crate) use app::APP_ACTIVATE;
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+pub(crate) use app::APP_CAPTURE;
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+pub(crate) use app::APP_EXIT;
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) use app::APP_HEADER_LEN;
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+pub(crate) use app::AppFrame;
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) use app::MAPPING_FAILED;
+#[cfg(feature = "cli")]
+pub(crate) use app::encode_activate_payload;
+#[cfg(feature = "cli")]
+pub(crate) use app::encode_capture_payload;
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) use app::v2;
+#[cfg(any(
+    feature = "cli",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) use app::workload;
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) use app::{
+    APP_CANCEL, APP_ERROR, APP_EXEC, APP_MAPS, APP_PING, APP_READY, APP_STDERR, APP_STDOUT,
+    APP_STOP, APP_STOPPED, UNSUPPORTED_OPERATION,
 };
-pub use boot::{MAPS_TOKEN, WORKLOAD_ACCOUNT_TOKEN, parse_host_mapping_count};
-pub use exec::{
-    EXEC_CWD_PRESENT, EXEC_ENVIRONMENT_PRESENT, EXEC_EXTENDED, EXEC_INHERIT_DEFAULT_ENV,
-    ExecPayload, GuestExecPayload, MAX_ARGUMENT_BYTES, MAX_ARGUMENTS, MAX_CWD_BYTES,
-    MAX_ENVIRONMENT, MAX_GUEST_CWD_BYTES, MAX_OUTPUT_BYTES, MAX_TIMEOUT_MS, Workload,
-    WorkloadEnvironment, decode_exec_payload, decode_guest_exec_payload, encode_exec_payload,
-};
-pub use features::GuestFeatures;
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) use app::{BUSY, CWD_FAILED, INVALID_REQUEST, LAUNCH_FAILED, MAPPINGS_INCOMPLETE};
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+pub(crate) use app::{decode_activate_payload, decode_capture_payload};
+pub use boot::{MAPS_TOKEN, parse_host_mapping_count};
+#[cfg(feature = "testing")]
+pub(crate) use exec::decode_exec_payload;
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+pub(crate) use exec::{GuestExecPayload, decode_guest_exec_payload};
+#[cfg(feature = "cli")]
+pub(crate) use exec::{Workload, WorkloadEnvironment, encode_exec_payload};
 pub use maps::{
     GuestHostMap, GuestMapsPayload, HostMap, MAP_ENTRY_HEADER_LEN, MAP_READ_ONLY, MAPS_HEADER_LEN,
     MAX_HOST_MAPPINGS, MAX_MAP_PATH_BYTES, MapsPayload, decode_guest_maps_payload,
     decode_maps_payload, encode_maps_payloads,
 };
-pub use outer::{
+#[cfg_attr(
+    not(all(
+        feature = "host",
+        feature = "testing",
+        feature = "guest",
+        target_os = "linux",
+        target_arch = "x86_64"
+    )),
+    allow(
+        unused_imports,
+        reason = "the host, the fake OpenVMM, and the guest each use part of NVXS"
+    )
+)]
+pub(crate) use outer::{
     CAPABILITY_LEN, OUTER_ACK, OUTER_CREDIT, OUTER_DATA, OUTER_ERROR, OUTER_GUEST_ATTACH,
     OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_MAGIC, OUTER_MAX_PAYLOAD, OUTER_MAX_RECEIVE_WINDOW,
     OUTER_MIN_RECEIVE_WINDOW, OUTER_READY, OUTER_RECEIVE_WINDOW, OUTER_RESET, OUTER_VERSION,
-    OUTER_WAIT, OuterHeader, decode_ack_payload, decode_credit_payload, decode_outer_header,
-    encode_ack_payload, encode_credit_payload, encode_outer,
+    OUTER_WAIT, OuterHeader, decode_outer_header, encode_outer,
 };
 
 /// Protocol violation detected while encoding or decoding.

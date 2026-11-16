@@ -14,6 +14,9 @@ use crate::guest::parse::parse_decimal;
 /// Whether this process inherited an ignored SIGPIPE across `exec`.
 static SIGPIPE_IGNORED: AtomicBool = AtomicBool::new(false);
 
+/// Linux's `PF_KTHREAD`, which distinguishes kernel threads from userspace processes.
+const KERNEL_THREAD: u64 = 0x0020_0000;
+
 /// Runs before Rust's standard runtime changes SIGPIPE to `SIG_IGN`.
 #[used]
 #[unsafe(link_section = ".init_array")]
@@ -110,6 +113,40 @@ impl ProcessId {
     pub(crate) fn raw(self) -> i32 {
         self.0.as_raw()
     }
+
+    /// Checks an owned child's retained status without collecting it or reopening its pidfd.
+    pub(crate) fn is_unreaped(self) -> Result<bool, Errno> {
+        probe_unreaped(nix::libc::P_PID, self.raw() as nix::libc::id_t)
+    }
+
+    /// Lists live userspace processes in this process's procfs, excluding fully dead processes
+    /// and kernel threads. A process that disappears during the walk needs no kill.
+    pub(crate) fn live_userspace() -> Result<Vec<Self>, Errno> {
+        let mut processes = Vec::new();
+        for entry in std::fs::read_dir("/proc").map_err(|error| super::errno_of(&error))? {
+            let entry = entry.map_err(|error| super::errno_of(&error))?;
+            let Some(process) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| parse_decimal(name.as_bytes()))
+                .and_then(|id| i64::try_from(id).ok())
+                .and_then(Self::from_positive)
+            else {
+                continue;
+            };
+            let stat = match std::fs::read(entry.path().join("stat")) {
+                Ok(stat) => stat,
+                Err(error) if matches!(super::errno_of(&error), Errno::ENOENT | Errno::ESRCH) => {
+                    continue;
+                }
+                Err(error) => return Err(super::errno_of(&error)),
+            };
+            if live_userspace(&stat)? {
+                processes.push(process);
+            }
+        }
+        Ok(processes)
+    }
 }
 
 /// The side of a fork on which the calling process continues.
@@ -185,6 +222,26 @@ pub(crate) fn process_name(process: ProcessId) -> Result<Vec<u8>, Errno> {
     Ok(name)
 }
 
+/// Reads the state and flags after the last `)` of procfs's stat record: the command may hold
+/// spaces and parentheses. A zombie leader may still have live threads; only a wholly dead
+/// process needs no kill. Kernel threads cannot be killed.
+fn live_userspace(stat: &[u8]) -> Result<bool, Errno> {
+    let end = stat
+        .iter()
+        .rposition(|&byte| byte == b')')
+        .ok_or(Errno::EPROTO)?;
+    let mut fields = stat[end + 1..]
+        .split(u8::is_ascii_whitespace)
+        .filter(|field| !field.is_empty());
+    let state = fields.next().ok_or(Errno::EPROTO)?;
+    let flags = fields.nth(5).and_then(parse_decimal).ok_or(Errno::EPROTO)?;
+    let threads = fields
+        .nth(10)
+        .and_then(parse_decimal)
+        .ok_or(Errno::EPROTO)?;
+    Ok((!matches!(state, b"Z" | b"X") || threads > 1) && flags & KERNEL_THREAD == 0)
+}
+
 /// Sets the command name of the calling thread, of which the kernel keeps the first 15 bytes.
 /// The process's procfs `comm` file holds the name of its first thread, whose ID is the process
 /// ID.
@@ -247,8 +304,7 @@ fn child_status(process: nix::libc::pid_t, status: nix::libc::c_int) -> ReapedCh
 ///
 /// Only a program that is its process's one status collector calls this: the managed agent, which
 /// as the direct agent is PID 1 and also collects its workloads' orphaned descendants, and the
-/// time daemon. The guest libraries wait only for the child that the caller names, with
-/// [`wait_named`].
+/// time daemon.
 ///
 /// libc is used instead of `nix` because `nix` converts a terminating signal to its finite
 /// `Signal` enum and rejects Linux real-time signal numbers, after the child is reaped.
@@ -325,102 +381,25 @@ pub(crate) fn kill_process(process: ProcessId) -> Result<(), Errno> {
     kill(process.0, Signal::SIGKILL)
 }
 
-/// Returns the ID of the process group to which `process` belongs. The lookup goes by
-/// `process`'s ID, which names `process` only while its status stays uncollected.
-pub(crate) fn process_group_of(process: ProcessId) -> Result<ProcessId, Errno> {
-    nix::unistd::getpgid(Some(process.0)).map(ProcessId)
-}
-
-/// One child that a wait names, which is all that it may collect.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum WaitTarget<'a> {
-    /// The child with this process ID.
-    Process(ProcessId),
-    /// The child to which this pidfd refers.
-    Pidfd(BorrowedFd<'a>),
-}
-
-/// Collects the status of the child that `target` names once it has ended, and returns its raw
-/// wait status, in the form that `waitpid` reports. Without `block`, it returns `None` while the
-/// child runs.
-///
-/// Only an exit or a terminating signal ends the child. `waitid` also reports each stop of a
-/// child that this process traces, whatever its options, which leaves the child running: a
-/// blocking wait goes on past such a stop, and one without `block` returns `None`.
-///
-/// Only the named child's status is collected, so every other child's stays for its collector.
-/// The wait names the child whatever signal it reports its end with, as `__WALL` makes it, so a
-/// child that `clone` started with an exit signal other than `SIGCHLD`, or none, and that ends
-/// before it runs a program, which would reset that signal, is collected too. Interruptions are
-/// retried. A target that is not a child of this process, or whose status was collected already,
-/// is `ECHILD`, and a blocking wait through a pidfd that its opener made nonblocking, while the
-/// child runs, is `EAGAIN`.
-///
-/// libc is used because `nix`'s `waitid` decodes the state into a `WaitStatus`, which fails for a
-/// real-time signal after the child is reaped. The raw status is rebuilt from the child event's
-/// code and status, which keeps the signal number and the core dump.
-pub(crate) fn wait_named(target: WaitTarget<'_>, block: bool) -> Result<Option<i32>, Errno> {
-    let (kind, id) = match target {
-        WaitTarget::Process(process) => (nix::libc::P_PID, process.0.as_raw() as nix::libc::id_t),
-        WaitTarget::Pidfd(descriptor) => (
-            nix::libc::P_PIDFD,
-            descriptor.as_raw_fd() as nix::libc::id_t,
-        ),
-    };
-    let options = if block {
-        nix::libc::WEXITED | nix::libc::__WALL
-    } else {
-        nix::libc::WEXITED | nix::libc::WNOHANG | nix::libc::__WALL
-    };
-    loop {
-        // SAFETY: zero is a valid initial representation for `siginfo_t`, and leaves `si_pid` zero
-        // unless a child event fills it.
-        let mut information = unsafe { std::mem::zeroed::<nix::libc::siginfo_t>() };
-        // SAFETY: `information` is writable, and the call collects at most the named child.
-        let result = unsafe { nix::libc::waitid(kind, id, &mut information, options) };
-        if result < 0 {
-            match Errno::last() {
-                Errno::EINTR => continue,
-                error => return Err(error),
-            }
-        }
-        // SAFETY: a successful `waitid` either initialized the Linux child-event fields, or, for a
-        // child that still runs, left the zeroed `si_pid`.
-        let (process, status) = unsafe { (information.si_pid(), information.si_status()) };
-        if process == 0 {
-            return Ok(None);
-        }
-        return Ok(Some(match information.si_code {
-            nix::libc::CLD_EXITED => (status & 0xff) << 8,
-            nix::libc::CLD_KILLED => status & 0x7f,
-            nix::libc::CLD_DUMPED => (status & 0x7f) | 0x80,
-            // A traced child's stop, which does not end it.
-            _ if block => continue,
-            _ => return Ok(None),
-        }));
-    }
-}
-
 /// Returns whether the child to which `pidfd` refers is unreaped: whether it runs, or has ended
 /// with a status that no collector has taken yet, which the check leaves in place, as `WNOWAIT`
 /// makes it. Unlike a signal 0, the check needs no permission to signal the child. A child whose
 /// status a collector took, as the wait's `ECHILD` tells, is not.
 ///
-/// libc is used for the same reason as in [`wait_named`], whose options the check shares.
+/// libc is used because `nix`'s `waitid` decodes the state into a `WaitStatus`, which fails for a
+/// real-time signal.
 pub(crate) fn is_unreaped(pidfd: BorrowedFd<'_>) -> Result<bool, Errno> {
+    probe_unreaped(nix::libc::P_PIDFD, pidfd.as_raw_fd() as nix::libc::id_t)
+}
+
+/// Checks a named child through `WNOWAIT`, leaving all status collection to its owner.
+fn probe_unreaped(kind: nix::libc::idtype_t, id: nix::libc::id_t) -> Result<bool, Errno> {
     let options = nix::libc::WEXITED | nix::libc::WNOHANG | nix::libc::WNOWAIT | nix::libc::__WALL;
     loop {
         // SAFETY: zero is a valid initial representation for `siginfo_t`.
         let mut information = unsafe { std::mem::zeroed::<nix::libc::siginfo_t>() };
         // SAFETY: `information` is writable, and `WNOWAIT` leaves the child's status in place.
-        let result = unsafe {
-            nix::libc::waitid(
-                nix::libc::P_PIDFD,
-                pidfd.as_raw_fd() as nix::libc::id_t,
-                &mut information,
-                options,
-            )
-        };
+        let result = unsafe { nix::libc::waitid(kind, id, &mut information, options) };
         if result == 0 {
             return Ok(true);
         }

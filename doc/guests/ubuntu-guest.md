@@ -16,7 +16,7 @@ describes how the pieces fit together and why.
 | Artifact | Used by | Boot supervisor |
 | --- | --- | --- |
 | `initramfs-ubuntu.cpio.gz` | `nvx-rs run --guest ubuntu` | The common NVX `/init` inside the Ubuntu initramfs |
-| `ubuntu-distro.erofs` | `nvx-rs sandbox --layer distro,...` | The Alpine control initramfs and its init agent |
+| `ubuntu-distro.erofs` | `nvx-rs sandbox --layer distro,...` | `nvx-init`, which the common `/init` of the Alpine initramfs starts |
 
 Alpine remains the default guest of `run` and the only control environment of
 `sandbox`. The sandbox launcher always boots the Alpine initramfs, and the
@@ -38,8 +38,8 @@ what Ubuntu userland needs on this machine:
 - devtmpfs, procfs, sysfs, and tmpfs;
 - virtio-mmio block, network, console, and filesystem devices;
 - ext4, EROFS, and overlayfs; and
-- the memory and process-count cgroups and the PID, mount, and UTS namespaces
-  that the sandbox uses, and network namespaces for guest services.
+- the memory and process-count cgroups, and the PID, mount, UTS, and network
+  namespaces, which programs in the guest may use.
 
 Its [patches](../../kernel/patches) add the xe9 early and interactive consoles
 and the shared virtio-mmio interrupt status, keep the HVC console from losing
@@ -100,7 +100,7 @@ The builder then:
    `/nonexistent`, a `nogroup` group, and usr-merged `/bin`, `/sbin`, `/lib`,
    and `/lib64` links; and
 9. installs the NVX scripts from `guest/common` and `guest/ubuntu`, and the
-   ten Rust guest binaries from `nvx-rs`.
+   ten Rust guest binaries of the `nvx` package.
 
 The builder never executes a binary from the Ubuntu tree on the host. Both
 artifacts are packed with root ownership, fixed timestamps, and a stable file
@@ -125,8 +125,8 @@ loads the kernel and initramfs through the
 and the common [`/init`](../../guest/common/init) runs as PID 1. It disables
 module loading, runs the [time ABI](../design/3.2-clock-and-time.md) boot step, and then
 either runs an `nvx_exec` workload or mounts the HostFs share, configures
-static networking, and starts the managed agent or an interactive shell. For
-Ubuntu that shell is Bash, whose startup file prints
+static networking, and starts the managed agent, a one-shot workload, or an
+interactive shell. For Ubuntu that shell is Bash, whose startup file prints
 `NVX-GUEST-BOOT-OK: ubuntu` once it is ready for input.
 
 The guest defaults to 512 MiB because the kernel unpacks the initramfs into a
@@ -143,8 +143,8 @@ Alpine.
 It installs the same ten Rust guest binaries as Alpine and Azure Linux under
 their `/sbin/nvx-*` names. Docker copies all ten from one digest-pinned Rust
 builder, while native and determinism builds use the shared fresh-target
-routine. The package manifest records one aggregate `nvx-rs` source digest
-and each installed binary's digest.
+routine. The package manifest records the digest of the `nvx` package's
+[guest inputs](../build.md#the-nvx-package) and each installed binary's digest.
 
 ## Ubuntu sandbox layer
 
@@ -168,17 +168,16 @@ proof.
 
 The layer runs under the Alpine control initramfs as the sandbox's read-only
 `distro` layer over a writable scratch disk, which is formatted separately
-with `mkfs.ext4`; see the
-[experimental sandbox](../run.md#experimental-single-workload-sandbox). For a
-one-shot workload, the Alpine
-[container entry helper](../../guest/alpine/nvx-container-enter) injects its
-musl loader, `setpriv`, and libraries into `/.nvx-agent`, so glibc Ubuntu
-binaries run while the trusted agent stays musl-based. A managed sandbox's
-agent, a static binary, enters each execution itself and runs the workload
-without them. The workload gets private mount, PID, and UTS namespaces and
-shares the guest's network namespace. It runs as a fixed non-root identity, by
-default `65534:65534`, the Ubuntu `nobody` account whose home the builder
-creates, with no supplementary groups, no capabilities, and `no_new_privs`.
+with `mkfs.ext4`, such as a copy of the sandbox scratch template,
+`ubuntu-smoke-scratch.ext4`, which the sandbox scenarios boot and
+[`build-scratch-template`](../usage.md#build-scratch-template) formats; see the
+[experimental sandbox](../run.md#experimental-single-workload-sandbox). The
+sandbox's init, nvx-init, a static binary, runs each execution itself, as a
+plain process in the VM's root. Its executions share nvx-init's mount, PID,
+and UTS namespaces, and the guest's network namespace. A workload runs as a
+fixed non-root identity, by default `65534:65534`, the Ubuntu `nobody`
+account whose home the builder creates, with no supplementary groups, no
+capabilities, and `no_new_privs`.
 
 The sandbox rejects systemd entrypoints, and it rejects a distro layer whose
 manifest lists the `systemd` package. Systemd needs a separate compatibility
@@ -197,7 +196,8 @@ Base or the lock.
 Release staging rejects an Ubuntu manifest that does not match its artifact
 and the current inputs. Platform releases carry all four Ubuntu files under
 `guest/`, with the sandbox scratch template, `ubuntu-smoke-scratch.ext4`,
-which has no manifest; `nvx-rs download` installs them all, and
+which has no manifest, as [Release packages](../build.md#release-packages)
+lists; `nvx-rs download` installs them all, and
 `run --guest ubuntu` fails when the initramfs is missing instead of falling
 back to Alpine.
 [Package and source delivery](../distribution.md) describes how

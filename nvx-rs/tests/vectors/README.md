@@ -9,25 +9,24 @@ yet breaks those peers. Only bytes that no codec produced catch such a change.
 
 | File | Vectors |
 | --- | --- |
-| [`nvxc-v1.txt`](nvxc-v1.txt) | Version 1 of the control protocol: `NVXC` frames, their `EXEC`, `MAPS`, and features payloads, and `NVXS` records of NVX's host and guest |
+| [`nvxc-v1.txt`](nvxc-v1.txt) | Version 1 of the control protocol, which no peer speaks any longer: `NVXC` frames, which version 2 refuses, their `EXEC` and `MAPS` payloads, which version 2 carries unchanged, their features payloads, and `NVXS` records of NVX's host and guest |
 | [`nvxl-v1.txt`](nvxl-v1.txt) | Version 1 of the `NVXL` listener announcement |
-| [`activation-v1.txt`](activation-v1.txt) | Version 1 of the activation record of a layered root, and what Ready reports about an activation |
-| [`template-key-v1.txt`](template-key-v1.txt) | Version 1 of the canonical encoding of a template's compatibility key, with its identity |
-| [`capture-class-v2.txt`](capture-class-v2.txt) | Version 2 of the canonical encoding of a capture class, with its identity |
+| [`activation-v2.txt`](activation-v2.txt) | Version 2 of the guest-restore record of a layered root, and what Ready reports about a guest restore |
+| [`snapshot-key-v1.txt`](snapshot-key-v1.txt) | Version 1 of the canonical encoding of a snapshot's compatibility key, with its identity |
 | [`openvmm/`](openvmm) | OpenVMM's vectors and cases of the `NVXS` session, and the excerpts of its sources that define the kernel command-line tokens of its platform tier, unchanged |
 
 [4.4 Host-Guest Control Interface](../../../doc/design/4.4-host-guest-control-interface.md)
 and
 [3.5.4 Host-Local Access and Ingress](../../../doc/design/3.5-network.md#354-host-local-access-and-ingress)
-describe the protocols, and the documentation of `nvx::activation`, in
-[`src/activation/mod.rs`](../../src/activation/mod.rs), the activation record.
+describe the protocols, and the documentation of `nvx::guest_restore`, in
+[`src/guest_restore/mod.rs`](../../src/guest_restore/mod.rs), the guest-restore
+record.
 
 ## Line format
 
-`nvxc-v1.txt`, `nvxl-v1.txt`, `activation-v1.txt`, `template-key-v1.txt`, and
-`capture-class-v2.txt` share one line format. A line that starts with `#` is a
-comment, and an empty line is ignored. Every other line is one vector, whose
-fields `|` separates:
+`nvxc-v1.txt`, `nvxl-v1.txt`, `activation-v2.txt`, and `snapshot-key-v1.txt`
+share one line format. A line that starts with `#` is a comment, and an empty
+line is ignored. Every other line is one vector, whose fields `|` separates:
 
 ```text
 KIND|NAME|BYTES|VALUE|...
@@ -50,14 +49,15 @@ KIND|NAME|BYTES|VALUE|...
 A decoder must decode the bytes of each vector to its values, and an encoder
 must encode the values to exactly its bytes. A kind whose name starts with
 `INVALID_` has no values: every decoder must refuse the bytes of its vectors.
+The frames and the features payload of `nvxc-v1.txt` have no codec any longer:
+version 2's decoder refuses those frames, version 2 carries their `EXEC` and
+`MAPS` payloads unchanged, and its tests pin the bytes of its own frames.
 
-A key or a class holds too many values for one line, so the value of each
-vector of `template-key-v1.txt` and of `capture-class-v2.txt` is its identity,
-and each file's header names the captures whose keys or classes the vectors
-encode. The tests of `nvx::host::template` derive each key from its capture,
-and check that it is the key that the vector's bytes decode to, and encode
-each class to the vector's bytes. Nothing decodes a class, which only its
-identity names.
+A key holds too many values for one line, so the value of each vector of
+`snapshot-key-v1.txt` is its identity, and the file's header names the
+captures whose keys the vectors encode. The tests of
+`nvx::host::snapshot` derive each key from its capture, and check that it is
+the key that the vector's bytes decode to.
 
 ## Rules
 
@@ -70,18 +70,15 @@ identity names.
   name the export's root, for a host whose export is one directory. NVX's
   hosts, whose exports are aggregates, send none, and a host whose export is
   one directory sends one only to a guest that deploys with it, so the C agent
-  of earlier releases, which refuses it, never receives one. And
-  `CLASS|NETWORK` of version 1 of a class's encoding came to encode its
-  network in place as the template captures it, under the complete deny-all
-  policy: the encodings of a key and of a class have not been released, so a
-  template store that an earlier build created is not supported, and is
-  deleted and created again, since nothing migrates it.
-- Version 2 of a class's encoding, which adds the kernel tuning parameters of
-  [microsoft/nvx#995](https://github.com/microsoft/nvx/issues/995), replaced
-  version 1, whose vectors `template-key-v1.txt` held until then. Its vectors
-  in `capture-class-v2.txt` encode the classes of version 1's, and one with
-  kernel tuning parameters. No decoder refuses version 1, since nothing decodes
-  a class.
+  of earlier releases, which refuses it, never receives one. And the snapshot
+  key of `snapshot-key-v1.txt` drops the obsolete guest-build field, uses the
+  `nvx snapshot key` hash domain in place, records the compatibility identity
+  that its runtime's caller names in place of NVX's boot contract, control
+  contract, and control session versions, drops the restore packet version,
+  and appends the full capture-time contract, while its compatibility identity
+  still digests only the preceding compatibility fields: its encoding has not
+  been released, and no snapshot outlives a deployment, so no key that an
+  earlier build encoded is supported, since nothing migrates it.
 - The bytes come from the protocol's definition, never from the code that they
   check, and so do the values of each vector.
 
@@ -93,9 +90,9 @@ identity names.
 [`b4028c1aa775d8aafba1a170857acc032c7c86a1`](https://github.com/microsoft/openvmm/tree/b4028c1aa775d8aafba1a170857acc032c7c86a1/vm/devices/virtio/virtio_console/test_data).
 They keep OpenVMM's own format, which its `control_session_protocol` tests read:
 one record of each type, as `NAME|BYTES`, and 37 cases of the boundaries and
-refusals of the records' payloads and headers. The tests of
-`nvx::protocol::nvxs` check that each vector decodes and encodes to its bytes,
-and that each case is accepted or refused as it says.
+refusals of the records' payloads and headers. The tests of the crate's NVXS
+session, under `src/protocol/nvxs/`, check that each vector decodes and
+encodes to its bytes, and that each case is accepted or refused as it says.
 
 `openvmm/` also holds two excerpts of OpenVMM's sources at that commit, whole
 lines, unchanged: `platform_command_line_token_is_invariant.rs`, the function
@@ -104,12 +101,9 @@ command-line tokens of a capture at OpenVMM's platform tier, after the
 constant of the kernel tuning parameters that it admits among them, and
 `microvm_control_tty_command_line.rs`, the constant of
 `openvmm/openvmm_defs/src/microvm.rs` that names the control tty's token, which
-the function reads. The tests of `nvx::host::template` compile them, and check
-each token of a template's kernel command line with OpenVMM's own function, and
-the kernel tuning parameters of a template with OpenVMM's own constant. The
-runtime adapter in `tests/runtime-adapter/` compiles them too, as the allowlist
-with which the guest agent of a template's VM checks its kernel command line,
-and its tests pin the set of tokens that they admit.
+the function reads. The tests of `nvx::host::config` compile them, and check
+that its allowlist of a capture's kernel command-line tokens admits each token
+as OpenVMM's own function does.
 
 The tests cannot call OpenVMM's broker or its allowlist: OpenVMM's workspace
 needs a later Rust release than `nvx`'s minimum, and the `nvx-rs` job cannot
@@ -117,9 +111,10 @@ check out the OpenVMM submodule, whose deploy key fork pull requests lack. They
 read the copies instead, and the ignored test `tests/openvmm_vectors.rs`
 compares the copies with the submodule's files, and finds each excerpt among
 the lines of its file. It also checks that the versions of OpenVMM's snapshot
-format, saved-state schema, time ABI, and restore packets in `nvx::contract` are
-the submodule's, and that the bound of an activation record,
-`nvx::activation::MAX_RECORD_BYTES`, is that of the submodule's restore packet.
+format, time ABI, and restore packet that the sources of `nvx-rs` define are
+the submodule's, and that the bound of a guest-restore record,
+`nvx::guest_restore::MAX_RECORD_BYTES`, is that of the submodule's restore
+packet.
 The NVX CLI jobs, which check out the submodule, run it, and so does an OpenVMM
 pin promotion, from the repository's root:
 

@@ -1,11 +1,13 @@
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use super::*;
 use crate::guest::sys::{ClockAdjustment, ClockDiscipline, FrequencyHold};
+use crate::guest::time::NSEC_PER_MSEC;
 use crate::guest::time::decoders::{HostClock, PACKET_DNS_SIZE};
 use crate::guest::time::state::HostClockStatus;
 use crate::guest::time::system::PORTB_TIME_WINDOW;
@@ -22,7 +24,6 @@ impl Restore {
             generation_id,
             memory_ranges: Vec::new(),
             network: None,
-            activation: None,
             finished: false,
             seed: None,
         }
@@ -34,16 +35,15 @@ impl Restore {
         self
     }
 
-    /// Returns the restore with the host's input gated until the guest acknowledges it.
-    pub(crate) fn gated(mut self) -> Self {
-        self.flags |= decoders::PACKET_ACK_REQUIRED;
+    /// Returns a restore that carries network settings, including an otherwise empty policy.
+    pub(crate) fn with_network(mut self, dns: Option<IpAddr>, announce: bool) -> Self {
+        self.network = Some(RestoreNetwork::new(dns, announce));
         self
     }
 
-    /// Returns the restore whose packet ends with the activation record `record`.
-    pub(crate) fn with_activation_record(mut self, record: &[u8]) -> Self {
-        self.flags |= decoders::PACKET_ACTIVATION;
-        self.activation = Some(record.to_vec());
+    /// Returns the restore with the host's input gated until the guest acknowledges it.
+    pub(crate) fn gated(mut self) -> Self {
+        self.flags |= decoders::PACKET_ACK_REQUIRED;
         self
     }
 
@@ -166,6 +166,19 @@ fn errors_print_the_diagnostics_of_nvx_time() {
 }
 
 #[test]
+fn an_expired_preparation_deadline_does_not_wait_for_boot_checks() {
+    let (error, suppressed) = TimeAbi::report_only()
+        .pre_capture_until(Instant::now())
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        PreCaptureError::BootChecks(TimeError::Deadline)
+    ));
+    assert!(!suppressed);
+    assert_eq!(sys::check_released(), Ok(()));
+}
+
+#[test]
 fn strict_mode_keeps_report_only_mode_and_spares_the_daemon_and_the_preparation() {
     let enforcing = TimeAbi {
         report_only: false,
@@ -280,7 +293,7 @@ fn a_failed_revocation_fails_the_call_and_every_later_one_until_a_revocation_suc
 fn a_preparation_that_may_leave_port_permission_fails_with_its_suppression() {
     let revoke = Err(PortError::Revoke(Errno::ENOMEM));
     // A preparation that suppressed the detectors holds their suppression.
-    let error = released_preparation(Ok(()), revoke).unwrap_err();
+    let error = released_preparation(Ok(()), revoke, None).unwrap_err();
     assert!(
         matches!(
             &error,
@@ -294,14 +307,14 @@ fn a_preparation_that_may_leave_port_permission_fails_with_its_suppression() {
     assert!(error.holds_suppression());
     // One that kept the record of the settings that it could not restore holds it too.
     let kept = Err(PreCaptureError::Unrestored(Errno::EIO));
-    let error = released_preparation(kept, revoke).unwrap_err();
+    let error = released_preparation(kept, revoke, None).unwrap_err();
     assert!(error.holds_suppression(), "{error:?}");
     // One that left the settings as they were holds nothing.
     for failed in [
         PreCaptureError::Pending,
         PreCaptureError::Suppression(Errno::EIO),
     ] {
-        let error = released_preparation(Err(failed), revoke).unwrap_err();
+        let error = released_preparation(Err(failed), revoke, None).unwrap_err();
         assert!(
             matches!(
                 error,
@@ -315,16 +328,195 @@ fn a_preparation_that_may_leave_port_permission_fails_with_its_suppression() {
         assert!(!error.holds_suppression());
     }
     // Without port permission, the preparation's result stands.
-    released_preparation(Ok(()), Ok(())).unwrap();
-    let error = released_preparation(Err(PreCaptureError::Pending), Ok(())).unwrap_err();
+    released_preparation(Ok(()), Ok(()), None).unwrap();
+    let error = released_preparation(Err(PreCaptureError::Pending), Ok(()), None).unwrap_err();
     assert!(matches!(error, PreCaptureError::Pending), "{error:?}");
     assert!(!error.holds_suppression());
     let kept = Err(PreCaptureError::Unrestored(Errno::EIO));
     assert!(
-        released_preparation(kept, Ok(()))
+        released_preparation(kept, Ok(()), None)
             .unwrap_err()
             .holds_suppression()
     );
+}
+
+#[test]
+fn strict_preparation_keeps_its_first_diagnostic_revocation_after_a_successful_release() {
+    let ops = FakeOps::new([]);
+    ops.revoke_errors.lock().unwrap().extend([
+        Some(Errno::ENOMEM),
+        None,
+        Some(Errno::EIO),
+        None,
+        None,
+        None,
+    ]);
+    let mut runtime = Runtime::new(&ops, false).strict();
+    runtime.deadline = Some(Instant::now() + std::time::Duration::from_secs(1));
+    for (check, detail) in [
+        (CheckId::C12, b"first".as_slice()),
+        (CheckId::C11, b"second".as_slice()),
+        (CheckId::C10, b"third".as_slice()),
+    ] {
+        runtime.conformance_failure(
+            ViolationCode::Conformance(check),
+            super::super::Phase::Capture,
+            detail,
+        );
+    }
+    assert_eq!(ops.transactions(), 3);
+    assert_eq!(sys::check_released(), Ok(()));
+    let violation = runtime.peek_violation().unwrap();
+    assert_eq!(
+        (violation.status(), violation.code(), violation.detail()),
+        (193, "G_CONFORMANCE_C12", "first")
+    );
+    let (error, suppressed) = finished_preparation(&runtime, Ok(())).unwrap_err();
+    assert!(suppressed);
+    assert!(
+        matches!(
+            &error,
+            PreCaptureError::PortRelease {
+                error: TimeError::PortRelease(source),
+                suppressed: true,
+            } if has_errno(source, Errno::ENOMEM)
+        ),
+        "{error:?}"
+    );
+    assert_eq!(ops.power.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn strict_preparation_keeps_a_partial_grants_failed_rollback_after_a_successful_release() {
+    let ops = FakeOps::new([]);
+    ops.grant_errors
+        .lock()
+        .unwrap()
+        .extend([None, Some(Errno::EPERM)]);
+    ops.revoke_errors
+        .lock()
+        .unwrap()
+        .extend([Some(Errno::ENOMEM), None]);
+    let mut runtime = Runtime::new(&ops, false).strict();
+    runtime.deadline = Some(Instant::now() + std::time::Duration::from_secs(1));
+    runtime.conformance_failure(
+        ViolationCode::Conformance(CheckId::C12),
+        super::super::Phase::Capture,
+        b"partial grant",
+    );
+    assert_eq!(sys::check_released(), Err(PortError::Revoke(Errno::ENOMEM)));
+    runtime.conformance_failure(
+        ViolationCode::Conformance(CheckId::C11),
+        super::super::Phase::Capture,
+        b"later release",
+    );
+    assert_eq!(sys::check_released(), Ok(()));
+    let (error, suppressed) = finished_preparation(&runtime, Ok(())).unwrap_err();
+    assert!(suppressed);
+    assert!(
+        matches!(
+            &error,
+            PreCaptureError::PortRelease {
+                error: TimeError::PortRelease(source),
+                suppressed: true,
+            } if has_errno(source, Errno::ENOMEM)
+        ),
+        "{error:?}"
+    );
+    assert_eq!(ops.power.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn strict_preparation_keeps_a_samples_failed_revocation_after_successful_diagnostics() {
+    let ops = FakeOps::new([u32::from(PORTB_TIME_WINDOW)]);
+    ops.revoke_errors
+        .lock()
+        .unwrap()
+        .extend([Some(Errno::ENOMEM), None]);
+    let mut runtime = Runtime::new(&ops, false).strict();
+    runtime.deadline = Some(Instant::now() + std::time::Duration::from_secs(1));
+    assert_eq!(
+        system::best_sample(&runtime, 0, NSEC_PER_MSEC, 0).unwrap_err(),
+        system::SampleError::Ports(PortError::Revoke(Errno::ENOMEM))
+    );
+    runtime.conformance_failure(
+        ViolationCode::Conformance(CheckId::C12),
+        super::super::Phase::Capture,
+        b"sample release",
+    );
+    assert_eq!(sys::check_released(), Ok(()));
+    let (error, suppressed) = finished_preparation(&runtime, Ok(())).unwrap_err();
+    assert!(suppressed);
+    assert!(
+        matches!(
+            &error,
+            PreCaptureError::PortRelease {
+                error: TimeError::PortRelease(source),
+                suppressed: true,
+            } if has_errno(source, Errno::ENOMEM)
+        ),
+        "{error:?}"
+    );
+    assert_eq!(ops.power.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_bounded_capture_keeps_a_dropped_revocation_before_repair_diagnostics() {
+    for bounded in [true, false] {
+        let ops = FakeOps::new([]);
+        ops.revoke_errors
+            .lock()
+            .unwrap()
+            .extend([Some(Errno::ENOMEM), None]);
+        let runtime = Runtime::new(&ops, false).strict();
+        let ports = runtime.open_ports().unwrap();
+        drop(ports);
+        assert_eq!(sys::check_released(), Err(PortError::Revoke(Errno::ENOMEM)));
+        let failure = repair_failed(&runtime, ViolationCode::RepairPacket, "invalid packet");
+        assert_eq!(sys::check_released(), Ok(()));
+        let (error, unbounded) = finished_capture(&runtime, Err(failure), bounded).unwrap_err();
+        assert!(unbounded);
+        if bounded {
+            assert!(
+                matches!(&error, TimeError::PortRelease(source) if has_errno(source, Errno::ENOMEM)),
+                "{error:?}"
+            );
+        } else {
+            assert!(
+                matches!(&error, TimeError::Violation(violation)
+                    if violation.status() == status::TIME_REPAIR && violation.code() == "G_REPAIR_PACKET"),
+                "{error:?}"
+            );
+        }
+        assert_eq!(ops.power.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn strict_preparation_keeps_the_boot_failure_stage_and_suppression_ownership() {
+    let violation = Violation::of_missing_daemon();
+    let boot = Err(PreCaptureError::BootChecks(TimeError::Violation(
+        violation.clone(),
+    )));
+    let failure = released_preparation(boot, Ok(()), Some(violation)).unwrap_err();
+    assert!(
+        matches!(failure, PreCaptureError::BootChecks(TimeError::Violation(ref violation))
+        if violation.status() == status::TIME_CONFORMANCE)
+    );
+
+    let failure = released_preparation(
+        Ok(()),
+        Err(PortError::Revoke(Errno::ENOMEM)),
+        Some(Violation::of_missing_daemon()),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        failure,
+        PreCaptureError::PortRelease {
+            suppressed: true,
+            ..
+        }
+    ));
 }
 
 /// Returns the outcome of a cold boot that accepted no sample.
@@ -368,13 +560,13 @@ fn the_daemon_does_not_start_while_the_thread_may_hold_port_permission() {
 #[test]
 fn a_capture_refuses_an_entropy_path_with_a_nul_byte_before_its_transaction() {
     let ops = FakeOps::new([]);
-    let runtime = Runtime::new(&ops, true);
+    let mut runtime = Runtime::new(&ops, true);
     let request = CaptureRequest::new(
         ScratchPolicy::Fresh,
         GenerationId::from_bytes([1; GenerationId::LENGTH]),
         PathBuf::from(OsStr::from_bytes(b"restore\0entropy")),
     );
-    let error = capture(&runtime, request).unwrap_err();
+    let error = capture(&mut runtime, request).unwrap_err();
     assert!(
         matches!(&error, TimeError::EntropyFile { source, .. } if source.kind() == io::ErrorKind::InvalidInput),
         "{error:?}"
@@ -396,7 +588,6 @@ fn requests_and_restores_carry_the_abi_values() {
         generation_id: GenerationId::from_bytes([7; GenerationId::LENGTH]),
         memory_ranges: vec![range],
         network: None,
-        activation: None,
         finished: false,
         seed: None,
     };
@@ -429,10 +620,6 @@ fn requests_and_restores_carry_the_abi_values() {
     assert!(!plain.acknowledgement_required() && !plain.memory_target());
     assert!(plain.finished());
     assert_eq!(plain.processor_target(), None);
-    assert_eq!(plain.activation_record(), None);
-    let activated = plain.with_activation_record(&[0xa1, 0xa2, 0xa3]);
-    assert_eq!(activated.activation_record(), Some(&[0xa1, 0xa2, 0xa3][..]));
-    assert_eq!(activated.flags(), decoders::PACKET_ACTIVATION);
 }
 
 #[test]
@@ -442,9 +629,9 @@ fn cpu_sets_hold_the_cpus_that_the_abi_covers() {
         .try_fold(CpuSet::new(), CpuSet::with)
         .unwrap();
     assert_eq!(set.to_string(), "1-3,6");
-    assert_eq!(set.iter().collect::<Vec<_>>(), [1, 2, 3, 6]);
+    assert_eq!(set.0.iter().collect::<Vec<_>>(), [1, 2, 3, 6]);
     assert_eq!(
-        (set.len(), set.contains(6), set.contains(4)),
+        (set.0.len(), set.0.contains(6), set.0.contains(4)),
         (4, true, false)
     );
     assert_eq!(
@@ -452,7 +639,7 @@ fn cpu_sets_hold_the_cpus_that_the_abi_covers() {
         Some("63".to_owned())
     );
     assert_eq!(CpuSet::new().with(64), None);
-    assert!(CpuSet::new().is_empty());
+    assert!(CpuSet::new().0.is_empty());
     assert_eq!(CpuSet::new().to_string(), "none");
     assert_eq!(CpuSet::from(CpuMask::parse(b"1-3,6").unwrap()), set);
 
@@ -492,7 +679,6 @@ fn a_restore_hands_over_its_seed_once_and_formats_none_of_it() {
         generation_id: seed.generation_id(),
         memory_ranges: Vec::new(),
         network: None,
-        activation: None,
         finished: false,
         seed: Some(seed),
     };
@@ -621,6 +807,40 @@ fn capture_in_each_mode() {
     system::make_runtime_directories();
     state_store(&TimeState::default()).unwrap();
     let previous = GenerationId::from_bytes([1; GenerationId::LENGTH]);
+    let held = system::lock_portb().unwrap();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        drop(held);
+    });
+    let ops = FakeOps::new([0]);
+    let mut runtime = Runtime::new(&ops, true);
+    let deadline = Instant::now() + std::time::Duration::from_millis(250);
+    runtime.deadline = Some(deadline);
+    let result = capture(
+        &mut runtime,
+        CaptureRequest::in_memory(ScratchPolicy::Fresh, previous),
+    );
+    holder.join().unwrap();
+    assert!(
+        matches!(result, Err(TimeError::PortLock(ref error))
+        if error.kind() == io::ErrorKind::TimedOut),
+        "{result:?}"
+    );
+    assert_eq!(runtime.deadline, Some(deadline));
+    assert_eq!(ops.transactions(), 1);
+    assert!(
+        !ops.output
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(port, _)| *port == Port::Snapshot)
+    );
+    assert!(sys::check_released().is_ok());
+    writeln!(
+        io::stderr(),
+        "FINAL_CAPTURE_PORTB_DEADLINE_REGRESSION_EXERCISED"
+    )
+    .unwrap();
     let entropy: [u8; Seed::LENGTH] = std::array::from_fn(|index| index as u8 + 2);
     let secret = &entropy[GenerationId::LENGTH..];
     let path = Path::new("/run/nvx/restore-entropy");
@@ -637,7 +857,7 @@ fn capture_in_each_mode() {
     let capture_with = |input: Vec<u32>, request| {
         let ops = FakeOps::new(input);
         *ops.discipline.lock().unwrap() = found;
-        let outcome = capture(&Runtime::new(&ops, true), request).unwrap();
+        let outcome = capture(&mut Runtime::new(&ops, true), request).unwrap();
         let mut logged = ops.kernel_log.lock().unwrap().clone();
         logged.extend_from_slice(&ops.console.lock().unwrap());
         let adjustments = ops.adjustments.lock().unwrap().clone();
@@ -718,9 +938,9 @@ fn capture_in_each_mode() {
     // the failure's event reaches the debug console in a port transaction of its own.
     let mut ops = FakeOps::new([]);
     ops.adjust_error = Some(Errno::EPERM);
-    let runtime = Runtime::new(&ops, true);
+    let mut runtime = Runtime::new(&ops, true);
     let request = CaptureRequest::new(ScratchPolicy::Fresh, previous, path.to_owned());
-    let error = capture(&runtime, request).unwrap_err();
+    let error = capture(&mut runtime, request).unwrap_err();
     let TimeError::Violation(violation) = &error else {
         panic!("{error:?}");
     };

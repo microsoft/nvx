@@ -15,7 +15,6 @@ import lzma
 import os
 import queue
 import re
-import select
 import shlex
 import shutil
 import signal
@@ -63,7 +62,6 @@ from nvx_tools import (  # noqa: E402
     performance,
     performance_history,
     release,
-    runtime_adapter_tests,
     ubuntu,
 )
 from nvx_tools.build_constants import (  # noqa: E402
@@ -810,7 +808,6 @@ def _write_release_fixture(
             "minirootfs_sha256": AlpineBuildConstants.MINIROOTFS_SHA256,
             "guest_sources": [
                 "guest/common",
-                "guest/alpine",
                 *GuestRustBuildConstants.SOURCE_PATHS,
             ],
             "package_manifests": ["build/initramfs.cpio.gz.packages.json"],
@@ -2033,15 +2030,13 @@ class NvxRsTests(unittest.TestCase):
         for name in (
             "nvx-rs/Cargo.toml",
             "nvx-rs/Cargo.lock",
-            "nvx-rs/build.rs",
             "nvx-rs/src/bin/nvx-rs.rs",
             "rust-toolchain.toml",
         ):
             self.assertIn(name, relative)
-        # Tests, documentation, and the bundled release pin build no part of
-        # the executable.
+        # Tests and documentation build no part of the executable.
         for name in relative:
-            self.assertNotRegex(name, r"^nvx-rs/(tests/|README\.md$|artifacts\.json$)")
+            self.assertNotRegex(name, r"^nvx-rs/(tests/|README\.md$)")
         self.assertEqual(nvx_rs.source_sha256(), nvx_rs.source_sha256())
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -2050,7 +2045,6 @@ class NvxRsTests(unittest.TestCase):
                 for name in (
                     "nvx-rs/Cargo.toml",
                     "nvx-rs/Cargo.lock",
-                    "nvx-rs/build.rs",
                     "nvx-rs/src/lib.rs",
                     "nvx-rs/src/bin/nvx-rs.rs",
                     "rust-toolchain.toml",
@@ -2362,7 +2356,7 @@ class NvxRsTests(unittest.TestCase):
                 self.assertIsNone(nvx_rs.reported_error(stderr))
 
     def test_usage_documents_every_error_code_of_nvx_rs(self):
-        # nvx-rs/README.md lists every code of nvx::ErrorCode, which a test of
+        # nvx-rs/README.md lists every code that nvx-rs prints, which a test of
         # nvx-rs checks, and doc/usage.md lists the same codes with the status
         # with which nvx-rs exits: 2 for usage errors and 1 for any other.
         def table(path: Path) -> list[tuple[str, str]]:
@@ -2403,7 +2397,7 @@ class NvxRsTests(unittest.TestCase):
             for index, line in enumerate(lines)
             if line.startswith("### ")
         }
-        self.assertGreater(len(rows), 40)
+        self.assertGreater(len(rows), 25)
         for row in rows:
             link = row.split(" | ")[0].removeprefix("| ")
             with self.subTest(module=link):
@@ -2456,21 +2450,49 @@ class NvxRsTests(unittest.TestCase):
     @unittest.skipUnless(
         os.environ.get("NVX_RS"), "set NVX_RS to an nvx-rs executable to run"
     )
-    def test_run_help_states_each_guest_memory_default(self):
+    def test_run_boots_each_guest_with_its_default_memory(self):
         # nvx-rs run boots each guest with the memory that guests.py gives
-        # test-microvm, and its help says so.
-        completed = subprocess.run(
-            [os.environ["NVX_RS"], "run", "--help"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=True,
-        )
-        help_text = " ".join(completed.stdout.split())
-        for name in guests.GUEST_NAMES:
-            default = guests.guest_descriptor(name).default_memory_mib
-            with self.subTest(guest=name):
-                self.assertIn(f"{name} {default}", help_text)
+        # test-microvm, as the OpenVMM command of its dry run shows. A dry run
+        # launches nothing, so placeholders stand in for the artifacts.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            build_dir = BuildConstants.BUILD_DIR.relative_to(BuildConstants.REPO_ROOT)
+            for relative in (
+                common.openvmm_binary_path().relative_to(BuildConstants.REPO_ROOT),
+                build_dir / KernelBuildConstants.BINARY_NAME,
+                *(
+                    build_dir / guests.guest_descriptor(name).initramfs_name
+                    for name in guests.GUEST_NAMES
+                ),
+            ):
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                (root / relative).write_bytes(b"placeholder\n")
+            with patch.dict(os.environ):
+                os.environ.pop("NVX_OPENVMM", None)
+                for name in guests.GUEST_NAMES:
+                    default = guests.guest_descriptor(name).default_memory_mib
+                    with self.subTest(guest=name):
+                        completed = subprocess.run(
+                            nvx_rs.command_line(
+                                ("run", "--guest", name, "--dry-run"), root=root
+                            ),
+                            stdin=subprocess.DEVNULL,
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
+                            check=True,
+                        )
+                        command = completed.stdout.splitlines()[0]
+                        self.assertTrue(command.startswith(">> "), command)
+                        words = command.split()
+                        self.assertEqual(
+                            [
+                                value
+                                for option, value in itertools.pairwise(words)
+                                if option == "--memory"
+                            ],
+                            [f"{default}M"],
+                        )
 
     def test_egress_policies_compile_to_the_rules_that_nvx_rs_prints(self):
         with patch.object(
@@ -2525,11 +2547,14 @@ class NvxRsTests(unittest.TestCase):
                         allow=("192.0.2.0/25",), deny=("198.51.100.0/24:icmp",)
                     ),
                 )
+                # nvx-rs refuses a policy that is not an object with the stable
+                # code of its error, and nvx.py reads the message, one line
+                # without that code, whatever its wording.
                 policy.write_text("[]", encoding="utf-8")
-                with self.assertRaisesRegex(
-                    common.ScriptError, "^egress policy must be an object$"
-                ):
+                with self.assertRaises(nvx_rs.NvxRsError) as refused:
                     nvx_rs.compile_egress_policy(policy)
+                self.assertEqual(refused.exception.code, "unsupported")
+                self.assertRegex(str(refused.exception), r"\A(?!error\[)[^\r\n]+\Z")
                 # A caller may pass a path as a command line gave it, which may
                 # be relative and start with "-".
                 (root / "-policy.json").write_text(
@@ -2545,76 +2570,6 @@ class NvxRsTests(unittest.TestCase):
                 self.assertEqual(
                     dashed, nvx_rs.EgressRules(allow=("192.0.2.0/24",), deny=())
                 )
-
-    @unittest.skipUnless(
-        os.environ.get("NVX_RS"), "set NVX_RS to an nvx-rs executable to run"
-    )
-    def test_run_leaves_openvmm_the_terminal_to_restore(self):
-        """A guest-triggered shutdown can end OpenVMM while its console holds
-        the terminal in raw mode, and OpenVMM restores the terminal settings
-        only when its standard error is a terminal, so nvx-rs run must leave
-        it one."""
-        if sys.platform != "linux":
-            self.skipTest("needs a Linux pseudo-terminal")
-        import pty
-        import termios
-
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            # OpenVMM saves the settings through standard error, if it is a
-            # terminal, and its console makes standard input raw until the
-            # guest shuts down. A restore needs no kernel or initramfs.
-            openvmm = root / "openvmm"
-            openvmm.write_text(
-                f"#!{sys.executable}\n"
-                "import os, termios, tty\n"
-                "saved = termios.tcgetattr(2) if os.isatty(2) else None\n"
-                "tty.setraw(0)\n"
-                "if saved is not None:\n"
-                "    termios.tcsetattr(2, termios.TCSAFLUSH, saved)\n",
-                encoding="utf-8",
-            )
-            openvmm.chmod(0o755)
-            # nvx-rs run reads the snapshot's manifest before it starts
-            # OpenVMM, to attach the boot console that the snapshot recorded.
-            # This one, its format version and magic alone, records none.
-            snapshot = root / "snapshot"
-            snapshot.mkdir()
-            (snapshot / "manifest.bin").write_bytes(
-                b"\x08\x02\x52\x14OPENVMM_SNAPSHOT_V2\x00"
-            )
-            primary, secondary = pty.openpty()
-            try:
-                before = termios.tcgetattr(secondary)
-                completed = subprocess.run(
-                    [
-                        os.environ["NVX_RS"],
-                        "--root",
-                        str(root),
-                        "run",
-                        "--restore-snapshot",
-                        str(snapshot),
-                    ],
-                    stdin=secondary,
-                    stdout=secondary,
-                    stderr=secondary,
-                    cwd=root,
-                    env={**os.environ, "NVX_OPENVMM": str(openvmm)},
-                    timeout=60,
-                    check=False,
-                )
-                after = termios.tcgetattr(secondary)
-                output = b""
-                while select.select([primary], [], [], 0)[0]:
-                    chunk = os.read(primary, 65536)
-                    if not chunk:
-                        break
-                    output += chunk
-            finally:
-                os.close(secondary)
-                os.close(primary)
-        self.assertEqual(completed.returncode, 0, output.decode(errors="replace"))
-        self.assertEqual(after, before, "the terminal was left in raw mode")
 
 
 class CiTests(unittest.TestCase):
@@ -6144,10 +6099,6 @@ class CiConfigurationTests(unittest.TestCase):
             "setup-cross-os-cache": set[str](),
             "verify": set[str](),
             "test-openvmm": kernel_alpine,
-            # The runtime adapter's VM scenarios boot what nvx finds, and its
-            # layered scenarios boot the Ubuntu layer over a copy of the
-            # scratch template (tests/runtime-adapter/tests/common/mod.rs).
-            "test-runtime-adapter": kernel_alpine | workload,
             # A sandbox boots the Alpine control initramfs under its layers.
             "sandbox": kernel_alpine,
         }
@@ -6568,31 +6519,6 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn("uses: ./.github/actions/check-nvx-rs", definition)
         self.assertEqual(ci.REQUIRED_CI_RESULT_ENVIRONMENTS["nvx-rs"], "NVX_RS_RESULT")
 
-    def test_nvx_rs_bundles_a_release_in_the_current_layout(self):
-        # The bundled feature stages what a release holds besides nvx-rs, so
-        # its synthetic release ships nvx-rs and its provenance, as releases
-        # do, and the pinned older release, which doesn't, stages as well.
-        action = (
-            BuildConstants.REPO_ROOT
-            / ".github"
-            / "actions"
-            / "check-nvx-rs"
-            / "action.yml"
-        ).read_text(encoding="utf-8")
-        script = _composite_action_script(action, "Check artifact bundling")
-        for member in (
-            "bin/${executable}",
-            "bin/${cli}",
-            "guest/vmlinux",
-            "guest/initramfs.cpio.gz",
-            f"provenance/{nvx_rs.PROVENANCE_NAME}",
-        ):
-            with self.subTest(member=member):
-                self.assertIn(f'"${{bundle}}/{member}"', script)
-                self.assertIn(member, script.split("sha256sum", 1)[1])
-        self.assertIn("cli=nvx-rs.exe", script)
-        self.assertIn("--features bundled artifacts", script)
-
     def test_nvx_rs_builds_and_checks_every_guest_binary_for_musl(self):
         crate = BuildConstants.REPO_ROOT / "nvx-rs"
         action = (
@@ -6646,61 +6572,6 @@ class CiConfigurationTests(unittest.TestCase):
             'python3 ../scripts/nvx.py test-guest-binaries --binaries "${directory}"',
             build,
         )
-
-    def test_nvx_rs_checks_the_runtime_adapter_in_each_configuration(self):
-        # The runtime adapter builds on the nvx crate as an independent adapter
-        # does, with a lockfile of its own and default features off. Each
-        # configuration is linted, built, tested, documented with warnings
-        # denied, and checked with the minimum Rust version of nvx; the
-        # guest-only one builds the static musl executable that guests run, so
-        # it needs Linux.
-        root = BuildConstants.REPO_ROOT
-        action = (
-            root / ".github" / "actions" / "check-nvx-rs" / "action.yml"
-        ).read_text(encoding="utf-8")
-        adapter = root / "tests" / "runtime-adapter"
-        manifest = (adapter / "Cargo.toml").read_text(encoding="utf-8")
-        self.assertIn(
-            'nvx = { path = "../../nvx-rs", default-features = false }\n', manifest
-        )
-        self.assertIn("\ndefault = []\n", manifest)
-        self.assertTrue((adapter / "Cargo.lock").is_file())
-        toolchain = '"+${{ steps.toolchains.outputs.toolchain }}"'
-        msrv = '"+${{ steps.toolchains.outputs.msrv }}"'
-        musl = "x86_64-unknown-linux-musl"
-        for configuration, options in (
-            ("protocol-only", ""),
-            ("host-only", " --features host"),
-            ("guest-only", f" --features guest --target {musl}"),
-        ):
-            with self.subTest(configuration=configuration):
-                name = f"Check the runtime adapter's {configuration} configuration"
-                step = _composite_action_step(action, name)
-                self.assertIn("      working-directory: tests/runtime-adapter\n", step)
-                self.assertEqual(
-                    "      if: runner.os == 'Linux'\n" in step,
-                    configuration == "guest-only",
-                )
-                script = " ".join(
-                    _composite_action_script(action, name).replace("\\\n", " ").split()
-                )
-                self.assertTrue(script.startswith("set -euo pipefail "))
-                for command in (
-                    f"cargo {toolchain} clippy --locked --all-targets{options} "
-                    "-- -D warnings",
-                    f"cargo {toolchain} build --locked{options}",
-                    f"cargo {toolchain} test --locked{options}",
-                    f'RUSTDOCFLAGS="-D warnings" cargo {toolchain} doc --locked '
-                    f"--no-deps{options}",
-                    f"cargo {msrv} check --locked --all-targets{options}",
-                ):
-                    self.assertIn(command, script)
-                if configuration == "protocol-only":
-                    self.assertIn(f"cargo {toolchain} fmt --all --check", script)
-                if configuration == "guest-only":
-                    self.assertIn(
-                        f'rustup target add --toolchain "${{toolchain}}" {musl}', script
-                    )
 
     def test_required_ci_result_policy(self):
         always_successful = {
@@ -7594,7 +7465,7 @@ class CiConfigurationTests(unittest.TestCase):
             (("doc/ci.md", "README.md", "DOC/Guide.MD"), select(), None),
             # Documentation selects no suite, even in a suite's directory.
             (("scripts/setup/README.md",), select(), None),
-            (("nvx-rs/README.md", "tests/runtime-adapter/README.md"), select(), None),
+            (("nvx-rs/README.md",), select(), None),
             (
                 ("scripts/setup/README.md", "scripts/test_nvx_tools.py"),
                 select(),
@@ -7641,7 +7512,6 @@ class CiConfigurationTests(unittest.TestCase):
             (("kernel/config-microvm",), microvm_and_benchmarks, None),
             (("kernel/patches/0001-example.patch",), microvm_and_benchmarks, None),
             (("guest/common/init",), microvm_and_benchmarks, None),
-            (("guest/alpine/nvx-container-enter",), microvm_and_benchmarks, None),
             (
                 (".github/actions/build-guest-artifacts/action.yml",),
                 microvm_and_benchmarks,
@@ -7688,11 +7558,6 @@ class CiConfigurationTests(unittest.TestCase):
             (("nvx-rs/tests/cli.rs",), microvm_and_benchmarks, None),
             # Inputs of the microVM tests alone, such as the planner of their
             # shards (#691).
-            (
-                ("tests/runtime-adapter/src/lib.rs",),
-                microvm_only,
-                microvm_and_benchmarks,
-            ),
             (
                 ("scripts/nvx_tools/microvm_tests.py",),
                 microvm_only,
@@ -7876,165 +7741,6 @@ class CiConfigurationTests(unittest.TestCase):
                             changes.run_microvm_tests or changes.run_benchmarks,
                         )
 
-    def test_ci_change_classification_runs_microvm_tests_for_the_runtime_adapter(self):
-        # The microVM jobs run the runtime adapter's suite on every backend, so
-        # a change to the adapter, its suite, or the command that runs it alone
-        # runs them. The OpenVMM CI check reads none of them, and neither the
-        # benchmarks nor the packages use the adapter, so a pull request skips
-        # the platform and package jobs.
-        workflow = (
-            BuildConstants.REPO_ROOT
-            / ".github"
-            / "workflows"
-            / "run-nvx-microvm-tests.yml"
-        ).read_text(encoding="utf-8")
-        for system in ("Linux", "Windows"):
-            with self.subTest(system=system):
-                hook = _workflow_step(
-                    workflow, "test", f"Run runtime adapter scenarios on {system}"
-                )
-                self.assertIn("!inputs.debug-kernel", hook)
-                self.assertIn("nvx.py test-runtime-adapter\n", hook)
-                self.assertIn('--backend "${{ inputs.backend }}"\n', hook)
-        adapter = (
-            "tests/runtime-adapter/Cargo.toml",
-            "tests/runtime-adapter/Cargo.lock",
-            "tests/runtime-adapter/src/lib.rs",
-            "tests/runtime-adapter/src/bin/runtime-adapter-guest.rs",
-            "tests/runtime-adapter/tests/independent_build.rs",
-            "tests/runtime-adapter/scenarios.txt",
-        )
-        for changed_files in (
-            *((path,) for path in adapter),
-            adapter,
-            ("scripts/nvx_tools/runtime_adapter_tests.py",),
-        ):
-            with self.subTest(changed_files=changed_files):
-                changes = ci.classify_ci_changes("pull_request", changed_files)
-                self.assertEqual(changes, ci.CiChanges(True, True, False, True, False))
-                self.assertEqual(
-                    ci.classify_ci_changes("push", changed_files),
-                    ci.CiChanges(True, True, False, True, True),
-                )
-                expected = ci.required_ci_expected_results(
-                    "pull_request", same_repository=True, changes=changes
-                )
-                for job in (
-                    *ci.REQUIRED_CI_MICROVM_TEST_JOBS,
-                    *ci.REQUIRED_CI_MICROVM_DEBUG_JOBS,
-                ):
-                    self.assertEqual(expected[job], "success", job)
-                for job in (
-                    ci.REQUIRED_CI_OPENVMM_CI_JOB,
-                    *ci.REQUIRED_CI_PLATFORM_JOBS,
-                    *ci.REQUIRED_CI_PACKAGE_JOBS,
-                    "performance-gate",
-                ):
-                    self.assertEqual(expected[job], "skipped", job)
-        summary = ci.describe_ci_changes(
-            "pull_request",
-            adapter,
-            ci.classify_ci_changes("pull_request", adapter),
-        )
-        self.assertIn(
-            "### NVX microVM tests: run\nInputs changed: "
-            "`tests/runtime-adapter/Cargo.toml`, `tests/runtime-adapter/Cargo.lock`, "
-            "`tests/runtime-adapter/src/lib.rs`, and 3 more.\n",
-            summary,
-        )
-        self.assertIn(
-            "### Platform benchmarks and packages: skip\nNo input changed.\n",
-            summary,
-        )
-
-    def test_runtime_adapter_scenarios_take_a_guest_agent_that_linux_builds(self):
-        # The scenarios boot VMs of the artifacts that the microVM jobs that
-        # run them download into the checkout, with the adapter's guest agent,
-        # a static musl executable. The Linux jobs build it before the
-        # scenarios run, and the WHP job takes the one that distro-artifacts
-        # builds on Linux, as the WHP guest and sandbox job takes the Ubuntu
-        # and Azure Linux images. The default suites neither build nor
-        # download it.
-        github = BuildConstants.REPO_ROOT / ".github"
-        workflow = (github / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        microvm_workflow = (
-            github / "workflows" / "run-nvx-microvm-tests.yml"
-        ).read_text(encoding="utf-8")
-        build = (
-            "cargo build --locked --release --features guest "
-            "--target x86_64-unknown-linux-musl --bin runtime-adapter-guest"
-        )
-        agent = (
-            "tests/runtime-adapter/target/x86_64-unknown-linux-musl/release/"
-            "runtime-adapter-guest"
-        )
-
-        def step(job: str, name: str) -> str:
-            return _workflow_step(
-                microvm_workflow if job == "test" else workflow, job, name
-            )
-
-        linux_build = step("test", "Build the runtime adapter's guest agent on Linux")
-        self.assertIn(
-            "if: runner.os != 'Windows' && inputs.runtime-adapter "
-            "&& !inputs.debug-kernel\n",
-            linux_build,
-        )
-        self.assertIn("working-directory: tests/runtime-adapter\n", linux_build)
-        self.assertIn(build, " ".join(linux_build.split()))
-        download = step("test", "Download the runtime adapter's guest agent on Windows")
-        self.assertIn(
-            "if: runner.os == 'Windows' && inputs.runtime-adapter "
-            "&& !inputs.debug-kernel\n",
-            download,
-        )
-        self.assertIn("uses: actions/download-artifact@v8\n", download)
-        self.assertIn("name: runtime-adapter-guest\n", download)
-        self.assertIn("path: build/runtime-adapter\n", download)
-        for system, setup, guest_agent in (
-            ("Linux", linux_build, agent),
-            (
-                "Windows",
-                download,
-                "build\\runtime-adapter\\runtime-adapter-guest",
-            ),
-        ):
-            with self.subTest(system=system):
-                name = f"Run runtime adapter scenarios on {system}"
-                hook = step("test", name)
-                # The command takes NVX's artifacts from the checkout, into which
-                # the job downloaded them.
-                self.assertNotIn("NVX_ARTIFACTS_DIR", hook)
-                self.assertIn(f"--guest-agent {guest_agent}\n", hook)
-                self.assertLess(
-                    microvm_workflow.index(setup),
-                    microvm_workflow.index(f"      - name: {name}\n"),
-                )
-
-        shared = " ".join(
-            step("distro-artifacts", "Build the runtime adapter's guest agent")
-            .replace("\\\n", " ")
-            .split()
-        )
-        self.assertIn("working-directory: tests/runtime-adapter", shared)
-        self.assertIn(
-            'rustup toolchain install "${toolchain}" --profile minimal '
-            "--no-self-update --target x86_64-unknown-linux-musl",
-            shared,
-        )
-        self.assertIn(
-            build.replace("cargo build", 'cargo "+${toolchain}" build'), shared
-        )
-        upload = step("distro-artifacts", "Upload the runtime adapter's guest agent")
-        self.assertIn("uses: actions/upload-artifact@v7\n", upload)
-        self.assertIn("name: runtime-adapter-guest\n", upload)
-        self.assertIn(f"path: {agent}\n", upload)
-        self.assertIn(
-            "needs: [artifacts, distro-artifacts, build-openvmm-windows-msvc, "
-            "build-nvx-rs-windows-msvc, openvmm-changes]",
-            _workflow_job(workflow, "nvx-microvm-adapter-whp"),
-        )
-
     def test_ci_change_classification_covers_each_suite_input(self):
         github = BuildConstants.REPO_ROOT / ".github"
         tools = BuildConstants.REPO_ROOT / "scripts" / "nvx_tools"
@@ -8213,10 +7919,6 @@ class CiConfigurationTests(unittest.TestCase):
         all_guest_inputs = (
             set[str]().union(*guest_inputs.values()) | guest_binary_inputs
         )
-        microvm_workflow = (
-            github / "workflows" / "run-nvx-microvm-tests.yml"
-        ).read_text(encoding="utf-8")
-        self.assertIn("working-directory: tests/runtime-adapter\n", microvm_workflow)
         microvm_inputs = (
             job_inputs(
                 *ci.REQUIRED_CI_MICROVM_TEST_JOBS,
@@ -8229,7 +7931,6 @@ class CiConfigurationTests(unittest.TestCase):
             )
             | nvx_rs_inputs
             | all_guest_inputs
-            | {"tests/runtime-adapter/example"}
         )
         # The platform jobs check their history's expected host in data/, the
         # package jobs name their packages with VERSION and ship LICENSE, and
@@ -8424,12 +8125,10 @@ class CiConfigurationTests(unittest.TestCase):
             "nvx-rs/src/protocol/nvxs/tests/host.rs",
             "nvx-rs/src/guest/managed_agent/tests/loopback.rs",
             "nvx-rs/tests/guest_tools.rs",
-            "nvx-rs/artifacts.json",
         )
         guest_side = (
             "nvx-rs/Cargo.toml",
             "nvx-rs/Cargo.lock",
-            "nvx-rs/build.rs",
             "nvx-rs/src/lib.rs",
             "nvx-rs/src/protocol/nvxs/host.rs",
             "nvx-rs/src/guest/time/checks.rs",
@@ -9190,11 +8889,6 @@ python3() {
                 "openvmm-windows-msvc",
                 "run-nvx-microvm-tests.yml",
             ),
-            "nvx-microvm-adapter-whp": (
-                "build-openvmm-windows-msvc",
-                "openvmm-windows-msvc",
-                "run-nvx-microvm-tests.yml",
-            ),
             "nvx-microvm-debug-kvm": (
                 "build-openvmm-linux-gnu",
                 "openvmm-linux-gnu",
@@ -9302,13 +8996,12 @@ python3() {
         self.assertEqual(build_workflow.count("retention-days: 1"), 2)
         # The microVM workflow also downloads nvx-rs, which the benchmarks
         # don't run, the debug kernel, which neither the platform nor package
-        # jobs read, the Ubuntu distro layer in two more steps, for an
-        # unsharded default run and for the runtime adapter scenarios alone,
-        # and on Windows the runtime adapter's guest agent. The platform jobs
-        # download only what they boot, and the package jobs every image that
-        # a package ships; their action downloads nvx-rs.
+        # jobs read, and the Ubuntu distro layer a second time for an
+        # unsharded default run. The platform jobs download only what they
+        # boot, and the package jobs every image that a package ships; their
+        # action downloads nvx-rs.
         for consumer_workflow, download_count in (
-            (microvm_workflow, 12),
+            (microvm_workflow, 10),
             (platform_workflow, 4),
             (package_workflow, 7),
         ):
@@ -10089,14 +9782,9 @@ python3() {
         # second job beside the suite, on the same runner pool and with the
         # same OpenVMM and nvx-rs builds. Of the two, only that job reads the
         # Ubuntu and Azure Linux artifacts, so only it downloads and waits for
-        # them. #982: the runtime adapter scenarios, which that job runs last,
-        # take about twice as long on WHP as on KVM and MSHV, and WHP's job
-        # then ended last in most runs, so WHP runs them in a third job beside
-        # the other two, which waits for the same artifacts as the second but
-        # downloads, of the Ubuntu and Azure Linux ones, only the Ubuntu
-        # distro layer. Together, each backend's jobs run every step of the
-        # former single job exactly once, and the debug-kernel jobs, which
-        # never set a selector, run as before.
+        # them. Together, the two jobs run every step of the former single job
+        # exactly once, and the debug-kernel jobs, which never set the
+        # selector, run as before.
         workflows = BuildConstants.REPO_ROOT / ".github" / "workflows"
         jobs = yaml.safe_load((workflows / "ci.yml").read_text(encoding="utf-8"))[
             "jobs"
@@ -10105,19 +9793,14 @@ python3() {
             (workflows / "run-nvx-microvm-tests.yml").read_text(encoding="utf-8")
         )
         # PyYAML reads the `on` key as true.
-        declared = microvm[True]["workflow_call"]["inputs"]
-        for selector in ("guests-and-sandboxes", "runtime-adapter"):
-            with self.subTest(selector=selector):
-                self.assertEqual(declared[selector]["type"], "boolean")
-                self.assertIs(declared[selector]["default"], False)
+        selector = microvm[True]["workflow_call"]["inputs"]["guests-and-sandboxes"]
+        self.assertEqual(selector["type"], "boolean")
+        self.assertIs(selector["default"], False)
         backends = {
             "kvm": "Linux / KVM",
             "mshv": "Linux / MSHV",
             "whp": "Windows / WHP",
         }
-        # The backends that run the runtime adapter scenarios in a job of
-        # their own.
-        separate = {"whp"}
         self.assertEqual(
             {
                 name
@@ -10128,8 +9811,7 @@ python3() {
                 f"nvx-microvm-{kind}-{backend}"
                 for kind in ("tests", "guests", "debug")
                 for backend in backends
-            }
-            | {f"nvx-microvm-adapter-{backend}" for backend in separate},
+            },
         )
         for backend, label in backends.items():
             suite = jobs[f"nvx-microvm-tests-{backend}"]
@@ -10145,7 +9827,7 @@ python3() {
                 self.assertNotIn("distro-artifacts", suite["needs"])
                 # The guest and sandbox job also waits for the Ubuntu and Azure
                 # Linux artifacts, and otherwise equals the suite's job but for
-                # its name, the selectors, and the suite's shards
+                # its name, the selector, and the suite's shards
                 # (test_ci_runs_each_default_microvm_suite_in_its_shards).
                 conjuncts = _expression_conjuncts(suite["if"])
                 after = conjuncts.index("needs.artifacts.result == 'success'") + 1
@@ -10169,26 +9851,11 @@ python3() {
                             *conjuncts[after:],
                         ],
                         "with": inputs
-                        | {"display-name": name, "guests-and-sandboxes": True}
-                        | ({} if backend in separate else {"runtime-adapter": True}),
+                        | {"display-name": name, "guests-and-sandboxes": True},
                     },
                 )
-                if backend in separate:
-                    # The runtime adapter job equals the guest and sandbox job
-                    # but for its name and selector.
-                    adapter = f"{label} / Runtime adapter"
-                    self.assertEqual(
-                        jobs[f"nvx-microvm-adapter-{backend}"],
-                        guests
-                        | {
-                            "name": f"NVX microVM tests / {adapter}",
-                            "with": inputs
-                            | {"display-name": adapter, "runtime-adapter": True},
-                        },
-                    )
-                for selector in ("guests-and-sandboxes", "runtime-adapter"):
-                    self.assertNotIn(selector, suite["with"])
-                    self.assertNotIn(selector, debug["with"])
+                self.assertNotIn("guests-and-sandboxes", suite["with"])
+                self.assertNotIn("guests-and-sandboxes", debug["with"])
                 self.assertIs(debug["with"]["debug-kernel"], True)
 
         steps = microvm["jobs"]["test"]["steps"]
@@ -10206,29 +9873,21 @@ python3() {
             if str(step.get("uses", "")).startswith("actions/upload-artifact@")
         ]
 
-        def selected(
-            backend: str, *, debug: bool, parts: tuple[bool, bool] | None
-        ) -> list[str]:
-            # The steps of a job that sets the guests-and-sandboxes and
-            # runtime-adapter selectors to `parts`. None stands for the single
-            # job that ran every step before the splits: it ignores the
-            # selectors' conjuncts. Only the default-suite jobs run a shard;
-            # the single job, the jobs that set a selector, and the
-            # debug-kernel jobs pass none.
+        def selected(backend: str, *, debug: bool, guests: bool | None) -> list[str]:
+            # A selector of None stands for the single job that ran every step
+            # before the split: it ignores the guests-and-sandboxes conjuncts.
+            # Only the default-suite jobs run a shard; the single job, the
+            # guest and sandbox jobs, and the debug-kernel jobs pass none.
             windows = backend == "whp"
-            single = parts is None
-            guests, adapter = parts or (True, True)
-            sharded = not single and not guests and not adapter and not debug
+            sharded = guests is False and not debug
             values = {
                 "runner.os != 'Windows'": not windows,
                 "runner.os == 'Windows'": windows,
                 "inputs.backend == 'kvm'": backend == "kvm",
                 "inputs.debug-kernel": debug,
                 "!inputs.debug-kernel": not debug,
-                "inputs.guests-and-sandboxes": guests,
-                "!inputs.guests-and-sandboxes": single or not guests,
-                "inputs.runtime-adapter": adapter,
-                "!inputs.runtime-adapter": single or not adapter,
+                "inputs.guests-and-sandboxes": guests is not False,
+                "!inputs.guests-and-sandboxes": guests is not True,
                 "!inputs.shard": not sharded,
             }
             chosen: list[str] = []
@@ -10250,45 +9909,30 @@ python3() {
 
         for backend in backends:
             system = "Windows" if backend == "whp" else "Linux"
-            single = selected(backend, debug=False, parts=None)
-            suite_steps = selected(backend, debug=False, parts=(False, False))
-            if backend in separate:
-                guest_steps = selected(backend, debug=False, parts=(True, False))
-                adapter_steps = selected(backend, debug=False, parts=(False, True))
-                split = [suite_steps, guest_steps, adapter_steps]
-            else:
-                guest_steps = selected(backend, debug=False, parts=(True, True))
-                adapter_steps = []
-                split = [suite_steps, guest_steps]
+            single = selected(backend, debug=False, guests=None)
+            suite_steps = selected(backend, debug=False, guests=False)
+            guest_steps = selected(backend, debug=False, guests=True)
             with self.subTest(backend=backend):
-                # The jobs take the same builds and validate the runner the
+                # Both jobs take the same builds and validate the runner the
                 # same way, and every other step of the single job runs in
                 # exactly one of them. Each downloads the guest artifacts that
                 # its steps read (test_ci_jobs_download_exactly_the_guest_
                 # artifacts_that_they_read): the default suite only the kernel
-                # and the Alpine initramfs, the guest and sandbox steps every
-                # guest artifact that the single job downloaded, and the
-                # runtime adapter scenarios alone those two and the Ubuntu
-                # distro layer.
+                # and the Alpine initramfs, and the guest and sandbox steps
+                # every guest artifact that the single job downloaded.
                 for step_name in setup:
                     if step_name in downloads:
                         continue
-                    for job_steps in split:
-                        self.assertEqual(step_name in job_steps, step_name in single)
+                    self.assertEqual(step_name in suite_steps, step_name in single)
+                    self.assertEqual(step_name in guest_steps, step_name in single)
                 self.assertEqual(
                     downloaded(suite_steps), {"guest-kernel", "guest-alpine"}
                 )
                 self.assertEqual(downloaded(guest_steps), downloaded(single))
-                if adapter_steps:
-                    self.assertEqual(
-                        downloaded(adapter_steps),
-                        {"guest-kernel", "guest-alpine", "guest-ubuntu-distro"},
-                    )
                 self.assertEqual(
                     sorted(
                         step_name
-                        for job_steps in split
-                        for step_name in job_steps
+                        for step_name in suite_steps + guest_steps
                         if step_name not in setup
                     ),
                     sorted(step_name for step_name in single if step_name not in setup),
@@ -10304,36 +9948,21 @@ python3() {
                     f"Run Ubuntu sandbox layer smoke test on {system}",
                 ):
                     self.assertIn(step_name, guest_steps)
-                scenarios = f"Run runtime adapter scenarios on {system}"
-                self.assertEqual(scenarios in guest_steps, backend not in separate)
-                if adapter_steps:
-                    self.assertEqual(
-                        [
-                            step_name
-                            for step_name in adapter_steps
-                            if step_name not in setup
-                        ],
-                        [
-                            "Download the runtime adapter's guest agent on Windows",
-                            scenarios,
-                        ],
-                    )
                 self.assertEqual(
                     "Run extended Ubuntu guest tests on Linux/KVM" in guest_steps,
                     backend == "kvm",
                 )
                 self.assertEqual(
-                    selected(backend, debug=True, parts=(False, False)),
-                    selected(backend, debug=True, parts=None),
+                    selected(backend, debug=True, guests=False),
+                    selected(backend, debug=True, guests=None),
                 )
 
         # A second upload of an artifact name in a run fails, so each shard of
         # the default suite, the guest and sandbox job, and the debug-kernel
-        # job of every backend upload under names of their own. A job that
-        # runs the runtime adapter scenarios alone runs no test-microvm step,
-        # so it has nothing to upload and uploads nothing.
+        # job of every backend upload under names of their own.
         defaults = {
-            name: definition.get("default") for name, definition in declared.items()
+            name: definition.get("default")
+            for name, definition in microvm[True]["workflow_call"]["inputs"].items()
         }
         legs = [
             {**defaults, **leg}
@@ -10341,31 +9970,12 @@ python3() {
             if job.get("uses") == "./.github/workflows/run-nvx-microvm-tests.yml"
             for leg in _matrix_legs(job)
         ]
-        statuses = {"always": lambda: True, "failure": lambda: True}
-
-        def uploads_in(upload: Mapping[str, Any], leg: Mapping[str, Any]) -> bool:
-            return _expression_truthy(
-                _evaluate_expression(str(upload["if"]), {"inputs": leg}, statuses)
-            )
-
         self.assertTrue(uploads)
         for upload in uploads:
-            uploaded = [
-                _resolve_inputs(upload["with"]["name"], leg)
-                for leg in legs
-                if uploads_in(upload, leg)
-            ]
+            uploaded = [_resolve_inputs(upload["with"]["name"], leg) for leg in legs]
             with self.subTest(upload=upload["name"]):
                 self.assertNotIn("inputs.", " ".join(uploaded))
                 self.assertEqual(len(set(uploaded)), len(uploaded), uploaded)
-                self.assertEqual(
-                    [
-                        leg["display-name"]
-                        for leg in legs
-                        if not uploads_in(upload, leg)
-                    ],
-                    [f"{backends[backend]} / Runtime adapter" for backend in separate],
-                )
         failure_logs = next(
             step
             for step in uploads
@@ -12885,6 +12495,11 @@ Write-Output (Get-BenchmarkScratchDirectory)
                 self.assertIn("--scenario sandbox-lifecycle", acceptance)
                 self.assertIn("--scenario sandbox-proxy-only", acceptance)
                 self.assertIn("--scenario sandbox-ram-upper", acceptance)
+                self.assertIn("--scenario sandbox-gpt-layer", acceptance)
+                self.assertIn("--scenario vm-lifecycle", acceptance)
+                self.assertIn("--scenario snapshot-core", acceptance)
+                self.assertIn("--scenario snapshot-tiers", acceptance)
+                self.assertIn("--scenario untiered-network-policy", acceptance)
                 self.assertIn(
                     '--output-dir "build/test-results/public-exec-${{ inputs.backend }}"',
                     acceptance,
@@ -12907,9 +12522,7 @@ Write-Output (Get-BenchmarkScratchDirectory)
         # Each microVM job, the guest and sandbox and debug-kernel ones and
         # each shard of a default suite too, keeps the duration report of
         # every test-microvm step whether it passes, fails, or is cancelled,
-        # under a name of its own in each attempt (#694, #695, #696). A job
-        # that runs the runtime adapter scenarios alone runs no test-microvm
-        # step, so it keeps no report, and no failure logs either (#982).
+        # under a name of its own in each attempt (#694, #695, #696).
         workflows = BuildConstants.REPO_ROOT / ".github" / "workflows"
         steps = {
             step["name"]: step
@@ -12918,8 +12531,7 @@ Write-Output (Get-BenchmarkScratchDirectory)
             )["jobs"]["test"]["steps"]
         }
         upload = steps["Upload NVX microVM scenario durations"]
-        runs_test_microvm = "(inputs.guests-and-sandboxes || !inputs.runtime-adapter)"
-        self.assertEqual(upload["if"], f"always() && {runs_test_microvm}")
+        self.assertEqual(upload["if"], "always()")
         self.assertEqual(upload["uses"], "actions/upload-artifact@v7")
         self.assertEqual(
             upload["with"]["path"],
@@ -12939,10 +12551,7 @@ Write-Output (Get-BenchmarkScratchDirectory)
                     1,
                 )
         # The failure logs keep their upload, only when a step fails.
-        self.assertEqual(
-            steps["Upload NVX microVM failure logs"]["if"],
-            f"failure() && {runs_test_microvm}",
-        )
+        self.assertEqual(steps["Upload NVX microVM failure logs"]["if"], "failure()")
 
         kernel = "${{ inputs.debug-kernel && 'debug' || 'default' }}"
         part = "${{ inputs.guests-and-sandboxes && '-guests' || '' }}"
@@ -12976,14 +12585,12 @@ Write-Output (Get-BenchmarkScratchDirectory)
         for job_name, job in jobs.items():
             # Each shard of a default suite is a leg of its job's matrix.
             for inputs in _matrix_legs(job):
-                guests = inputs.get("guests-and-sandboxes", False) is True
-                if inputs.get("runtime-adapter", False) is True and not guests:
-                    continue
                 legs += 1
                 system = (
                     "Windows" if "windows" in json.loads(inputs["runner"]) else "Linux"
                 )
                 debug = inputs.get("debug-kernel", False) is True
+                guests = inputs.get("guests-and-sandboxes", False) is True
                 index = inputs.get("shard", 0)
                 for attempt in (1, 2):
                     artifact = (
@@ -14390,32 +13997,44 @@ class BuildConstantsTests(unittest.TestCase):
     def test_nvx_rs_third_party_notices_cover_every_linked_crate(self):
         # The crates of `cargo tree --locked --features cli -e normal` for the
         # release targets, x86_64-unknown-linux-musl and x86_64-pc-windows-msvc:
-        # what bin/nvx-rs[.exe] links, and serde_derive with the crates that it
-        # runs on while nvx-rs builds.
+        # what bin/nvx-rs[.exe] links, and serde_derive/document-features with
+        # the crates that they run on while nvx-rs builds.
         shipped = {
             "bitflags",
             "block-buffer",
             "cfg-if",
             "cpufeatures",
+            "crossterm",
+            "crossterm_winapi",
             "crypto-common",
             "digest",
+            "document-features",
             "generic-array",
             "getrandom",
             "itoa",
             "libc",
+            "linux-raw-sys",
+            "litrs",
+            "lock_api",
             "memchr",
             "memoffset",
             "nix",
+            "parking_lot",
+            "parking_lot_core",
             "proc-macro2",
             "quote",
+            "rustix",
+            "scopeguard",
             "serde",
             "serde_core",
             "serde_derive",
             "serde_json",
             "sha2",
+            "smallvec",
             "syn",
             "typenum",
             "unicode-ident",
+            "winapi",
             "windows-link",
             "windows-sys",
             "zmij",
@@ -14429,7 +14048,6 @@ class BuildConstantsTests(unittest.TestCase):
             "core_detect",
             "errno",
             "fastrand",
-            "linux-raw-sys",
             "num-traits",
             "once_cell",
             "proptest",
@@ -14437,11 +14055,13 @@ class BuildConstantsTests(unittest.TestCase):
             "rand",
             "rand_core",
             "rand_xorshift",
+            "redox_syscall",
             "regex-syntax",
-            "rustix",
             "tempfile",
             "unarray",
             "version_check",
+            "winapi-i686-pc-windows-gnu",
+            "winapi-x86_64-pc-windows-gnu",
         }
         # Versions of shipped crates that only the tests use: proptest's
         # chacha20 takes cpufeatures 0.3, and sha2 the cpufeatures that ships.
@@ -18021,13 +17641,6 @@ class BuildTests(unittest.TestCase):
         # util-linux provides these; the BusyBox applets lack required options.
         self.assertNotIn("setpriv", applets)
         self.assertNotIn("unshare", applets)
-        launcher = (
-            BuildConstants.REPO_ROOT
-            / "guest"
-            / "common"
-            / "nvx-container-launch-azurelinux"
-        ).read_text(encoding="utf-8")
-        self.assertIn("exec unshare --mount --pid --uts --fork --kill-child", launcher)
         self.assertIn(
             "busybox", [package["name"] for package in azurelinux.load_package_lock()]
         )
@@ -18238,7 +17851,6 @@ class BuildTests(unittest.TestCase):
             sources = {
                 crate / "Cargo.toml": "[package]\nname = 'fixture'\n",
                 crate / "Cargo.lock": "# lock\n",
-                crate / "build.rs": "fn main() {}\n",
                 crate / "src" / "lib.rs": "pub fn fixture() {}\n",
                 checkout / "rust-toolchain.toml": (
                     f'[toolchain]\nchannel = "{GuestRustBuildConstants.TOOLCHAIN}"\n'
@@ -18860,6 +18472,325 @@ def _shell_function(source: str, name: str) -> str:
     return source[start : source.index("\n}\n", start) + 3]
 
 
+class GuestInitRoutingTests(unittest.TestCase):
+    INIT = Path(__file__).parents[1] / "guest" / "common" / "init"
+
+    def setUp(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        self.shell = shell
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.pid = self.root / "daemon.pid"
+        self.announcer = self.root / "announcer.pid"
+        (self.root / "net" / "eth0").mkdir(parents=True)
+        (self.root / "os-release").write_text("ID=alpine\n", encoding="utf-8")
+        (self.root / "alpine-release").write_text("test\n", encoding="utf-8")
+        # The kernel's default, so that the init opens the ICMP echo sockets
+        # here rather than in the host's own setting.
+        (self.root / "ping_group_range").write_text("1\t0\n", encoding="utf-8")
+        self.helpers: dict[str, Path] = {}
+        for name, script in {
+            "nvx-time": f"printf '4242\\n' >{shlex.quote(self.pid.as_posix())}\n",
+            "nvx-init": 'printf "new-init"; printf " <%s>" "$@"; echo\n',
+            "nvx-ingress": (
+                f'printf "%s\\n" "$$" >{shlex.quote(self.announcer.as_posix())}\n'
+            ),
+            "nvx-hostmount": "echo hostmount\n",
+            "shell": "echo blockless-shell\n",
+        }.items():
+            path = self.root / name
+            path.write_text(f"#!/bin/sh\n{script}", encoding="utf-8")
+            path.chmod(0o755)
+            self.helpers[name] = path
+
+    def _run(self, cmdline: str) -> subprocess.CompletedProcess[str]:
+        command_line = self.root / "cmdline"
+        command_line.write_text(cmdline, encoding="utf-8")
+        source = self.INIT.read_text(encoding="utf-8")
+        replacements = {
+            "/sbin/nvx-init": self.helpers["nvx-init"],
+            "/sbin/nvx-time": self.helpers["nvx-time"],
+            "/sbin/nvx-ingress": self.helpers["nvx-ingress"],
+            "/sbin/nvx-hostmount": self.helpers["nvx-hostmount"],
+            "/proc/cmdline": command_line,
+            "/proc/sys/kernel/modules_disabled": self.root / "modules_disabled",
+            "/proc/sys/net/ipv4/ping_group_range": self.root / "ping_group_range",
+            "/sys/class/net": self.root / "net",
+            "/run/nvx/time/daemon.pid": self.pid,
+            "/etc/os-release": self.root / "os-release",
+            "/etc/alpine-release": self.root / "alpine-release",
+            "exec /bin/sh": self.helpers["shell"],
+        }
+        for original, replacement in replacements.items():
+            target = shlex.quote(replacement.as_posix())
+            if original == "exec /bin/sh":
+                target = f"exec {target}"
+            source = source.replace(original, target)
+        source = source.replace("/sbin/nvx-exit", "nvx_exit")
+        source = source.replace("/sbin/nvx-snapshot", "nvx_snapshot")
+        return subprocess.run(
+            [self.shell, "-s"],
+            input=(
+                "mount() { :; }\nifconfig() { :; }\nroute() { :; }\n"
+                'nvx_exit() { exit "$1"; }\n'
+                "nvx_snapshot() { echo blockless-snapshot; }\n"
+                f"{source}"
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=40,
+        )
+
+    def test_tokenless_layered_and_fresh_sandboxes_use_new_init(self):
+        for tokens in (
+            "nvx_layer=distro,0xd0003000,erofs nvx_overlay_upper=ramfs",
+            "nvx_snapshot_tier=platform",
+            "nvx_snapshot_tier=platform nvx_mode=managed",
+        ):
+            with self.subTest(tokens=tokens):
+                result = self._run(f"console=hvc0 nvx_sandbox=1 {tokens}")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "new-init <4242>\n")
+
+    def test_old_lifecycle_tokens_no_longer_select_the_old_layered_init(self):
+        for lifecycle in ("managed", "one-shot", ""):
+            with self.subTest(lifecycle=lifecycle):
+                result = self._run(
+                    "nvx_sandbox=1 nvx_layer=distro,0xd0003000,erofs "
+                    f"nvx_overlay_upper=ramfs nvx_lifecycle={lifecycle}"
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "new-init <4242>\n")
+
+    def test_openvmm_workload_identity_needs_the_same_nvx_identity(self):
+        # OpenVMM's identity tokens no longer name the identity: without the
+        # same nvx_identity=, a boot of any route fails closed before it
+        # starts anything.
+        refused = (
+            "NVX-WORKLOAD-ERROR: nvx_identity must name OpenVMM's workload identity\n"
+        )
+        openvmm = "nvx_workload_uid=4242 nvx_workload_gid=4242"
+        for tokens in (
+            f"nvx_exec=/bin/true {openvmm}",
+            "nvx_exec=/bin/true nvx_workload_uid=4242",
+            f"nvx_exec=/bin/true nvx_identity=4243:4242 {openvmm}",
+            f"{openvmm} nvx_identity=4242:4243",
+            f"nvx_entrypoint=/bin/true {openvmm}",
+            f"nvx_mode=managed nvx_control_tty=hvc2 {openvmm}",
+            f"nvx_sandbox=1 nvx_snapshot_tier=platform {openvmm}",
+        ):
+            with self.subTest(tokens=tokens):
+                result = self._run(tokens)
+                self.assertEqual(result.returncode, 125, result.stdout)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(refused, result.stderr)
+        # The same identity boots on, here to the one-shot workload's check
+        # of its entrypoint.
+        result = self._run(f"{openvmm} nvx_identity=4242:4242 nvx_entrypoint=bin/true")
+        self.assertEqual(result.returncode, 125, result.stdout)
+        self.assertIn("hostmount\n", result.stdout)
+        self.assertNotIn(refused, result.stderr)
+        self.assertIn(
+            "NVX-WORKLOAD-ERROR: nvx_entrypoint must be an absolute path\n",
+            result.stderr,
+        )
+
+    def test_exec_override_cannot_bypass_the_new_sandbox_init(self):
+        result = self._run(
+            "nvx_sandbox=1 nvx_snapshot_tier=platform nvx_exec=/bin/true"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "new-init <4242>\n")
+        result = self._run("nvx_sandbox=1 nvx_lifecycle=managed nvx_exec=/bin/true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "new-init <4242>\n")
+        result = self._run("nvx_exec=/bin/true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_blockless_platform_and_snapshot_vms_keep_their_routes(self):
+        for tokens in ("", "nvx_snapshot_tier=platform", "shellsnap snap"):
+            with self.subTest(tokens=tokens):
+                result = self._run(f"console=hvc0 {tokens}")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("hostmount\n", result.stdout)
+                self.assertIn("blockless-shell\n", result.stdout)
+                self.assertNotIn("new-init", result.stdout)
+                if tokens == "shellsnap snap":
+                    self.assertEqual(result.stdout.count("blockless-snapshot\n"), 2)
+                    self.assertIn("SNAP-RESTORE-OK\n", result.stdout)
+
+    def test_new_init_receives_the_announcers_process_id_when_present(self):
+        for ingress in ("allow", "host-loopback"):
+            with self.subTest(ingress=ingress):
+                result = self._run(
+                    "nvx_sandbox=1 nvx_snapshot_tier=platform "
+                    "virtnet_ip=172.16.0.2 virtnet_gw=172.16.0.1 "
+                    f"virtnet_ingress={ingress}"
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                pid = self.announcer.read_text(encoding="utf-8").strip()
+                self.assertGreater(int(pid), 1)
+                self.assertIn(f"new-init <4242> <{pid}>\n", result.stdout)
+
+    def test_new_init_waits_for_the_time_daemons_deferred_publication(self):
+        temporary = self.pid.with_name("daemon.pid.tmp")
+        self.helpers["nvx-time"].write_text(
+            "#!/bin/sh\n"
+            f"(sleep 0.1; printf '4242\\n' >{shlex.quote(temporary.as_posix())}; "
+            f"mv {shlex.quote(temporary.as_posix())} "
+            f"{shlex.quote(self.pid.as_posix())}) &\n",
+            encoding="utf-8",
+        )
+        result = self._run("nvx_sandbox=1 nvx_snapshot_tier=platform")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "new-init <4242>\n")
+
+    def test_missing_helpers_or_selected_init_fail_without_fallback(self):
+        self.helpers["nvx-time"].write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        self.pid.mkdir()
+        result = self._run("nvx_sandbox=1 nvx_snapshot_tier=platform")
+        self.assertEqual(result.returncode, 125, result.stdout)
+        self.assertIn("time daemon process ID is unavailable", result.stderr)
+        self.assertNotIn("new-init", result.stdout)
+
+        self.helpers["nvx-init"].unlink()
+        result = self._run("nvx_sandbox=1 nvx_snapshot_tier=platform")
+        self.assertEqual(result.returncode, 125, result.stdout)
+        self.assertIn("selected guest cannot act as sandbox control", result.stderr)
+        result = self._run("nvx_sandbox=1 nvx_lifecycle=managed")
+        self.assertEqual(result.returncode, 125, result.stdout)
+        self.assertIn("selected guest cannot act as sandbox control", result.stderr)
+
+
+class GuestInitWorkloadIdentityTests(unittest.TestCase):
+    """The shell /init's workload account and identity checks, as a one-shot
+    launch that asks for an account with nvx_workload_account=create runs
+    them: on a user database of their own, with setpriv and nvx-exit stubs."""
+
+    INIT = Path(__file__).parents[1] / "guest" / "common" / "init"
+    PASSWD = (
+        "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/:/sbin/nologin\n"
+    )
+    GROUP = "root:x:0:\nnobody:x:65534:\n"
+
+    def setUp(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        self.shell = shell
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        source = self.INIT.read_text(encoding="utf-8")
+        self.functions = (
+            "".join(
+                _shell_function(source, name)
+                for name in (
+                    "workload_fatal",
+                    "nonroot_id",
+                    "resolve_workload_identity",
+                    "ensure_workload_account",
+                    "run_workload",
+                    "read_workload_identity",
+                )
+            )
+            .replace("/etc/passwd", '"$root/passwd"')
+            .replace("/etc/group", '"$root/group"')
+            .replace("/sbin/nvx-exit", "nvx_exit")
+        )
+
+    def _run(self, uid: str, gid: str) -> subprocess.CompletedProcess[str]:
+        """Creates the account of the identity UID:GID and runs a workload as
+        it, on a fresh copy of the user database."""
+        (self.root / "passwd").write_bytes(self.PASSWD.encode())
+        (self.root / "group").write_bytes(self.GROUP.encode())
+        return subprocess.run(
+            [self.shell, "-s", "--", self.root.as_posix(), uid, gid],
+            input=(
+                "root=$1\nworkload_uid=$2\nworkload_gid=$3\n"
+                'nvx_exit() { echo "nvx-exit $1"; exit "$1"; }\n'
+                'setpriv() { echo "setpriv $*"; }\n'
+                f"{self.functions}"
+                "ensure_workload_account\n"
+                "run_workload /bin/busybox id\n"
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_account_creation_refuses_a_zero_id_however_it_is_spelled(self):
+        # As numbers, zero-padded IDs are root's: the account would replace
+        # root's record, and setpriv would run the workload as root.
+        for uid, gid, message in (
+            ("00", "65534", "workload UID is unavailable"),
+            ("65534", "000", "workload GID is unavailable"),
+        ):
+            with self.subTest(uid=uid, gid=gid):
+                result = self._run(uid, gid)
+                self.assertEqual(result.returncode, 125, result.stdout)
+                self.assertIn(f"NVX-WORKLOAD-ERROR: {message}\n", result.stderr)
+                self.assertNotIn("setpriv", result.stdout)
+                self.assertEqual(
+                    (self.root / "passwd").read_bytes(), self.PASSWD.encode()
+                )
+                self.assertEqual(
+                    (self.root / "group").read_bytes(), self.GROUP.encode()
+                )
+
+    def test_account_creation_runs_a_new_identity_as_itself(self):
+        result = self._run("4242", "4242")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("setpriv --reuid 4242 --regid 4242 ", result.stdout)
+        self.assertEqual(
+            (self.root / "passwd").read_bytes().decode(),
+            self.PASSWD + "nvx:x:4242:4242:NVX workload:/tmp:/sbin/nologin\n",
+        )
+        self.assertEqual(
+            (self.root / "group").read_bytes().decode(), self.GROUP + "nvx:x:4242:\n"
+        )
+
+    def test_nvx_identity_needs_both_ids(self):
+        # With neither, an nvx_exec workload would skip the privilege drop and
+        # run as root.
+        for identity, expected in (
+            ("4242:4243", "read 4242:4243\n"),
+            (":", None),
+            ("4242:", None),
+            (":4243", None),
+            ("4242", None),
+        ):
+            with self.subTest(identity=identity):
+                result = subprocess.run(
+                    [self.shell, "-s", "--", identity],
+                    input=(
+                        'nvx_exit() { echo "nvx-exit $1"; exit "$1"; }\n'
+                        f"{self.functions}"
+                        'read_workload_identity "$1"\n'
+                        'echo "read $workload_uid:$workload_gid"\n'
+                    ),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if expected is None:
+                    self.assertEqual(result.returncode, 125, result.stdout)
+                    self.assertIn(
+                        "NVX-WORKLOAD-ERROR: nvx_identity must be UID:GID\n",
+                        result.stderr,
+                    )
+                    self.assertNotIn("read ", result.stdout)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, expected)
+
+
 def _aggregate_child_name(index: int, target: str) -> str:
     """Return the name that nvx-rs gives the child of an aggregate share at
     `index` that the guest binds at `target`: the index, a hyphen, and the first
@@ -19012,529 +18943,28 @@ class InitIcmpEchoSocketsTests(unittest.TestCase):
     def test_every_guest_mode_gets_the_setting(self):
         source = self.INIT.read_text(encoding="utf-8")
         call = source.index("\nopen_icmp_echo_sockets\n")
-        # The one-shot program, the sandbox control agent, and the managed agent
+        # The one-shot program, the sandbox's nvx-init, and the managed agent
         # all start after the call.
         for later in (
-            'if [ -n "$nvx_exec" ]; then',
-            "exec /sbin/nvx-init-agent",
+            'if [ -n "$nvx_exec" ] && [ "$sandbox_mode" = false ]; then',
+            'exec /sbin/nvx-init "$@"',
             "exec /sbin/nvx-managed-agent",
         ):
             with self.subTest(later=later):
                 self.assertLess(call, source.index(later))
 
 
-class SandboxShareAgentTests(unittest.TestCase):
-    AGENT = Path(__file__).parents[1] / "guest" / "common" / "nvx-init-agent"
+class HostmountShareTests(unittest.TestCase):
+    HOSTMOUNT = Path(__file__).parents[1] / "guest" / "common" / "nvx-hostmount"
 
     def setUp(self):
         shell = _posix_shell()
         if shell is None:
             self.skipTest("POSIX shell is unavailable")
         self.shell = shell
-        self.source = self.AGENT.read_text(encoding="utf-8")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
-        self.rootfs = self.root / "rootfs"
-        self.rootfs.mkdir()
-        self.runtime = (self.root / "run").as_posix()
-
-    SHARE_FUNCTIONS = (
-        "validate_share_target",
-        "make_share_mount_point",
-        "record_live_share",
-        "claim_share_target",
-        "mount_live_share",
-        "parse_share_child",
-        "bind_live_share",
-        "mount_live_shares",
-        "mount_host_export",
-    )
-
-    def _aggregate(self, *children: str, mode: str = "rw") -> str:
-        """Returns the bootstrap of an aggregate whose children the
-        CHILD,TARGET,MODE specifications `children` place."""
-        tokens = [
-            f"virtfs_dir={self.runtime}/shares",
-            "virtfs_tag=microvm",
-            f"virtfs_mode={mode}",
-            "virtfs_aggregate=1",
-            *(f"nvx_share={child}" for child in children),
-        ]
-        return " ".join(tokens)
-
-    def _export(
-        self, *extra: str, directory: str | None = None, mode: str = "rw"
-    ) -> str:
-        """Returns the bootstrap of a managed sandbox's host export at
-        `directory`, by default its place, followed by the tokens `extra`."""
-        tokens = [
-            f"virtfs_dir={directory or self.runtime + '/hostfs/root'}",
-            "virtfs_tag=microvm",
-            f"virtfs_mode={mode}",
-            "virtfs_aggregate=1",
-            *extra,
-        ]
-        return " ".join(tokens)
-
-    def _run(
-        self, cmdline: str, function: str = "mount_live_shares"
-    ) -> tuple[subprocess.CompletedProcess[str], str]:
-        mount_log = self.root / "mount.log"
-        mount_log.unlink(missing_ok=True)
-        functions = "".join(
-            _shell_function(self.source, name) for name in self.SHARE_FUNCTIONS
-        )
-        script = (
-            "set -eu\n"
-            "rootfs=$1\ncmdline=$2\nmount_log=$3\nruntime=$4\nshare_mountpoints=\n"
-            "hostfs=$runtime/hostfs\n"
-            'fatal() { echo "FATAL: $*" >&2; exit 125; }\n'
-            'mount() { printf "%s\\n" "$*" >>"$mount_log"; }\n'
-            f"{functions}"
-            f"{function}\n"
-            "echo \"mountpoints=$(printf '%s' \"$share_mountpoints\" | tr '\\n' ' ')\"\n"
-        )
-        result = subprocess.run(
-            [
-                self.shell,
-                "-s",
-                "--",
-                self.rootfs.as_posix(),
-                cmdline,
-                mount_log.as_posix(),
-                self.runtime,
-            ],
-            input=script,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        log = mount_log.read_text(encoding="utf-8") if mount_log.exists() else ""
-        return result, log
-
-    def _run_teardown(
-        self,
-        script: str,
-        *,
-        shares: tuple[str, ...],
-        failing: str = "",
-        upper: str = "scratch",
-    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-        runtime = self.root / "run"
-        runtime.mkdir(exist_ok=True)
-        for name in ("container.pid", "workload-machine-id"):
-            (runtime / name).write_text("x\n", encoding="utf-8")
-        log = self.root / "teardown.log"
-        log.unlink(missing_ok=True)
-        functions = "".join(
-            _shell_function(self.source, name)
-            for name in ("unmount_live_shares", "fatal", "teardown")
-        ).replace("/sbin/nvx-exit", "nvx_exit")
-        # The agent records mounted shares one per line, most recent first.
-        # Windows drops a newline from a process argument, so pass a separator.
-        mountpoints = "|".join(
-            f"{self.rootfs.as_posix()}{target}" for target in reversed(shares)
-        )
-        # mount_upper sets the upper's mount point and name.
-        upper_point, upper_name = {
-            "scratch": ("$runtime/scratch", "scratch"),
-            "ram": ("$runtime/tmpfs", "the tmpfs upper"),
-        }[upper]
-        result = subprocess.run(
-            [
-                self.shell,
-                "-s",
-                "--",
-                runtime.as_posix(),
-                log.as_posix(),
-                mountpoints,
-                failing,
-            ],
-            input=(
-                "set -eu\n"
-                "runtime=$1\nlog=$2\nfailing=$4\n"
-                "share_mountpoints=$(printf '%s' \"$3\" | tr '|' '\\n')\n"
-                "rootfs=$runtime/rootfs\nlayers=$runtime/layers\n"
-                f'upper_point={upper_point}\nupper_name="{upper_name}"\n'
-                'umount() { printf "umount %s\\n" "$1" >>"$log"; '
-                '[ "$1" != "$failing" ]; }\n'
-                'mountpoint() { [ "$2" = "$layers/distro" ]; }\n'
-                'nvx_exit() { printf "exit %s\\n" "$1" >>"$log"; exit "$1"; }\n'
-                f"{functions}{script}\n"
-            ),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
-        return result, lines
-
-    def test_agent_mounts_share_after_lifecycle_checks_for_both_lifecycles(self):
-        # A one-shot sandbox binds its shares from their tokens, and a managed
-        # sandbox mounts only the export from which its agent maps them.
-        mount_call = self.source.index(
-            '\ncase "$workload_lifecycle" in\n'
-            "    managed) mount_host_export ;;\n"
-            "    *) mount_live_shares ;;\n"
-            "esac\n"
-        )
-        self.assertEqual(self.source.count("\n    *) mount_live_shares ;;\n"), 1)
-        self.assertEqual(self.source.count("mount_host_export ;;"), 1)
-        self.assertLess(
-            self.source.index('fatal "configured workload home is unavailable"'),
-            mount_call,
-        )
-        self.assertLess(
-            self.source.index('fatal "unsupported workload lifecycle'), mount_call
-        )
-        machine_id = self.source.index('>"$runtime/workload-machine-id"')
-        managed_agent = self.source.index("\n    /sbin/nvx-managed-agent \\\n")
-        self.assertLess(mount_call, managed_agent)
-        # The managed agent generates its own machine ID; one-shot workloads
-        # get theirs from the init agent.
-        self.assertLess(managed_agent, machine_id)
-        self.assertLess(machine_id, self.source.index("/sbin/nvx-container-launch"))
-        self.assertNotIn("exec /sbin/nvx-managed-agent", self.source)
-        self.assertEqual(self.source.count('\nteardown "$status"\n'), 1)
-        self.assertEqual(self.source.count('\n    teardown "$status"\n'), 1)
-        self.assertLess(managed_agent, self.source.index('\n    teardown "$status"\n'))
-        self.assertLess(
-            self.source.index("\n    give_back_launcher_process\n"), managed_agent
-        )
-
-    def test_managed_lifecycle_gives_back_the_launcher_process(self):
-        limit = self.root / "pids.max"
-        script = (
-            'fatal() { echo "FATAL: $*" >&2; exit 125; }\n'
-            + _shell_function(self.source, "give_back_launcher_process")
-        ).replace("/sys/fs/cgroup/container/pids.max", limit.as_posix())
-        for pids_max, expected in (
-            ("65", "64\n"),
-            ("2", "1\n"),
-            ("", None),
-            ("max", None),
-        ):
-            with self.subTest(pids_max=pids_max):
-                limit.unlink(missing_ok=True)
-                result = subprocess.run(
-                    [self.shell, "-s", "--", pids_max],
-                    input=f"{script}pids_max=$1\ngive_back_launcher_process\n",
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                if expected is None:
-                    self.assertFalse(limit.exists())
-                else:
-                    self.assertEqual(limit.read_text(encoding="utf-8"), expected)
-
-    def test_agent_teardown_unmounts_share_before_overlay_layers_and_scratch(self):
-        result, log = self._run_teardown("teardown 7", shares=("/workspace",))
-        runtime = (self.root / "run").as_posix()
-        self.assertEqual(result.returncode, 7, result.stderr)
-        self.assertEqual(
-            log,
-            [
-                f"umount {self.rootfs.as_posix()}/workspace",
-                f"umount {runtime}/rootfs",
-                f"umount {runtime}/layers/distro",
-                f"umount {runtime}/scratch",
-                "exit 7",
-            ],
-        )
-        self.assertIn("NVX-SANDBOX-EXIT: status=7", result.stdout)
-        self.assertFalse((self.root / "run" / "workload-machine-id").exists())
-        self.assertFalse((self.root / "run" / "container.pid").exists())
-
-        result, log = self._run_teardown("teardown 0", shares=())
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(log[0], f"umount {runtime}/rootfs")
-
-    def test_agent_teardown_unmounts_the_tmpfs_upper_last(self):
-        runtime = (self.root / "run").as_posix()
-        result, log = self._run_teardown(
-            "teardown 0", shares=("/workspace",), upper="ram"
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            log,
-            [
-                f"umount {self.rootfs.as_posix()}/workspace",
-                f"umount {runtime}/rootfs",
-                f"umount {runtime}/layers/distro",
-                f"umount {runtime}/tmpfs",
-                "exit 0",
-            ],
-        )
-
-        for upper, point, name in (
-            ("scratch", "scratch", "scratch"),
-            ("ram", "tmpfs", "the tmpfs upper"),
-        ):
-            with self.subTest(upper=upper):
-                result, log = self._run_teardown(
-                    "teardown 0",
-                    shares=(),
-                    failing=f"{runtime}/{point}",
-                    upper=upper,
-                )
-                self.assertEqual(result.returncode, 1, result.stdout)
-                self.assertEqual(
-                    result.stderr,
-                    f"NVX-SANDBOX-ERROR: failed to unmount {name}\n",
-                )
-                self.assertEqual(log[-2:], [f"umount {runtime}/{point}", "exit 1"])
-                self.assertIn("NVX-SANDBOX-EXIT: status=1", result.stdout)
-
-    def test_agent_teardown_unmounts_shares_in_reverse_mount_order(self):
-        rootfs = self.rootfs.as_posix()
-        runtime = (self.root / "run").as_posix()
-        result, log = self._run_teardown(
-            "teardown 0", shares=("/workspace", "/opt/hostedtoolcache")
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            log[:3],
-            [
-                f"umount {rootfs}/opt/hostedtoolcache",
-                f"umount {rootfs}/workspace",
-                f"umount {runtime}/rootfs",
-            ],
-        )
-
-        # A share that fails to unmount does not stop the others.
-        result, log = self._run_teardown(
-            "teardown 0",
-            shares=("/workspace", "/opt/hostedtoolcache"),
-            failing=f"{rootfs}/opt/hostedtoolcache",
-        )
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("failed to unmount the live share", result.stderr)
-        self.assertEqual(
-            log[:2],
-            [f"umount {rootfs}/opt/hostedtoolcache", f"umount {rootfs}/workspace"],
-        )
-        self.assertEqual(log[-1], "exit 1")
-
-    def test_agent_teardown_reports_share_unmount_failure(self):
-        share = f"{self.rootfs.as_posix()}/workspace"
-        result, log = self._run_teardown(
-            "teardown 0", shares=("/workspace",), failing=share
-        )
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("failed to unmount the live share", result.stderr)
-        self.assertEqual(log[0], f"umount {share}")
-        self.assertEqual(log[-1], "exit 1")
-        self.assertIn("NVX-SANDBOX-EXIT: status=1", result.stdout)
-
-    def test_agent_fatal_unmounts_share_before_power_off(self):
-        result, log = self._run_teardown(
-            'fatal "synthetic failure"', shares=("/workspace",)
-        )
-        self.assertEqual(result.returncode, 125, result.stdout)
-        self.assertIn("NVX-SANDBOX-ERROR: synthetic failure", result.stderr)
-        self.assertEqual(
-            log, [f"umount {self.rootfs.as_posix()}/workspace", "exit 125"]
-        )
-
-        result, log = self._run_teardown('fatal "early failure"', shares=())
-        self.assertEqual(result.returncode, 125, result.stdout)
-        self.assertEqual(log, ["exit 125"])
-
-        rootfs = self.rootfs.as_posix()
-        result, log = self._run_teardown(
-            'fatal "late failure"', shares=("/workspace", "/opt/hostedtoolcache")
-        )
-        self.assertEqual(result.returncode, 125, result.stdout)
-        self.assertEqual(
-            log,
-            [
-                f"umount {rootfs}/opt/hostedtoolcache",
-                f"umount {rootfs}/workspace",
-                "exit 125",
-            ],
-        )
-
-    def test_agent_skips_share_without_bootstrap_tokens(self):
-        result, log = self._run("console=hvc0 nvx_sandbox=1")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("mountpoints=\n", result.stdout)
-        self.assertEqual(log, "")
-
-    def test_agent_mounts_share_inside_container_rootfs(self):
-        (self.rootfs / "opt").mkdir()
-        for mode in ("rw", "ro"):
-            with self.subTest(mode=mode):
-                result, log = self._run(
-                    "nvx_sandbox=1 virtfs_dir=/opt/hostedtoolcache "
-                    f"virtfs_tag=microvm virtfs_mode={mode}"
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertTrue((self.rootfs / "opt" / "hostedtoolcache").is_dir())
-                self.assertIn(
-                    f"NVX-SANDBOX-SHARE: target=/opt/hostedtoolcache mode={mode}",
-                    result.stdout,
-                )
-                self.assertEqual(
-                    log.split(),
-                    [
-                        "-t",
-                        "virtiofs",
-                        "-o",
-                        f"{mode},nosuid,nodev",
-                        "microvm",
-                        f"{self.rootfs.as_posix()}/opt/hostedtoolcache",
-                    ],
-                )
-                self.assertIn(
-                    f"mountpoints={self.rootfs.as_posix()}/opt/hostedtoolcache\n",
-                    result.stdout,
-                )
-
-    def test_managed_agent_mounts_no_export_without_bootstrap_tokens(self):
-        result, log = self._run("console=hvc0 nvx_sandbox=1", "mount_host_export")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("mountpoints=\n", result.stdout)
-        self.assertEqual(log, "")
-        self.assertFalse((self.root / "run" / "hostfs").exists())
-
-    def test_managed_agent_mounts_the_export_where_only_root_can_enter(self):
-        runtime = self.root / "run"
-        runtime.mkdir()
-        hostfs = runtime / "hostfs"
-        for mode in ("rw", "ro"):
-            with self.subTest(mode=mode):
-                shutil.rmtree(hostfs, ignore_errors=True)
-                result, log = self._run(
-                    self._export("nvx_maps=2", mode=mode), "mount_host_export"
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(
-                    log.splitlines(),
-                    [
-                        f"-t virtiofs -o {mode},nosuid,nodev microvm "
-                        f"{self.runtime}/hostfs/root"
-                    ],
-                )
-                self.assertIn(
-                    f"NVX-SANDBOX-EXPORT: mode={mode} tag=microvm\n", result.stdout
-                )
-                # Teardown unmounts the export like a share.
-                self.assertIn(
-                    f"mountpoints={self.runtime}/hostfs/root\n", result.stdout
-                )
-                self.assertTrue((hostfs / "root").is_dir())
-                if os.name == "posix":
-                    self.assertEqual(hostfs.stat().st_mode & 0o777, 0o700)
-                # The agent maps into the container rootfs; the shell binds nothing.
-                self.assertEqual(list(self.rootfs.iterdir()), [])
-
-    def test_managed_agent_refuses_share_tokens_and_other_exports(self):
-        (self.root / "run").mkdir()
-        export = f"{self.runtime}/hostfs/root"
-        for cmdline, message in (
-            (
-                self._export("nvx_share=0,/workspace,rw"),
-                "not from nvx_share= tokens",
-            ),
-            ("nvx_share=0,/workspace,rw", "not from nvx_share= tokens"),
-            (
-                self._export(directory=f"{self.runtime}/shares"),
-                f"the host export must be mounted at {export}",
-            ),
-            (self._export(directory="/workspace"), "must be mounted at"),
-            (
-                self._export().replace(" virtfs_aggregate=1", ""),
-                "host export bootstrap is incomplete",
-            ),
-            ("virtfs_aggregate=1", "host export bootstrap is incomplete"),
-            (self._export(f"virtfs_dir={export}"), "bootstrap is incomplete"),
-            (self._export("virtfs_tag="), "bootstrap is incomplete"),
-            (
-                self._export().replace("virtfs_tag=microvm", "virtfs_tag=a.b"),
-                "host export tag is invalid",
-            ),
-            (self._export(mode="rx"), "host export mode is unsupported: rx"),
-        ):
-            with self.subTest(cmdline=cmdline):
-                result, log = self._run(cmdline, "mount_host_export")
-                self.assertEqual(result.returncode, 125, result.stdout)
-                self.assertIn(message, result.stderr)
-                # Every token is checked before anything is created or mounted.
-                self.assertEqual(log, "")
-                self.assertFalse((self.root / "run" / "hostfs").exists())
-
-    def test_managed_agent_refuses_an_export_directory_that_exists(self):
-        (self.root / "run" / "hostfs").mkdir(parents=True)
-        result, log = self._run(self._export(), "mount_host_export")
-        self.assertEqual(result.returncode, 125, result.stdout)
-        self.assertIn("failed to create the host export directory", result.stderr)
-        self.assertEqual(log, "")
-
-    def test_agent_binds_every_child_of_an_aggregate(self):
-        rootfs = self.rootfs.as_posix()
-        result, log = self._run(
-            "nvx_sandbox=1 "
-            + self._aggregate("0,/workspace,rw", "1,/opt/hostedtoolcache,ro")
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        # The aggregate stays outside the container rootfs; each child is bound
-        # inside it with its own mode.
-        self.assertEqual(
-            log.splitlines(),
-            [
-                f"-t virtiofs -o rw,nosuid,nodev microvm {self.runtime}/shares",
-                f"-o bind {self.runtime}/shares/0 {rootfs}/workspace",
-                f"-o remount,bind,rw,nosuid,nodev {rootfs}/workspace",
-                f"-o bind {self.runtime}/shares/1 {rootfs}/opt/hostedtoolcache",
-                f"-o remount,bind,ro,nosuid,nodev {rootfs}/opt/hostedtoolcache",
-            ],
-        )
-        self.assertIn(
-            "NVX-SANDBOX-SHARE: target=/workspace mode=rw child=0\n"
-            "NVX-SANDBOX-SHARE: target=/opt/hostedtoolcache mode=ro child=1\n",
-            result.stdout,
-        )
-        # Teardown unmounts the most recent bind first, and the aggregate last.
-        self.assertIn(
-            f"mountpoints={rootfs}/opt/hostedtoolcache {rootfs}/workspace "
-            f"{self.runtime}/shares\n",
-            result.stdout,
-        )
-
-    def test_agent_binds_children_by_the_names_that_nvx_gives_them(self):
-        rootfs = self.rootfs.as_posix()
-        workspace = _aggregate_child_name(0, "/workspace")
-        tools = _aggregate_child_name(1, "/opt/tools")
-        result, log = self._run(
-            self._aggregate(
-                f"{workspace},/workspace,rw", f"{tools},/opt/tools,ro", "a.b_C-9,/x,ro"
-            )
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(
-            f"-o bind {self.runtime}/shares/{workspace} {rootfs}/workspace\n", log
-        )
-        self.assertIn(
-            f"-o bind {self.runtime}/shares/{tools} {rootfs}/opt/tools\n", log
-        )
-        self.assertIn(f"-o bind {self.runtime}/shares/a.b_C-9 {rootfs}/x\n", log)
-        self.assertIn(
-            f"NVX-SANDBOX-SHARE: target=/workspace mode=rw child={workspace}\n",
-            result.stdout,
-        )
-        # A repeated name is refused, however the child is named.
-        result, log = self._run(
-            self._aggregate(f"{workspace},/workspace,rw", f"{workspace},/b,ro")
-        )
-        self.assertEqual(result.returncode, 125, result.stdout)
-        self.assertIn("child is not unique", result.stderr)
-        self.assertEqual(log, "")
 
     def test_hostmount_accepts_only_child_names_inside_the_aggregate(self):
-        hostmount = self.AGENT.with_name("nvx-hostmount").read_text(encoding="utf-8")
+        hostmount = self.HOSTMOUNT.read_text(encoding="utf-8")
         script = (
             'fail() { echo "FAIL: $*" >&2; exit 1; }\n'
             f"{_shell_function(hostmount, 'parse_share')}"
@@ -19581,7 +19011,7 @@ class SandboxShareAgentTests(unittest.TestCase):
                 self.assertIn("invalid live share", result.stderr)
 
     def test_hostmount_makes_file_mount_points_without_following_links(self):
-        hostmount = self.AGENT.with_name("nvx-hostmount").read_text(encoding="utf-8")
+        hostmount = self.HOSTMOUNT.read_text(encoding="utf-8")
         script = (
             f"{_shell_function(hostmount, 'make_file_mount_point')}"
             'make_file_mount_point "$1"\n'
@@ -19621,514 +19051,6 @@ class SandboxShareAgentTests(unittest.TestCase):
             linked.symlink_to(existing)
             self.assertEqual(make(linked), 1)
             self.assertEqual(existing.read_bytes(), b"{}")
-
-    def test_agent_binds_a_file_child_at_a_file(self):
-        rootfs = self.rootfs.as_posix()
-        (self.rootfs / "opt").mkdir()
-        (self.rootfs / "opt" / "existing.json").write_text("{}", encoding="utf-8")
-        result, log = self._run(
-            "nvx_sandbox=1 "
-            + self._aggregate(
-                "0,/workspace,rw",
-                "1,/etc/app/settings.json,ro,file",
-                "2,/opt/existing.json,rw,file",
-            )
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        # Each file child gets a file mount point, created inside the container
-        # rootfs or reused there, and is bound with its own mode.
-        settings = self.rootfs / "etc" / "app" / "settings.json"
-        self.assertTrue(settings.is_file())
-        self.assertEqual(settings.read_text(encoding="utf-8"), "")
-        self.assertEqual(
-            (self.rootfs / "opt" / "existing.json").read_text(encoding="utf-8"), "{}"
-        )
-        self.assertTrue((self.rootfs / "workspace").is_dir())
-        self.assertEqual(
-            log.splitlines(),
-            [
-                f"-t virtiofs -o rw,nosuid,nodev microvm {self.runtime}/shares",
-                f"-o bind {self.runtime}/shares/0 {rootfs}/workspace",
-                f"-o remount,bind,rw,nosuid,nodev {rootfs}/workspace",
-                f"-o bind {self.runtime}/shares/1 {rootfs}/etc/app/settings.json",
-                f"-o remount,bind,ro,nosuid,nodev {rootfs}/etc/app/settings.json",
-                f"-o bind {self.runtime}/shares/2 {rootfs}/opt/existing.json",
-                f"-o remount,bind,rw,nosuid,nodev {rootfs}/opt/existing.json",
-            ],
-        )
-        self.assertIn(
-            f"mountpoints={rootfs}/opt/existing.json {rootfs}/etc/app/settings.json "
-            f"{rootfs}/workspace {self.runtime}/shares\n",
-            result.stdout,
-        )
-
-        # A directory is no file mount point, a file no directory one, and
-        # the runtime binds the machine ID itself.
-        (self.rootfs / "dir").mkdir()
-        (self.rootfs / "file").write_text("x", encoding="utf-8")
-        for child, message in (
-            ("0,/dir,ro,file", "not a regular file"),
-            ("0,/file/settings.json,ro,file", "not a directory"),
-            ("0,/file,ro", "not a directory"),
-            ("0,/etc/machine-id,ro,file", "reserved"),
-            ("0,/etc/machine-id/child,ro", "reserved"),
-            ("0,/run,ro", "reserved"),
-            ("0,/run/nvx,ro", "reserved"),
-            ("0,/run/nvx/time/state,ro", "reserved"),
-        ):
-            with self.subTest(child=child):
-                result, log = self._run(self._aggregate(child))
-                self.assertEqual(result.returncode, 125, result.stdout)
-                self.assertIn(message, result.stderr)
-                self.assertEqual(log, "")
-
-    def test_agent_rejects_repeated_children_and_overlapping_targets(self):
-        for children, message in (
-            (("0,/workspace,rw", "0,/opt/tools,ro"), "child is not unique"),
-            (("0,/workspace,rw", "1,/workspace,ro"), "targets overlap"),
-            (("0,/workspace,rw", "1,/workspace/cache,ro"), "targets overlap"),
-            (("0,/opt/tools/node,ro", "1,/opt,rw"), "targets overlap"),
-        ):
-            with self.subTest(children=children):
-                result, log = self._run(self._aggregate(*children))
-                self.assertEqual(result.returncode, 125, result.stdout)
-                self.assertIn(message, result.stderr)
-                # Every child is checked before anything is mounted.
-                self.assertEqual(log, "")
-
-        # A shared prefix that is not a path component is not an overlap.
-        result, log = self._run(self._aggregate("0,/work,rw", "1,/workspace,ro"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(log.splitlines()), 5)
-
-    def test_agent_parses_every_share_before_mounting_any(self):
-        for cmdline in (
-            "virtfs_dir=/workspace virtfs_tag=microvm virtfs_mode=rw "
-            "virtfs_dir=/opt/tools",
-            "virtfs_tag=microvm virtfs_mode=ro",
-            "virtfs_dir=/workspace virtfs_tag=microvm virtfs_mode=rw "
-            "virtfs_dir= virtfs_tag=microvm virtfs_mode=ro",
-            "virtfs_aggregate=1",
-            "nvx_share=0,/workspace,rw",
-        ):
-            with self.subTest(cmdline=cmdline):
-                result, log = self._run(cmdline)
-                self.assertEqual(result.returncode, 125, result.stdout)
-                self.assertIn("bootstrap is incomplete", result.stderr)
-                self.assertEqual(log, "")
-
-    def test_agent_fatal_unmounts_mounted_shares(self):
-        mount_log = self.root / "mount.log"
-        functions = "".join(
-            _shell_function(self.source, name)
-            for name in ("unmount_live_shares", "fatal", *self.SHARE_FUNCTIONS)
-        ).replace("/sbin/nvx-exit", "nvx_exit")
-        result = subprocess.run(
-            [
-                self.shell,
-                "-s",
-                "--",
-                self.rootfs.as_posix(),
-                self._aggregate("0,/workspace,rw", "1,/opt/tools,ro"),
-                mount_log.as_posix(),
-                self.runtime,
-            ],
-            input=(
-                "set -eu\n"
-                "rootfs=$1\ncmdline=$2\nmount_log=$3\nruntime=$4\n"
-                "share_mountpoints=\n"
-                'mount() { printf "mount %s\\n" "$*" >>"$mount_log"; '
-                'case "$*" in *shares/1*) return 1 ;; esac; }\n'
-                'umount() { printf "umount %s\\n" "$1" >>"$mount_log"; }\n'
-                'nvx_exit() { printf "exit %s\\n" "$1" >>"$mount_log"; exit "$1"; }\n'
-                f"{functions}mount_live_shares\n"
-            ),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 125, result.stdout)
-        self.assertIn("failed to bind live share 1", result.stderr)
-        rootfs = self.rootfs.as_posix()
-        self.assertEqual(
-            mount_log.read_text(encoding="utf-8").splitlines(),
-            [
-                f"mount -t virtiofs -o rw,nosuid,nodev microvm {self.runtime}/shares",
-                f"mount -o bind {self.runtime}/shares/0 {rootfs}/workspace",
-                f"mount -o remount,bind,rw,nosuid,nodev {rootfs}/workspace",
-                f"mount -o bind {self.runtime}/shares/1 {rootfs}/opt/tools",
-                f"umount {rootfs}/workspace",
-                f"umount {self.runtime}/shares",
-                "exit 125",
-            ],
-        )
-
-    def test_agent_fails_closed_for_invalid_share_bootstrap(self):
-        (self.rootfs / "file").write_text("x", encoding="utf-8")
-        for cmdline, message in (
-            ("virtfs_dir=/workspace", "incomplete"),
-            ("virtfs_dir=/workspace virtfs_tag=microvm", "incomplete"),
-            ("virtfs_dir=/workspace virtfs_tag=bad/tag virtfs_mode=rw", "tag"),
-            ("virtfs_dir=/workspace virtfs_tag=microvm virtfs_mode=rx", "mode"),
-            ("virtfs_dir=workspace virtfs_tag=microvm virtfs_mode=rw", "absolute"),
-            ("virtfs_dir=/ virtfs_tag=microvm virtfs_mode=rw", "canonical"),
-            ("virtfs_dir=/a//b virtfs_tag=microvm virtfs_mode=rw", "canonical"),
-            ("virtfs_dir=/a/ virtfs_tag=microvm virtfs_mode=rw", "canonical"),
-            ("virtfs_dir=/a/./b virtfs_tag=microvm virtfs_mode=rw", "canonical"),
-            ("virtfs_dir=/a/../b virtfs_tag=microvm virtfs_mode=rw", "canonical"),
-            ("virtfs_dir=/a=b virtfs_tag=microvm virtfs_mode=rw", "reserved char"),
-            ('virtfs_dir=/a"b virtfs_tag=microvm virtfs_mode=rw', "reserved char"),
-            ("virtfs_dir=/proc virtfs_tag=microvm virtfs_mode=rw", "reserved"),
-            ("virtfs_dir=/sys/fs virtfs_tag=microvm virtfs_mode=rw", "reserved"),
-            ("virtfs_dir=/dev/shm virtfs_tag=microvm virtfs_mode=rw", "reserved"),
-            ("virtfs_dir=/.nvx-agent virtfs_tag=microvm virtfs_mode=ro", "reserved"),
-            ("virtfs_dir=/etc virtfs_tag=microvm virtfs_mode=ro", "reserved"),
-            ("virtfs_dir=/file virtfs_tag=microvm virtfs_mode=ro", "not a directory"),
-            (
-                "virtfs_dir=/workspace virtfs_tag=microvm virtfs_mode=rw "
-                "nvx_share=0,/workspace,rw",
-                "require an aggregate",
-            ),
-            (
-                "virtfs_dir=/shares virtfs_tag=microvm virtfs_mode=rw "
-                "virtfs_aggregate=1 nvx_share=0,/workspace,rw",
-                "must be mounted at",
-            ),
-            (self._aggregate(), "has no children"),
-            (self._aggregate(",/workspace,rw"), "child is invalid"),
-            (self._aggregate(".,/workspace,rw"), "child is invalid"),
-            (self._aggregate("..,/workspace,rw"), "child is invalid"),
-            (self._aggregate("a/b,/workspace,rw"), "child is invalid"),
-            (self._aggregate("a:b,/workspace,rw"), "child is invalid"),
-            (self._aggregate("a*,/workspace,rw"), "child is invalid"),
-            (self._aggregate("0,/workspace"), "child is invalid"),
-            (self._aggregate("0,/workspace,rx"), "mode"),
-            (self._aggregate("0,workspace,rw"), "absolute"),
-            (self._aggregate("0,/a,b,rw"), "reserved char"),
-            (self._aggregate('0,/a"b,rw', "1,/c,ro"), "reserved char"),
-            (self._aggregate("0,/workspace,rw", "1,/proc,ro"), "reserved"),
-            (self._aggregate("0,/file,ro"), "not a directory"),
-        ):
-            with self.subTest(cmdline=cmdline):
-                result, log = self._run(cmdline)
-                self.assertEqual(result.returncode, 125, result.stdout)
-                self.assertIn("live share", result.stderr)
-                self.assertIn(message, result.stderr)
-                self.assertEqual(log, "")
-
-    def test_agent_rejects_symbolic_link_in_share_target(self):
-        outside = self.root / "outside"
-        outside.mkdir()
-        try:
-            (self.rootfs / "workspace").symlink_to(outside, target_is_directory=True)
-        except OSError as error:
-            self.skipTest(f"symbolic links are unavailable: {error}")
-        result, log = self._run(
-            "virtfs_dir=/workspace/project virtfs_tag=microvm virtfs_mode=rw"
-        )
-        self.assertEqual(result.returncode, 125, result.stdout)
-        self.assertIn("crosses a symbolic link", result.stderr)
-        self.assertEqual(log, "")
-        self.assertFalse((outside / "project").exists())
-
-
-class SandboxRootTokenAgentTests(unittest.TestCase):
-    AGENT = SandboxShareAgentTests.AGENT
-    FIXTURE = (
-        Path(__file__).parents[1] / "nvx-rs" / "tests" / "fixtures" / "root-tokens.json"
-    )
-    UUID = "0123abcd-4567-89ef-0123-456789abcdef"
-    # nvx::protocol::root refuses a RAM upper beside a scratch block device,
-    # which it finds in the virtio_mmio.device= parameters of the command line
-    # as the kernel reads them. The shell init reads the tokens of those cases,
-    # and refuses the device that the kernel lists in /proc/iomem instead.
-    SCRATCH_DEVICE_ERROR = (
-        "a RAM upper takes no scratch block device, but the command line adds a "
-        "virtio-mmio device at 0xd0006000"
-    )
-
-    def setUp(self):
-        shell = _posix_shell()
-        if shell is None:
-            self.skipTest("POSIX shell is unavailable")
-        self.shell = shell
-        self.source = self.AGENT.read_text(encoding="utf-8")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
-
-    def _read(self, command_line: str) -> subprocess.CompletedProcess[str]:
-        """Runs the agent's reader of the root's boot tokens on `command_line`,
-        and prints the UUID that it expects of the distro layer and the upper."""
-        functions = "".join(
-            _shell_function(self.source, name)
-            for name in ("is_canonical_uuid", "read_layer_token", "read_root_tokens")
-        )
-        # Windows drops a newline from a process argument, so the command line
-        # comes from a file, as /proc/cmdline holds it.
-        path = self.root / "cmdline"
-        path.write_bytes(command_line.encode())
-        return subprocess.run(
-            [self.shell, "-s", "--", path.as_posix()],
-            input=(
-                "set -eu\n"
-                'cmdline=$(cat "$1")\n'
-                'fatal() { echo "FATAL: $*" >&2; exit 125; }\n'
-                f"{functions}"
-                "read_root_tokens\n"
-                'echo "layer_uuid=$layer_uuid upper=$upper"\n'
-            ),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-    def test_agent_reads_the_boot_tokens_as_nvx_rs_reads_them(self):
-        cases = json.loads(self.FIXTURE.read_text(encoding="utf-8"))["cases"]
-        accepted: set[str] = set()
-        devices = 0
-        for case in cases:
-            with self.subTest(case=case["name"]):
-                result = self._read(case["command_line"])
-                layout = case.get("layout")
-                if case.get("error") == self.SCRATCH_DEVICE_ERROR:
-                    self.assertNotIn("shell_error", case)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertRegex(result.stdout, r"\Alayer_uuid=\S* upper=ram\n\Z")
-                    devices += 1
-                    continue
-                if layout is not None and layout["format"] == "erofs":
-                    self.assertNotIn("shell_error", case)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    identity = layout["identity"] or ""
-                    self.assertEqual(
-                        result.stdout,
-                        f"layer_uuid={identity} upper={layout['upper']}\n",
-                    )
-                    accepted.add(layout["upper"])
-                    continue
-                self.assertEqual(result.returncode, 125, result.stdout)
-                self.assertRegex(result.stderr, r"\AFATAL: [^\n]+\n\Z")
-                self.assertIn(case.get("shell_error", ""), result.stderr)
-        self.assertEqual(accepted, {"scratch", "ram"})
-        self.assertGreater(devices, 0)
-
-    def test_agent_explains_the_roots_that_it_cannot_assemble(self):
-        for command_line, message in (
-            (
-                f"nvx_layer=distro,0xd0003000,{self.UUID} nvx_scratch=0xd0006000,ext4",
-                "the nvx_layer kernel parameter names no image format, erofs or "
-                f"gpt: 'distro,0xd0003000,{self.UUID}'",
-            ),
-            (
-                f"nvx_layer=distro,0xd0003000,gpt:{self.UUID} nvx_overlay_upper=ramfs",
-                f"nvx_layer=distro,0xd0003000,gpt:{self.UUID} names a GPT image, "
-                "which this init cannot assemble: it assembles only an EROFS image",
-            ),
-        ):
-            with self.subTest(command_line=command_line):
-                result = self._read(command_line)
-                self.assertEqual(result.returncode, 125, result.stdout)
-                self.assertEqual(result.stderr, f"FATAL: {message}\n")
-
-    def test_agent_requires_one_upper(self):
-        layer = f"nvx_layer=distro,0xd0003000,erofs:{self.UUID}"
-        for command_line, message in (
-            (
-                f"{layer} nvx_overlay_upper=ramfs nvx_scratch=0xd0006000,ext4",
-                "a layered root has one upper, but the command line names both "
-                "nvx_scratch and nvx_overlay_upper",
-            ),
-            (
-                f"quiet {layer}",
-                "the nvx_layer kernel parameter needs an upper, nvx_scratch or "
-                "nvx_overlay_upper",
-            ),
-            (
-                f"{layer} nvx_overlay_upper",
-                "the nvx_overlay_upper kernel parameter has no value",
-            ),
-            (
-                f"{layer} nvx_overlay_upper=tmpfs",
-                "the nvx_overlay_upper kernel parameter must be ramfs, not 'tmpfs'",
-            ),
-            (
-                f"{layer} nvx_overlay_upper=ramfs nvx_overlay_upper=ramfs",
-                "the nvx_overlay_upper kernel parameter is repeated",
-            ),
-        ):
-            with self.subTest(command_line=command_line):
-                result = self._read(command_line)
-                self.assertEqual(result.returncode, 125, result.stdout)
-                self.assertEqual(result.stderr, f"FATAL: {message}\n")
-
-    def test_agent_refuses_a_scratch_device_beside_a_ram_upper(self):
-        iomem = self.root / "iomem"
-        function = _shell_function(self.source, "refuse_scratch_device").replace(
-            "/proc/iomem", iomem.as_posix()
-        )
-        for content, refused in (
-            ("", False),
-            (
-                "d0003000-d0003fff : virtio-mmio.0\n"
-                "  d0003000-d0003fff : virtio-mmio.0\n"
-                "d0007000-d0007fff : virtio-mmio.1\n",
-                False,
-            ),
-            # Only a virtio-mmio device whose window starts at the base counts.
-            ("d0006000-d0006fff : reserved\n", False),
-            ("d0005000-d0006fff : virtio-mmio.2\n", False),
-            (
-                "d0003000-d0003fff : virtio-mmio.0\n"
-                "d0006000-d0006fff : virtio-mmio.1\n"
-                "  d0006000-d0006fff : virtio-mmio.1\n",
-                True,
-            ),
-        ):
-            with self.subTest(content=content):
-                iomem.write_text(content, encoding="utf-8")
-                result = subprocess.run(
-                    [self.shell, "-s"],
-                    input=(
-                        "set -eu\n"
-                        'fatal() { echo "FATAL: $*" >&2; exit 125; }\n'
-                        f"{function}refuse_scratch_device\necho accepted\n"
-                    ),
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
-                if refused:
-                    self.assertEqual(result.returncode, 125, result.stdout)
-                    self.assertEqual(
-                        result.stderr,
-                        "FATAL: a RAM upper takes no scratch block device, but the "
-                        "kernel has a virtio-mmio device at 0xd0006000\n",
-                    )
-                else:
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(result.stdout, "accepted\n")
-
-    def test_agent_checks_a_ram_upper_before_it_mounts_anything(self):
-        check = self.source.index('\n[ "$upper" = scratch ] || refuse_scratch_device\n')
-        self.assertLess(self.source.index("\nread_root_tokens\n"), check)
-        self.assertLess(check, self.source.index("\nmount_layer distro "))
-        self.assertLess(
-            self.source.index("\nmount_layer distro "),
-            self.source.index("\nmount_upper\n"),
-        )
-        self.assertIn(
-            "upperdir=$upper_point/upper,workdir=$upper_point/work,metacopy=on,xino=on",
-            self.source,
-        )
-
-    def test_agent_mounts_the_upper_that_the_tokens_name(self):
-        runtime = (self.root / "run").as_posix()
-        log = self.root / "commands.log"
-        for upper, commands, point, name in (
-            (
-                "scratch",
-                [
-                    f"mkdir -p {runtime}/scratch",
-                    "resolve 0xd0006000",
-                    "blockdev --flushbufs /dev/vdb",
-                    f"mount -t ext4 -o rw,nosuid,nodev /dev/vdb {runtime}/scratch",
-                    f"mkdir -p {runtime}/scratch/upper {runtime}/scratch/work",
-                ],
-                f"{runtime}/scratch",
-                "scratch",
-            ),
-            (
-                "ram",
-                [
-                    f"mkdir -p {runtime}/tmpfs",
-                    f"mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs {runtime}/tmpfs",
-                    f"mkdir -p {runtime}/tmpfs/upper {runtime}/tmpfs/work",
-                ],
-                f"{runtime}/tmpfs",
-                "the tmpfs upper",
-            ),
-        ):
-            with self.subTest(upper=upper):
-                log.unlink(missing_ok=True)
-                result = subprocess.run(
-                    [self.shell, "-s", "--", runtime, log.as_posix(), upper],
-                    input=(
-                        "set -eu\n"
-                        "runtime=$1\nlog=$2\nupper=$3\n"
-                        "scratch=$runtime/scratch\ntmpfs=$runtime/tmpfs\n"
-                        'fatal() { echo "FATAL: $*" >&2; exit 125; }\n'
-                        'resolve_block_device() { echo "resolve $*" >>"$log"; '
-                        "echo /dev/vdb; }\n"
-                        'blockdev() { echo "blockdev $*" >>"$log"; }\n'
-                        'mount() { echo "mount $*" >>"$log"; }\n'
-                        'mkdir() { echo "mkdir $*" >>"$log"; }\n'
-                        f"{_shell_function(self.source, 'mount_upper')}"
-                        "mount_upper\n"
-                        'echo "upper_point=$upper_point upper_name=$upper_name"\n'
-                    ),
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(
-                    result.stdout, f"upper_point={point} upper_name={name}\n"
-                )
-                self.assertEqual(log.read_text(encoding="utf-8").splitlines(), commands)
-
-    def test_agent_checks_the_layer_uuid_only_when_the_token_names_one(self):
-        log = self.root / "commands.log"
-        for expected, outcome in (
-            ("", "mounted\n"),
-            (self.UUID, "mounted\n"),
-            ("fedcba98-7654-3210-fedc-ba9876543210", None),
-        ):
-            with self.subTest(expected=expected):
-                log.unlink(missing_ok=True)
-                result = subprocess.run(
-                    [
-                        self.shell,
-                        "-s",
-                        "--",
-                        self.root.as_posix(),
-                        log.as_posix(),
-                        expected,
-                    ],
-                    input=(
-                        "set -eu\n"
-                        "layers=$1\nlog=$2\n"
-                        'fatal() { echo "FATAL: $*" >&2; exit 125; }\n'
-                        "resolve_block_device() { echo /dev/vda; }\n"
-                        'blockdev() { echo "blockdev $*" >>"$log"; }\n'
-                        'mount() { echo "mount $*" >>"$log"; }\n'
-                        'blkid() { echo "blkid $*" >>"$log"; '
-                        f"echo {self.UUID}; }}\n"
-                        f"{_shell_function(self.source, 'mount_layer')}"
-                        'mount_layer distro 0xd0003000 "$3" ""\n'
-                        "echo mounted\n"
-                    ),
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
-                commands = log.read_text(encoding="utf-8").splitlines()
-                self.assertEqual(
-                    [command.split()[0] for command in commands],
-                    ["blockdev", "mount", "blkid"]
-                    if expected
-                    else ["blockdev", "mount"],
-                )
-                if outcome is None:
-                    self.assertEqual(result.returncode, 125, result.stdout)
-                    self.assertEqual(
-                        result.stderr,
-                        f"FATAL: distro layer UUID is {self.UUID}, expected "
-                        f"{expected}\n",
-                    )
-                else:
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(result.stdout, outcome)
 
 
 @unittest.skipIf(os.name == "nt", "requires POSIX symbolic links")
@@ -20481,7 +19403,7 @@ class SandboxSmokeProfileTests(unittest.TestCase):
                 + " esac; }\n"
             )
             return self._run(
-                ("status_field", "check_namespaces"),
+                ("status_field", "check_hostname", "check_namespaces"),
                 f"{readlink}check_namespaces\necho checked",
                 {
                     "/proc/1/status": self._fixture("init-status", init_status),
@@ -20535,6 +19457,30 @@ class SandboxSmokeProfileTests(unittest.TestCase):
         result = run(private, hostname="nvx-sandbox")
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("expected nvx-lifecycle", result.stderr)
+
+    def test_init_hostname_check_reads_the_encoded_command_line(self):
+        def run(command_line: str, hostname: str) -> subprocess.CompletedProcess[str]:
+            return self._run(
+                ("check_hostname",),
+                "nvx_init=true\ncheck_hostname\necho checked",
+                {
+                    "/proc/cmdline": self._fixture("cmdline", command_line + "\n"),
+                    "/proc/sys/kernel/hostname": self._fixture(
+                        "hostname", hostname + "\n"
+                    ),
+                },
+            )
+
+        # nvx-lifecycle, as nvx-init's command line encodes it.
+        encoded = "nvx_hostname=6e76782d6c6966656379636c65"
+        result = run(
+            f"console=hvc0 {encoded} nvx_machine_id=generated", "nvx-lifecycle"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "checked\n")
+        result = run(f"console=hvc0 {encoded}", "nvx-sandbox")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("expected 6e76782d6c6966656379636c65", result.stderr)
 
     def _check_mounts(
         self, mountinfo: str, command_line: str
@@ -20838,6 +19784,7 @@ class SandboxSmokeProfileTests(unittest.TestCase):
                 "check_identity",
                 "check_capabilities",
                 "check_namespaces",
+                "check_hostname",
                 "check_mounts",
                 "check_devices",
                 "check_device_creation",
@@ -20894,6 +19841,28 @@ class SandboxSmokeProfileTests(unittest.TestCase):
         result = run("/workspace")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("check_entry ", result.stdout.splitlines())
+        # An execution of nvx-init shares its namespaces and cgroup, so the
+        # profile checks only its host name of them.
+        result = run("init", "entry", "/workspace", "rw")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "check_identity ",
+                "check_capabilities ",
+                "check_hostname ",
+                "check_mounts ",
+                "check_devices ",
+                "check_device_creation ",
+                "check_machine_id ",
+                "check_ports ",
+                "check_image ",
+                "NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534",
+                "check_entry ",
+                "check_share /workspace rw",
+                "NVX-UBUNTU-SANDBOX-OK uid=65534 gid=65534",
+            ],
+        )
         result = run("limits", "33554432")
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("limits requires MEMORY_MAX and PIDS_MAX", result.stderr)
@@ -21093,331 +20062,6 @@ class StaticElfTests(unittest.TestCase):
                 nvx.main(["check-static-elf", str(static), str(dynamic)]), 1
             )
         self.assertIn("not static executables", error.getvalue())
-
-
-class RuntimeAdapterSuiteTests(unittest.TestCase):
-    def _scenarios(self, text: str) -> Path:
-        """Writes `text` as the scenarios of an adapter, and returns their path."""
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        path = Path(temporary.name) / "scenarios.txt"
-        path.write_text(text, encoding="utf-8")
-        return path
-
-    def _run(
-        self,
-        path: Path,
-        listings: Mapping[tuple[str, str], str],
-        *,
-        targets: Mapping[str, str] | None = None,
-        check_only: bool = False,
-        artifacts: str | None = None,
-    ) -> tuple[int, list[tuple[list[str], dict[str, str]]], str, str]:
-        """Runs the handler on the scenarios at `path`, for an adapter whose Cargo
-        metadata holds the test targets `targets`, by name with their sources, and
-        whose targets list the tests of `listings`, by target and by the first of
-        libtest's arguments, and pass each run of named tests, with `artifacts` in
-        `NVX_ARTIFACTS_DIR`, or without it. Returns the handler's status, the runs, and
-        what it printed to its standard output and error."""
-        if targets is None:
-            targets = {name: f"tests/{name}.rs" for name in ("vm_a", "unit", "other")}
-        package = {
-            "name": "runtime-adapter",
-            "targets": [
-                {"name": "runtime_adapter", "kind": ["lib"], "src_path": "src/lib.rs"},
-                {"name": "runtime-adapter-host", "kind": ["bin"], "src_path": "h.rs"},
-                *(
-                    {"name": name, "kind": ["test"], "src_path": source}
-                    for name, source in targets.items()
-                ),
-            ],
-        }
-        metadata = json.dumps({"packages": [package]})
-        runs: list[tuple[list[str], dict[str, str]]] = []
-
-        def fake_listing(
-            command: list[str], environment: dict[str, str]
-        ) -> subprocess.CompletedProcess[str]:
-            if command[1] == "metadata":
-                return subprocess.CompletedProcess(command, 0, metadata, "")
-            target = (
-                command[command.index("--test") + 1] if "--test" in command else "lib"
-            )
-            first = command[command.index("--") + 1]
-            return subprocess.CompletedProcess(
-                command, 0, listings[(target, first)], ""
-            )
-
-        def fake_streamed(
-            command: list[str], environment: dict[str, str]
-        ) -> tuple[str, int]:
-            runs.append((command, environment))
-            names = command[command.index("--exact") + 1 :]
-            output = "".join(f"test {name} ... ok\n" for name in names)
-            return f"{output}\ntest result: ok. {len(names)} passed; 0 failed;\n", 0
-
-        guest = path.parent / "runtime-adapter-guest"
-        guest.write_bytes(b"")
-        args = argparse.Namespace(
-            backend="kvm", cargo="cargo", check_only=check_only, guest_agent=guest
-        )
-        scenarios = runtime_adapter_tests.read_scenarios(path)
-        with (
-            patch.object(
-                runtime_adapter_tests, "read_scenarios", return_value=scenarios
-            ),
-            patch.object(runtime_adapter_tests, "ADAPTER_DIRECTORY", path.parent),
-            patch.object(runtime_adapter_tests, "validate_openvmm_test_backend"),
-            patch.object(runtime_adapter_tests, "listing", fake_listing),
-            patch.object(runtime_adapter_tests, "streamed", fake_streamed),
-            patch.dict(os.environ),
-            contextlib.redirect_stdout(io.StringIO()) as stdout,
-            contextlib.redirect_stderr(io.StringIO()) as stderr,
-        ):
-            os.environ.pop("NVX_ARTIFACTS_DIR", None)
-            if artifacts is not None:
-                os.environ["NVX_ARTIFACTS_DIR"] = artifacts
-            status = runtime_adapter_tests.command_test_runtime_adapter(args)
-        return status, runs, stdout.getvalue(), stderr.getvalue()
-
-    def test_cli_registers_the_suite(self):
-        args = nvx.parse_args(["test-runtime-adapter", "--backend", "kvm"])
-
-        self.assertEqual(args.backend, "kvm")
-        self.assertEqual(args.cargo, "cargo")
-        self.assertFalse(args.check_only)
-        self.assertEqual(args.guest_agent, runtime_adapter_tests.GUEST_AGENT)
-        self.assertIs(args.handler, runtime_adapter_tests.command_test_runtime_adapter)
-
-    def test_ci_runs_the_suite_by_name_on_each_backend(self):
-        workflow = (
-            BuildConstants.REPO_ROOT
-            / ".github"
-            / "workflows"
-            / "run-nvx-microvm-tests.yml"
-        ).read_text(encoding="utf-8")
-
-        self.assertEqual(workflow.count("nvx.py test-runtime-adapter"), 2)
-        self.assertIn("python3 scripts/nvx.py test-runtime-adapter", workflow)
-        self.assertIn("python scripts\\nvx.py test-runtime-adapter", workflow)
-        self.assertNotIn("cargo test --locked --features host -- --ignored", workflow)
-
-    def test_scenarios_name_targets_and_tests_in_the_order_of_their_lines(self):
-        path = self._scenarios("# The suite.\n\nvm_a b  # last\nunit x\nvm_a a\n")
-
-        self.assertEqual(
-            runtime_adapter_tests.read_scenarios(path),
-            [
-                runtime_adapter_tests.Target("vm_a", ("b", "a")),
-                runtime_adapter_tests.Target("unit", ("x",)),
-            ],
-        )
-
-    def test_scenarios_refuse_other_lines(self):
-        for text, problem in (
-            ("vm_a\n", r":1: expected a target and a test, not 'vm_a'"),
-            ("unit x\nvm_a a b\n", r":2: expected a target and a test"),
-            ("vm_a a\nvm_a a\n", r":2: vm_a a is named twice"),
-            ("# Nothing yet.\n", r"names no scenario"),
-        ):
-            with (
-                self.subTest(text=text),
-                self.assertRaisesRegex(common.ScriptError, problem),
-            ):
-                runtime_adapter_tests.read_scenarios(self._scenarios(text))
-
-    def test_the_adapter_s_readme_lists_its_scenarios(self):
-        targets = runtime_adapter_tests.read_scenarios()
-        named = [(target.name, test) for target in targets for test in target.tests]
-        self.assertLessEqual(
-            {"vm_clone", "vm_template", "vm_layered", "template_operations"},
-            {target.name for target in targets},
-        )
-        readme = (runtime_adapter_tests.ADAPTER_DIRECTORY / "README.md").read_text(
-            encoding="utf-8"
-        )
-        section = re.split(r"\n#+ ", readme.split("\n### Stage scenarios\n", 1)[1])[0]
-        rows = re.findall(r"^\| `(\w+)` \| `(\w+)` \|", section, re.MULTILINE)
-
-        self.assertEqual(rows, named)
-
-    def test_libtest_s_terse_list_names_the_tests(self):
-        self.assertEqual(
-            runtime_adapter_tests.listed_tests("a: test\nb::c: test\nd: bench\n"),
-            ["a", "b::c"],
-        )
-
-    def test_naming_problems_name_missing_and_unnamed_tests(self):
-        target = runtime_adapter_tests.Target("vm_a", ("a", "gone"))
-
-        self.assertEqual(
-            runtime_adapter_tests.naming_problems(target, ["gone", "a"]), []
-        )
-        self.assertEqual(
-            runtime_adapter_tests.naming_problems(target, ["a", "new"]),
-            ["vm_a has no test gone", "vm_a has the test new, which no scenario names"],
-        )
-
-    def test_a_run_passes_once_each_scenario_ran_and_passed(self):
-        target = runtime_adapter_tests.Target("vm_a", ("a", "b"))
-        output = (
-            "running 2 tests\n"
-            "test b ... ok\n"
-            "test a has been running for over 60 seconds\n"
-            "test a ... ok\n\n"
-            "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; "
-            "3 filtered out; finished in 9.00s\n"
-        )
-
-        self.assertEqual(runtime_adapter_tests.run_problems(target, output, 0), [])
-
-    def test_a_run_fails_once_a_scenario_failed_or_did_not_run(self):
-        target = runtime_adapter_tests.Target("vm_a", ("a", "b"))
-        result = "test result: {}. {} passed; {} failed; 0 ignored; 0 measured; "
-        for output, status, problems in (
-            (
-                f"test a ... ok\ntest b ... FAILED\n\n{result.format('FAILED', 1, 1)}",
-                101,
-                ["vm_a b: FAILED", "vm_a passed 1 tests, not 2"],
-            ),
-            (
-                f"test a ... ok\n\n{result.format('ok', 1, 0)}4 filtered out\n",
-                0,
-                ["vm_a b did not run", "vm_a passed 1 tests, not 2"],
-            ),
-            (
-                f"running 0 tests\n\n{result.format('ok', 0, 0)}5 filtered out\n",
-                0,
-                [
-                    "vm_a a did not run",
-                    "vm_a b did not run",
-                    "vm_a passed 0 tests, not 2",
-                ],
-            ),
-            (
-                f"test a ... ok\ntest b ... ok\n\n{result.format('ok', 2, 0)}\n",
-                1,
-                ["the tests of vm_a exited with status 1"],
-            ),
-            ("error: could not compile `runtime-adapter`\n", 101, None),
-        ):
-            with self.subTest(output=output):
-                found = runtime_adapter_tests.run_problems(target, output, status)
-                if problems is None:
-                    self.assertIn("vm_a passed 0 tests, not 2", found)
-                else:
-                    self.assertEqual(found, problems)
-
-    def test_the_handler_checks_the_names_then_runs_each_target_by_name(self):
-        path = self._scenarios("vm_a a\nvm_a b\nunit x\n")
-        listings = {
-            ("vm_a", "--list"): "a: test\nb: test\n",
-            ("unit", "--list"): "x: test\n",
-            ("lib", "--ignored"): "",
-            ("other", "--ignored"): "",
-        }
-
-        status, runs, stdout, stderr = self._run(path, listings)
-
-        self.assertEqual(status, 0, stderr)
-        self.assertEqual(
-            [command for command, _ in runs],
-            [
-                runtime_adapter_tests.cargo_test(
-                    "cargo", "vm_a", "--include-ignored", "--exact", "a", "b"
-                ),
-                runtime_adapter_tests.cargo_test(
-                    "cargo", "unit", "--include-ignored", "--exact", "x"
-                ),
-            ],
-        )
-        environment = runs[0][1]
-        self.assertEqual(environment["NVX_HYPERVISOR"], "kvm")
-        self.assertEqual(
-            environment["NVX_ARTIFACTS_DIR"], os.fspath(BuildConstants.REPO_ROOT)
-        )
-        self.assertEqual(
-            Path(environment["RUNTIME_ADAPTER_GUEST"]),
-            (path.parent / "runtime-adapter-guest").resolve(),
-        )
-        self.assertIn("the 3 scenarios of 2 targets passed on kvm", stdout)
-
-        # A check runs nothing, and needs neither a hypervisor nor the guest agent.
-        status, runs, stdout, _ = self._run(path, listings, check_only=True)
-        self.assertEqual((status, runs), (0, []))
-        self.assertIn("3 scenarios name exactly the tests of 2 targets", stdout)
-
-    def test_the_handler_takes_a_relative_directory_of_artifacts_from_the_caller(self):
-        path = self._scenarios("unit x\n")
-        listings = {
-            ("unit", "--list"): "x: test\n",
-            ("lib", "--ignored"): "",
-            ("vm_a", "--ignored"): "",
-            ("other", "--ignored"): "",
-        }
-        for artifacts, expected in (
-            # Cargo runs the tests in the adapter's directory, not the caller's.
-            ("relative", Path("relative").resolve()),
-            (os.fspath(path.parent), path.parent.resolve()),
-            # NVX takes an empty directory for none, and the command this checkout.
-            ("", BuildConstants.REPO_ROOT),
-        ):
-            with self.subTest(artifacts=artifacts):
-                status, runs, _, stderr = self._run(path, listings, artifacts=artifacts)
-                self.assertEqual(status, 0, stderr)
-                self.assertEqual(Path(runs[0][1]["NVX_ARTIFACTS_DIR"]), expected)
-
-    def test_the_handler_runs_nothing_once_the_names_are_not_the_tests(self):
-        path = self._scenarios("vm_a a\nvm_a gone\ngone x\n")
-        listings = {
-            ("vm_a", "--list"): "a: test\nnew: test\n",
-            ("lib", "--ignored"): "unit::vm: test\n",
-            ("other", "--ignored"): "vm: test\n",
-            ("vm_dir", "--ignored"): "vm: test\n",
-        }
-        targets = {
-            "vm_a": "tests/vm_a.rs",
-            "other": "tests/other.rs",
-            # Cargo also builds a directory of the tests directory with a main.rs.
-            "vm_dir": "tests/vm_dir/main.rs",
-        }
-
-        status, runs, _, stderr = self._run(path, listings, targets=targets)
-
-        self.assertEqual((status, runs), (1, []))
-        for problem in (
-            "vm_a has no test gone",
-            "vm_a has the test new, which no scenario names",
-            "gone is not a test target of the adapter",
-            "the library has the ignored test unit::vm, which no scenario names",
-            "other has the ignored test vm, which no scenario names",
-            "vm_dir has the ignored test vm, which no scenario names",
-        ):
-            self.assertIn(problem, stderr)
-
-    def test_the_handler_refuses_an_adapter_that_cargo_does_not_describe(self):
-        path = self._scenarios("vm_a a\n")
-        for status, output, problem in (
-            (101, "", "cannot read the adapter's targets"),
-            (0, json.dumps({"packages": []}), "has no package runtime-adapter"),
-        ):
-
-            def fake_listing(
-                command: list[str],
-                environment: dict[str, str],
-                status: int = status,
-                output: str = output,
-            ) -> subprocess.CompletedProcess[str]:
-                return subprocess.CompletedProcess(command, status, output, "error")
-
-            with (
-                self.subTest(problem=problem),
-                patch.object(runtime_adapter_tests, "listing", fake_listing),
-                self.assertRaisesRegex(common.ScriptError, problem),
-            ):
-                runtime_adapter_tests.suite_problems(
-                    runtime_adapter_tests.read_scenarios(path), "cargo", {}
-                )
 
 
 class _TwoStreamInteraction:

@@ -11,10 +11,6 @@ pub const MAPS_TOKEN: &str = "nvx_maps=";
 /// The name of the [`MAPS_TOKEN`] token: its text up to the `=`.
 const MAPS_NAME: &[u8] = MAPS_TOKEN.as_bytes().split_at(MAPS_TOKEN.len() - 1).0;
 
-/// Token with which the guest creates an account for the workload identity when its image lacks
-/// a usable one.
-pub const WORKLOAD_ACCOUNT_TOKEN: &str = "nvx_workload_account=create";
-
 /// Parses the `nvx_maps=COUNT` token from a Linux kernel command line, whose tokens it reads as
 /// the guest's init splits them, with [`cmdline::init_tokens`].
 ///

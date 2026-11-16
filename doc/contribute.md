@@ -88,35 +88,43 @@ change selects, with the commands of the actions below, and runs them with
 | Code | Checks | Definition |
 | --- | --- | --- |
 | Python in `scripts/` and `.github/specula/` | Ruff lint and format with 88-column lines, Pyright in strict mode over `scripts/` against Linux and Windows APIs, and the Specula wiring tests. The code targets Python 3.10. | [check-quality](../.github/actions/check-quality/action.yml), [pyproject.toml](../pyproject.toml) |
-| Guest and setup shell scripts | ShellCheck, and shfmt with four-space indentation and indented `case` branches. Scripts are POSIX `sh` unless check-quality checks them as Bash. | [check-quality](../.github/actions/check-quality/action.yml) |
-| `scripts/setup/setup-windows-whp.ps1` | PowerShell syntax | [check-quality](../.github/actions/check-quality/action.yml) |
+| Guest, setup, and CI shell scripts | ShellCheck, and shfmt with four-space indentation and indented `case` branches. Scripts are POSIX `sh` unless check-quality checks them as Bash. | [check-quality](../.github/actions/check-quality/action.yml) |
+| `scripts/setup/setup-windows-whp.ps1` and the scripts of `scripts/setup/azure/windows/` | PowerShell syntax | [check-quality](../.github/actions/check-quality/action.yml) |
 | Markdown files and `doc/` paths | Every relative link and image in a tracked Markdown file resolves to a tracked file, and every anchor to a heading slug that GitHub generates, ignoring code. Every `doc/` path that a tracked file mentions resolves too, except the test fixtures that `DOC_PATH_FIXTURES` lists. | [check-quality](../.github/actions/check-quality/action.yml), [check_markdown_links.py](../scripts/check_markdown_links.py) |
 | Tests | Every test lives in a test file, and production files hold only the test hooks that the allowlist allows; see [Test layout](#test-layout) | [check-quality](../.github/actions/check-quality/action.yml), [check_test_layout.py](../scripts/check_test_layout.py) |
-| `nvx-rs/` | rustfmt, Clippy and rustdoc with warnings denied, Clippy also for the `cli` and `testing` features alone, tests including a bundled-release fixture, the minimum supported Rust version, a macOS check, the public API against its snapshots in `nvx-rs/public-api/`, and, through `nvx.py`, the musl lint, tests, build, digest manifest, and static-ELF check of the guest binaries; see [Rust crates](ci.md#rust-crates) | [check-nvx-rs](../.github/actions/check-nvx-rs/action.yml), [public_api.py](../scripts/public_api.py) |
-| `tests/runtime-adapter/` | rustfmt, then Clippy and rustdoc with warnings denied, the build, the tests, and the minimum supported Rust version of `nvx`, in the protocol-only, host-only, and, on Linux, static musl guest-only configurations; see [Rust crates](ci.md#rust-crates) | [check-nvx-rs](../.github/actions/check-nvx-rs/action.yml) |
-| NVX CLI | Compiles `scripts/`, runs every `scripts/test_*.py` module, and checks command help, on Linux and Windows, and compares the copies of OpenVMM's protocol vectors in `nvx-rs/tests/vectors/openvmm/`, and of the identities of its built-in CPU profiles in `nvx-rs/src/host/cli/cpu_generations.json`, with the submodule's files | [validate-nvx](../.github/actions/validate-nvx/action.yml), [ci.yml](../.github/workflows/ci.yml) |
+| `kernel/config-microvm` | Every setting of the kernel feature inventory holds, and every other symbol that the configuration sets is recorded in `kernel/config-microvm.derived`; see [Kernel configuration](build.md#kernel-configuration) | [check-quality](../.github/actions/check-quality/action.yml), [`check-kernel-config`](usage.md#check-kernel-config) |
+| `nvx-rs/` | rustfmt, Clippy and rustdoc with warnings denied, Clippy also for the `serde`, `cli` and `testing` features alone, tests, the minimum supported Rust version, a macOS check, the public API against its snapshots in `nvx-rs/public-api/`, and, through `nvx.py`, the musl lint, tests, build, digest manifest, and static-ELF check of the guest binaries; see [Rust crates](ci.md#rust-crates) | [check-nvx-rs](../.github/actions/check-nvx-rs/action.yml), [public_api.py](../scripts/public_api.py) |
+| NVX CLI | Compiles `scripts/`, runs every `scripts/test_*.py` module and the tests of the skills' scripts, and checks command help, on Linux and Windows, and compares the copies of OpenVMM's protocol vectors in `nvx-rs/tests/vectors/openvmm/`, and of the identities of its built-in CPU profiles in `nvx-rs/src/host/cli/cpu_generations.json`, with the submodule's files | [validate-nvx](../.github/actions/validate-nvx/action.yml), [ci.yml](../.github/workflows/ci.yml) |
 
 check-quality names each shell script that it checks, and a CLI test fails
 unless validate-nvx runs every `scripts/test_*.py` module on both operating
 systems, so add a new script or test module to those lists.
 
-A change to the public API of `nvx` updates its snapshots, which list it on
-Linux and on Windows, so that the change shows in the pull request's diff:
+A change to the public API of `nvx` updates its snapshots in
+`nvx-rs/public-api/`, which list it on Linux and on Windows, so that the
+change shows in the pull request's diff. The first command checks the
+snapshots, as the `nvx-rs` job does on Linux, and the second rewrites them:
 
 ```bash
+python3 scripts/public_api.py
 python3 scripts/public_api.py --update
 ```
 
 The script builds rustdoc's JSON with the Rust release that
-`rust-toolchain.toml` pins, and adds the musl and MSVC targets to it; see
+`rust-toolchain.toml` pins, and adds the musl and MSVC targets to it. It also
+fails unless the API's hidden items are one `main` per binary, the entry point
+that the binary's source calls, and the modules that hold it; see
 [Rust crates](ci.md#rust-crates).
 
 ## Test ownership
 
 OpenVMM owns control-plane coverage. Its own CI runs its unit,
-documentation, and VMM tests on each pull request into the pinned branch and
-on each push to it, and NVX CI checks that they passed the pinned revision
-instead of running them (see [OpenVMM CI](ci.md#openvmm-ci)). Run its unit and
+documentation, and VMM tests on each pull request into the pinned branch that
+is ready for review and on the pushes to it, and the `openvmm-ci` job of NVX
+CI checks that they passed
+the pinned revision instead of running them, with
+[`check-openvmm-ci`](usage.md#check-openvmm-ci), which checks a checkout's pin
+locally too (see [OpenVMM CI](ci.md#openvmm-ci)). Run its unit and
 documentation tests locally with
 `scripts/nvx.py test-openvmm-unit` and its VMM tests with
 `scripts/nvx.py test-openvmm --backend BACKEND`. The VMM tests boot
@@ -133,29 +141,44 @@ devices. Add those scenarios to
 The scenarios that drive the public `nvx-rs sandbox` commands live in
 `scripts/nvx_tools/managed_exec_tests.py`,
 `scripts/nvx_tools/sandbox_lifecycle_tests.py`,
-`scripts/nvx_tools/sandbox_proxy_tests.py`, and
-`scripts/nvx_tools/sandbox_ram_upper_tests.py`, and `microvm_tests.py`
+`scripts/nvx_tools/sandbox_proxy_tests.py`,
+`scripts/nvx_tools/sandbox_ram_upper_tests.py`, and `microvm_tests.py`, which
 registers them. `sandbox` and the control protocol belong to `nvx-rs`
 ([microsoft/nvx#359](https://github.com/microsoft/nvx/issues/359)), so the
 scenarios drive them as commands, compile egress policies with
 `nvx-rs egress compile`, and leave the control session to `nvx-rs`: the
 `managed-lifecycle` scenario builds OpenVMM's command line and runs the ignored
-`nvx-rs` test `tests/managed_lifecycle.rs`, which drives the guest. Add no
+`nvx-rs` unit test `src/host/session/tests/managed_lifecycle.rs`, which drives
+the guest, and the
+`vm-lifecycle` scenario runs the ignored test `tests/vm_lifecycle.rs`, which
+drives a VM through the public API of `nvx`. Add no
 Python client of the control protocol, lifecycle, or egress logic.
 
-Unit tests for the host tooling live in `scripts/test_*.py`. The `nvx` crate
+The guest and sandbox jobs of the three backends run the acceptance of the
+library and the CLI on real VMs: the smoke tests `vm-lifecycle`, which
+creates, spawns, reattaches to, and stops a VM through the public API, and
+`snapshot-core` and `snapshot-tiers`, which capture named snapshots with
+nvx-init as the guest and restore them, concurrently too, under the CLI's lock
+of the snapshot; and the CLI's twelve cold cells, each image format, an EROFS
+layer or a GPT disk, over each upper, a scratch image or RAM, on each of KVM,
+MSHV, and WHP. The [case matrix](acceptance-case-matrix.md) names the scenarios
+and steps of each smoke test and cell.
+
+Unit tests for the host tooling live in `scripts/test_*.py`, which the NVX CLI
+jobs run. The `nvx` crate
 keeps the unit tests of each module in the module's `tests` module, in files
 of their own beside its source, as [Test layout](#test-layout) describes, and
-integration tests in its `tests` directory, and also runs
-`tests/guest_tools.rs` against the exact guest-profile binaries. Tests of the NVX
+integration tests in its `tests` directory, among them the
+[security checklist](../nvx-rs/tests/security_checklist.rs), which checks
+through the public API alone the security requirements that the host's
+documentation states for a VM's directory and outputs and for a snapshot's
+directory. The `nvx-rs` job runs them as
+[check-nvx-rs](../.github/actions/check-nvx-rs/action.yml) defines, and also
+runs `tests/guest_tools.rs` against the exact guest-profile binaries;
+[Testing](../nvx-rs/README.md#testing) describes them. Tests of the NVX
 mechanics, such as the conformance vectors of the control protocol, belong in
-`nvx`. Tests of what an independent adapter observes through
-the public API of `nvx` alone, such as its own framing over the control
-session between the host and the guest, belong in the
-[runtime adapter](../tests/runtime-adapter/README.md), whose consolidated
-suite the microVM jobs run on each backend with
-`scripts/nvx.py test-runtime-adapter --backend BACKEND`. [Continuous integration](ci.md)
-describes how CI checks OpenVMM's own CI and what the NVX microVM suite covers.
+`nvx`. [Continuous integration](ci.md) describes how CI checks OpenVMM's own CI
+and what the NVX microVM suite covers.
 
 ## Test layout
 
@@ -342,7 +365,8 @@ A pin promotion moves the `openvmm` gitlink to a reviewed OpenVMM revision:
 - In the pull request, name the OpenVMM pull request and the exact pinned
   SHA, the scope and any prerequisite revisions, and the validation you ran.
 - A gitlink change is an input of every CI suite, so its pull request runs
-  the full matrix, including both OpenVMM suites.
+  the full matrix, including the [OpenVMM CI](ci.md#openvmm-ci) check of the
+  new pin, which waits up to 300 minutes for OpenVMM's CI to pass it.
 - When a rebase conflicts on the gitlink, do not pick either side: combining
   both changes usually needs a new OpenVMM revision.
 

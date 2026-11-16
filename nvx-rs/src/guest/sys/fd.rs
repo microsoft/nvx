@@ -1,25 +1,19 @@
 //! Owned file descriptors and safe file-oriented system operations.
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub(crate) use nix::fcntl::OFlag as OpenFlags;
-use nix::fcntl::{FcntlArg, FdFlag, Flock, FlockArg, SealFlag, fcntl};
+use nix::fcntl::{FcntlArg, Flock, FlockArg, fcntl};
 use nix::poll::{PollFd, PollFlags};
-use nix::sys::memfd::{MFdFlags, memfd_create};
-use nix::sys::socket::{AddressFamily, Shutdown, SockFlag, SockType, shutdown, socketpair};
 pub(crate) use nix::sys::stat::Mode;
 use nix::sys::stat::SFlag;
 use nix::unistd::Whence;
 
 use super::Errno;
-
-/// The seals that make an execution configuration immutable.
-const IMMUTABLE_SEALS: SealFlag = SealFlag::F_SEAL_WRITE
-    .union(SealFlag::F_SEAL_GROW)
-    .union(SealFlag::F_SEAL_SHRINK)
-    .union(SealFlag::F_SEAL_SEAL);
 
 /// An owned file descriptor.
 ///
@@ -38,11 +32,6 @@ impl FileDescriptor {
     pub(super) unsafe fn from_raw(descriptor: RawFd) -> Self {
         // SAFETY: the caller guarantees that the descriptor is open and has no other owner.
         Self(unsafe { OwnedFd::from_raw_fd(descriptor) })
-    }
-
-    /// Formats the descriptor number as a NUL-terminated decimal argument.
-    pub(crate) fn argument(&self) -> CString {
-        CString::new(self.0.as_raw_fd().to_string()).expect("a decimal descriptor has no NUL")
     }
 
     /// Reads bytes once, without retrying an interrupted call.
@@ -85,6 +74,38 @@ impl FileDescriptor {
         Ok(())
     }
 
+    /// Writes through a nonblocking pipe or character device by the caller deadline, without
+    /// waiting for flow control. Regular files ignore nonblocking mode. Legacy writes are unchanged.
+    pub(crate) fn write_all_until(
+        &self,
+        mut bytes: &[u8],
+        deadline: Option<Instant>,
+    ) -> Result<(), Errno> {
+        let Some(deadline) = deadline else {
+            return self.write_all(bytes);
+        };
+        FileLock::check_deadline(Some(deadline))?;
+        let flags = fcntl(&self.0, FcntlArg::F_GETFL).map(OpenFlags::from_bits_retain)?;
+        if !flags.contains(OpenFlags::O_NONBLOCK) {
+            return Err(Errno::EINVAL);
+        }
+        let kind =
+            SFlag::from_bits_truncate(nix::sys::stat::fstat(&self.0)?.st_mode) & SFlag::S_IFMT;
+        if !matches!(kind, SFlag::S_IFIFO | SFlag::S_IFCHR) {
+            return Err(Errno::EOPNOTSUPP);
+        }
+        while !bytes.is_empty() {
+            FileLock::check_deadline(Some(deadline))?;
+            match super::signal::write_without_sigpipe(self, bytes) {
+                Ok(0) => return Err(Errno::EIO),
+                Ok(count) => bytes = &bytes[count..],
+                Err(Errno::EINTR) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        FileLock::check_deadline(Some(deadline))
+    }
+
     /// Reads at `offset` once, preserving the C cast from `u64` to `off_t`.
     pub(crate) fn pread(&self, bytes: &mut [u8], offset: u64) -> Result<usize, Errno> {
         nix::sys::uio::pread(&self.0, bytes, offset as _)
@@ -117,12 +138,6 @@ impl FileDescriptor {
         nix::sys::stat::fchmod(&self.0, mode)
     }
 
-    /// Shuts down the sending direction of this connected socket, so that its peer reads end of
-    /// file, which closing it would not tell while another process holds a copy of it.
-    pub(crate) fn shut_down_sending(&self) -> Result<(), Errno> {
-        shutdown(self.0.as_raw_fd(), Shutdown::Write)
-    }
-
     /// Waits at most `timeout_ms` milliseconds for data to read, with one `poll` call.
     ///
     /// Returns whether `poll` reported `POLLIN`. An interrupted call is an error, not a retry.
@@ -147,41 +162,10 @@ impl FileDescriptor {
         fcntl(&self.0, FcntlArg::F_SETFL(flags | OpenFlags::O_NONBLOCK)).map(|_| ())
     }
 
-    /// Checks that this is an end of a pipe, which reads unless `writes`, and makes it
-    /// nonblocking and close-on-exec, as the ends of the pipes that an execution creates are. An
-    /// end of another kind of file, or one open for the other direction, is `EINVAL`.
-    pub(crate) fn take_pipe_end(&self, writes: bool) -> Result<(), Errno> {
-        let status = nix::sys::stat::fstat(&self.0)?;
-        if SFlag::from_bits_truncate(status.st_mode) & SFlag::S_IFMT != SFlag::S_IFIFO {
-            return Err(Errno::EINVAL);
-        }
-        let flags = fcntl(&self.0, FcntlArg::F_GETFL).map(OpenFlags::from_bits_retain)?;
-        let access = if writes {
-            OpenFlags::O_WRONLY
-        } else {
-            OpenFlags::O_RDONLY
-        };
-        if flags & OpenFlags::O_ACCMODE != access {
-            return Err(Errno::EINVAL);
-        }
-        fcntl(&self.0, FcntlArg::F_SETFL(flags | OpenFlags::O_NONBLOCK))?;
-        fcntl(&self.0, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map(|_| ())
-    }
-
-    /// Rewinds this descriptor to byte zero.
-    pub(crate) fn rewind(&self) -> Result<(), Errno> {
-        nix::unistd::lseek(&self.0, 0, Whence::SeekSet).map(|_| ())
-    }
-
     /// Moves this descriptor to the end of its file. On the kernel log device, it skips the
     /// records already written, so that reads return only later ones.
     pub(crate) fn seek_end(&self) -> Result<(), Errno> {
         nix::unistd::lseek(&self.0, 0, Whence::SeekEnd).map(|_| ())
-    }
-
-    /// Adds the complete immutable-file seal set used by execution configurations.
-    pub(crate) fn seal_immutable(&self) -> Result<(), Errno> {
-        fcntl(&self.0, FcntlArg::F_ADD_SEALS(IMMUTABLE_SEALS)).map(|_| ())
     }
 
     /// Closes this descriptor and returns an error if the kernel reports one.
@@ -231,7 +215,8 @@ impl io::Write for FileDescriptor {
     }
 }
 
-/// Gives up the descriptor to its new owner, which `crate::guest::spawn` hands to a child.
+/// Gives up the descriptor to its new owner, such as a socket that takes over an inherited
+/// descriptor.
 impl From<FileDescriptor> for OwnedFd {
     fn from(descriptor: FileDescriptor) -> Self {
         descriptor.0
@@ -243,37 +228,10 @@ pub(crate) fn open(path: &CStr, flags: OpenFlags, mode: Mode) -> Result<FileDesc
     nix::fcntl::open(path, flags, mode).map(FileDescriptor)
 }
 
-/// Opens `name` in the directory that `directory` refers to, whatever path names that directory
-/// now, with typed `flags` and `mode`.
-pub(crate) fn open_at(
-    directory: &FileDescriptor,
-    name: &CStr,
-    flags: OpenFlags,
-    mode: Mode,
-) -> Result<FileDescriptor, Errno> {
-    nix::fcntl::openat(&directory.0, name, flags, mode).map(FileDescriptor)
-}
-
-/// Creates an anonymous close-on-exec file that permits seals.
-pub(crate) fn create_memfd(name: &CStr) -> Result<FileDescriptor, Errno> {
-    memfd_create(name, MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING).map(FileDescriptor)
-}
-
 /// Creates a close-on-exec pipe and returns its owned read and write ends.
 pub(crate) fn create_pipe() -> Result<(FileDescriptor, FileDescriptor), Errno> {
     nix::unistd::pipe2(OpenFlags::O_CLOEXEC)
         .map(|(reader, writer)| (FileDescriptor(reader), FileDescriptor(writer)))
-}
-
-/// Creates a connected pair of close-on-exec Unix stream sockets and returns its owned ends.
-pub(crate) fn create_socket_pair() -> Result<(FileDescriptor, FileDescriptor), Errno> {
-    socketpair(
-        AddressFamily::Unix,
-        SockType::Stream,
-        None,
-        SockFlag::SOCK_CLOEXEC,
-    )
-    .map(|(first, second)| (FileDescriptor(first), FileDescriptor(second)))
 }
 
 /// Makes the null device the standard input, output, and error, and closes every other
@@ -317,6 +275,48 @@ pub(crate) fn unlink(path: &CStr) -> Result<(), Errno> {
 pub(crate) struct FileLock {
     /// The locked file, which the lock holds only so that dropping it releases the lock.
     _lock: Flock<OwnedFd>,
+}
+
+impl FileLock {
+    /// Checks an explicit caller deadline; ordinary operations pass `None`.
+    pub(crate) fn check_deadline(deadline: Option<Instant>) -> Result<(), Errno> {
+        match deadline {
+            Some(deadline) if Instant::now() >= deadline => Err(Errno::ETIMEDOUT),
+            _ => Ok(()),
+        }
+    }
+
+    /// Takes an exclusive file lock, bounding every retry by the same optional deadline.
+    pub(crate) fn acquire(
+        path: &CStr,
+        mode: Mode,
+        deadline: Option<Instant>,
+    ) -> Result<Self, Errno> {
+        let Some(deadline) = deadline else {
+            return super::lock_file(path, mode);
+        };
+        Self::check_deadline(Some(deadline))?;
+        let flags = OpenFlags::O_RDWR | OpenFlags::O_CREAT | OpenFlags::O_CLOEXEC;
+        let mut descriptor = nix::fcntl::open(path, flags, mode)?;
+        loop {
+            Self::check_deadline(Some(deadline))?;
+            match Flock::lock(descriptor, FlockArg::LockExclusiveNonblock) {
+                Ok(lock) => {
+                    Self::check_deadline(Some(deadline))?;
+                    return Ok(Self { _lock: lock });
+                }
+                Err((returned, Errno::EINTR | Errno::EWOULDBLOCK)) => {
+                    descriptor = returned;
+                    thread::sleep(
+                        deadline
+                            .saturating_duration_since(Instant::now())
+                            .min(Duration::from_millis(1)),
+                    );
+                }
+                Err((_, error)) => return Err(error),
+            }
+        }
+    }
 }
 
 /// Opens `path`, creating it with `mode` if it is missing, and waits for its exclusive lock,

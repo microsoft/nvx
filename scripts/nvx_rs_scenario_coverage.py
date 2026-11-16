@@ -9,10 +9,7 @@ LLVM_PROFILE_FILE that gives each process a profile of its own, it runs:
 
 - the microVM scenarios of `nvx.py test-microvm --backend kvm`, whose NVX_RS
   names a wrapper that records the start of each nvx-rs process and then
-  becomes the instrumented nvx-rs;
-- the runtime adapter's suite of `nvx.py test-runtime-adapter --backend kvm`,
-  whose host program and tests Cargo builds on the crate with the same
-  instrumentation.
+  becomes the instrumented nvx-rs.
 
 It then runs the crate's own tests as scripts/nvx_rs_coverage.py does, merges
 the profiles of the scenarios, of the crate's tests, and of both, and writes
@@ -33,8 +30,8 @@ nvx_rs_coverage.py counts it:
   coverage.json; scenarios/ and together/ also hold an HTML report, html/;
 - microvm/: the output directory of test-microvm, with the logs of the
   scenarios and their duration report;
-- build.log, microvm.log, runtime-adapter.log, and crate-tests.log: what the
-  build of nvx-rs and the runs printed.
+- build.log, microvm.log, and crate-tests.log: what the build of nvx-rs and
+  the runs printed.
 
 The "nvx-rs scenario coverage" section of doc/ci.md describes the measurement
 and the workflow that runs it.
@@ -62,22 +59,17 @@ from typing import Any, Protocol, cast
 import nvx_rs_coverage as coverage
 from nvx_rs_coverage import Count, Counts, MeasurementError
 from nvx_tools.adversarial_oracles import terminate_process_tree
-from nvx_tools.runtime_adapter_tests import ADAPTER_DIRECTORY, GUEST_AGENT
 
 REPO_ROOT = coverage.REPO_ROOT
 CRATE_DIR = coverage.CRATE_DIR
 NVX_PY = REPO_ROOT / "scripts" / "nvx.py"
-ADAPTER_DIR = ADAPTER_DIRECTORY
 DEFAULT_OUTPUT = REPO_ROOT / "build" / "nvx-rs-scenario-coverage"
-# The guest agent that test-runtime-adapter takes by default: its release
-# build in tests/runtime-adapter.
-DEFAULT_GUEST_AGENT = GUEST_AGENT
 # What a measurement builds and records, which the next one removes first. It
 # lies beneath nvx-rs/target, where an nvx-rs finds the checkout's artifacts
 # without --root, as one that `cargo build` makes does.
 WORK_DIR = CRATE_DIR / "target" / "scenario-coverage"
 BACKEND = "kvm"
-MEASUREMENT_FORMAT = 1
+MEASUREMENT_FORMAT = 2
 SUMMARY_FILE = "summary.md"
 MEASUREMENT_FILE = "measurement.json"
 PROCESSES_FILE = "processes.json"
@@ -87,7 +79,6 @@ HTML_DIRECTORY = "html"
 MICROVM_DIRECTORY = "microvm"
 BUILD_LOG = "build.log"
 MICROVM_LOG = "microvm.log"
-ADAPTER_LOG = "runtime-adapter.log"
 CRATE_TESTS_LOG = "crate-tests.log"
 # test-microvm's scenario duration report, in its output directory.
 DURATIONS_FILE = "scenario-durations.jsonl"
@@ -103,10 +94,9 @@ HTML_RUNS = ("scenarios", "together")
 METRICS = ("lines", "functions")
 # The environment that instruments every crate that Cargo builds, with the
 # crate's paths relative to it, as nvx_rs_coverage.py's reports have them,
-# and every other path absolute. cargo-llvm-cov's rustc wrapper would
-# instrument only the crates of nvx-rs's workspace, so the runtime adapter's
-# binaries, which link the crate, would link no profiler runtime and write no
-# profile.
+# and every other path absolute. The scenarios start Cargo themselves, so
+# --no-rustc-wrapper puts the instrumentation in flags that all of those
+# builds inherit rather than limiting it to builds selected by the wrapper.
 SHOW_ENV = (
     "cargo",
     "llvm-cov",
@@ -137,15 +127,13 @@ BUILD = (
 # their profiles rather than replace one another's.
 PROFILE_PATTERN = "%p-%m.profraw"
 # The directories, beneath a measurement's profiles, of the nvx-rs processes,
-# which the wrapper names; of the other processes of the build of nvx-rs and
-# of test-microvm, such as the managed-lifecycle scenario's test; and of the
-# processes of test-runtime-adapter. llvm-cov counts what a profile reached of
-# a function for every executable that holds the function under the same
-# symbol, so whether a group of executables wrote profiles shows only in the
-# profiles of its own directory.
+# which the wrapper names, and of the other processes of the build of nvx-rs
+# and of test-microvm, such as the managed-lifecycle scenario's test. llvm-cov
+# counts what a profile reached of a function for every executable that holds
+# the function under the same symbol, so whether a group of executables wrote
+# profiles shows only in the profiles of its own directory.
 NVX_RS_PROFILES = "nvx-rs"
 MICROVM_PROFILES = "microvm"
-ADAPTER_PROFILES = "runtime-adapter"
 # The reports leave out each file outside the crate, whose path the
 # instrumentation leaves absolute, and test code, and the LCOV reports the
 # test doubles too, as nvx_rs_coverage.py's do.
@@ -158,9 +146,8 @@ COMMAND_GROUPS = ("egress", "sandbox")
 # as one of that span's, for the rounding of the report's times.
 SPAN_SLACK_SECONDS = 1.0
 # The variable whose value, unique to a measurement, every process of its
-# runs inherits, by which an interrupted measurement ends those that left its
-# process tree, such as the VMs that the runtime adapter's host program starts
-# in sessions of their own, for its later processes to reattach to.
+# runs inherits, by which an interrupted measurement ends any processes that
+# left their run's process tree.
 RUN_VARIABLE = "NVX_SCENARIO_COVERAGE_RUN"
 # How long an interrupted measurement kills such processes before it gives up.
 END_SECONDS = 10.0
@@ -811,13 +798,9 @@ def problems(
     reaches the crate's production code, reached."""
     issues: list[str] = []
     runs = cast(dict[str, Any], measurement["runs"])
-    for name, what in (
-        ("microvm", "`nvx.py test-microvm`"),
-        ("runtime_adapter", "`nvx.py test-runtime-adapter`"),
-    ):
-        status = cast(int, runs[name]["status"])
-        if status != 0:
-            issues.append(f"{what} failed with status {status}.")
+    status = cast(int, runs["microvm"]["status"])
+    if status != 0:
+        issues.append(f"`nvx.py test-microvm` failed with status {status}.")
     tests = cast(dict[str, Any], measurement["crate_tests"])
     for retried in cast(list[dict[str, Any]], tests["retries"]):
         target = cast(str, retried["target"])
@@ -908,7 +891,7 @@ def render(
     lines = [
         "## nvx-rs scenario coverage on Linux/KVM",
         "",
-        "What the KVM microVM scenarios and the runtime adapter's suite reached of "
+        "What the KVM microVM scenarios reached of "
         f"the production code of the `nvx` crate at `{commit[:12]}`, alone and "
         f"together with the crate's own tests, built by {rustc} and measured by "
         f"{tool}. Production code leaves out test code, test data, and the test "
@@ -988,7 +971,6 @@ def _prepare_output(output: Path) -> Path:
         MICROVM_DIRECTORY,
         BUILD_LOG,
         MICROVM_LOG,
-        ADAPTER_LOG,
         CRATE_TESTS_LOG,
         *RUNS,
     ):
@@ -1026,7 +1008,6 @@ def _report(
 def measure(
     output: Path,
     *,
-    guest_agent: Path,
     scenarios: Sequence[str] = (),
     work: Path = WORK_DIR,
     run: coverage.Runner = run_command,
@@ -1049,12 +1030,10 @@ def measure(
     flags = instrumentation(run)
     _remove(work)
     target = work / "target"
-    adapter_target = work / "adapter-target"
     profiles = work / "profiles"
     nvx_rs_profiles = profiles / NVX_RS_PROFILES
     microvm_profiles = profiles / MICROVM_PROFILES
-    adapter_profiles = profiles / ADAPTER_PROFILES
-    profile_directories = (nvx_rs_profiles, microvm_profiles, adapter_profiles)
+    profile_directories = (nvx_rs_profiles, microvm_profiles)
     starts = work / "starts"
     profdata = work / "profdata"
     for directory in (*profile_directories, starts, profdata):
@@ -1063,12 +1042,9 @@ def measure(
     binary = target / "release" / "nvx-rs"
     earlier_strays = {
         directory: coverage.stray_profiles(directory)
-        for directory in (REPO_ROOT, CRATE_DIR, ADAPTER_DIR)
+        for directory in (REPO_ROOT, CRATE_DIR)
     }
     microvm = scenario_environment(base, flags, target, microvm_profiles, wrapper)
-    adapter = scenario_environment(
-        base, flags, adapter_target, adapter_profiles, wrapper
-    )
 
     try:
         if run_streamed(BUILD, microvm, output / BUILD_LOG) != 0:
@@ -1090,11 +1066,6 @@ def measure(
             command, microvm, output / MICROVM_LOG, forward_interrupts=True
         )
         microvm_seconds = round(time.monotonic() - started, 1)
-        command = [sys.executable, str(NVX_PY), "test-runtime-adapter"]
-        command += ["--backend", BACKEND, "--guest-agent", str(guest_agent)]
-        started = time.monotonic()
-        adapter_status = run_streamed(command, adapter, output / ADAPTER_LOG)
-        adapter_seconds = round(time.monotonic() - started, 1)
         tests = coverage.run_tests(output / CRATE_TESTS_LOG, run, CRATE_DIR)
     except BaseException:
         # Each run ended its process tree, but not the processes that left it.
@@ -1126,11 +1097,6 @@ def measure(
             "the crate's tests that the scenarios run",
             tuple(executables(target / "debug" / "deps")),
             microvm_profiles,
-        ),
-        Group(
-            "the runtime adapter's tests and host program",
-            tuple(objects(adapter_target)),
-            adapter_profiles,
         ),
     ]
     groups = [group for group in groups if group.paths]
@@ -1183,7 +1149,6 @@ def measure(
         "scenarios": list(scenarios),
         "runs": {
             "microvm": {"status": microvm_status, "seconds": microvm_seconds},
-            "runtime_adapter": {"status": adapter_status, "seconds": adapter_seconds},
         },
         "crate_tests": {
             "status": tests.status,
@@ -1219,22 +1184,13 @@ def measure(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Measure which host code of the nvx crate the KVM microVM "
-        "scenarios and the runtime adapter's suite reach, alone and together "
-        "with the crate's own tests."
+        "scenarios reach, alone and together with the crate's own tests."
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT,
         help="directory of the reports (default: build/nvx-rs-scenario-coverage)",
-    )
-    parser.add_argument(
-        "--guest-agent",
-        type=Path,
-        default=DEFAULT_GUEST_AGENT,
-        help="the runtime adapter's guest agent, a static musl executable that "
-        "the measurement doesn't instrument (default: its release build in "
-        "tests/runtime-adapter)",
     )
     parser.add_argument(
         "--scenario",
@@ -1251,16 +1207,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    guest_agent = cast(Path, arguments.guest_agent).resolve()
-    if not guest_agent.is_file():
-        print(
-            f"error: the runtime adapter's guest agent is missing: {guest_agent}; "
-            "build it in tests/runtime-adapter with `cargo build --locked --release "
-            "--features guest --target x86_64-unknown-linux-musl --bin "
-            "runtime-adapter-guest`",
-            file=sys.stderr,
-        )
-        return 1
     # A cancelled CI step gets SIGINT, and SIGTERM 7.5 s later, which then
     # interrupts the measurement as SIGINT does, so that its runs end too.
     if signal.getsignal(signal.SIGTERM) == signal.SIG_DFL:
@@ -1268,7 +1214,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         status = measure(
             cast(Path, arguments.output),
-            guest_agent=guest_agent,
             scenarios=cast(list[str], arguments.scenario),
         )
     except KeyboardInterrupt:

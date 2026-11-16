@@ -6,6 +6,94 @@ use std::io;
 use super::crc::crc32;
 use super::*;
 
+impl Expected {
+    /// Expects exactly as many partitions as `partitions` holds, in the order of their numbers,
+    /// and each to have the unique GUID and size that its expectation sets.
+    pub(crate) fn partitions(mut self, partitions: Vec<ExpectedPartition>) -> Self {
+        self.partitions = Some(partitions);
+        self
+    }
+}
+
+impl ExpectedPartition {
+    /// Expects nothing of the partition but that it exists.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Expects the partition's unique GUID to be `guid`.
+    pub(crate) fn unique_guid(mut self, guid: Uuid) -> Self {
+        self.unique_guid = Some(guid);
+        self
+    }
+
+    /// Expects the partition to be `bytes` long.
+    pub(crate) fn size(mut self, bytes: u64) -> Self {
+        self.size = Some(bytes);
+        self
+    }
+}
+
+impl Disk {
+    /// Returns the size of a logical block, in bytes.
+    fn logical_block_size(&self) -> u32 {
+        self.logical_block_size
+    }
+
+    /// Returns the disk's size, in bytes.
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Returns the disk's GUID.
+    fn guid(&self) -> Uuid {
+        self.guid
+    }
+
+    /// Returns the partitions after the first, which hold the read-only layers of the root: at
+    /// least one.
+    fn lowers(&self) -> &[Partition] {
+        &self.partitions[1..]
+    }
+}
+
+impl Partition {
+    /// Returns the partition type GUID.
+    fn type_guid(&self) -> Uuid {
+        self.type_guid
+    }
+
+    /// Returns the unique partition GUID.
+    pub(crate) fn unique_guid(&self) -> Uuid {
+        self.unique_guid
+    }
+
+    /// Returns the partition's attribute bits, which the parser does not interpret.
+    fn attributes(&self) -> u64 {
+        self.attributes
+    }
+
+    /// Returns the partition's first logical block.
+    fn first_lba(&self) -> u64 {
+        self.first_lba
+    }
+
+    /// Returns the partition's last logical block, which it includes.
+    fn last_lba(&self) -> u64 {
+        self.last_lba
+    }
+
+    /// Returns the partition's byte offset in the disk.
+    fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// Returns the partition's size, in bytes.
+    fn size(&self) -> u64 {
+        self.size
+    }
+}
+
 /// The Linux filesystem data partition type GUID, `0fc63daf-8483-4772-8e79-3d69d8477de4`, as GPT
 /// stores it.
 const LINUX_DATA: Uuid = Uuid::from_bytes_le([

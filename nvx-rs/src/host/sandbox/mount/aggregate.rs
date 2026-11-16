@@ -1,10 +1,7 @@
-//! The children of an aggregate of shares, the values of OpenVMM's options that attach shares,
-//! and the planning of the export of a sandbox's shares.
+//! The planning of the export of a sandbox's shares.
 
 use std::io;
 use std::path::PathBuf;
-
-use sha2::{Digest, Sha256};
 
 use super::{
     MountAccess, MountKind, MountOwner, PolicyKind, SandboxMount, validate_mount_host_paths,
@@ -12,44 +9,10 @@ use super::{
 };
 use crate::error::Result;
 use crate::host::filesystem::{
-    self, ExportPlan, ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target,
+    self, ExportRequest, Mapping, Owner, PathList, PlannedExport, ReservedTargets, Target,
 };
 use crate::host::paths;
 use crate::host::sandbox::refused;
-
-/// Returns the name of the aggregate child at `index` that the guest binds at `target`: the
-/// index, a hyphen, and the first 32 hexadecimal digits of the SHA-256 digest of the target.
-///
-/// A snapshot records every child's name, so it pins each target, and OpenVMM refuses a restore
-/// that requests other targets before the guest runs, rather than keep the snapshot's binds.
-pub fn aggregate_child_name(index: usize, target: &str) -> String {
-    let digest = Sha256::digest(target.as_bytes());
-    let hex: String = digest[..16]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    format!("{index}-{hex}")
-}
-
-/// Returns the `--mount-child` value that attaches `host_path` as the child `name`. It always
-/// gives the mode, which OpenVMM reads after the last comma or before the `file` flag, so the
-/// host path may contain commas. A file child carries OpenVMM's `file` flag, so OpenVMM refuses
-/// a directory that replaced the file instead of exporting all of it.
-pub fn aggregate_child_argument(
-    name: &str,
-    host_path: &str,
-    access: MountAccess,
-    kind: MountKind,
-) -> String {
-    let file = if kind == MountKind::File { ",file" } else { "" };
-    format!("{name},{host_path},{access}{file}")
-}
-
-/// Returns the `--mount` value that attaches `host_path` at `target`. It always gives the mode,
-/// which OpenVMM reads after the last comma, so the host path may contain commas.
-pub fn mount_argument(target: &str, host_path: &str, access: MountAccess) -> String {
-    format!("{target},{host_path},{access}")
-}
 
 /// Plans the export of `mounts`, the live shares of one sandbox, through the planner of every
 /// NVX caller, [`filesystem::plan`], after it checks them with [`validate_mounts`], each share
@@ -61,10 +24,13 @@ pub fn mount_argument(target: &str, host_path: &str, access: MountAccess) -> Str
 /// requires to be one, becomes the export's, and the container root reserves the trees of its
 /// runtime. Each share keeps the kind with which it was requested: a host path that the planner
 /// finds to be of the other kind is refused, as [`SandboxMount::validated`] refuses it. Returns
-/// `None` without shares.
+/// the export with the pins of the objects in it that a workload could move, or `None` without
+/// shares.
 ///
-/// Fails as those checks, [`SandboxMount::absolute`], and [`filesystem::plan`] do.
-pub fn plan_mounts(mounts: &[SandboxMount]) -> Result<Option<ExportPlan>> {
+/// Fails as those checks and [`filesystem::plan`] do, and with
+/// [`ErrorKind::Io`](crate::ErrorKind::Io) if a relative host path meets an unreadable current
+/// directory, or Windows cannot qualify a drive-relative path.
+pub(crate) fn plan_mounts(mounts: &[SandboxMount]) -> Result<Option<PlannedExport>> {
     validate_mounts(mounts)?;
     for mount in mounts {
         mount.validated()?;
@@ -78,7 +44,7 @@ pub fn plan_mounts(mounts: &[SandboxMount]) -> Result<Option<ExportPlan>> {
 pub(crate) fn plan_mounts_with(
     mounts: &[SandboxMount],
     cwd: &dyn Fn() -> io::Result<PathBuf>,
-) -> Result<Option<ExportPlan>> {
+) -> Result<Option<PlannedExport>> {
     let Some(first) = mounts.first() else {
         return Ok(None);
     };
@@ -124,7 +90,10 @@ pub(crate) fn plan_mounts_with(
     // since the share was requested is refused rather than shared whole, and so is a host path
     // that now leads into another share's directory, where the share would have no root of its
     // own.
-    if let Some(plan) = &plan {
+    if let Some(PlannedExport {
+        description: plan, ..
+    }) = &plan
+    {
         for mount in mounts {
             let Some(bind) = plan
                 .binds

@@ -8,14 +8,90 @@ use std::thread;
 use std::time::Instant;
 
 use super::*;
-use crate::protocol::{
+use crate::host::transport::HostConnection;
+use crate::protocol::exec::{
     EXEC_CWD_PRESENT, EXEC_ENVIRONMENT_PRESENT, EXEC_EXTENDED, EXEC_INHERIT_DEFAULT_ENV,
-    OUTER_DATA, OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_READY, OUTER_RESET, decode_app,
-    decode_outer_header, encode_app, encode_outer,
+};
+use crate::protocol::v2::{Frame, STDIN_WINDOW, VERSION};
+use crate::protocol::{
+    OUTER_DATA, OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_READY, OUTER_RESET, decode_outer_header,
+    encode_outer,
 };
 
 const CAPABILITY: [u8; CAPABILITY_LEN] = [7; CAPABILITY_LEN];
 const INSTANCE: [u8; 16] = [0x11; 16];
+
+/// The codes of the kinds of requests that version 2 shares with version 1, as its header holds
+/// them, and those of an execution's standard input.
+const PING: u8 = 0x01;
+const EXEC: u8 = 0x02;
+const CANCEL: u8 = 0x04;
+const STDIN: u8 = 0x09;
+const STDIN_END: u8 = 0x0a;
+
+/// A `READY` of the protocol version, which acknowledges a request.
+const READY: Frame<'static> = Frame::Ready {
+    version: VERSION,
+    activation: &[],
+};
+
+impl Session {
+    fn from_connection(connection: HostConnection) -> Self {
+        Self {
+            inner: Some(connection.into()),
+            probe: Arc::new(Probe::default()),
+        }
+    }
+
+    fn connect(
+        endpoint: &str,
+        pid: u32,
+        capability: &[u8; CAPABILITY_LEN],
+        timeout: f64,
+    ) -> Result<Self> {
+        Self::connect_unless_exited(endpoint, pid, capability, timeout, || false, None)
+    }
+
+    /// Runs `request` as `exec` does, with a standard input that stays open, as a terminal's does,
+    /// without Ctrl-C, and discards its output.
+    fn run(&mut self, request: &ExecRequest, response_timeout: f64) -> Result<ExecResult> {
+        let (_input, receiver) = mpsc::channel();
+        self.exec_with(
+            request,
+            response_timeout,
+            || receiver,
+            || false,
+            |_, _| Ok(()),
+        )
+    }
+
+    /// Runs `request` as `exec` does, with the standard input that `chunks` hold, until its end,
+    /// and without Ctrl-C, and returns how it ended and its standard output and error.
+    fn run_with(
+        &mut self,
+        request: &ExecRequest,
+        response_timeout: f64,
+        chunks: &[&[u8]],
+    ) -> (Result<ExecResult>, Vec<u8>, Vec<u8>) {
+        let (input, receiver) = mpsc::channel();
+        for chunk in chunks {
+            input.send(Ok(chunk.to_vec())).unwrap();
+        }
+        drop(input);
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let result = self.exec_with(
+            request,
+            response_timeout,
+            || receiver,
+            || false,
+            |error, data| {
+                (if error { &mut stderr } else { &mut stdout }).extend_from_slice(data);
+                Ok(())
+            },
+        );
+        (result, stdout, stderr)
+    }
+}
 
 /// What a [`Recording`] transport records: the direction and timeout of each transfer.
 type Transfers = Arc<Mutex<Vec<(&'static str, Option<Duration>)>>>;
@@ -142,14 +218,19 @@ impl<T: Transport> Guest<T> {
     fn request(&mut self) -> (u8, u64, Vec<u8>) {
         let (record_type, frame) = self.record().unwrap();
         assert_eq!(record_type, OUTER_DATA);
-        let frame = decode_app(&frame).unwrap();
-        (frame.kind, frame.request_id, frame.payload.to_vec())
+        let (request_id, _) = Frame::decode(&frame).unwrap();
+        (frame[5], request_id, frame[24..].to_vec())
     }
 
-    fn send(&mut self, kind: u8, request_id: u64, status: i32, payload: &[u8]) {
+    /// Sends `frame` with `request_id`.
+    fn send(&mut self, request_id: u64, frame: Frame<'_>) {
+        self.send_raw(&frame.encode(request_id).unwrap());
+    }
+
+    /// Sends the bytes of a frame, which may break the protocol.
+    fn send_raw(&mut self, frame: &[u8]) {
         self.sequence += 1;
-        let frame = encode_app(kind, request_id, status, payload);
-        let record = encode_outer(OUTER_DATA, &INSTANCE, 1, self.sequence, &frame).unwrap();
+        let record = encode_outer(OUTER_DATA, &INSTANCE, 1, self.sequence, frame).unwrap();
         self.stream.write_all(&record, None).unwrap();
     }
 }
@@ -164,8 +245,36 @@ fn session_with(
         guest.accept();
         serve(&mut guest);
     });
-    let session = Session::attach(Box::new(host), &CAPABILITY, 5.0).unwrap();
+    let session = Session::attach(Box::new(host), &CAPABILITY, 5.0, None).unwrap();
     (session, worker)
+}
+
+#[test]
+fn an_owned_connection_keeps_its_authenticated_framing_without_another_attach() {
+    let (host, guest) = stream_pair(64);
+    let worker = thread::spawn(move || {
+        let mut guest = Guest::new(guest);
+        guest.accept();
+        for expected in [17, 0] {
+            let (kind, request_id, payload) = guest.request();
+            assert_eq!(kind, PING);
+            assert!(payload.is_empty());
+            if expected != 0 {
+                assert_eq!(request_id, expected);
+            }
+            guest.send(request_id, READY);
+        }
+    });
+    let until = Instant::now() + Duration::from_secs(5);
+    let mut connection = HostConnection::attach(Box::new(host), &CAPABILITY, until).unwrap();
+    connection
+        .send(&Frame::Ping.encode(17).unwrap(), Some(until))
+        .unwrap();
+    let reply = connection.receive(Some(until)).unwrap();
+    assert_eq!(Frame::decode(&reply).unwrap(), (17, READY));
+    let mut session = Session::from_connection(connection);
+    session.ping(5.0).unwrap();
+    worker.join().unwrap();
 }
 
 fn request(arguments: &[&str]) -> ExecRequest {
@@ -207,13 +316,33 @@ fn exec_payload(workload: ExecRequest) -> Vec<u8> {
     let (sender, receiver) = mpsc::channel();
     let (mut session, worker) = session_with(move |guest| {
         let (kind, request_id, payload) = guest.request();
-        assert_eq!(kind, APP_EXEC);
+        assert_eq!(kind, EXEC);
         sender.send(payload).unwrap();
-        guest.send(APP_EXIT, request_id, 0, b"exit");
+        guest.send(request_id, exit(0, Outcome::Exit));
     });
-    session.exec(&workload, 5.0).unwrap();
+    session.run(&workload, 5.0).unwrap();
     worker.join().unwrap();
     receiver.recv().unwrap()
+}
+
+/// Returns the `EXIT` of an execution that ended with `outcome` and `status`.
+fn exit(status: i32, outcome: Outcome) -> Frame<'static> {
+    Frame::Exit { status, outcome }
+}
+
+/// Returns the bytes of an `EXIT` of `request_id` and `status` whose outcome is `text`, which
+/// version 2 may not know.
+fn exit_text(request_id: u64, status: i32, text: &[u8]) -> Vec<u8> {
+    let length = u32::try_from(text.len()).unwrap();
+    [
+        b"NVXC".as_slice(),
+        &[VERSION, 0x84, 0, 0],
+        &request_id.to_le_bytes(),
+        &status.to_le_bytes(),
+        &length.to_le_bytes(),
+        text,
+    ]
+    .concat()
 }
 
 fn u16_at(payload: &[u8], offset: usize) -> u16 {
@@ -239,7 +368,7 @@ fn values(payload: &[u8], mut offset: usize, count: usize) -> (Vec<Vec<u8>>, usi
 fn exec_streams_output_and_returns_bounded_status() {
     let (mut session, worker) = session_with(|guest| {
         let (kind, request_id, payload) = guest.request();
-        assert_eq!(kind, APP_EXEC);
+        assert_eq!(kind, EXEC);
         // The legacy request: the timeout, the argument count, and no extension.
         assert_eq!(
             (
@@ -249,39 +378,145 @@ fn exec_streams_output_and_returns_bounded_status() {
             ),
             (5000, 3, 0)
         );
-        guest.send(APP_STDOUT, request_id, 0, b"hello");
-        guest.send(APP_STDERR, request_id, 0, b"warning");
-        guest.send(APP_EXIT, request_id, 7, b"exit");
+        // The command's standard input is empty, so the workload's ends at once.
+        assert_eq!(guest.request(), (STDIN_END, request_id, Vec::new()));
+        guest.send(request_id, Frame::Stdout(b"hello"));
+        guest.send(request_id, Frame::Stderr(b"warning"));
+        guest.send(request_id, exit(7, Outcome::Exit));
     });
     let mut workload = request(&["/bin/sh", "-c", "echo hello"]);
     workload.timeout_ms = 5000;
-    let result = session.exec(&workload, 5.0).unwrap();
+    let (result, stdout, stderr) = session.run_with(&workload, 5.0, &[]);
     worker.join().unwrap();
     assert_eq!(
-        result,
+        result.unwrap(),
         ExecResult {
             returncode: 7,
             category: "exit",
-            stdout: b"hello".to_vec(),
-            stderr: b"warning".to_vec(),
+            stderr_end: Some(b'g'),
         }
     );
+    assert_eq!((stdout, stderr), (b"hello".to_vec(), b"warning".to_vec()));
+}
+
+#[test]
+fn exec_streams_output_past_the_old_cap() {
+    // Version 1 forwarded at most 1 MiB of output; version 2 streams it whole.
+    let (mut session, worker) = session_with(|guest| {
+        let (_, request_id, _) = guest.request();
+        assert_eq!(guest.request(), (STDIN_END, request_id, Vec::new()));
+        let chunk = vec![b'x'; 60_000];
+        for _ in 0..18 {
+            guest.send(request_id, Frame::Stdout(&chunk));
+        }
+        guest.send(request_id, exit(0, Outcome::Exit));
+    });
+    let (result, stdout, stderr) = session.run_with(&request(&["/bin/true"]), 5.0, &[]);
+    worker.join().unwrap();
+    assert_eq!(result.unwrap().returncode, 0);
+    assert_eq!(stdout, vec![b'x'; 18 * 60_000]);
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn exec_streams_its_standard_input_under_the_window_until_its_end() {
+    let input: Vec<u8> = (0..120 * 1024).map(|index| (index % 251) as u8).collect();
+    let (mut session, worker) = session_with(|guest| {
+        let (_, request_id, _) = guest.request();
+        // The guest acknowledges nothing until the window is full, or the input ended.
+        let (mut received, mut outstanding) = (Vec::new(), 0);
+        loop {
+            match guest.request() {
+                (STDIN, id, bytes) if id == request_id => {
+                    outstanding += bytes.len();
+                    assert!(outstanding <= STDIN_WINDOW as usize, "{outstanding}");
+                    received.extend(bytes);
+                }
+                (STDIN_END, id, bytes) if id == request_id && bytes.is_empty() => break,
+                request => panic!("unexpected request {request:?}"),
+            }
+            if outstanding == STDIN_WINDOW as usize {
+                let count = u32::try_from(outstanding).unwrap();
+                guest.send(request_id, Frame::StdinAck(count));
+                outstanding = 0;
+            }
+        }
+        if outstanding > 0 {
+            let count = u32::try_from(outstanding).unwrap();
+            guest.send(request_id, Frame::StdinAck(count));
+        }
+        for chunk in received.chunks(v2::MAX_PAYLOAD) {
+            guest.send(request_id, Frame::Stdout(chunk));
+        }
+        guest.send(request_id, exit(0, Outcome::Exit));
+    });
+    let chunks: Vec<&[u8]> = input.chunks(40 * 1024).collect();
+    let (result, stdout, _) = session.run_with(&request(&["/bin/cat"]), 5.0, &chunks);
+    worker.join().unwrap();
+    assert_eq!(result.unwrap().returncode, 0);
+    assert_eq!(stdout, input);
+}
+
+#[test]
+fn ctrl_c_cancels_the_running_workload() {
+    let (mut session, worker) = session_with(|guest| {
+        let (_, request_id, _) = guest.request();
+        guest.send(request_id, Frame::Stdout(b"started"));
+        // Ctrl-C after the output: the guest ends the workload, which would outlive the session.
+        assert_eq!(guest.request(), (CANCEL, request_id, Vec::new()));
+    });
+    let started = AtomicBool::new(false);
+    let (_input, receiver) = mpsc::channel();
+    let result = session.exec_with(
+        &request(&["/bin/sleep", "60"]),
+        5.0,
+        || receiver,
+        || started.load(Ordering::SeqCst),
+        |_, _| {
+            started.store(true, Ordering::SeqCst);
+            Ok(())
+        },
+    );
+    assert!(matches!(result, Err(Exit::Interrupted)), "{result:?}");
+    worker.join().unwrap();
+}
+
+#[test]
+fn a_failed_read_of_the_standard_input_cancels_the_workload() {
+    let (mut session, worker) = session_with(|guest| {
+        let (_, request_id, _) = guest.request();
+        assert_eq!(guest.request(), (STDIN, request_id, b"partial".to_vec()));
+        // No end of the input follows, which would let the workload take what it read as all.
+        assert_eq!(guest.request(), (CANCEL, request_id, Vec::new()));
+    });
+    let (input, receiver) = mpsc::channel();
+    input.send(Ok(b"partial".to_vec())).unwrap();
+    input.send(Err(io::Error::other("read failed"))).unwrap();
+    let result = session.exec_with(
+        &request(&["/bin/cat"]),
+        5.0,
+        || receiver,
+        || false,
+        |_, _| Ok(()),
+    );
+    assert_eq!(message(result), "cannot read standard input: read failed");
+    worker.join().unwrap();
 }
 
 #[test]
 fn exec_rejects_unbounded_or_relative_arguments() {
     let (mut session, worker) = session_with(|_| {});
     assert_eq!(
-        message(session.exec(&request(&["relative"]), 1.0)),
+        message(session.run(&request(&["relative"]), 1.0)),
         "managed exec entrypoint must be absolute"
     );
     assert_eq!(
-        message(session.exec(&request(&["/bin/true"; 65]), 1.0)),
+        message(session.run(&request(&["/bin/true"; 65]), 1.0)),
         "managed exec requires 1 through 64 arguments"
     );
     for argument in ["", "a\0b", &"a".repeat(4097)] {
         assert_eq!(
-            message(session.exec(&request(&["/bin/true", argument]), 1.0)),
+            message(session.run(&request(&["/bin/true", argument]), 1.0)),
             "managed exec argument is empty or exceeds 4096 bytes"
         );
     }
@@ -406,7 +641,7 @@ fn exec_rejects_invalid_execution_fields_before_sending() {
         let mut workload = request(&["/bin/true"]);
         workload.cwd = Some(cwd.to_owned());
         assert_eq!(
-            failure(session.exec(&workload, 1.0)),
+            failure(session.run(&workload, 1.0)),
             (
                 ErrorCode::Unsupported,
                 "managed exec working directory must be an absolute path of at most 4096 bytes"
@@ -431,7 +666,7 @@ fn exec_rejects_invalid_execution_fields_before_sending() {
                 .map(|entry| (*entry).to_owned())
                 .collect(),
         );
-        assert_eq!(message(session.exec(&workload, 1.0)), expected);
+        assert_eq!(message(session.run(&workload, 1.0)), expected);
     }
     // Nothing reached the guest, which reads the end of the stream.
     drop(session);
@@ -444,7 +679,7 @@ fn exec_rejects_invalid_response_timeout_before_sending() {
     let (mut session, worker, received) = silent_session();
     for timeout in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert_eq!(
-            message(session.exec(&request(&["/bin/true"]), timeout)),
+            message(session.run(&request(&["/bin/true"]), timeout)),
             "managed exec response timeout must be positive and finite"
         );
     }
@@ -455,59 +690,67 @@ fn exec_rejects_invalid_response_timeout_before_sending() {
 
 #[test]
 fn exec_rejects_unknown_exit_category() {
-    // A cancellation, which this session never requests, is not among the categories.
-    for category in [&b"guest-provided-detail"[..], b"cancelled"] {
+    // A cancellation, whose end this session never waits for, is not among the categories.
+    let (mut session, worker) = session_with(|guest| {
+        let (_, request_id, _) = guest.request();
+        guest.send(request_id, exit(137, Outcome::Cancelled));
+    });
+    assert_eq!(
+        message(session.run(&request(&["/bin/true"]), 5.0)),
+        "managed guest returned an unsupported exit category"
+    );
+    worker.join().unwrap();
+    // Version 2 knows no other outcome.
+    for category in [&b"guest-provided-detail"[..], b"\xffexit", b"output-limit"] {
         let (mut session, worker) = session_with(move |guest| {
             let (_, request_id, _) = guest.request();
-            guest.send(APP_EXIT, request_id, 125, category);
+            guest.send_raw(&exit_text(request_id, 125, category));
         });
         assert_eq!(
-            message(session.exec(&request(&["/bin/true"]), 5.0)),
-            "managed guest returned an unsupported exit category"
+            message(session.run(&request(&["/bin/true"]), 5.0)),
+            "the NVXC frame of version 2 is malformed"
         );
         worker.join().unwrap();
     }
-    let (mut session, worker) = session_with(|guest| {
-        let (_, request_id, _) = guest.request();
-        guest.send(APP_EXIT, request_id, 0, b"\xffexit");
-    });
-    assert_eq!(
-        message(session.exec(&request(&["/bin/true"]), 5.0)),
-        "managed guest returned an invalid exit category"
-    );
-    worker.join().unwrap();
 }
 
 #[test]
 fn exec_refusal_keeps_status_category_and_diagnostic() {
+    let diagnostic =
+        b"nvx-managed-agent: cannot enter working directory /missing: No such file or directory\n";
     let (mut session, worker) = session_with(|guest| {
         let (_, request_id, _) = guest.request();
-        guest.send(
-            APP_STDERR,
-            request_id,
-            0,
-            b"nvx-managed-agent: cannot enter working directory /missing: No such file or \
-              directory\n",
-        );
-        guest.send(APP_ERROR, request_id, 2, b"cwd-failed");
+        assert_eq!(guest.request(), (STDIN_END, request_id, Vec::new()));
+        guest.send(request_id, Frame::Stderr(diagnostic));
+        let refusal = Frame::Error {
+            status: 2,
+            category: b"cwd-failed",
+        };
+        guest.send(request_id, refusal);
     });
     let mut workload = request(&["/bin/true"]);
     workload.cwd = Some("/missing".to_owned());
+    let (result, stdout, stderr) = session.run_with(&workload, 5.0, &[]);
     assert_eq!(
-        failure(session.exec(&workload, 5.0)),
+        failure(result),
         (
             ErrorCode::ExecRefused,
             "managed guest rejected exec (status=2, category=cwd-failed)".to_owned()
         )
     );
+    assert_eq!((stdout, stderr), (Vec::new(), diagnostic.to_vec()));
     worker.join().unwrap();
-    // A category that is not ASCII is decoded with replacement characters.
+    // A category that is not UTF-8 is decoded with replacement characters.
     let (mut session, worker) = session_with(|guest| {
         let (_, request_id, _) = guest.request();
-        guest.send(APP_ERROR, request_id, 5, b"bad\xff");
+        let refusal = Frame::Error {
+            status: 5,
+            category: b"bad\xff",
+        };
+        guest.send(request_id, refusal);
     });
     assert_eq!(
-        message(session.exec(&request(&["/bin/true"]), 5.0)),
+        message(session.run(&request(&["/bin/true"]), 5.0)),
         "managed guest rejected exec (status=5, category=bad\u{fffd})"
     );
     worker.join().unwrap();
@@ -590,14 +833,15 @@ impl Transport for Recording {
         let response = if header.record_type == OUTER_HOST_ATTACH {
             encode_outer(OUTER_READY, &INSTANCE, 1, 0, &[]).unwrap()
         } else {
-            let request = decode_app(&data[OUTER_HEADER_LEN..]).unwrap();
-            let (kind, payload) = match request.kind {
-                APP_PING => (APP_READY, &b""[..]),
-                APP_EXEC => (APP_EXIT, &b"exit"[..]),
-                _ => (APP_STOPPED, &b""[..]),
+            let request = &data[OUTER_HEADER_LEN..];
+            let (request_id, _) = Frame::decode(request).unwrap();
+            let response = match request[5] {
+                PING => READY,
+                EXEC => exit(0, Outcome::Exit),
+                _ => Frame::Stopped,
             };
             self.sequence += 1;
-            let frame = encode_app(kind, request.request_id, 0, payload);
+            let frame = response.encode(request_id).unwrap();
             encode_outer(OUTER_DATA, &INSTANCE, 1, self.sequence, &frame).unwrap()
         };
         self.responses.extend(response);
@@ -611,11 +855,11 @@ fn operations_bound_their_requests_by_their_deadlines() {
     // response, so attach, ping, exec, and stop each write within the time in which they then
     // read: no transfer gets more than what is left of its operation's timeout.
     let (transport, transfers) = Recording::new(None);
-    let mut session = Session::attach(Box::new(transport), &CAPABILITY, 7.0).unwrap();
+    let mut session = Session::attach(Box::new(transport), &CAPABILITY, 7.0, None).unwrap();
     let mut operations = vec![(7.0, transfers.lock().unwrap().split_off(0))];
     session.ping(5.0).unwrap();
     operations.push((5.0, transfers.lock().unwrap().split_off(0)));
-    session.exec(&request(&["/bin/true"]), 3.0).unwrap();
+    session.run(&request(&["/bin/true"]), 3.0).unwrap();
     operations.push((3.0, transfers.lock().unwrap().split_off(0)));
     session.stop(2.0).unwrap();
     operations.push((2.0, transfers.lock().unwrap().split_off(0)));
@@ -646,14 +890,14 @@ fn failed_transfer_closes_the_session() {
     ] {
         // The attachment's write and read succeed.
         let (transport, transfers) = Recording::new(Some((failure, 2)));
-        let mut session = Session::attach(Box::new(transport), &CAPABILITY, 5.0).unwrap();
+        let mut session = Session::attach(Box::new(transport), &CAPABILITY, 5.0, None).unwrap();
         assert_eq!(
             self::failure(session.ping(5.0)),
             (ErrorCode::TimedOut, expected.to_owned())
         );
         let count = transfers.lock().unwrap().len();
         assert_eq!(
-            self::failure(session.exec(&request(&["/bin/true"]), 5.0)),
+            self::failure(session.run(&request(&["/bin/true"]), 5.0)),
             (
                 ErrorCode::Protocol,
                 "managed control session is closed".to_owned()
@@ -679,10 +923,10 @@ fn request_to_a_stalled_endpoint_times_out_and_closes_the_session() {
         // The endpoint reads nothing more until the client gives up.
         let _ = released.recv_timeout(Duration::from_secs(10));
     });
-    let mut session = Session::attach(Box::new(host), &CAPABILITY, 5.0).unwrap();
+    let mut session = Session::attach(Box::new(host), &CAPABILITY, 5.0, None).unwrap();
     let started = Instant::now();
     assert_eq!(
-        message(session.exec(&request(&["/bin/true"]), 0.25)),
+        message(session.run(&request(&["/bin/true"]), 0.25)),
         "managed control request timed out"
     );
     let elapsed = started.elapsed();
@@ -728,21 +972,28 @@ fn check_writes_to_a_slow_endpoint(
     assert!(reader.join().unwrap() > 0, "the endpoint read nothing");
 }
 
-/// Checks the wait for `endpoint`, which never appears, of a start that checks after each
-/// attempt whether the OpenVMM that it launched has exited, as [`Session::connect_launched`]
-/// checks it: an OpenVMM that exits ends the wait at once, as a closed endpoint, rather than at
-/// the timeout, and one that runs on keeps it going until the timeout.
+/// Checks the wait for `endpoint`, which never appears, of a cold run that checks after each
+/// attempt whether the OpenVMM that it launched has exited, as
+/// [`Session::connect_launched_cancellable`] checks it: an OpenVMM that exits ends the wait at
+/// once, as a closed endpoint, rather than at the timeout, and one that runs on keeps it going
+/// until the timeout.
 #[cfg(any(unix, windows))]
 fn check_waits_for_openvmm_that_exits(endpoint: &str) {
     let mut checks = 0;
     let started = Instant::now();
-    let failure =
-        Session::connect_unless_exited(endpoint, std::process::id(), &CAPABILITY, 60.0, || {
+    let failure = Session::connect_unless_exited(
+        endpoint,
+        std::process::id(),
+        &CAPABILITY,
+        60.0,
+        || {
             checks += 1;
             checks == 3
-        })
-        .err()
-        .unwrap();
+        },
+        None,
+    )
+    .err()
+    .unwrap();
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "{:?}",
@@ -752,19 +1003,201 @@ fn check_waits_for_openvmm_that_exits(endpoint: &str) {
     assert_eq!(checks, 3);
     let mut checks = 0;
     let started = Instant::now();
-    let failure =
-        Session::connect_unless_exited(endpoint, std::process::id(), &CAPABILITY, 0.2, || {
+    let failure = Session::connect_unless_exited(
+        endpoint,
+        std::process::id(),
+        &CAPABILITY,
+        0.2,
+        || {
             checks += 1;
             false
-        })
-        .err()
-        .unwrap();
+        },
+        None,
+    )
+    .err()
+    .unwrap();
     assert!(started.elapsed() >= Duration::from_millis(200));
     assert_eq!(
         failure.message().unwrap(),
         format!("managed control endpoint did not become available: {endpoint}")
     );
     assert_ne!(checks, 0);
+}
+
+/// A process that runs for a minute unless it is killed, which dropping it kills and reaps.
+#[cfg(any(target_os = "linux", windows))]
+struct Sleeper(std::process::Child);
+
+#[cfg(any(target_os = "linux", windows))]
+impl Sleeper {
+    /// Spawns the sleeper under a `SpawnLock`, so that on Windows it holds no handle of a VMM that
+    /// another test spawns meanwhile.
+    fn spawn() -> Self {
+        let mut command = if cfg!(windows) {
+            let mut command = std::process::Command::new("ping");
+            command.args(["-n", "60", "127.0.0.1"]);
+            command
+        } else {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("60");
+            command
+        };
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null());
+        Self(crate::host::tests::spawn_locked(&mut command).unwrap())
+    }
+
+    /// Returns the verified process of the sleeper.
+    fn process(&self) -> Process {
+        use crate::host::process::{BootId, Opened, ProcessRef};
+
+        let reference = ProcessRef {
+            pid: self.0.id(),
+            start_time: platform::process_start_time(self.0.id()).unwrap().unwrap(),
+            boot: BootId::current().unwrap(),
+        };
+        let Opened::Running(process) = Process::open(&reference).unwrap() else {
+            panic!("the sleeper runs");
+        };
+        process
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl Drop for Sleeper {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Checks the wait for `endpoint`, which never appears, of a cold run whose OpenVMM is the
+/// verified process that [`Session::connect_launched_cancellable`] receives: the wait goes on
+/// while the process runs, and ends at once, as a closed endpoint, once it exits, rather than at
+/// the timeout.
+#[cfg(any(target_os = "linux", windows))]
+fn check_launched_waits_end_once_their_process_exits(endpoint: &str) {
+    let mut sleeper = Sleeper::spawn();
+    let process = sleeper.process();
+    let started = Instant::now();
+    let failure = thread::scope(|scope| {
+        let waiting = scope.spawn(|| {
+            Session::connect_launched_cancellable(
+                endpoint,
+                &process,
+                &CAPABILITY,
+                60.0,
+                AttachmentCancellation::default(),
+            )
+            .err()
+        });
+        thread::sleep(Duration::from_millis(500));
+        let ended_early = waiting.is_finished();
+        sleeper.0.kill().unwrap();
+        sleeper.0.wait().unwrap();
+        assert!(!ended_early, "the wait ended while OpenVMM ran");
+        waiting.join().unwrap().unwrap()
+    });
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(matches!(failure, Exit::EndpointClosed), "{failure:?}");
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn check_forward_failure_during_connect(endpoint: &str) {
+    let (attempted, attempt) = mpsc::sync_channel(1);
+    let started = Instant::now();
+    let result = super::super::run::attach_with_output(
+        |cancellation| {
+            Session::connect_unless_exited(
+                endpoint,
+                std::process::id(),
+                &CAPABILITY,
+                60.0,
+                || {
+                    let _ = attempted.try_send(());
+                    false
+                },
+                Some(cancellation),
+            )
+        },
+        || {
+            attempt.recv_timeout(Duration::from_secs(5)).unwrap();
+            Err(Exit::error(ErrorCode::Io, "original forwarding failure"))
+        },
+    );
+    assert_eq!(
+        result.err().unwrap().message(),
+        Some("original forwarding failure")
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn check_forward_failure_during_handshake(
+    client: Box<dyn Transport>,
+    mut server: impl io::Read + Send + 'static,
+) {
+    let (waiting, wait) = mpsc::sync_channel(0);
+    let (release, released) = mpsc::channel();
+    let peer = thread::spawn(move || {
+        let mut request = vec![0; OUTER_HEADER_LEN + CAPABILITY_LEN];
+        server.read_exact(&mut request).unwrap();
+        assert_eq!(
+            decode_outer_header(request[..OUTER_HEADER_LEN].try_into().unwrap())
+                .unwrap()
+                .record_type,
+            OUTER_HOST_ATTACH
+        );
+        waiting.send(()).unwrap();
+        released.recv_timeout(Duration::from_secs(5)).unwrap();
+    });
+    let started = Instant::now();
+    let result = super::super::run::attach_with_output(
+        move |cancellation| Session::attach(client, &CAPABILITY, 60.0, Some(cancellation)),
+        || {
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            Err(Exit::error(ErrorCode::Io, "original forwarding failure"))
+        },
+    );
+    let elapsed = started.elapsed();
+    release.send(()).unwrap();
+    peer.join().unwrap();
+    assert_eq!(
+        result.err().unwrap().message(),
+        Some("original forwarding failure")
+    );
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn check_cancellable_session_closes_failed_io(
+    client: Box<dyn Transport>,
+    server: impl Transport + 'static,
+) {
+    let (closed, closure) = mpsc::channel();
+    let peer = thread::spawn(move || {
+        let mut guest = Guest::new(server);
+        guest.accept();
+        let _ = guest.request();
+        closed.send(guest.record().is_none()).unwrap();
+    });
+    let cancellation = AttachmentCancellation::default();
+    let mut session =
+        Session::attach(client, &CAPABILITY, 5.0, Some(cancellation.clone())).unwrap();
+    assert_eq!(
+        message(session.ping(0.05)),
+        "managed control response timed out"
+    );
+    let observed = closure.recv_timeout(Duration::from_secs(1));
+    drop(session);
+    drop(cancellation);
+    peer.join().unwrap();
+    assert_eq!(observed, Ok(true));
 }
 
 #[test]
@@ -804,58 +1237,10 @@ fn a_closed_endpoint_ends_the_operation_with_its_own_error() {
 }
 
 #[test]
-fn output_beyond_the_guest_limit_breaks_the_protocol() {
-    // The guest agent forwards at most 1 MiB of output, so a guest that sends more misbehaves.
-    let (mut session, worker) = session_with(|guest| {
-        let (_, request_id, _) = guest.request();
-        let chunk = vec![b'x'; 60_000];
-        for _ in 0..18 {
-            guest.send(APP_STDOUT, request_id, 0, &chunk);
-        }
-        guest.send(APP_EXIT, request_id, 0, b"exit");
-    });
-    assert_eq!(
-        failure(session.exec(&request(&["/bin/true"]), 5.0)),
-        (
-            ErrorCode::Protocol,
-            format!("managed guest exceeded the {MAX_OUTPUT_BYTES}-byte output limit")
-        )
-    );
-    // The guest may still be sending its exit record, which the host never reads, and a send
-    // fails once the session is gone, so the session ends after the guest.
-    worker.join().unwrap();
-}
-
-#[test]
-fn features_of_a_guest_that_predates_them_are_none() {
-    let (mut session, worker) = session_with(|guest| {
-        let (kind, request_id, _) = guest.request();
-        assert_eq!(kind, APP_FEATURES);
-        guest.send(APP_ERROR, request_id, 95, UNSUPPORTED_OPERATION);
-        let (_, request_id, _) = guest.request();
-        guest.send(
-            APP_READY,
-            request_id,
-            0,
-            &GuestFeatures::SANDBOX_AGENT.encode(),
-        );
-        let (_, request_id, _) = guest.request();
-        guest.send(APP_ERROR, request_id, 22, b"invalid-request");
-    });
-    assert_eq!(session.features(5.0).unwrap(), GuestFeatures::NONE);
-    assert_eq!(session.features(5.0).unwrap(), GuestFeatures::SANDBOX_AGENT);
-    assert_eq!(
-        message(session.features(5.0)),
-        "managed guest returned an invalid features response"
-    );
-    worker.join().unwrap();
-}
-
-#[test]
 fn protocol_violations_keep_the_messages_of_python() {
     let (mut session, worker) = session_with(|guest| {
         let (_, request_id, _) = guest.request();
-        guest.send(APP_READY, request_id ^ 1, 0, &[]);
+        guest.send(request_id ^ 1, READY);
     });
     assert_eq!(
         message(session.ping(5.0)),
@@ -864,43 +1249,36 @@ fn protocol_violations_keep_the_messages_of_python() {
     worker.join().unwrap();
     let (mut session, worker) = session_with(|guest| {
         let (_, request_id, _) = guest.request();
-        guest.send(APP_STDOUT, request_id ^ 1, 0, b"x");
+        guest.send(request_id ^ 1, Frame::Stdout(b"x"));
     });
     assert_eq!(
-        message(session.exec(&request(&["/bin/true"]), 5.0)),
+        message(session.run(&request(&["/bin/true"]), 5.0)),
         "managed guest returned a mismatched request ID"
     );
     worker.join().unwrap();
     let (mut session, worker) = session_with(|guest| {
         let (_, request_id, _) = guest.request();
-        guest.send(APP_READY, request_id ^ 1, 0, &GuestFeatures::NONE.encode());
-    });
-    assert_eq!(
-        message(session.features(5.0)),
-        "managed guest returned a mismatched request ID"
-    );
-    worker.join().unwrap();
-    let (mut session, worker) = session_with(|guest| {
-        let (_, request_id, _) = guest.request();
-        guest.send(APP_READY, request_id, 0, b"");
+        guest.send(request_id, READY);
     });
     assert_eq!(
         message(session.stop(5.0)),
         "managed guest did not acknowledge stop"
     );
     worker.join().unwrap();
-    // An acknowledgement has status 0 and no payload.
-    for (status, payload) in [(1, &b""[..]), (0, b"x")] {
-        let (mut session, worker) = session_with(move |guest| {
-            let (_, request_id, _) = guest.request();
-            guest.send(APP_READY, request_id, status, payload);
-        });
-        assert_eq!(
-            message(session.ping(5.0)),
-            "managed guest did not acknowledge readiness"
-        );
-        worker.join().unwrap();
-    }
+    // An acknowledgement has no payload but the protocol version.
+    let (mut session, worker) = session_with(|guest| {
+        let (_, request_id, _) = guest.request();
+        let ready = Frame::Ready {
+            version: VERSION,
+            activation: b"x",
+        };
+        guest.send(request_id, ready);
+    });
+    assert_eq!(
+        message(session.ping(5.0)),
+        "managed guest did not acknowledge readiness"
+    );
+    worker.join().unwrap();
 }
 
 /// The endpoints of POSIX hosts: Unix-domain sockets that this process serves.
@@ -964,7 +1342,7 @@ mod endpoints {
         workload
             .arguments
             .extend(std::iter::repeat_n("a".repeat(4000), 10));
-        let failure = session.exec(&workload, 5.0).unwrap_err();
+        let failure = session.run(&workload, 5.0).unwrap_err();
         worker.join().unwrap();
         assert!(matches!(failure, Exit::EndpointClosed), "{failure:?}");
         let (mut session, worker, _directory) = connected(|_| {});
@@ -993,10 +1371,142 @@ mod endpoints {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn unsupported_peer_verification_fails_without_retrying() {
+        use std::process::{Command, Stdio};
+
+        let child = "NVX_TEST_CLI_CONTROL_PIDFD_DENIAL";
+        let Some(errno) = std::env::var_os(child) else {
+            for errno in [nix::libc::ENOPROTOOPT, nix::libc::EPERM, nix::libc::EACCES] {
+                let mut command = Command::new(std::env::current_exe().unwrap());
+                command
+                    .args([
+                        "--exact",
+                        "host::cli::session::tests::endpoints::unsupported_peer_verification_fails_without_retrying",
+                        "--nocapture",
+                    ])
+                    .env(child, errno.to_string())
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                crate::host::sys::tests::refuse_peer_pidfd_on_spawn(&mut command, errno);
+                let output = crate::host::tests::spawn_locked(&mut command)
+                    .unwrap()
+                    .wait_with_output()
+                    .unwrap();
+                assert!(
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout)
+                            .contains(&format!("NVX_CLI_CONTROL_PIDFD_REFUSED {errno}")),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        };
+        let errno: i32 = errno.to_str().unwrap().parse().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let _listener = UnixListener::bind(&path).unwrap();
+        let mut checks = 0;
+        let failure = Session::connect_unless_exited(
+            path.to_str().unwrap(),
+            std::process::id(),
+            &CAPABILITY,
+            60.0,
+            || {
+                checks += 1;
+                checks == 2
+            },
+            None,
+        )
+        .err()
+        .expect("unsupported peer verification must fail before authentication");
+        assert_eq!(failure.code(), Some(ErrorCode::Io));
+        assert!(failure.message().unwrap().contains("SO_PEERPIDFD"));
+        assert_eq!(checks, 0, "a permanent verification failure must not retry");
+        println!("NVX_CLI_CONTROL_PIDFD_REFUSED {errno}");
+    }
+
+    #[test]
     fn waits_for_an_endpoint_end_once_openvmm_exits() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("control.sock");
         check_waits_for_openvmm_that_exits(path.to_str().unwrap());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn launched_waits_end_once_their_process_exits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        check_launched_waits_end_once_their_process_exits(path.to_str().unwrap());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn forward_failure_cancels_the_connection_before_its_timeout() {
+        let directory = tempfile::tempdir().unwrap();
+        check_forward_failure_during_connect(
+            directory.path().join("control.sock").to_str().unwrap(),
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn forward_failure_cancels_a_handshake_while_the_peer_remains_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let client = platform::connect_endpoint(
+            path.to_str().unwrap(),
+            std::process::id(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let (server, _) = listener.accept().unwrap();
+        check_forward_failure_during_handshake(client, server);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn zero_console_polls_do_not_install_a_blocking_socket_timeout() {
+        let (stream, mut server) = UnixStream::pair().unwrap();
+        let inspect = stream.try_clone().unwrap();
+        let mut client = platform::transport_from_handle(stream.into()).unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                client
+                    .read(&mut [0], Some(Duration::ZERO))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::TimedOut
+            );
+            assert_eq!(inspect.read_timeout().unwrap(), None);
+        }
+        server.write_all(b"c").unwrap();
+        let mut byte = [0];
+        assert_eq!(client.read(&mut byte, Some(Duration::ZERO)).unwrap(), 1);
+        assert_eq!(&byte, b"c");
+        drop(server);
+        assert_eq!(client.read(&mut byte, Some(Duration::ZERO)).unwrap(), 0);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn successful_attachment_does_not_keep_failed_session_io_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let client = platform::connect_endpoint(
+            path.to_str().unwrap(),
+            std::process::id(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let (server, _) = listener.accept().unwrap();
+        check_cancellable_session_closes_failed_io(client, Server(server));
     }
 
     #[test]
@@ -1115,7 +1625,7 @@ mod endpoints {
     fn read_reports_a_closed_endpoint_after_its_data() {
         let (mut session, worker) = connected(|guest| {
             let (_, request_id, _) = guest.request();
-            guest.send(APP_READY, request_id, 0, &[]);
+            guest.send(request_id, READY);
             let _ = guest.request();
         });
         session.ping(5.0).unwrap();
@@ -1167,6 +1677,81 @@ mod endpoints {
     #[test]
     fn waits_for_an_endpoint_end_once_openvmm_exits() {
         check_waits_for_openvmm_that_exits(r"\\.\pipe\nvx-cli-session-test-exited");
+    }
+
+    #[test]
+    fn launched_waits_end_once_their_process_exits() {
+        check_launched_waits_end_once_their_process_exits(
+            r"\\.\pipe\nvx-cli-session-test-launched-exited",
+        );
+    }
+
+    #[test]
+    fn forward_failure_cancels_the_connection_before_its_timeout() {
+        check_forward_failure_during_connect(r"\\.\pipe\nvx-cli-session-test-cancelled");
+    }
+
+    #[test]
+    fn forward_failure_cancels_a_handshake_while_the_peer_remains_open() {
+        let (name, server) = create_pipe();
+        let accepted = thread::spawn(move || {
+            accept(&server);
+            server
+        });
+        let client = platform::connect_endpoint(
+            &name.replace('\\', "/"),
+            std::process::id(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        check_forward_failure_during_handshake(client, accepted.join().unwrap());
+    }
+
+    #[test]
+    fn zero_console_polls_preserve_ready_bytes_and_peer_exit() {
+        let (name, server) = create_pipe();
+        let accepted = thread::spawn(move || {
+            accept(&server);
+            server
+        });
+        let mut client = platform::connect_endpoint(
+            &name.replace('\\', "/"),
+            std::process::id(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut server = accepted.join().unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                client
+                    .read(&mut [0], Some(Duration::ZERO))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::TimedOut
+            );
+        }
+        server.write_all(b"c").unwrap();
+        let mut byte = [0];
+        assert_eq!(client.read(&mut byte, Some(Duration::ZERO)).unwrap(), 1);
+        assert_eq!(&byte, b"c");
+        drop(server);
+        assert_eq!(client.read(&mut byte, Some(Duration::ZERO)).unwrap(), 0);
+    }
+
+    #[test]
+    fn successful_attachment_does_not_keep_failed_session_io_open() {
+        let (name, server) = create_pipe();
+        let accepted = thread::spawn(move || {
+            accept(&server);
+            server
+        });
+        let client = platform::connect_endpoint(
+            &name.replace('\\', "/"),
+            std::process::id(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        check_cancellable_session_closes_failed_io(client, Server(accepted.join().unwrap()));
     }
 
     #[test]

@@ -2,8 +2,6 @@
 
 use std::path::{Component, Path, Prefix};
 
-use super::host_path::canonicalize;
-
 /// Joins an aggregate child index and child-relative source into a guest export path.
 pub(super) fn guest_source(child: usize, source: &str) -> String {
     if source.is_empty() {
@@ -52,18 +50,6 @@ pub fn guest_path(path: &Path) -> Option<String> {
         guest.push('/');
     }
     Some(guest)
-}
-
-/// Returns the guest path of an existing host path the way mappings derive it: from the
-/// resolved path, so links, letter case, and short names do not matter. A path that does not
-/// exist is translated as written.
-///
-/// Use it to turn a host working directory into a `process.cwd` inside a mapped path.
-pub fn resolve_guest_path(path: &Path) -> Option<String> {
-    match canonicalize(path) {
-        Ok(canonical) => guest_path(&canonical),
-        Err(_) => guest_path(path),
-    }
 }
 
 /// Returns whether the guest path `path` is `directory` or one of its descendants, comparing

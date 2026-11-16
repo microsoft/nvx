@@ -1,58 +1,22 @@
-//! The lifecycle of a managed sandbox, a port of the former
-//! `scripts/nvx_tools/sandbox_lifecycle.py`, which it replaced (microsoft/nvx#359), on the
-//! [`store`](crate::host::store), [`supervisor`], and [`session`](crate::host::session) that
-//! every host of a sandbox shares.
+//! Persistent sandboxes on the CLI's store and caller-owned [`crate::host::vm`] interface.
 //!
-//! A sandbox lives in its state directory, which is the directory of its store:
+//! Provision records the typed image and upper, image bindings, network, and export with its pins.
+//! Start journals the prepared capability and outputs before spawn, records the verified process,
+//! and commits the matching saved VM only after authenticated readiness and mappings. Every
+//! lifecycle command takes the CLI store's recoverable lock; indeterminate launches retain their
+//! evidence.
 //!
-//! ```text
-//! <state>/
-//!   config.json          the launch that provision records, in format 8, with the export plan of
-//!                        its shares or `null` without shares, its upper, the bindings of its
-//!                        distro layer and of its scratch image, if any, and its network
-//!   sandbox.lock         the store's lock, which serializes the lifecycle transitions
-//!   launch.json          the store's journal of a start in progress, or of an interrupted one
-//!   runtime.json         the store's runtime record of the running VM, in its format 4
-//!   control.capability   the 32-byte capability of the running OpenVMM
-//!   control.sock         the control endpoint of the running OpenVMM, on POSIX
-//!   openvmm.log          OpenVMM's output, which each start replaces
-//!   outcome.json         OpenVMM's outcome report of the latest start
-//! ```
+//! A restored sandbox, whose configuration names a named snapshot, restores it at each start in
+//! place of a cold boot, under the snapshot's lock, through the blocking restore driver, which
+//! readies the guest, maps the shares and runs the recorded workload.
 //!
-//! The CLI keeps its own record, the configuration, in its own formats; the store keeps the
-//! runtime records, and reads no other format than its own: a sandbox that an earlier build
-//! started must be stopped with that build.
+//! Exec and stop reattach with runtime and process verification. Stop requests NVXC shutdown,
+//! waits for exit, then forces only the verified process. Deprovision removes only this stopped
+//! sandbox's owned files, and a restored sandbox's view of its snapshot under the snapshot's
+//! lock. No running sandbox from the old runtime store is migrated.
 //!
-//! [`provision`], [`fn@crate::host::cli::sandbox::lifecycle::start`], [`fn@crate::host::cli::sandbox::lifecycle::stop`], and [`deprovision`] hold the [`LifecycleLock`] for their
-//! whole transition, and [`exec_workload`] only while it finds the running VM, so a long workload
-//! cannot delay a stop. `config.json` also records the binding of the distro layer that
-//! `provision` verified, and that of the scratch image of an upper on scratch, which [`fn@crate::host::cli::sandbox::lifecycle::start`] checks from metadata
-//! alone, and the network as its typed policy, which [`fn@crate::host::cli::sandbox::lifecycle::start`] checks again, in place of the
-//! network options that `sandbox_lifecycle.py` recorded: it refuses to start a sandbox that
-//! `nvx.py` or an earlier `nvx-rs` provisioned, which has no bindings or no typed network. It
-//! records shares as the export plan that `provision` made, whose host objects [`fn@crate::host::cli::sandbox::lifecycle::start`] checks
-//! again. [`fn@crate::host::cli::sandbox::lifecycle::start`] exports the shares, and once the guest agent is ready sends it the plan's
-//! mapping table, which it mounts in order before any workload runs; a mapping that fails ends the
-//! start, after the guest shuts down as a stop has it do.
-//!
-//! Every transition but provision finds the sandbox's VM with [`supervisor::reattach`], as an
-//! orchestrator does after it restarts: it ends a start that was interrupted, holds a recorded
-//! OpenVMM that still runs through its verified identity, and clears the runtime record of one
-//! that exited without a stop, which the first transition to find it reports, or which a start
-//! replaces. A VM that another runtime identity than the artifacts' started, as after the
-//! artifacts were replaced, is never driven, since its guest may speak other contracts: [`fn@crate::host::cli::sandbox::lifecycle::stop`]
-//! ends it by identity-verified forced termination, without a control session, and the other
-//! transitions refuse it. [`fn@crate::host::cli::sandbox::lifecycle::start`] launches OpenVMM with [`supervisor::launch`], under the
-//! runtime identity that the install metadata of the artifacts names, and [`fn@crate::host::cli::sandbox::lifecycle::stop`] asks the guest
-//! of a VM of that identity to shut down, waits for OpenVMM to exit, and reports a VM that does
-//! not, without ending it otherwise.
-//!
-//! [`fn@crate::host::cli::sandbox::lifecycle::start`] hands OpenVMM, through a [`crate::host::sandbox::PreparedLaunch`] of the checked files, the objects that
-//! the checks found, rather than paths that something could replace meanwhile, and claims the
-//! scratch image, if any, for this sandbox while OpenVMM runs. It holds the checked files until
-//! the guest is ready, when it releases them, and on Windows OpenVMM's copies of them, or until it
-//! has ended an OpenVMM whose start failed. A sandbox whose upper is in RAM starts each time with
-//! an empty upper, which its stop discards.
+//! A run launches the VM that a provision and a start would launch, in a temporary VM directory,
+//! without a state directory, executes one workload over NVXC, and stops it the way stop does.
 
 mod directory;
 mod outcome;
@@ -63,22 +27,30 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::ErrorCode;
+use crate::host::artifacts::{Guest, KERNEL_NAME};
+use crate::host::cli::artifacts::{Located, locate};
 use crate::host::cli::deadline::RETRY_INTERVAL;
 use crate::host::cli::sandbox::lock::LifecycleLock;
 use crate::host::cli::sandbox::state::{
-    RecordedDistro, RecordedScratch, serialize_launch, write_json,
+    Config, NetworkRecord, RecordedDistro, RecordedScratch, Source, check_images, read_config,
+    serialize_launch, write_json,
 };
 use crate::host::cli::sandbox::{Artifacts, error_with_cause};
 use crate::host::cli::session::Session;
+use crate::host::cli::store::StateFile;
 use crate::host::cli::{Exit, Result};
-use crate::host::sandbox::{SandboxLaunch, require_file};
-use crate::host::store::{IdentityPart, LockedStore, RUNTIME_NAME};
-use crate::host::supervisor::{self, Reattached, Vmm};
-use crate::protocol::{CAPABILITY_LEN, GuestFeatures};
+use crate::host::filesystem::PlannedExport;
+use crate::host::process::{Opened, Process};
+use crate::host::runtime::{IdentityPart, LaunchOptions, Runtime, RuntimeIdentity};
+use crate::host::sandbox::layer::SandboxLayer;
+use crate::host::sandbox::require_file;
+use crate::host::vm::SavedVm;
 
 pub(crate) use self::directory::{create_state_directory, prepare_state_directory};
-pub(crate) use self::outcome::{validate_outcome_destination, write_exec_outcome};
-pub(crate) use self::start::{exec_workload, start};
+pub(crate) use self::outcome::{
+    copy_openvmm_outcome, validate_outcome_destination, write_exec_outcome,
+};
+pub(crate) use self::start::{exec_workload, run, start};
 pub(crate) use self::stop::{deprovision, stop};
 
 /// The launch configuration, the CLI's own record beside those of the store.
@@ -89,7 +61,7 @@ pub(crate) const LOCK_RETRY_INTERVAL: Duration = RETRY_INTERVAL;
 /// The version of outcome reports.
 pub(crate) const OUTCOME_SCHEMA_VERSION: u64 = 1;
 
-/// The options of a launch, besides the launch itself, that `provision` records.
+/// The options of a launch, besides its images, that `provision` records.
 pub(crate) struct ProvisionConfig<'a> {
     /// `--hypervisor`, resolved.
     pub(crate) hypervisor: &'a str,
@@ -97,25 +69,36 @@ pub(crate) struct ProvisionConfig<'a> {
     pub(crate) memory_mib: u64,
     /// `--cmdline`.
     pub(crate) cmdline: &'a str,
+    /// The RAM upper's cap, or the default when omitted.
+    pub(crate) ram_upper_percent: Option<u8>,
+    /// `--hostname`.
+    pub(crate) hostname: &'a str,
+    /// `--workload-user`.
+    pub(crate) workload_identity: (u32, u32),
+    /// The export plan of the shares, with its pins, if any.
+    pub(crate) export: Option<&'a PlannedExport>,
+    /// The network options, or `None` without `--net`.
+    pub(crate) network: Option<&'a NetworkRecord>,
 }
 
-/// The control features that the layered sandbox root must provide for the requests of
-/// `nvx-rs sandbox`.
-pub(crate) const REQUIRED_FEATURES: GuestFeatures = GuestFeatures::LAYERED_SANDBOX;
-
-/// Records a launch and its distro layer, at the path at which it was verified, with the layer's
-/// binding, in a new state directory, as `provision` does, with the binding of its scratch image,
-/// if its upper is on scratch, at the path that it records for it.
+/// Records the launch of the distro layer `distro`, at the path at which it was verified, with
+/// the layer's binding, over `scratch`, the scratch image of an upper on scratch, with the options
+/// of `config`, in a new state directory, as `provision` does, with the binding of its scratch
+/// image at the path that it records for it, and `source`, the named snapshot that each start of
+/// a sandbox of `snapshot restore` restores, or `None`. `layer` is the distro layer as given,
+/// whose images it checks again, with the export plan, as [`check_images`] does.
 pub(crate) fn provision(
     state_path: &str,
-    launch: &SandboxLaunch,
+    layer: &SandboxLayer,
+    scratch: Option<&Path>,
     distro: &RecordedDistro,
     config: &ProvisionConfig<'_>,
+    source: Option<&Source>,
     timeout: f64,
 ) -> Result {
     let state_dir = prepare_state_directory(state_path, true)?;
     let config_path = state_dir.join(CONFIG_NAME);
-    let runtime_path = state_dir.join(RUNTIME_NAME);
+    let runtime_path = state_dir.join(StateFile::Runtime.name());
     let _lock = LifecycleLock::acquire(&state_dir, timeout, true)?;
     if config_path.exists() || runtime_path.exists() {
         return Err(Exit::error(
@@ -123,63 +106,48 @@ pub(crate) fn provision(
             "sandbox is already provisioned",
         ));
     }
-    launch.validated()?;
-    let scratch = RecordedScratch::new(launch)?;
+    check_images(layer, scratch, config.export)?;
+    let scratch = RecordedScratch::new(scratch)?;
     write_json(
         &config_path,
-        &serialize_launch(launch, distro, scratch.as_ref(), config)?,
+        &serialize_launch(distro, scratch.as_ref(), config, source)?,
     )
 }
 
-/// What a transition finds of the sandbox's VM, through [`supervisor::reattach`].
 enum Found {
     /// No VM is recorded, or a start that was interrupted is over.
     Nothing,
     /// The recorded OpenVMM exited without a stop, and its runtime record is cleared.
     Exited,
     /// The VM runs under the runtime identity of the artifacts.
-    Live(Vmm),
+    Live(SavedVm, Process),
     /// The VM runs under another runtime identity, which differs in these parts.
-    Mismatched(Vmm, Vec<IdentityPart>),
+    Mismatched(SavedVm, Process, Vec<IdentityPart>),
 }
 
-/// Finds the sandbox's VM in the locked store, as an orchestrator does after it restarts within
-/// the same host boot: with [`supervisor::reattach`], under the runtime identity of `artifacts`.
-///
-/// Only a recorded launch needs that identity, so a sandbox that never started, or that stopped,
-/// needs no install metadata. Fails for a record that the store does not read, such as one of an
-/// earlier format, and when whether the VM runs cannot be determined.
-fn find_vm(locked: &mut LockedStore, artifacts: &Artifacts<'_>) -> Result<Found> {
-    if !records_launch(locked)? {
+fn find_vm(lock: &mut LifecycleLock, artifacts: &Artifacts<'_>) -> Result<Found> {
+    let Some(saved) = lock.locked().runtime().map_err(error_with_cause)? else {
         return Ok(Found::Nothing);
-    }
+    };
+    let process = match Process::open(&saved.process).map_err(|error| {
+        Exit::error(
+            ErrorCode::VmmIndeterminate,
+            format!("cannot determine whether the OpenVMM process of the sandbox runs: {error}"),
+        )
+    })? {
+        Opened::Running(process) => process,
+        Opened::Exited(_) => {
+            lock.clear_runtime()?;
+            return Ok(Found::Exited);
+        }
+    };
     let runtime = artifacts.runtime_identity()?;
-    Ok(
-        match supervisor::reattach(locked, &runtime).map_err(error_with_cause)? {
-            Reattached::Live(vmm) => Found::Live(vmm),
-            Reattached::Mismatched { vmm, differences } => Found::Mismatched(vmm, differences),
-            Reattached::Exited {
-                record: Some(_), ..
-            } => Found::Exited,
-            Reattached::Exited { record: None, .. } => Found::Nothing,
-            Reattached::Indeterminate(reason) => {
-                return Err(Exit::error(
-                    ErrorCode::VmmIndeterminate,
-                    format!(
-                        "cannot determine whether the OpenVMM process of the sandbox runs: \
-                         {reason}"
-                    ),
-                ));
-            }
-        },
-    )
-}
-
-/// Returns whether the locked store records a launch of the sandbox, in its launch journal or its
-/// runtime record, which alone needs the runtime identity of the artifacts.
-fn records_launch(locked: &mut LockedStore) -> Result<bool> {
-    Ok(locked.journal().map_err(error_with_cause)?.is_some()
-        || locked.runtime().map_err(error_with_cause)?.is_some())
+    let differences = saved.runtime.differences(&runtime);
+    Ok(if differences.is_empty() {
+        Found::Live(saved, process)
+    } else {
+        Found::Mismatched(saved, process, differences)
+    })
 }
 
 /// Returns the parts of a runtime identity that `differences` names, as messages list them.
@@ -191,7 +159,7 @@ fn differing_parts(differences: &[IdentityPart]) -> String {
 /// Returns the error of a transition other than stop on a VM that another runtime identity than
 /// the artifacts' started, which differs in `differences`: the CLI does not drive it, since it may
 /// speak other contracts, and only its stop ends it.
-fn mismatched(vmm: &Vmm, differences: &[IdentityPart]) -> Exit {
+fn mismatched(saved: &SavedVm, differences: &[IdentityPart]) -> Exit {
     Exit::error(
         ErrorCode::RuntimeMismatch,
         format!(
@@ -199,7 +167,7 @@ fn mismatched(vmm: &Vmm, differences: &[IdentityPart]) -> Exit {
              {}, so it is not driven: stop it to terminate its OpenVMM process {} without a \
              guest shutdown",
             differing_parts(differences),
-            vmm.record().process().pid
+            saved.process.pid
         ),
     )
 }
@@ -207,19 +175,19 @@ fn mismatched(vmm: &Vmm, differences: &[IdentityPart]) -> Exit {
 /// The running VM of a sandbox, and the capability with which its control session attaches.
 struct Running {
     /// The VM.
-    vmm: Vmm,
-    /// Its control capability.
-    capability: [u8; CAPABILITY_LEN],
+    saved: SavedVm,
+    /// The held, identity-verified process.
+    process: Process,
 }
 
 /// Returns the running VM of the sandbox in the locked store of `state_dir`, as exec requires it.
 fn running_vm(
     state_dir: &Path,
-    locked: &mut LockedStore,
+    lock: &mut LifecycleLock,
     artifacts: &Artifacts<'_>,
 ) -> Result<Running> {
-    let found = found_vm(locked, artifacts)?;
-    running(state_dir, locked, found)
+    let found = found_vm(lock, artifacts)?;
+    running(state_dir, found)
 }
 
 /// Finds the sandbox's VM as [`find_vm`] does, for an operation other than a start, which holds
@@ -227,19 +195,19 @@ fn running_vm(
 /// recorded launch needs, it holds the lock of their downloads, as [`Artifacts::hold`] says, so
 /// that no download replaces them meanwhile. A sandbox that records no launch needs neither the
 /// artifacts nor their root.
-fn found_vm(locked: &mut LockedStore, artifacts: &Artifacts<'_>) -> Result<Found> {
-    if !records_launch(locked)? {
+fn found_vm(lock: &mut LifecycleLock, artifacts: &Artifacts<'_>) -> Result<Found> {
+    if lock.locked().runtime().map_err(error_with_cause)?.is_none() {
         return Ok(Found::Nothing);
     }
     let _hold = artifacts.hold()?;
-    find_vm(locked, artifacts)
+    find_vm(lock, artifacts)
 }
 
 /// Returns the running VM that `found` describes in the locked store of `state_dir`, as exec and
 /// stop require it, with its control capability.
-fn running(state_dir: &Path, locked: &mut LockedStore, found: Found) -> Result<Running> {
-    let vmm = match found {
-        Found::Live(vmm) => vmm,
+fn running(state_dir: &Path, found: Found) -> Result<Running> {
+    let (saved, process) = match found {
+        Found::Live(saved, process) => (saved, process),
         Found::Nothing => {
             // A directory without the configuration of a sandbox holds no provisioned one, which
             // a start would report too, rather than one that is stopped.
@@ -255,20 +223,34 @@ fn running(state_dir: &Path, locked: &mut LockedStore, found: Found) -> Result<R
                 "sandbox runtime state is stale because the OpenVMM process is not running",
             ));
         }
-        Found::Mismatched(vmm, differences) => return Err(mismatched(&vmm, &differences)),
+        Found::Mismatched(saved, _, differences) => return Err(mismatched(&saved, &differences)),
     };
-    let capability = locked.read_capability().map_err(error_with_cause)?;
-    Ok(Running { vmm, capability })
+    Ok(Running { saved, process })
 }
 
-/// Connects to the control endpoint of `vmm`, and attaches with `capability`.
-fn connect(vmm: &Vmm, capability: &[u8; CAPABILITY_LEN], timeout: f64) -> Result<Session> {
-    Session::connect(
-        vmm.endpoint(),
-        vmm.record().process().pid,
-        capability,
-        timeout,
-    )
+fn runtime_for(
+    artifacts: &Artifacts<'_>,
+    config: &Config,
+    identity: RuntimeIdentity,
+) -> Result<Runtime> {
+    let Located { dir, openvmm } = locate(artifacts.root)?;
+    Ok(Runtime {
+        openvmm,
+        kernel: dir.artifact(KERNEL_NAME),
+        initramfs: dir.initramfs(Guest::Alpine),
+        identity,
+        hypervisor: config.hypervisor().parse().map_err(error_with_cause)?,
+        cpu_profile: None,
+        windows_breakaway: false,
+        options: LaunchOptions::default(),
+    })
+}
+
+fn connect(saved: &SavedVm, artifacts: &Artifacts<'_>, timeout: f64) -> Result<Session> {
+    let _hold = artifacts.hold()?;
+    let config = Config::new(read_config(&saved.vm_dir.path().join(CONFIG_NAME))?)?;
+    let runtime = runtime_for(artifacts, &config, artifacts.runtime_identity()?)?;
+    Session::reattach(saved, &runtime, timeout)
 }
 
 /// Checks that `state_dir` holds the configuration of a provisioned sandbox: a directory without

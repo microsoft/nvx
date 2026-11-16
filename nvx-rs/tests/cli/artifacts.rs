@@ -3,7 +3,6 @@
 //! guest kernel, and every guest in the order of `nvx.py`, with its initramfs, package manifest,
 //! and distro layer and manifest, or `null`.
 
-use nvx::host::artifacts::Guest;
 use serde_json::{Value, json};
 
 use crate::harness::{LINE_END, Root};
@@ -86,7 +85,7 @@ fn artifacts_list_every_guest_in_order() {
             .iter()
             .map(|guest| guest["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, Guest::ALL.map(Guest::name), "{name}");
+        assert_eq!(names, ["alpine", "ubuntu", "azurelinux"], "{name}");
         // Two spaces indent each level, and the members are sorted, as Python writes them.
         let layout = ensure_ascii(&serde_json::to_string_pretty(&expected).unwrap()) + "\n";
         assert_eq!(outcome.stdout(), layout.replace('\n', LINE_END), "{name}");

@@ -1,16 +1,15 @@
-//! Translation of a network posture into OpenVMM options, and the egress policy files of
-//! `nvx.py`.
+//! Translation of a network posture into OpenVMM options.
 //!
 //! OpenVMM's portable profile enforces an egress default plus IPv4 and IPv6 allow and deny rules
 //! that match a network of one family and, optionally, one protocol (TCP, UDP, or ICMP) and, for
 //! TCP or UDP, one port or an inclusive range of ports; deny rules take precedence.
-//! [`EgressRule`]s are lowered into that form exactly, by the lowering that also compiles egress
-//! policy files ([`policy`]): exceptions are subtracted from their networks, a rule without
-//! destinations matches `0.0.0.0/0` and `::/0`, `any` protocol with a port or a port range becomes
-//! a TCP and a UDP rule, destinations merge into the fewest networks that cover them, rules for
-//! every port of a protocol subsume narrower rules, and overlapping and adjacent port ranges
-//! merge. Each action emits at most [`MAX_RULES`] OpenVMM rules, sorted by family, address, prefix
-//! length, protocol, and ports.
+//! [`EgressRule`]s are lowered into that form exactly: exceptions are subtracted from their
+//! networks, a rule without destinations matches `0.0.0.0/0` and `::/0`, `any` protocol with a
+//! port or a port range becomes a TCP and a UDP rule, destinations merge into the fewest networks
+//! that cover them, rules for every port of a protocol subsume narrower rules, and overlapping
+//! and adjacent port ranges merge. Each action emits at most [`MAX_RULES`] OpenVMM rules, sorted
+//! by family, address, prefix length, protocol, and ports, which
+//! [`NetworkPolicy::native_egress_rules`] returns.
 //!
 //! Host-loopback access is bidirectional: with it allowed, the guest reaches host loopback
 //! services through its gateway, and OpenVMM publishes the guest's listeners on host loopback.
@@ -28,7 +27,7 @@
 //! A template's capture attaches its NIC under the complete deny-all policy instead, whatever the
 //! network's own: egress denied without rules, ingress and host-loopback access denied, without a
 //! proxy or forwards. It is the one policy of a snapshot that OpenVMM lets a restore replace, so
-//! each restore of the template installs its clone's own policy, and the clone's activation
+//! each restore of the template installs its clone's own policy, and the clone's guest restore
 //! record gives the guest what OpenVMM gives a VM that boots with the policy on its kernel command
 //! line: its DNS server, and whether its listeners are published.
 
@@ -36,15 +35,22 @@ mod address;
 mod arguments;
 mod loopback;
 mod lowering;
-pub mod policy;
+#[cfg(feature = "cli")]
+pub(crate) mod policy;
 mod proxy;
 mod rule;
+
+use std::net::{IpAddr, Ipv4Addr};
+
+use crate::guest_restore::{Network, Publication};
 
 pub use self::arguments::openvmm_arguments;
 pub(crate) use self::arguments::{dns_server, template_arguments};
 pub use self::loopback::{ForwardProtocol, HostLoopback, LoopbackForward};
 pub use self::proxy::{NetworkProxy, ProxyScheme};
 pub use self::rule::{Access, Destination, EgressRule, EgressRules, PortSelector, Protocol};
+
+use crate::error::Result;
 
 /// Largest number of allow rules, and of deny rules, that OpenVMM accepts.
 pub const MAX_RULES: usize = 256;
@@ -127,6 +133,19 @@ impl NetworkPolicy {
         }
     }
 
+    /// Combines this launch's policy with the fixed NIC gateway and its resolved DNS service.
+    pub(crate) fn activation_network(&self, gateway: Ipv4Addr, dns: Option<IpAddr>) -> Network {
+        Network {
+            dns,
+            publication: if self.publishes_listeners() {
+                Publication::Published
+            } else {
+                Publication::Unpublished
+            },
+            proxy: self.proxy.map(|proxy| proxy.url(gateway)),
+        }
+    }
+
     /// Returns the proxy-only policy whose one way out is `proxy`: egress denied without rules,
     /// ingress and host-loopback access denied, and no forwards. Messages call the rules
     /// `egress.allow` and `egress.deny`.
@@ -159,6 +178,45 @@ impl NetworkPolicy {
     pub fn publishes_listeners(&self) -> bool {
         self.ingress == Access::Allow || self.host_loopback == HostLoopback::Allow
     }
+
+    /// Returns the native rules that the `allow` and `deny` rules lower to, as
+    /// [`openvmm_arguments`] lowers them: destinations merged, exceptions subtracted, port ranges
+    /// merged, and each action's rules sorted, at most [`MAX_RULES`] of them. It reads nothing on
+    /// the host, and lowers the rules whatever the rest of the policy.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when a rule is
+    /// malformed, such as a destination that is not a CIDR, an exception outside its network, or
+    /// a port range that ends below its start, or when an action needs more than [`MAX_RULES`]
+    /// native rules. The allow rules are checked first, and messages name the rules as
+    /// [`openvmm_arguments`] names them.
+    pub fn native_egress_rules(&self) -> Result<NativeEgressRules> {
+        Ok(NativeEgressRules {
+            allow: native_rules(&self.allow)?,
+            deny: native_rules(&self.deny)?,
+        })
+    }
+}
+
+/// The native rules that the `allow` and `deny` rules of a [`NetworkPolicy`] lower to, which
+/// [`NetworkPolicy::native_egress_rules`] returns.
+///
+/// Each rule is the value of an `--network-egress-allow` or `--network-egress-deny` option of
+/// OpenVMM: `CIDR`, `CIDR:PROTOCOL`, `CIDR:PROTOCOL:PORT`, or `CIDR:PROTOCOL:FIRST-LAST`. Each
+/// list holds at most [`MAX_RULES`] rules, sorted by family, address, prefix length, protocol,
+/// and ports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeEgressRules {
+    /// Rules of traffic to permit.
+    pub allow: Vec<String>,
+    /// Rules of traffic to block, which OpenVMM applies first.
+    pub deny: Vec<String>,
+}
+
+/// Lowers the rules of one action as [`NetworkPolicy::native_egress_rules`] does.
+fn native_rules(rules: &EgressRules) -> Result<Vec<String>> {
+    lowering::lower(&rule::parse_rules(rules)?.concat(), &rules.name)
 }
 
 #[cfg(test)]

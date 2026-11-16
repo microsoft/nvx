@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Tests for module_diagrams.py, which draws the module diagrams of the nvx
-crate that doc/modules publishes, and for the workflow that draws them after
-every merge to dev and commits them.
+crate that doc/modules publishes, and for the workflow that draws them every
+night and commits them.
 
 They check how the script reads and checks cargo-modules' exports, which are
-written here in its DOT form, how it merges the platforms' modules, the graphs
-that it draws, the page that shows them, how it replaces an earlier run's
-output, and what it runs, with a stand-in for cargo-modules and Graphviz. They
-also check that doc/modules holds a page and the diagrams that it shows, the
-workflow's triggers, credentials, and pins, and, on POSIX hosts, run its
-publication step against a local repository.
+written here in its DOT form, how it merges the platforms' modules, the modules
+of the public API that it keeps, the graphs that it draws, the page that shows
+them, how it replaces an earlier run's output, and what it runs, with a
+stand-in for cargo-modules and Graphviz. They also check that doc/modules holds
+a page and the diagrams that it shows, the workflow's triggers, credentials, and
+pins, and, on POSIX hosts, run its publication step against a local repository.
 """
 
 from __future__ import annotations
@@ -222,6 +222,20 @@ class ParseTests(unittest.TestCase):
         )
         self.assertEqual(parsed.uses, frozenset(LINUX_USES))
 
+    def test_filtered_parents_leave_children_under_the_nearest_ancestor(self):
+        for owner in ("nvx", "nvx::host"):
+            with self.subTest(owner=owner):
+                omitted = f"{owner}::gpt"
+                child = f"{omitted}::crc"
+                modules = {"nvx": "crate"}
+                if owner != "nvx":
+                    modules[owner] = "pub"
+                modules[child] = "pub(self)"
+                text = export(modules).replace(owns(omitted, child), owns(owner, child))
+                parsed = diagrams.parse(text, "linux")
+                self.assertEqual(parsed.visibility, modules)
+                self.assertEqual(parsed.owner[child], owner)
+
     def test_exports_of_anything_but_modules_and_their_uses_fail(self):
         modules = {"nvx": "crate", "nvx::host": "pub"}
         cases = {
@@ -348,12 +362,13 @@ class RestoreTests(unittest.TestCase):
         plain_uses: Iterable[tuple[str, str]] = (("nvx::host", "nvx::error"),),
         tested: Mapping[str, str] = TESTED,
         tested_uses: Iterable[tuple[str, str]] = TESTED_USES,
+        target: str = "linux",
     ) -> diagrams.Export:
         return diagrams.restore(
-            diagrams.parse(export(plain, plain_uses), "linux"),
-            diagrams.parse(export(tested, tested_uses), "linux"),
+            diagrams.parse(export(plain, plain_uses), target),
+            diagrams.parse(export(tested, tested_uses), target),
             conditions,
-            "linux",
+            target,
         )
 
     def test_modules_that_cargo_modules_drops_as_tests_return_with_their_uses(self):
@@ -380,6 +395,99 @@ class RestoreTests(unittest.TestCase):
     def test_a_test_in_a_string_is_no_condition(self):
         restored = self.restore(found(imp=('feature = "test"',)))
         self.assertIn("nvx::host::imp", restored.visibility)
+
+    def test_a_test_or_a_feature_that_the_export_enables_builds_outside_tests(self):
+        # As the Linux platform's identity module, under cfg(any(test, feature =
+        # "cli")), which cargo-modules drops as a test module.
+        self.assertIn("cli", diagrams.FEATURES)
+        restored = self.restore(found(imp=('any(test, feature = "cli")',)))
+        self.assertIn("nvx::host::imp", restored.visibility)
+        # Without the feature, the module may build for tests alone.
+        other = 'any(test, feature = "other")'
+        with self.assertRaisesRegex(
+            diagrams.DiagramError,
+            re.escape(f"nvx::host::imp builds under cfg({other})"),
+        ):
+            self.restore(found(imp=(other,)))
+
+    def test_a_test_or_platform_feature_tracks_its_target_and_descendants(self):
+        condition = 'any(test, all(feature = "guest", target_os = "linux"))'
+        child = "nvx::host::imp::child"
+        for platform, target in diagrams.TARGETS.items():
+            with self.subTest(platform=platform):
+                restored = self.restore(
+                    {**found(imp=(condition,)), child: ()},
+                    tested={**TESTED, child: "pub(self)"},
+                    tested_uses=(*TESTED_USES, (child, "nvx::error")),
+                    target=target,
+                )
+                visibility = dict(PLAIN)
+                uses = {("nvx::host", "nvx::error")}
+                if platform == LINUX:
+                    visibility.update(
+                        {"nvx::host::imp": "pub(self)", child: "pub(self)"}
+                    )
+                    uses.update(
+                        {
+                            ("nvx::host", "nvx::host::imp"),
+                            ("nvx::host::imp", "nvx::error"),
+                            (child, "nvx::error"),
+                        }
+                    )
+                self.assertEqual(restored.visibility, visibility)
+                self.assertEqual(restored.uses, uses)
+                self.assertEqual(
+                    diagrams.public(restored).visibility,
+                    {"nvx": "crate", "nvx::host": "pub"},
+                )
+
+    def test_a_platform_feature_needs_an_enabled_feature_and_known_target(self):
+        cases = (
+            (
+                'any(test, all(feature = "other", target_os = "linux"))',
+                diagrams.TARGETS[LINUX],
+            ),
+            ('any(test, all(feature = "guest", target_os = "linux"))', "unknown"),
+        )
+        for condition, target in cases:
+            with self.subTest(condition=condition, target=target):
+                with self.assertRaisesRegex(
+                    diagrams.DiagramError,
+                    re.escape(f"nvx::host::imp builds under cfg({condition})"),
+                ):
+                    self.restore(found(imp=(condition,)), target=target)
+
+    def test_filtered_children_regain_their_parent_and_production_uses(self):
+        parent = "nvx::host::imp"
+        child = f"{parent}::child"
+        target = diagrams.TARGETS[LINUX]
+        plain = export(
+            {**PLAIN, child: "pub(self)"},
+            (
+                ("nvx::host", "nvx::error"),
+                ("nvx::host", child),
+                (child, "nvx::error"),
+            ),
+        ).replace(owns(parent, child), owns("nvx::host", child))
+        tested = export(
+            {**TESTED, child: "pub(self)"},
+            (*TESTED_USES, (parent, child), (child, "nvx::error")),
+        )
+        restored = diagrams.restore(
+            diagrams.parse(plain, target),
+            diagrams.parse(tested, target),
+            {
+                **found(
+                    imp=('any(test, all(feature = "guest", target_os = "linux"))',)
+                ),
+                child: (),
+            },
+            target,
+        )
+        self.assertEqual(restored.owner[child], parent)
+        self.assertIn((parent, child), restored.uses)
+        self.assertNotIn(("nvx::host", child), restored.uses)
+        self.assertIn((child, "nvx::error"), restored.uses)
 
     def test_a_use_that_only_a_restored_module_makes_counts_once(self):
         # cargo-modules moves the uses of a module that it drops to the module
@@ -515,6 +623,59 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(diagrams.quote('a"b\\c\nd'), '"a\\"b\\\\c\\nd"')
 
 
+class PublicTests(unittest.TestCase):
+    def test_the_public_api_leaves_out_private_modules_and_programs(self):
+        kept = diagrams.public(
+            diagrams.parse(
+                export(
+                    {
+                        "nvx": "crate",
+                        "nvx::error": "pub(self)",
+                        "nvx::host": "pub",
+                        "nvx::host::cli": "pub",
+                        "nvx::host::cli::args": "pub",
+                        "nvx::host::sys": "pub(crate)",
+                        "nvx::host::sys::fs": "pub",
+                        "nvx::host::vm": "pub",
+                    },
+                    (
+                        ("nvx", "nvx::error"),
+                        ("nvx", "nvx::host::vm"),
+                        ("nvx::host::cli", "nvx::host::vm"),
+                        ("nvx::host::vm", "nvx::host::sys::fs"),
+                    ),
+                ),
+                "linux",
+            )
+        )
+        # host::cli is a program's, and a public module inside it or inside a
+        # private module is no part of the API either.
+        self.assertIn("nvx::host::cli", diagrams.PROGRAMS)
+        self.assertEqual(
+            kept.visibility,
+            {"nvx": "crate", "nvx::host": "pub", "nvx::host::vm": "pub"},
+        )
+        self.assertEqual(kept.owner, {"nvx::host": "nvx", "nvx::host::vm": "nvx::host"})
+        self.assertEqual(kept.uses, {("nvx", "nvx::host::vm")})
+
+    def test_a_module_public_on_one_platform_alone_is_that_platform_s(self):
+        modules = {"nvx": "crate", "nvx::a": "pub", "nvx::a::b": "pub"}
+        merged = diagrams.merge(
+            {
+                "Linux": diagrams.public(diagrams.parse(export(modules), "linux")),
+                "Windows": diagrams.public(
+                    diagrams.parse(
+                        export({**modules, "nvx::a": "pub(crate)"}), "windows"
+                    )
+                ),
+            }
+        )
+        self.assertEqual(sorted(merged.modules), ["nvx", "nvx::a", "nvx::a::b"])
+        self.assertEqual(merged.modules["nvx::a"].visibility, "pub")
+        self.assertEqual(merged.only("nvx::a"), "Linux")
+        self.assertIsNone(merged.only("nvx::a::b"))
+
+
 class GraphTests(unittest.TestCase):
     def test_boxes_show_their_visibility_and_platforms(self):
         source = diagrams.hierarchy(crate(), "nvx::host")
@@ -570,7 +731,7 @@ class GraphTests(unittest.TestCase):
         )
         self.assertEqual(
             label(drawn["nvx::error"]),
-            ["error", diagrams.DESCRIPTIONS["error"], "pub(crate)"],
+            ["error", "pub(crate)"],
         )
         self.assertIn('subgraph "cluster_nvx"', source)
         self.assertEqual(edges(source), {})
@@ -672,7 +833,7 @@ class PageTests(unittest.TestCase):
 
     def test_the_page_leads_to_how_ci_draws_the_diagrams(self):
         text = " ".join(self.page().split())
-        self.assertIn("CI draws them again after every merge to `dev`", text)
+        self.assertIn("CI draws them again every night", text)
         for output, target in (
             (diagrams.DEFAULT_OUTPUT, "../../doc/ci.md#module-diagrams"),
             (PUBLISHED, "../ci.md#module-diagrams"),
@@ -762,7 +923,16 @@ class DrawTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "modules"
             names = self.draw(output, tools)
-            drawn = diagrams.diagrams(crate())
+            drawn = diagrams.diagrams(
+                diagrams.merge(
+                    {
+                        platform: diagrams.public(
+                            diagrams.parse(EXPORTS[platform], target)
+                        )
+                        for platform, target in diagrams.TARGETS.items()
+                    }
+                )
+            )
             self.assertEqual(
                 names, sorted([diagrams.PAGE, *(diagram.name for diagram in drawn)])
             )
@@ -789,15 +959,16 @@ class DrawTests(unittest.TestCase):
         self.assertIn("cargo-modules) 9.9.9 finds them and Graphviz 1.2.3 draws", flat)
 
     def test_draw_restores_the_modules_that_cargo_modules_drops_as_tests(self):
-        # As nvx::host::sandbox::scratch::imp: each platform builds a module of
-        # the same path under its own condition, but cargo-modules drops Linux's,
-        # under cfg(not(windows)), unless it analyzes with cfg(test).
+        # As nvx::host::sandbox::scratch::imp, if it were public, as the modules
+        # that the diagrams draw are: each platform builds a module of the same
+        # path under its own condition, but cargo-modules drops Linux's, under
+        # cfg(not(windows)), unless it analyzes with cfg(test).
         linux = {
             **LINUX_MODULES,
-            "nvx::host::imp": "pub(self)",
+            "nvx::host::imp": "pub",
             "nvx::host::tests": "pub(self)",
         }
-        windows = {**WINDOWS_MODULES, "nvx::host::imp": "pub(self)"}
+        windows = {**WINDOWS_MODULES, "nvx::host::imp": "pub"}
         imports = (*LINUX_USES, ("nvx::host::imp", "nvx::error"))
         tools = FakeTools(
             {LINUX: EXPORTS[LINUX], WINDOWS: export(windows, WINDOWS_USES)},

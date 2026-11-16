@@ -137,7 +137,6 @@ class GuestRustBuildConstants:
     SOURCE_FILES: Final = (
         Path("nvx-rs") / "Cargo.toml",
         Path("nvx-rs") / "Cargo.lock",
-        Path("nvx-rs") / "build.rs",
         Path("rust-toolchain.toml"),
         Path("scripts") / "nvx_tools" / "build_constants.py",
         Path("scripts") / "nvx_tools" / "guest_binaries.py",
@@ -201,11 +200,7 @@ class GuestRustBuildConstants:
 
 class AlpineBuildConstants:
     GUEST_NAME: Final = "alpine"
-    GUEST_DIRECTORY: Final = Path("guest") / GUEST_NAME
-    GUEST_SOURCE_DIRECTORIES: Final = (
-        BuildConstants.COMMON_GUEST_DIRECTORY,
-        GUEST_DIRECTORY,
-    )
+    GUEST_SOURCE_DIRECTORIES: Final = (BuildConstants.COMMON_GUEST_DIRECTORY,)
     DISTRIBUTION: Final = "Alpine Linux"
     VERSION: Final = "3.24.1"
     BRANCH: Final = "v3.24"

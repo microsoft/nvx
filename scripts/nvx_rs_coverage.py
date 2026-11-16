@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Measure which code of the nvx crate its own tests reach.
 
-The script runs the crate's tests, with every feature and NVX_BUNDLE=skip, under
-cargo-llvm-cov, with the compiler that rust-toolchain.toml pins and its
-llvm-tools component, and writes what they reached on this host to an output
-directory:
+The script runs the crate's tests, with every feature, under cargo-llvm-cov, with
+the compiler that rust-toolchain.toml pins and its llvm-tools component, and
+writes what they reached on this host to an output directory:
 
 - lcov.info and html/: the LCOV and HTML reports of the crate's production code,
   with paths relative to the crate;
@@ -111,14 +110,12 @@ Runner = Callable[[Sequence[str], bool], subprocess.CompletedProcess[str]]
 
 def environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
     """Returns the environment of the measurement's commands: this process's,
-    or `base`, with NVX_BUNDLE=skip and without NVX_GUEST_BINARIES.
+    or `base`, without NVX_GUEST_BINARIES.
 
-    --all-features enables `bundled`, whose build script would otherwise
-    download a release, and the guest binaries' tests run the binaries that
-    NVX_GUEST_BINARIES names, which are not instrumented, instead of Cargo's.
+    The guest binaries' tests run the binaries that NVX_GUEST_BINARIES names,
+    which are not instrumented, instead of Cargo's.
     """
     result = dict(os.environ if base is None else base)
-    result["NVX_BUNDLE"] = "skip"
     result.pop("NVX_GUEST_BINARIES", None)
     return result
 

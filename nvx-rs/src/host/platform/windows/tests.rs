@@ -1,31 +1,60 @@
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::mem;
+#[cfg(feature = "cli")]
 use std::os::windows::fs::OpenOptionsExt;
-use std::os::windows::io::AsHandle;
 use std::path::Path;
+use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "cli")]
+use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
 use windows_sys::Win32::Foundation::{
     CompareObjectHandles, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_ACCESS_DENIED,
-    ERROR_INVALID_PARAMETER, ERROR_SHARING_VIOLATION, GetHandleInformation, HANDLE_FLAG_INHERIT,
-    SetHandleInformation,
+    ERROR_INVALID_PARAMETER, GetHandleInformation, HANDLE_FLAG_INHERIT, SetHandleInformation,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, GetCurrentProcess, INFINITE, TerminateProcess,
+    CreateEventW, GetCurrentProcess, INFINITE, OpenProcess, PROCESS_DUP_HANDLE,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, TerminateProcess,
 };
 
+#[cfg(feature = "cli")]
+pub(crate) use super::endpoint::tests::disconnect_control;
+pub(crate) use super::endpoint::tests::{accept_control, control_server};
 use super::identity::status_error;
-use super::log_claim::{local_directory, log_job_id, log_job_name, log_job_processes, object_name};
+#[cfg(feature = "cli")]
+use super::log_claim::log_job_processes;
+use super::log_claim::{local_directory, log_job_id, log_job_name, object_name};
 pub(crate) use super::private::tests::set_access;
+pub(crate) use super::private::tests::{access, user_sid};
 use super::process::{end_process, wait_step};
 use super::spawn::command_line;
 use super::*;
-use crate::host::platform::inherit::{Inherited, lock_spawns, spawn_command};
+use crate::host::platform::inherit::{Inherited, lock_spawns};
+
+pub(crate) fn wait_exit_handle(process: OwnedHandle, deadline: Instant) -> io::Result<bool> {
+    super::process::ProcessHandle {
+        process,
+        terminate: false,
+    }
+    .wait(deadline)
+    .map(|exited| exited.expect("Windows process handles always provide an exit event"))
+}
+
+impl ProcessHandle {
+    pub(crate) fn wait_only(pid: u32) -> Self {
+        Self {
+            process: open_handle(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE)
+                .unwrap(),
+            terminate: false,
+        }
+    }
+}
 
 thread_local! {
     /// What a spawn of this thread runs in its window, once its handles are inheritable and
@@ -41,6 +70,28 @@ pub(super) fn in_window() {
             hook();
         }
     });
+}
+
+pub(crate) fn with_spawn_window<T>(
+    hook: impl FnMut() + 'static,
+    operation: impl FnOnce() -> T,
+) -> T {
+    IN_WINDOW.set(Some(Box::new(hook)));
+    let result = operation();
+    IN_WINDOW.set(None);
+    result
+}
+
+pub(crate) fn inherits_file(pid: u32, value: usize, file: &fs::File) -> bool {
+    // SAFETY: opens only the test's already verified child to inspect its handle table.
+    let child = owned(unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, pid) })
+        .unwrap_or_else(|| panic!("cannot inspect the child: {}", io::Error::last_os_error()));
+    holds(&child, value as HANDLE, file)
+}
+
+pub(crate) fn untrusted_log_job(log: &fs::File) -> OwnedHandle {
+    let id = log_job_id(log).unwrap().unwrap();
+    job_with_descriptor(&log_job_name(id), "D:P(A;;GA;;;WD)")
 }
 
 fn line(program: &str, arguments: &[&str]) -> String {
@@ -81,18 +132,28 @@ fn a_restore_ready_client_that_closed_before_its_connection_was_accepted_is_read
         }
         received
     };
+    // A fresh endpoint and its listener, as a restore binds them.
+    let listen = || {
+        let endpoint = format!(
+            r"\\.\pipe\nvx-restore-ready-{}-{}",
+            std::process::id(),
+            crate::host::tests::unique_suffix()
+        );
+        let listener = ReadyListener::bind(&endpoint).unwrap();
+        (endpoint, listener)
+    };
     // A client that sent nothing, as a VMM that fails as it starts, and one that sent its
     // event, each closed before the listener accepted their connection: what they sent
     // remains to read, and then the end of the pipe.
     for sent in [&b""[..], b"the event\n"] {
-        let (endpoint, mut listener) = listen_ready(Path::new("unused")).unwrap();
+        let (endpoint, mut listener) = listen();
         let mut client = fs::OpenOptions::new().write(true).open(&endpoint).unwrap();
         client.write_all(sent).unwrap();
         drop(client);
         assert_eq!(receive_all(&mut listener), sent);
     }
     // A client that closes once the listener accepted its connection.
-    let (endpoint, mut listener) = listen_ready(Path::new("unused")).unwrap();
+    let (endpoint, mut listener) = listen();
     let client = fs::OpenOptions::new().write(true).open(&endpoint).unwrap();
     let mut received = Vec::new();
     assert!(
@@ -106,7 +167,7 @@ fn a_restore_ready_client_that_closed_before_its_connection_was_accepted_is_read
 
 #[test]
 fn windows_refuses_to_terminate_a_process_that_exited_with_access_denied() {
-    let mut child = spawn_command(&mut sleeper()).unwrap();
+    let mut child = spawn_locked(&mut sleeper()).unwrap();
     let pid = child.id();
     let start_time = process_start_time(pid).unwrap().unwrap();
     let process = open_process(pid, start_time).unwrap().unwrap();
@@ -135,7 +196,7 @@ fn a_wait_sleeps_a_remainder_below_a_millisecond_instead_of_waiting_a_tick() {
 
 #[test]
 fn a_wait_with_less_than_a_millisecond_left_ends_at_its_deadline() {
-    let mut child = spawn_command(&mut sleeper()).unwrap();
+    let mut child = spawn_locked(&mut sleeper()).unwrap();
     let pid = child.id();
     let start_time = process_start_time(pid).unwrap().unwrap();
     let process = open_process(pid, start_time).unwrap().unwrap();
@@ -184,13 +245,15 @@ fn children_inherit_only_their_standard_handles() {
     let stderr = stdout.try_clone().unwrap();
     let system = std::env::var_os("SystemRoot").unwrap();
     let cmd = Path::new(&system).join("System32").join("cmd.exe");
-    let child = spawn_detached(
+    let child = spawn_with_stdio(
         &cmd,
         &[OsString::from("/c"), OsString::from("ping -n 30 127.0.0.1")],
         &std::env::temp_dir(),
         [stdin.into(), stdout.into(), stderr.into()],
         &[],
-        false,
+        SpawnMode::Detached {
+            breakaway_from_job: false,
+        },
         None,
     )
     .unwrap();
@@ -203,7 +266,7 @@ fn children_inherit_only_their_standard_handles() {
         let _ = sender.send(leaked_reader.read_to_end(&mut rest).map(|_| rest));
     });
     let rest = receiver.recv_timeout(Duration::from_secs(5));
-    assert!(child.terminate(Duration::from_secs(10)));
+    child.terminate_and_wait().unwrap();
     assert!(
         rest.expect("the child inherited the caller's pipe")
             .unwrap()
@@ -259,55 +322,6 @@ fn make_inheritable(handle: &impl AsRawHandle) {
 }
 
 #[test]
-fn a_child_loses_only_the_inherited_handle_that_is_closed_in_it() {
-    let directory = tempfile::tempdir().unwrap();
-    let closed = std::fs::File::create(directory.path().join("closed")).unwrap();
-    let kept = std::fs::File::create(directory.path().join("kept")).unwrap();
-    let (_other_reader, other) = io::pipe().unwrap();
-    let (stdin, _stdin_writer) = io::pipe().unwrap();
-    let (_stdout_reader, stdout) = io::pipe().unwrap();
-    let stderr = stdout.try_clone().unwrap();
-    let system = std::env::var_os("SystemRoot").unwrap();
-    let ping = Path::new(&system).join("System32").join("PING.EXE");
-    let child = spawn_detached(
-        &ping,
-        &["-n", "30", "127.0.0.1"].map(OsString::from),
-        &std::env::temp_dir(),
-        [stdin.into(), stdout.into(), stderr.into()],
-        &[Inherited::new(&closed), Inherited::new(&kept)],
-        false,
-        None,
-    )
-    .unwrap();
-    let pid = child.id();
-    let (process, start_time) = child.pin().unwrap();
-    let value = |handle: &std::fs::File| handle.as_raw_handle() as HANDLE;
-    let held = |handle: &std::fs::File| holds(&child.process, value(handle), handle);
-    let inherited = (held(&closed), held(&kept));
-    // A handle that the child did not inherit is not closed in it, and neither is any of its
-    // own.
-    let refused = process.close_inherited(pid, other.as_handle());
-    // A process found again, through a handle that may not duplicate its handles, keeps them.
-    let found = open_process(pid, start_time).unwrap().unwrap();
-    let denied = found.close_inherited(pid, closed.as_handle());
-    let closing = process.close_inherited(pid, closed.as_handle());
-    let after = (held(&closed), held(&kept));
-    assert!(child.terminate(Duration::from_secs(10)));
-    // Once the child has exited, it holds no handle, so a close succeeds.
-    let exited = process.close_inherited(pid, kept.as_handle());
-    assert_eq!(inherited, (true, true), "the child did not inherit both");
-    assert!(refused.is_err(), "{refused:?}");
-    assert_eq!(denied.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-    closing.unwrap();
-    assert_eq!(
-        after,
-        (false, true),
-        "the close did not take the closed handle alone"
-    );
-    exited.unwrap();
-}
-
-#[test]
 fn children_inherit_the_allowed_handles_while_they_are_created() {
     let (_allowed_reader, allowed) = io::pipe().unwrap();
     // A handle that was inheritable before the spawn stays so.
@@ -327,13 +341,15 @@ fn children_inherit_the_allowed_handles_while_they_are_created() {
         Inherited::new(&kept),
         Inherited::new(&allowed),
     ];
-    let child = spawn_detached(
+    let child = spawn_with_stdio(
         &ping,
         &["-n", "30", "127.0.0.1"].map(OsString::from),
         &std::env::temp_dir(),
         [stdin.into(), stdout.into(), stderr.into()],
         &inherit,
-        false,
+        SpawnMode::Detached {
+            breakaway_from_job: false,
+        },
         None,
     )
     .unwrap();
@@ -344,45 +360,13 @@ fn children_inherit_the_allowed_handles_while_they_are_created() {
         holds(&child.process, value(&other), &other),
     );
     let (allowed_inheritable, kept_inheritable) = (inheritable(&allowed), inheritable(&kept));
-    assert!(child.terminate(Duration::from_secs(10)));
+    child.terminate_and_wait().unwrap();
     assert!(
         allowed_held && kept_held,
         "an allowed handle was not inherited"
     );
     assert!(!other_held, "a handle that was not allowed was inherited");
     assert!(!allowed_inheritable && kept_inheritable);
-}
-
-#[cfg(feature = "cli")]
-#[test]
-fn foreground_children_inherit_only_the_allowed_handles_besides_their_standard_ones() {
-    // A handle that this process leaves inheritable, as its parent may have passed it, and
-    // that `std::process::Command` would pass on.
-    let (_other_reader, other) = io::pipe().unwrap();
-    make_inheritable(&other);
-    let (_allowed_reader, allowed) = io::pipe().unwrap();
-    let system = std::env::var_os("SystemRoot").unwrap();
-    let cmd = Path::new(&system).join("System32").join("cmd.exe");
-    // The child shares this process's console and standard handles, so it writes nothing.
-    let child = spawn_foreground(
-        &cmd,
-        &["/c", "ping -n 30 127.0.0.1 >NUL"].map(OsString::from),
-        &[Inherited::new(&allowed)],
-    )
-    .unwrap();
-    let value = |handle: &io::PipeWriter| handle.as_raw_handle() as HANDLE;
-    let (allowed_held, other_held) = (
-        holds(&child.process, value(&allowed), &allowed),
-        holds(&child.process, value(&other), &other),
-    );
-    let allowed_inheritable = inheritable(&allowed);
-    assert!(child.terminate(Duration::from_secs(10)));
-    assert!(allowed_held, "an allowed handle was not inherited");
-    assert!(!other_held, "a handle that was not allowed was inherited");
-    assert!(
-        !allowed_inheritable,
-        "the spawn left the allowed handle inheritable"
-    );
 }
 
 #[test]
@@ -408,18 +392,18 @@ fn batch_files_are_refused_before_cmd_could_read_their_arguments() {
             let error = result.err().expect("a batch file started");
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
         };
-        #[cfg(feature = "cli")]
-        refused(spawn_foreground(&program, &arguments, &[]));
         let (stdin, _stdin_writer) = io::pipe().unwrap();
         let (_stdout_reader, stdout) = io::pipe().unwrap();
         let stderr = stdout.try_clone().unwrap();
-        refused(spawn_detached(
+        refused(spawn_with_stdio(
             &program,
             &arguments,
             directory.path(),
             [stdin.into(), stdout.into(), stderr.into()],
             &[],
-            false,
+            SpawnMode::Detached {
+                breakaway_from_job: false,
+            },
             None,
         ));
     }
@@ -448,18 +432,20 @@ fn concurrent_spawns_that_allow_one_handle_all_inherit_it_and_restore_it() {
                     let (stdin, _stdin_writer) = io::pipe().unwrap();
                     let (_stdout_reader, stdout) = io::pipe().unwrap();
                     let stderr = stdout.try_clone().unwrap();
-                    let child = spawn_detached(
+                    let child = spawn_with_stdio(
                         &ping,
                         &["-n", "30", "127.0.0.1"].map(OsString::from),
                         &std::env::temp_dir(),
                         [stdin.into(), stdout.into(), stderr.into()],
                         &[Inherited::new(&shared)],
-                        false,
+                        SpawnMode::Detached {
+                            breakaway_from_job: false,
+                        },
                         None,
                     )
                     .unwrap();
                     let held = holds(&child.process, value, &shared);
-                    assert!(child.terminate(Duration::from_secs(10)));
+                    child.terminate_and_wait().unwrap();
                     assert!(held, "a spawn did not inherit the allowed handle");
                 }
             });
@@ -480,13 +466,15 @@ fn a_spawn_that_panics_in_its_window_restores_the_handles_and_lets_other_spawns_
         let (stdin, _stdin_writer) = io::pipe()?;
         let (_stdout_reader, stdout) = io::pipe()?;
         let stderr = stdout.try_clone()?;
-        spawn_detached(
+        spawn_with_stdio(
             &cmd,
             &["/c", "exit", "0"].map(OsString::from),
             &std::env::temp_dir(),
             [stdin.into(), stdout.into(), stderr.into()],
             inherit,
-            false,
+            SpawnMode::Detached {
+                breakaway_from_job: false,
+            },
             None,
         )
     }
@@ -511,7 +499,9 @@ fn a_spawn_that_panics_in_its_window_restores_the_handles_and_lets_other_spawns_
         .recv_timeout(WINDOW_TIMEOUT)
         .expect("a spawn after the panic did not take the lock")
         .unwrap();
-    assert!(other.terminate(WINDOW_TIMEOUT), "the stand-in did not exit");
+    other
+        .terminate_and_wait()
+        .expect("the stand-in did not exit");
 }
 
 /// The longest wait of the tests of a spawn's window.
@@ -539,9 +529,17 @@ fn sleeper() -> std::process::Command {
     command
 }
 
-/// A spawn of a stand-in VMM, with a log as its standard output and error, as
-/// `supervisor::spawn` passes the VMM its launch's log, that another thread runs and holds in
+/// Spawns `command` under a `SpawnLock`, which it releases once the process exists, so that
+/// the process inherits no handle that a spawn of a VMM makes inheritable meanwhile.
+fn spawn_locked(command: &mut std::process::Command) -> io::Result<std::process::Child> {
+    let _lock = lock_spawns();
+    command.spawn()
+}
+
+/// A spawn of a stand-in VMM, with a log as its standard output and error, as the crate's spawn
+/// of a VMM passes the VMM its launch's log, that another thread runs and holds in
 /// its window, with the log's handles inheritable, until it is released.
+#[cfg(feature = "cli")]
 struct HeldSpawn {
     /// The log.
     log: std::path::PathBuf,
@@ -553,6 +551,7 @@ struct HeldSpawn {
     spawn: thread::JoinHandle<io::Result<LaunchedProcess>>,
 }
 
+#[cfg(feature = "cli")]
 impl HeldSpawn {
     /// Starts the spawn of `cmd /c exit 0`, outside any job, with its log in `directory`, and
     /// returns once it is in its window.
@@ -563,7 +562,7 @@ impl HeldSpawn {
     }
 
     /// Starts the spawn of a stand-in that runs for a minute, `ping`, in the job of its log,
-    /// as `supervisor::spawn` starts the VMM, with its log in `directory`, and returns once it
+    /// as the crate's spawn of a VMM starts it, with its log in `directory`, and returns once it
     /// is in its window.
     fn start_in_job(directory: &Path) -> Self {
         let system = std::env::var_os("SystemRoot").unwrap();
@@ -598,13 +597,15 @@ impl HeldSpawn {
             })));
             let (stdin, _stdin_writer) = io::pipe()?;
             let stderr = file.try_clone()?;
-            spawn_detached(
+            spawn_with_stdio(
                 &program,
                 &arguments,
                 &std::env::temp_dir(),
                 [stdin.into(), file.into(), stderr.into()],
                 &[],
-                false,
+                SpawnMode::Detached {
+                    breakaway_from_job: false,
+                },
                 job,
             )
         });
@@ -631,17 +632,17 @@ impl HeldSpawn {
     /// log and its identity.
     fn finish(self) -> (std::path::PathBuf, (u64, u64)) {
         let (stand_in, log, identity) = self.stand_in();
-        assert!(
-            stand_in.terminate(WINDOW_TIMEOUT),
-            "the stand-in did not exit"
-        );
+        stand_in
+            .terminate_and_wait()
+            .expect("the stand-in did not exit");
         (log, identity)
     }
 }
 
 /// Returns whether the claim on the log `log`, the file `identity`, is released within
 /// `timeout`.
-fn claim_released_within(log: &Path, identity: (u64, u64), timeout: Duration) -> bool {
+#[cfg(feature = "cli")]
+pub(crate) fn claim_released_within(log: &Path, identity: (u64, u64), timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
         if !log_claim_held(log, identity).unwrap() {
@@ -654,12 +655,13 @@ fn claim_released_within(log: &Path, identity: (u64, u64), timeout: Duration) ->
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_process_spawned_under_the_spawn_lock_does_not_inherit_a_vmms_log() {
     let directory = tempfile::tempdir().unwrap();
     let held = HeldSpawn::start(directory.path());
     // The spawn of the other process waits for the window to close.
-    let other = thread::spawn(|| spawn_command(&mut sleeper()).map(Running));
+    let other = thread::spawn(|| spawn_locked(&mut sleeper()).map(Running));
     thread::sleep(Duration::from_millis(500));
     let waited = !other.is_finished();
     let (log, identity) = held.finish();
@@ -683,6 +685,7 @@ fn a_process_spawned_under_the_spawn_lock_does_not_inherit_a_vmms_log() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_process_spawned_without_the_spawn_lock_in_a_window_holds_the_vmms_log() {
     let directory = tempfile::tempdir().unwrap();
@@ -704,6 +707,7 @@ fn a_process_spawned_without_the_spawn_lock_in_a_window_holds_the_vmms_log() {
     assert!(released, "the log stayed held after the process exited");
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_process_spawned_in_the_window_of_a_vmm_in_its_logs_job_holds_the_log_but_not_its_claim() {
     let directory = tempfile::tempdir().unwrap();
@@ -714,10 +718,9 @@ fn a_process_spawned_in_the_window_of_a_vmm_in_its_logs_job_holds_the_log_but_no
     let (stand_in, log, identity) = held.stand_in();
     let mut other = other.unwrap();
     let held_while_running = log_claim_held(&log, identity).unwrap();
-    assert!(
-        stand_in.terminate(WINDOW_TIMEOUT),
-        "the stand-in did not exit"
-    );
+    stand_in
+        .terminate_and_wait()
+        .expect("the stand-in did not exit");
     // Once the stand-in has exited, the job holds no process, and the claim is released, while
     // the process still holds the log.
     let released = claim_released_within(&log, identity, WINDOW_TIMEOUT);
@@ -785,6 +788,7 @@ fn job_with_descriptor(name: &[u16], sddl: &str) -> OwnedHandle {
     job.unwrap_or_else(|| panic!("cannot create a job: {}", io::Error::last_os_error()))
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_job_that_is_not_the_users_under_the_name_of_a_logs_job_is_not_the_logs() {
     let directory = tempfile::tempdir().unwrap();
@@ -808,6 +812,7 @@ fn a_job_that_is_not_the_users_under_the_name_of_a_logs_job_is_not_the_logs() {
     assert!(!log_claim_held(&path, identity).unwrap());
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn an_object_of_another_type_under_the_name_of_a_logs_job_is_not_the_logs() {
     let directory = tempfile::tempdir().unwrap();
@@ -890,6 +895,95 @@ fn local_link(name: &[u16], target: &[u16]) -> OwnedHandle {
 }
 
 #[test]
+fn vm_spawns_refuse_untrusted_log_job_names_before_creating_a_child() {
+    use crate::host::spawn::{self, VmmCommand};
+    use crate::protocol::CAPABILITY_LEN;
+
+    let directory = tempfile::tempdir().unwrap();
+    let log = fs::File::create(directory.path().join("vmm.log")).unwrap();
+    let id = log_job_id(&log).unwrap().unwrap();
+    let name = log_job_name(id);
+    let system = std::env::var_os("SystemRoot").unwrap();
+    let command = VmmCommand {
+        program: Path::new(&system).join("System32").join("cmd.exe"),
+        arguments: ["/c", "exit", "0"].map(OsString::from).to_vec(),
+        working_dir: directory.path().to_path_buf(),
+        breakaway_from_job: false,
+        inherit: Vec::new(),
+    };
+    let refused = || {
+        let entered = Rc::new(Cell::new(false));
+        let observed = Rc::clone(&entered);
+        let result = with_spawn_window(
+            move || observed.set(true),
+            || {
+                spawn::spawn_vm_with_mode(
+                    &command,
+                    &[7; CAPABILITY_LEN],
+                    log.try_clone().unwrap(),
+                    false,
+                )
+            },
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(child) => {
+                child
+                    .kill_and_confirm_exit()
+                    .expect("the unexpected child did not exit");
+                panic!("an untrusted log-job name started a child");
+            }
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert!(
+            !entered.get(),
+            "a refused spawn entered the creation window"
+        );
+    };
+
+    for sddl in ["D:P", "D:P(A;;GA;;;WD)"] {
+        let other = job_with_descriptor(&name, sddl);
+        refused();
+        drop(other);
+    }
+    // SAFETY: the name is NUL-terminated; this event occupies only this test's fresh log name.
+    let event = owned(unsafe { CreateEventW(ptr::null(), 1, 0, name.as_ptr()) }).unwrap();
+    refused();
+    drop(event);
+
+    let other_log = fs::File::create(directory.path().join("other.log")).unwrap();
+    let other = create_log_job(&other_log).unwrap().unwrap();
+    let link = local_link(&name, &object_name(raw(&other)).unwrap());
+    refused();
+    drop(link);
+    drop(other);
+    let elsewhere: Vec<u16> = local_directory()
+        .unwrap()
+        .into_iter()
+        .chain(format!(r"\nvx-vm-spawn-{:032x}", id.1).encode_utf16())
+        .collect();
+    let link = local_link(&name, &elsewhere);
+    refused();
+    drop(link);
+
+    let entered = Rc::new(Cell::new(false));
+    let observed = Rc::clone(&entered);
+    let child = with_spawn_window(
+        move || observed.set(true),
+        || spawn::spawn_vm_with_mode(&command, &[7; CAPABILITY_LEN], log, false),
+    )
+    .unwrap();
+    child
+        .kill_and_confirm_exit()
+        .expect("the trusted child did not exit");
+    assert!(
+        entered.get(),
+        "the successful spawn bypassed the observation"
+    );
+}
+
+#[cfg(feature = "cli")]
+#[test]
 fn what_a_link_under_the_name_of_a_logs_job_leads_to_is_not_the_logs() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("vmm.log");
@@ -944,6 +1038,7 @@ fn what_a_link_under_the_name_of_a_logs_job_leads_to_is_not_the_logs() {
     assert!(!log_claim_held(&path, identity).unwrap());
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_vmm_never_starts_outside_a_job_that_a_claim_check_takes_for_its_logs() {
     let directory = tempfile::tempdir().unwrap();
@@ -960,8 +1055,8 @@ fn a_vmm_never_starts_outside_a_job_that_a_claim_check_takes_for_its_logs() {
 }
 
 #[test]
-fn a_vmm_whose_log_is_no_file_of_a_disk_volume_starts_without_a_job() {
-    use crate::host::supervisor::{self, VmmCommand};
+fn a_vmm_whose_log_is_no_file_of_a_disk_volume_is_refused() {
+    use crate::host::spawn::{self, VmmCommand};
     use crate::protocol::CAPABILITY_LEN;
 
     let null = OpenOptions::new().write(true).open("NUL").unwrap();
@@ -971,19 +1066,30 @@ fn a_vmm_whose_log_is_no_file_of_a_disk_volume_starts_without_a_job() {
     assert!(create_log_job(&pipe).unwrap().is_none());
     // A pipe has an identity that a claim check can match, but no file ID: a claim check, as
     // a spawn does, takes it for a log without a job.
+    #[cfg(feature = "cli")]
     assert!(opened_file_identity(&pipe).is_ok());
     assert_eq!(log_job_id(&null).unwrap(), None);
     assert_eq!(log_job_id(&pipe).unwrap(), None);
     let system = std::env::var_os("SystemRoot").unwrap();
     let cmd = Path::new(&system).join("System32").join("cmd.exe");
-    let command = VmmCommand::new(
-        cmd,
-        ["/c", "exit", "0"].map(OsString::from).to_vec(),
-        std::env::temp_dir(),
-    );
+    let command = VmmCommand {
+        program: cmd,
+        arguments: ["/c", "exit", "0"].map(OsString::from).to_vec(),
+        working_dir: std::env::temp_dir(),
+        breakaway_from_job: false,
+        inherit: Vec::new(),
+    };
     for log in [null, pipe] {
-        let launched = supervisor::spawn(&command, &[7; CAPABILITY_LEN], log).unwrap();
-        assert!(launched.kill_and_wait(), "the stand-in did not exit");
+        let error = match spawn::spawn_vm_with_mode(&command, &[7; CAPABILITY_LEN], log, false) {
+            Err(error) => error,
+            Ok(child) => {
+                child
+                    .kill_and_confirm_exit()
+                    .expect("the unexpected child did not exit");
+                panic!("a spawn accepted a log without a job");
+            }
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
     }
 }
 
@@ -997,68 +1103,13 @@ fn the_jobs_of_logs_whose_file_ids_share_their_low_64_bits_are_distinct() {
 
 /// Returns whether any process holds the file at `path` open: an open that shares nothing
 /// then fails with a sharing violation.
+#[cfg(feature = "cli")]
 fn held_open(path: &Path) -> bool {
     match OpenOptions::new().read(true).share_mode(0).open(path) {
         Ok(_) => false,
         Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => true,
         Err(error) => panic!("cannot open {}: {error}", path.display()),
     }
-}
-
-#[test]
-fn a_launch_whose_vmm_exited_ends_while_a_process_spawned_in_its_window_holds_its_log() {
-    use crate::host::store::{ArtifactIdentity, LaunchId, Recovery, RuntimeIdentity, SandboxStore};
-    use crate::host::supervisor::{self, VmmCommand};
-    use crate::protocol::CAPABILITY_LEN;
-
-    let directory = tempfile::tempdir().unwrap();
-    let store = SandboxStore::create(directory.path().join("sandbox")).unwrap();
-    let artifact = |digit: char| ArtifactIdentity::sha256(&digit.to_string().repeat(64)).unwrap();
-    let runtime = RuntimeIdentity::new(artifact('a'), artifact('b'), artifact('c'));
-    let capability = [7; CAPABILITY_LEN];
-    let mut locked = store.lock(None).unwrap();
-    let mut launch = locked
-        .begin_launch(&LaunchId::generate().unwrap(), &runtime, &capability)
-        .unwrap();
-    let system = std::env::var_os("SystemRoot").unwrap();
-    let cmd = Path::new(&system).join("System32").join("cmd.exe");
-    let command = VmmCommand::new(
-        cmd,
-        ["/c", "exit", "0"].map(OsString::from).to_vec(),
-        store.dir(),
-    );
-    // While the VMM is created, another part of the caller spawns a process without the
-    // spawn lock, as `std::process::Command` spawns one, which inherits the VMM's log.
-    let other = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let spawned = std::rc::Rc::clone(&other);
-    IN_WINDOW.set(Some(Box::new(move || {
-        *spawned.borrow_mut() = Some(sleeper().spawn().map(Running));
-    })));
-    let launched = supervisor::spawn(&command, &capability, launch.take_log().unwrap());
-    IN_WINDOW.set(None);
-    let launched = launched.unwrap();
-    let mut other = other
-        .take()
-        .expect("no process was spawned in the window")
-        .unwrap();
-    let vmm = launch.record_process(&launched).unwrap();
-    launched.detach();
-    assert!(
-        vmm.wait(Instant::now() + WINDOW_TIMEOUT).unwrap(),
-        "the stand-in did not exit"
-    );
-    // The VMM has exited, so the launch ends, whatever the other process holds.
-    let ended = launch.abandon().unwrap();
-    let holds = held_open(&store.log_path());
-    let running = other.0.try_wait().unwrap().is_none();
-    drop(other);
-    assert!(running, "the process spawned in the window exited early");
-    assert!(
-        holds,
-        "the process spawned in the window did not hold the log"
-    );
-    assert_eq!(ended, Recovery::Exited);
-    assert!(store.journal().unwrap().is_none());
 }
 
 #[test]
@@ -1071,17 +1122,19 @@ fn a_thread_that_holds_the_spawn_lock_spawns_under_it_until_its_last_lock_is_dro
     let stderr = stdout.try_clone().unwrap();
     let system = std::env::var_os("SystemRoot").unwrap();
     let cmd = Path::new(&system).join("System32").join("cmd.exe");
-    let vmm = spawn_detached(
+    let vmm = spawn_with_stdio(
         &cmd,
         &["/c", "exit", "0"].map(OsString::from),
         &std::env::temp_dir(),
         [stdin.into(), stdout.into(), stderr.into()],
         &[],
-        false,
+        SpawnMode::Detached {
+            breakaway_from_job: false,
+        },
         None,
     )
     .unwrap();
-    let other = spawn_command(&mut sleeper()).map(Running).unwrap();
+    let other = spawn_locked(&mut sleeper()).map(Running).unwrap();
     // The hold lasts until the thread's last lock is dropped, whichever that is.
     let (taken, acquired) = std::sync::mpsc::channel();
     let waiter = thread::spawn(move || {
@@ -1093,7 +1146,7 @@ fn a_thread_that_holds_the_spawn_lock_spawns_under_it_until_its_last_lock_is_dro
     drop(second);
     let late = acquired.recv_timeout(WINDOW_TIMEOUT).is_ok();
     waiter.join().unwrap();
-    assert!(vmm.terminate(WINDOW_TIMEOUT), "the stand-in did not exit");
+    vmm.terminate_and_wait().expect("the stand-in did not exit");
     drop(other);
     assert!(
         !early,

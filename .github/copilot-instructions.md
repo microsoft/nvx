@@ -34,10 +34,11 @@
   change selects, with their commands read from the actions, and `--run` runs
   them.
 - For changes under `nvx-rs/`, run the commands in
-  [check-nvx-rs](./actions/check-nvx-rs/action.yml). It also checks the
-  runtime adapter in `tests/runtime-adapter/`, which builds on `nvx`; run its
-  steps for changes to either.
-  They need no hypervisor.
+  [check-nvx-rs](./actions/check-nvx-rs/action.yml).
+  They need no hypervisor. Its public-API check compares the public API of
+  `nvx` with the snapshots in `nvx-rs/public-api/`: a change to the public API
+  updates them with `python3 scripts/public_api.py --update` (see
+  [Rust crates](../doc/ci.md#rust-crates)).
 - OpenVMM source changes also require the package-scoped checks prescribed by the
   nested repository. Do not claim unavailable hardware or cross-platform gates
   passed; report the missing prerequisite and rely on CI when appropriate.
@@ -47,7 +48,8 @@
 - Put a Rust module's unit tests in its `tests` module, in files of their own
   (`src/a/b.rs` declares `#[cfg(test)] mod tests;` and keeps them in
   `src/a/b/tests.rs`), never inline or as test-only items in production files.
-  Python unit tests are `test_*.py` modules in `scripts/`. Run
+  Python unit tests are the `test_*.py` modules of `scripts/`,
+  `.github/specula/tests/`, and `.github/skills/*/scripts/`. Run
   `python3 scripts/check_test_layout.py`; a test hook that cannot move needs an
   entry in `scripts/test-layout-allowlist.json`, and moving test code out needs
   `--tighten`. See [Test layout](../doc/contribute.md#test-layout).
@@ -104,8 +106,9 @@
   `cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml`,
   and again after changing `nvx-rs/`. The microVM scenarios run it too, and build
   it there the first time that they need it, unless `NVX_RS` names another build
-  (see [Usage](../doc/usage.md#nvx-rs)). The `managed-lifecycle` scenario runs an
-  `nvx-rs` test with Cargo. In a checkout that holds no artifacts, `run` and
+  (see [Usage](../doc/usage.md#nvx-rs)). The `managed-lifecycle` and
+  `vm-lifecycle` scenarios run `nvx-rs` tests with Cargo. In a checkout that
+  holds no artifacts, `run` and
   `sandbox` first download those of the release of `HEAD` or of its nearest
   released ancestor, as `nvx-rs download` does; build the artifacts that a change
   affects instead of testing a release's.
@@ -174,8 +177,8 @@
   not manually edit `data/*.csv` unless the task explicitly concerns baseline
   maintenance, and change an expected benchmark host, `data/*-host.json`, only
   to accept a new host together with a reset of its series' history.
-- Full runs of `dev`, scheduled or dispatched, publish the `nvx` crate to
-  crates.io when `nvx-rs/` changed; see
+- Full runs of `dev`, scheduled or dispatched, publish the `nvx` crate, the
+  only crate that NVX publishes, to crates.io when `nvx-rs/` changed; see
   [crates.io releases](../doc/ci.md#cratesio-releases). Do not publish it by
   hand, and change the version that `nvx-rs/Cargo.toml` declares only to start
   another series, as [The nvx crate](../doc/distribution.md#the-nvx-crate)

@@ -2,7 +2,9 @@
 
 #[cfg(windows)]
 use std::path::Path;
+#[cfg(any(windows, feature = "cli"))]
 use std::thread;
+#[cfg(any(windows, feature = "cli"))]
 use std::time::{Duration, Instant};
 
 /// How long a test waits for a lock or claim that it released to be free.
@@ -10,14 +12,17 @@ use std::time::{Duration, Instant};
 /// A process that a concurrent test spawns holds a copy of each descriptor of the test process
 /// from its fork until it executes its program, and with it the lock or claim of a file that a
 /// test had open, for that moment.
+#[cfg(any(windows, feature = "cli"))]
 const RELEASE_WAIT: Duration = Duration::from_secs(10);
 
 /// Interval at which a test checks a lock or claim that it released again, the interval at which
 /// the host retries a lock.
+#[cfg(any(windows, feature = "cli"))]
 const RELEASE_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Returns whether `free` holds before [`RELEASE_WAIT`] passes, checking it again at every
 /// [`RELEASE_RETRY_INTERVAL`] until then.
+#[cfg(any(windows, feature = "cli"))]
 pub(crate) fn released(mut free: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + RELEASE_WAIT;
     while !free() {
@@ -27,6 +32,36 @@ pub(crate) fn released(mut free: impl FnMut() -> bool) -> bool {
         thread::sleep(RELEASE_RETRY_INTERVAL);
     }
     true
+}
+
+/// Returns 32 random lowercase hexadecimal digits, with which a test names a pipe that no
+/// concurrent test or run of the tests names.
+#[cfg(windows)]
+pub(crate) fn unique_suffix() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).unwrap();
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Spawns `command` under a `SpawnLock`, which it releases once the process exists, so that on
+/// Windows the process inherits no handle of a VMM that a concurrent test spawns, such as the
+/// VMM's log, which it would hold until it exits.
+#[cfg(any(target_os = "linux", windows, feature = "cli"))]
+pub(crate) fn spawn_locked(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    let _lock = super::platform::inherit::lock_spawns();
+    command.spawn()
+}
+
+/// Returns a `SpawnLock`, which a test holds while the code that it tests spawns processes with
+/// `std::process`, as the download spawns `tar` and `curl`, so that on Windows none of them
+/// inherits a handle of a VMM that a concurrent test spawns, such as the VMM's log, which it would
+/// hold until it exits. A concurrent spawn of a VMM waits for the lock, so a test holds it only
+/// while it runs those processes.
+#[cfg(feature = "cli")]
+pub(crate) fn hold_spawns() -> super::platform::inherit::SpawnLock {
+    super::platform::inherit::lock_spawns()
 }
 
 /// Makes `link` a junction to the directory `target`, which any user may create, with `cmd`'s
@@ -39,8 +74,6 @@ pub(crate) fn junction(link: &Path, target: &Path) {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    use super::platform::inherit::spawn_command;
-
     let mut command = Command::new("cmd");
     command
         .raw_arg(format!(
@@ -49,6 +82,6 @@ pub(crate) fn junction(link: &Path, target: &Path) {
             target.display()
         ))
         .stdout(Stdio::null());
-    let status = spawn_command(&mut command).unwrap().wait().unwrap();
+    let status = spawn_locked(&mut command).unwrap().wait().unwrap();
     assert!(status.success(), "cannot link {}", link.display());
 }

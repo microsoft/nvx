@@ -8,24 +8,18 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use nvx::contract::{
-    BOOT_CONTRACT_VERSION, CONTROL_CONTRACT_REVISION, CONTROL_SESSION_PROTOCOL_VERSION,
-};
-use nvx::host::process::{Process, ProcessRef};
-use nvx::host::sandbox::distro::DistroBinding;
-use nvx::host::sandbox::scratch::ScratchBinding;
-use nvx::host::sandbox::{LayerRole, SandboxLayer};
+use nvx::host::process::{Opened, Process, ProcessRef};
 use serde_json::{Value, json};
 
 #[cfg(unix)]
 use crate::harness::mode;
 use crate::harness::{
-    Content, HYPERVISOR, Hosts, LAYER, OPENVMM, Outcome, PROVENANCE, Root, SCRATCH, UUID, entries,
-    in_parallel, is_hex, json,
+    Content, HYPERVISOR, Hosts, LAYER, OPENVMM, Outcome, PROVENANCE, Root, SCRATCH, UUID,
+    canonical, entries, in_parallel, is_hex, json,
 };
 use crate::openvmm::{
-    NO_NETWORK, NetworkPolicy, Options, WORKLOAD, assert_checked_blocks, assert_checked_distro,
-    assert_endpoint, assert_opened_distro, assert_opened_images, assert_outcome_report, managed,
+    NO_NETWORK, NetworkPolicy, Options, WORKLOAD, assert_endpoint, assert_opened_distro,
+    assert_opened_images, assert_outcome_report, assert_stable_blocks, managed,
 };
 
 /// The entries of the state directory of a sandbox that never started: its configuration and
@@ -47,6 +41,12 @@ fn running() -> Vec<&'static str> {
     names
 }
 
+fn with_exec(mut names: Vec<&'static str>) -> Vec<&'static str> {
+    names.push("exec.lock");
+    names.sort_unstable();
+    names
+}
+
 /// Returns the arguments of the lifecycle operation `operation` of the sandbox whose state
 /// directory is `state`, with `options`.
 pub(crate) fn sandbox<S: AsRef<str>>(operation: &str, state: &str, options: &[S]) -> Vec<String> {
@@ -65,30 +65,48 @@ pub(crate) fn provision(state: &str, options: &[&str]) -> Vec<String> {
     sandbox("provision", state, &all)
 }
 
-/// Returns the configuration that provision records for the minimal sandbox, in format 8, with
+/// Returns the configuration that provision records for the minimal sandbox, in format 10, with
 /// placeholders, and without the bindings of its images, which [`assert_bindings`] checks.
 pub(crate) fn minimal_config() -> Value {
     json!({
         "cmdline": "",
         "export": null,
-        "format": 8,
+        "export_pins": null,
+        "format": 10,
         "hostname": "nvx-sandbox",
         "hypervisor": HYPERVISOR,
-        "layers": [{"path": "{root/distro.erofs}", "role": "distro", "uuid": UUID}],
+        "image": {"path": "{root/distro.erofs}", "format": "erofs", "identity": UUID},
         "memory_mib": 256,
         "network": null,
-        "scratch": "{root/scratch.ext4}",
-        "upper": "scratch",
+        "upper": {"kind": "scratch", "path": "{root/scratch.ext4}"},
         "workload_gid": 65534,
         "workload_uid": 65534,
     })
 }
 
-/// Returns the configuration of a sandbox with shares, whose export plan is `export`.
+/// Returns the configuration of a sandbox with shares, whose export plan is `export`, and whose
+/// pins pin nothing, as for shares that each bind their child's root, which no workload can move,
+/// and that deny no path inside a part that the guest may write.
 pub(crate) fn shared_config(export: Value) -> Value {
     let mut config = minimal_config();
+    config["export_pins"] = unpinned(&export);
     config["export"] = export;
     config
+}
+
+/// Returns the pins of `export` that pin nothing: a `null` for each denied path of each child, and
+/// for each bind.
+pub(crate) fn unpinned(export: &Value) -> Value {
+    let nulls = |items: &Value| vec![Value::Null; items.as_array().unwrap().len()];
+    json!({
+        "binds": nulls(&export["binds"]),
+        "denied": export["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|child| nulls(&child["denied"]))
+            .collect::<Vec<_>>(),
+    })
 }
 
 /// Returns the bind of an export plan that binds its child `child` at `target`.
@@ -102,60 +120,86 @@ pub(crate) fn child(root: &str, writable: bool) -> Value {
     json!({
         "allowed": [],
         "denied": [],
-        "deniedIdentities": [],
         "root": root,
         "writable": writable,
         "write": [],
     })
 }
 
+/// The platform scheme of the seals that bindings hold on this host.
+const SEAL_SCHEME: &str = if cfg!(windows) { "windows" } else { "linux" };
+
+/// Asserts that `seal`, the seal of a file in a binding that provision recorded, seals the file at
+/// `path` as it is: a regular file of its length, sealed on this host.
+fn assert_seal(seal: &Value, path: &Path) {
+    assert_eq!(seal["version"], 1, "{seal}");
+    assert_eq!(seal["scheme"], SEAL_SCHEME, "{seal}");
+    assert_eq!(seal["kind"], "regular", "{seal}");
+    assert_eq!(seal["length"], fs::metadata(path).unwrap().len(), "{seal}");
+}
+
+/// Asserts that `binding`, the distro binding that provision recorded, binds the distro layer of
+/// the root as it is, as explicit verification of the layer, which has no manifest, binds it.
+fn assert_distro_binding(root: &Root, binding: &Value) {
+    assert_eq!(binding["version"], 1, "{binding}");
+    assert_eq!(binding["format"], "erofs", "{binding}");
+    assert_eq!(binding["identity"], UUID, "{binding}");
+    assert_seal(&binding["image"], &root.below("distro.erofs"));
+    assert_eq!(binding["manifest"], Value::Null, "{binding}");
+    assert_eq!(
+        binding["policy"],
+        json!({"revision": 1, "result": "accepted"}),
+        "{binding}"
+    );
+}
+
 /// Asserts that `config`, a configuration that provision recorded, holds the bindings of the
-/// distro layer and the scratch image of the root as they are, as explicit verification of the
-/// layer and the binding of the image make them, and returns it without them.
+/// distro layer and the scratch image of the root as they are, and returns it without them.
+///
+/// The test reads what it can tell of the images from outside: their formats, identities, kinds
+/// and lengths, the distro policy's verdict and the manifest's absence. Each start checks the
+/// rest of the seals, the files' identities and times, against the images, and the unit tests of
+/// `nvx-rs sandbox` check that provision records the very bindings that explicit verification of
+/// the layer and the binding of the image make.
 pub(crate) fn assert_bindings(root: &Root, mut config: Value) -> Value {
     let members = config.as_object_mut().unwrap();
     let distro = members.remove("distro_binding").expect("a distro binding");
     let scratch = members
         .remove("scratch_binding")
         .expect("a scratch binding");
-    let layer = SandboxLayer::new(
-        LayerRole::Distro,
-        root.below("distro.erofs").to_str().unwrap(),
-        UUID,
-    );
+    assert_distro_binding(root, &distro);
+    let mut fields: Vec<&String> = scratch.as_object().unwrap().keys().collect();
+    fields.sort();
     assert_eq!(
-        distro,
-        serde_json::to_value(DistroBinding::verify(&layer).unwrap()).unwrap()
+        fields,
+        ["device", "fileId", "kind", "length", "scheme", "version"],
+        "{scratch}"
     );
-    assert_eq!(
-        scratch,
-        serde_json::to_value(ScratchBinding::bind(&root.below("scratch.ext4")).unwrap()).unwrap()
-    );
+    assert_seal(&scratch, &root.below("scratch.ext4"));
     config
 }
 
-/// Asserts that `record`, the runtime record of the sandbox in the state directory `state`, below
-/// the root, is the store's format 4 for an OpenVMM that runs: with a launch ID, the OpenVMM
-/// process by its ID, start time, and the host's boot, the control endpoint, and the runtime
-/// identity that the build provenance of the root names, with this build's contracts. Returns the
-/// endpoint and the process.
+/// Checks the CLI's exact saved VM, its verified process and its installed runtime identity.
 fn assert_runtime_record(root: &Root, state: &str, record: &Value) -> (String, Process) {
     let mut names: Vec<&String> = record.as_object().unwrap().keys().collect();
     names.sort();
     assert_eq!(
         names,
-        ["endpoint", "format", "launch", "process", "runtime"],
+        ["capability", "endpoint", "process", "runtime", "vmDir"],
         "{record}"
     );
-    assert_eq!(record["format"], 4, "{record}");
-    assert!(
-        record["launch"].as_str().is_some_and(|id| is_hex(id, 32)),
-        "{record}"
+    assert_eq!(
+        Path::new(record["vmDir"].as_str().unwrap()),
+        root.below(state)
+    );
+    assert_eq!(
+        serde_json::from_value::<Vec<u8>>(record["capability"].clone()).unwrap(),
+        fs::read(root.below(state).join("control.capability")).unwrap()
     );
     let reference: ProcessRef = serde_json::from_value(record["process"].clone()).unwrap();
-    let process = Process::open(&reference)
-        .unwrap()
-        .unwrap_or_else(|| panic!("the OpenVMM of the record does not run: {record}"));
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the OpenVMM of the record does not run: {record}");
+    };
     let endpoint = record["endpoint"].as_str().unwrap().to_owned();
     assert_endpoint(root, state, &endpoint);
     let digest = |index: usize| format!("sha256:{}", PROVENANCE[index].2);
@@ -165,9 +209,7 @@ fn assert_runtime_record(root: &Root, state: &str, record: &Value) -> (String, P
             "openvmm": digest(0),
             "kernel": digest(1),
             "initramfs": digest(2),
-            "bootContract": BOOT_CONTRACT_VERSION,
-            "controlContract": CONTROL_CONTRACT_REVISION,
-            "controlSession": CONTROL_SESSION_PROTOCOL_VERSION,
+            "compatibility": "nvx-boot-v5+nvxs-v1+nvx-microvm-v2-control-v2",
         }),
         "{record}"
     );
@@ -239,13 +281,13 @@ fn configuration(
 }
 
 /// Returns the mapping table entry that maps the export's child `source` at `target`.
-fn mapped(source: &str, target: &str, read_only: bool, directory: bool) -> Value {
+pub(crate) fn mapped(source: &str, target: &str, read_only: bool, directory: bool) -> Value {
     json!({"source": source, "target": target, "read_only": read_only, "directory": directory})
 }
 
 /// Returns the options of a start of a sandbox whose aggregate exports `children`, as
 /// `--mount-child` values, which the guest maps from `/run/nvx/hostfs/root`.
-fn exported(options: Options, children: &[&str]) -> Options {
+pub(crate) fn exported(options: Options, children: &[&str]) -> Options {
     let mut tokens: Vec<String> = WORKLOAD.iter().map(|token| (*token).to_owned()).collect();
     tokens.push(format!("nvx_maps={}", children.len()));
     options
@@ -333,7 +375,6 @@ fn configurations() -> Vec<Configuration> {
             "children": [{
                 "allowed": ["{root/share/hidden/shown}"],
                 "denied": ["{root/share/hidden}"],
-                "deniedIdentities": [null],
                 "root": "{root/share}",
                 "writable": true,
                 "write": ["{root/share/writable}"],
@@ -357,7 +398,6 @@ fn configurations() -> Vec<Configuration> {
             "children": [{
                 "allowed": [],
                 "denied": [],
-                "deniedIdentities": [],
                 "file": true,
                 "root": "{root/single.txt}",
                 "writable": false,
@@ -369,7 +409,8 @@ fn configurations() -> Vec<Configuration> {
     file.maps = Some(json!([mapped("0", "/etc/single.txt", true, false)]));
 
     // A managed sandbox runs the guest agent, whatever entrypoint and arguments provision gets,
-    // and records the policy file's rules in its typed network.
+    // and records its network options, with the policy file's rules in OpenVMM's form, from which
+    // each start builds the policy again.
     let mut network = configuration(
         "network and launch options",
         vec![
@@ -414,28 +455,13 @@ fn configurations() -> Vec<Configuration> {
                 (
                     "network",
                     json!({
-                        "allow": {
-                            "name": "--network-egress-allow",
-                            "rules": [{
-                                "ports": [{"endPort": null, "port": 443, "protocol": "tcp"}],
-                                "to": [{"cidr": "192.0.2.0/24", "except": []}],
-                            }],
-                        },
-                        "deny": {
-                            "name": "--network-egress-deny",
-                            "rules": [{
-                                "ports": [],
-                                "to": [{"cidr": "192.0.2.128/25", "except": []}],
-                            }],
-                        },
                         "egress": "allow",
-                        "guestNetwork": "10.0.0.2/24",
-                        "hostLoopback": "allow",
-                        "hostLoopbackForwards": [
-                            {"guestPort": 8080, "hostPort": 18080, "protocol": "tcp"},
-                            {"guestPort": 9090, "hostPort": 19090, "protocol": "udp"},
-                        ],
+                        "egress_allow": ["192.0.2.0/24:tcp:443"],
+                        "egress_deny": ["192.0.2.128/25"],
+                        "host_loopback": "allow",
+                        "host_loopback_forwards": ["tcp:18080:8080", "udp:19090:9090"],
                         "ingress": "deny",
+                        "net": "10.0.0.2/24",
                         "proxy": null,
                     }),
                 ),
@@ -487,14 +513,14 @@ fn configurations() -> Vec<Configuration> {
         {
             let mut config = minimal_config();
             config["network"] = json!({
-                "allow": {"name": "--network-egress-allow", "rules": []},
-                "deny": {"name": "--network-egress-deny", "rules": []},
                 "egress": "deny",
-                "guestNetwork": "10.0.0.2/24",
-                "hostLoopback": "deny",
-                "hostLoopbackForwards": [],
-                "ingress": "deny",
-                "proxy": {"port": 3128, "scheme": null},
+                "egress_allow": [],
+                "egress_deny": [],
+                "host_loopback": "deny",
+                "host_loopback_forwards": [],
+                "ingress": null,
+                "net": "10.0.0.2/24",
+                "proxy": "10.0.0.1:3128",
             });
             config
         },
@@ -578,15 +604,20 @@ fn check_lifecycle(case: &Configuration) {
         let context = format!("{}, start {round}", case.name);
         root.nvx_rs(&sandbox::<&str>("start", case.argument, &[]))
             .assert_silent_success();
-        assert_eq!(entries(&state), running(), "{context}");
+        let expected = if round == 1 {
+            running()
+        } else {
+            with_exec(running())
+        };
+        assert_eq!(entries(&state), expected, "{context}");
         let (endpoint, process) =
             assert_runtime_record(&root, case.state, &json(&state.join("runtime.json")));
         assert_capability(&state);
         let mut options =
             Options::parse(&root.openvmm_arguments(&format!("build/fake-openvmm-{token}.json")));
-        assert_checked_blocks(&root, &options.take("--microvm-sandbox-block"));
+        assert_stable_blocks(&root, &options.take("--microvm-sandbox-block"), true);
         assert_opened_images(&root, token);
-        let mut expected = (case.openvmm)(managed(case.state, &endpoint));
+        let mut expected = (case.openvmm)(managed(case.state, &endpoint)).persistent_expected();
         expected.take("--microvm-sandbox-block");
         expected.assert_matches(&root, &options, &context);
         let maps = root.below(&format!("build/fake-openvmm-{token}-maps.json"));
@@ -598,20 +629,21 @@ fn check_lifecycle(case: &Configuration) {
         let outcome = root.nvx_rs(&sandbox("exec", case.argument, options));
         outcome.assert_success();
         assert_eq!(outcome.stdout(), *stdout, "{context}");
-        assert_eq!(entries(&state), running(), "{context}");
+        assert_eq!(entries(&state), with_exec(running()), "{context}");
         root.nvx_rs(&sandbox::<&str>("stop", case.argument, &[]))
             .assert_silent_success();
         assert!(
             process
                 .wait(Instant::now() + Duration::from_secs(10))
-                .unwrap(),
+                .unwrap()
+                .is_some(),
             "{context}: OpenVMM runs on"
         );
-        assert_eq!(entries(&state), STOPPED, "{context}");
+        assert_eq!(entries(&state), with_exec(STOPPED.to_vec()), "{context}");
         assert_outcome_report(
             &json(&state.join("outcome.json")),
             HYPERVISOR,
-            ("managed", "success", 0),
+            ("run", "success", 0),
             case.network,
         );
     }
@@ -629,9 +661,7 @@ fn lifecycles_of_every_configuration() {
     in_parallel(&cases, check_lifecycle);
 }
 
-/// A sandbox whose upper is in RAM needs no scratch image: provision records `ram` and neither a
-/// scratch image nor its binding, and each start attaches the distro layer alone, which OpenVMM
-/// opens, and asks the guest for the RAM upper.
+/// A RAM upper records its default cap and no scratch image, and each start uses that cap.
 #[test]
 fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
     let root = Root::new();
@@ -651,19 +681,10 @@ fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
         .unwrap()
         .remove("distro_binding")
         .expect("a distro binding");
-    let layer = SandboxLayer::new(
-        LayerRole::Distro,
-        root.below("distro.erofs").to_str().unwrap(),
-        UUID,
-    );
-    assert_eq!(
-        distro,
-        serde_json::to_value(DistroBinding::verify(&layer).unwrap()).unwrap()
-    );
+    assert_distro_binding(&root, &distro);
     let mut expected = minimal_config();
     for (name, value) in [
-        ("upper", json!("ram")),
-        ("scratch", Value::Null),
+        ("upper", json!({"kind": "ram", "max_memory_percent": 50})),
         ("scratch_binding", Value::Null),
     ] {
         expected[name] = value;
@@ -673,13 +694,18 @@ fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
     for round in 1..=2 {
         let context = format!("start {round}");
         operate(&root, "start", "state", &[]).assert_silent_success();
-        assert_eq!(entries(&state), running(), "{context}");
+        let expected = if round == 1 {
+            running()
+        } else {
+            with_exec(running())
+        };
+        assert_eq!(entries(&state), expected, "{context}");
         let (endpoint, process) =
             assert_runtime_record(&root, "state", &json(&state.join("runtime.json")));
         let mut options = Options::parse(&root.openvmm_arguments("build/fake-openvmm-state.json"));
-        assert_checked_distro(&root, &options.take("--microvm-sandbox-block"));
+        assert_stable_blocks(&root, &options.take("--microvm-sandbox-block"), false);
         assert_opened_distro(&root, "state");
-        let mut expected = managed("state", &endpoint).in_ram();
+        let mut expected = managed("state", &endpoint).in_ram().persistent_expected();
         expected.take("--microvm-sandbox-block");
         expected.assert_matches(&root, &options, &context);
         let outcome = operate(
@@ -694,14 +720,15 @@ fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
         assert!(
             process
                 .wait(Instant::now() + Duration::from_secs(10))
-                .unwrap(),
+                .unwrap()
+                .is_some(),
             "{context}: OpenVMM runs on"
         );
-        assert_eq!(entries(&state), STOPPED, "{context}");
+        assert_eq!(entries(&state), with_exec(STOPPED.to_vec()), "{context}");
         assert_outcome_report(
             &json(&state.join("outcome.json")),
             HYPERVISOR,
-            ("managed", "success", 0),
+            ("run", "success", 0),
             NO_NETWORK,
         );
     }
@@ -737,10 +764,11 @@ fn stops_keep_an_outcome_report_that_the_caller_reads_whatever_its_umask() {
         assert!(
             process
                 .wait(Instant::now() + Duration::from_secs(10))
-                .unwrap(),
+                .unwrap()
+                .is_some(),
             "{context}: OpenVMM runs on"
         );
-        assert_eq!(entries(&state), STOPPED, "{context}");
+        assert_eq!(entries(&state), with_exec(STOPPED.to_vec()), "{context}");
         let report = state.join("outcome.json");
         let (permissions, expected) = (mode(&report), FAKE_REPORT_MODE & !(umask & 0o077));
         assert_eq!(
@@ -750,7 +778,7 @@ fn stops_keep_an_outcome_report_that_the_caller_reads_whatever_its_umask() {
         assert_outcome_report(
             &json(&report),
             HYPERVISOR,
-            ("managed", "success", 0),
+            ("run", "success", 0),
             NO_NETWORK,
         );
         step("deprovision", &[]).assert_silent_success();
@@ -770,7 +798,7 @@ struct Execution {
     status: i32,
     /// What the workload wrote to standard output.
     stdout: String,
-    /// What the workload wrote to standard error.
+    /// What the workload wrote to standard error, or the guest agent before it refused it.
     stderr: &'static str,
     /// The code of the error with which `exec` refuses the workload, if it does, and what the
     /// error names.
@@ -883,6 +911,15 @@ fn executions() -> Vec<Execution> {
         "",
     );
     missing.stderr = "openvmm: /bin/missing: not found\n";
+    // The guest agent's diagnostic streams before its refusal.
+    let mut cwd_refused = refused(
+        "missing working directory",
+        &["--cwd", "/missing"],
+        "exec-refused",
+        vec!["cwd-failed"],
+    );
+    cwd_refused.stderr =
+        "nvx-managed-agent: cannot enter working directory /missing: No such file or directory\n";
     let mut existing = refused(
         "existing outcome report",
         &["--outcome-report", "{root/reports/existing.json}"],
@@ -971,12 +1008,7 @@ fn executions() -> Vec<Execution> {
             "",
         ),
         missing,
-        refused(
-            "missing working directory",
-            &["--cwd", "/missing"],
-            "exec-refused",
-            vec!["cwd-failed"],
-        ),
+        cwd_refused,
         refused(
             "relative working directory",
             &["--cwd", "relative"],
@@ -1035,7 +1067,7 @@ fn managed_execs_exit_with_the_workload_status() {
         }
         let before = root.snapshot();
         let started = Instant::now();
-        let outcome = root.nvx_rs(&sandbox("exec", "{root/state}", &case.options));
+        let mut outcome = root.nvx_rs(&sandbox("exec", "{root/state}", &case.options));
         eprintln!("case: {}", case.name);
         match &case.refusal {
             Some((code, fragments)) => {
@@ -1044,6 +1076,14 @@ fn managed_execs_exit_with_the_workload_status() {
                     .map(|fragment| root.expand(fragment))
                     .collect();
                 let fragments: Vec<&str> = fragments.iter().map(String::as_str).collect();
+                // What the guest wrote before it refused the workload streams before the error.
+                let streamed = case.stderr.as_bytes();
+                assert!(
+                    outcome.stderr.starts_with(streamed),
+                    "{}",
+                    outcome.describe()
+                );
+                outcome.stderr.drain(..streamed.len());
                 outcome.assert_error(code, &fragments);
                 // A refusal changes nothing, but the fake OpenVMM's log of the connections to its
                 // control endpoint, and the workload did not run.
@@ -1073,8 +1113,53 @@ fn managed_execs_exit_with_the_workload_status() {
             "{}: the workload outlived its timeout",
             case.name
         );
-        assert_eq!(entries(&state), running(), "{}", case.name);
+        assert_eq!(entries(&state), with_exec(running()), "{}", case.name);
     }
+    root.nvx_rs(&sandbox::<&str>("stop", "{root/state}", &[]))
+        .assert_silent_success();
+    root.nvx_rs(&sandbox::<&str>("deprovision", "{root/state}", &[]))
+        .assert_silent_success();
+}
+
+#[test]
+fn managed_execs_stream_their_standard_input_and_output() {
+    let root = Root::new();
+    root.nvx_rs(&provision("{root/state}", &[]))
+        .assert_silent_success();
+    root.nvx_rs(&sandbox::<&str>("start", "{root/state}", &[]))
+        .assert_silent_success();
+    // The workload reads more input than the window of 64 KiB holds, until its end, and echoes
+    // it as it reads it.
+    let input: Vec<u8> = (0..200 * 1024).map(|index| (index % 251) as u8).collect();
+    let cat = [
+        "--entrypoint",
+        "/bin/sh",
+        "--arg=-c",
+        "--arg",
+        "cat; echoerr ended",
+    ];
+    let echoed = root.nvx_rs_with_input(&sandbox("exec", "{root/state}", &cat), &input);
+    assert_eq!(echoed.status, Some(0), "{}", echoed.describe());
+    assert!(echoed.stdout == input, "{}", echoed.describe());
+    assert_eq!(echoed.stderr(), "ended\n");
+    // Output passes the old cap of 1 MiB whole.
+    let flood = root.nvx_rs(&sandbox(
+        "exec",
+        "{root/state}",
+        &[
+            "--entrypoint",
+            "/bin/sh",
+            "--arg=-c",
+            "--arg",
+            "flood 2000000",
+        ],
+    ));
+    assert_eq!(flood.status, Some(0), "{}", flood.describe());
+    assert!(
+        flood.stdout == vec![b'x'; 2_000_000],
+        "{}",
+        flood.describe()
+    );
     root.nvx_rs(&sandbox::<&str>("stop", "{root/state}", &[]))
         .assert_silent_success();
     root.nvx_rs(&sandbox::<&str>("deprovision", "{root/state}", &[]))
@@ -1145,7 +1230,12 @@ fn refusals_of_a_running_sandbox(root: &Root) {
     for operation in ["stop", "exec"] {
         let outcome = operate(root, operation, "state", &[]);
         assert_refused(root, &outcome, "sandbox-not-running", &["not running"]);
-        assert_eq!(entries(&state), STOPPED, "{operation}");
+        let expected = if operation == "exec" {
+            with_exec(STOPPED.to_vec())
+        } else {
+            STOPPED.to_vec()
+        };
+        assert_eq!(entries(&state), expected, "{operation}");
     }
     operate(root, "deprovision", "state", &[]).assert_silent_success();
 }
@@ -1168,7 +1258,7 @@ fn failed_start(root: &Root) {
             root,
             &outcome,
             "exited",
-            &["OpenVMM exited during startup", "status 5"],
+            &["OpenVMM exited during startup", "without an outcome report"],
         );
         assert!(
             elapsed < Duration::from_secs(60),
@@ -1202,16 +1292,29 @@ fn start_without_openvmm(root: &Root) {
 
 /// A start refuses a configuration of a format that it does not read, one that is not an object,
 /// one that is not strict JSON, one without the fields of its format or with fields of other
-/// types or ranges, one whose format is not that of its shares, and one whose upper is not as its
-/// format records it, before it launches OpenVMM.
+/// types or ranges, one whose format is not that of its shares, one whose upper is not as its
+/// format records it, and one that holds an export without its pins or pins without an export,
+/// before it launches OpenVMM.
 fn malformed_configuration(root: &Root) {
     root.nvx_rs(&provision("{root/state}", &[]))
         .assert_silent_success();
-    // Format 8 records the shares under `export`, `null` for none, and the upper under `upper`;
-    // format 7 records no `upper`, and format 1 records no `export` either.
+    // The sole typed record requires the image, the upper's own fields, and the export plan.
     let config = json(&root.below("state/config.json"));
     let mut without_export = config.clone();
     without_export.as_object_mut().unwrap().remove("export");
+    // It records the export's pins beside the export, which a configuration that `nvx-rs` wrote
+    // before it pinned exported objects there lacks, and an export without its pins, or pins
+    // without an export, are malformed.
+    let mut without_export_pins = config.clone();
+    without_export_pins
+        .as_object_mut()
+        .unwrap()
+        .remove("export_pins");
+    let mut export_without_pins = config.clone();
+    export_without_pins["export"] =
+        json!({"binds": [bind(0, "/data", true)], "children": [child("/share", false)]});
+    let mut pins_without_export = config.clone();
+    pins_without_export["export_pins"] = json!({"binds": [], "denied": []});
     let mut memory_text = config.clone();
     memory_text["memory_mib"] = json!("256");
     let mut uid_beyond_32_bits = config.clone();
@@ -1221,30 +1324,59 @@ fn malformed_configuration(root: &Root) {
     let mut format_7_with_upper = config.clone();
     format_7_with_upper["format"] = json!(7);
     let mut other_upper = config.clone();
-    other_upper["upper"] = json!("tmpfs");
+    other_upper["upper"] = json!({"kind": "tmpfs"});
     let mut scratch_without_image = config.clone();
-    scratch_without_image["scratch"] = Value::Null;
+    scratch_without_image["upper"]["path"] = Value::Null;
     // An upper in RAM has no scratch image, nor its binding.
     let mut ram_with_scratch = config.clone();
-    ram_with_scratch["upper"] = json!("ram");
+    ram_with_scratch["upper"] =
+        json!({"kind": "ram", "max_memory_percent": 50, "path": "{root/scratch.ext4}"});
     let mut ram_with_binding = ram_with_scratch.clone();
-    ram_with_binding["scratch"] = Value::Null;
+    ram_with_binding["upper"] = json!({"kind": "ram", "max_memory_percent": 50});
     let mut format_1_with_export = without_upper.clone();
     format_1_with_export["format"] = json!(1);
+    // A network record requires each of its fields, and one whose options their parser or the
+    // network's own checks refuse is malformed, as the old plan's network was.
+    let mut network = config.clone();
+    network["network"] = json!({
+        "egress": "deny",
+        "egress_allow": [],
+        "egress_deny": [],
+        "host_loopback": null,
+        "host_loopback_forwards": [],
+        "ingress": null,
+        "net": "10.0.0.2/24",
+        "proxy": null,
+    });
+    let mut network_without_egress = network.clone();
+    network_without_egress["network"]
+        .as_object_mut()
+        .unwrap()
+        .remove("egress");
+    let mut network_of_a_gateway = network.clone();
+    network_of_a_gateway["network"]["net"] = json!("10.0.0.1/24");
+    let mut network_with_another_egress = network.clone();
+    network_with_another_egress["network"]["egress"] = json!("sometimes");
+    let mut network_with_a_broken_rule = network.clone();
+    network_with_a_broken_rule["network"]["egress_allow"] = json!(["192.0.2.0/33"]);
     let unsupported = &["unsupported format", "{root/state/config.json}"][..];
-    let mismatched = &["format does not match its mounts"][..];
+    let missing_export = &["sandbox configuration has no export plan"][..];
+    let missing_export_pins = &[
+        "sandbox configuration has no export pins",
+        "deprovision the sandbox and provision it again",
+    ][..];
     let malformed = &["sandbox configuration is malformed"][..];
     for (text, code, fragments) in [
         (
-            r#"{"format": 9}"#.to_owned(),
+            r#"{"format": 11}"#.to_owned(),
             "format-unsupported",
             unsupported,
         ),
         ("[]".to_owned(), "format-unsupported", unsupported),
-        // Only the integers 8, 7, and 1 are formats, and the configuration is strict JSON, in
+        // Only the integer 10 is a format, and the configuration is strict JSON, in
         // which no object repeats a field.
         (
-            r#"{"format": 8.0}"#.to_owned(),
+            r#"{"format": 10.0}"#.to_owned(),
             "format-unsupported",
             unsupported,
         ),
@@ -1257,7 +1389,7 @@ fn malformed_configuration(root: &Root) {
             ][..],
         ),
         (
-            r#"{"format": 8, "format": 8}"#.to_owned(),
+            r#"{"format": 9, "format": 9}"#.to_owned(),
             "io",
             &[
                 "failed to read sandbox configuration",
@@ -1265,22 +1397,49 @@ fn malformed_configuration(root: &Root) {
                 "duplicate field \"format\"",
             ][..],
         ),
-        (r#"{"format": 1}"#.to_owned(), "io", malformed),
-        (r#"{"format": 8}"#.to_owned(), "io", malformed),
+        (
+            r#"{"format": 1}"#.to_owned(),
+            "format-unsupported",
+            unsupported,
+        ),
+        (
+            r#"{"format": 8}"#.to_owned(),
+            "format-unsupported",
+            unsupported,
+        ),
         (memory_text.to_string(), "io", malformed),
         (uid_beyond_32_bits.to_string(), "io", malformed),
         (without_upper.to_string(), "io", malformed),
-        (format_7_with_upper.to_string(), "io", malformed),
+        (
+            format_7_with_upper.to_string(),
+            "format-unsupported",
+            unsupported,
+        ),
         (other_upper.to_string(), "io", malformed),
         (scratch_without_image.to_string(), "io", malformed),
         (ram_with_scratch.to_string(), "io", malformed),
         (ram_with_binding.to_string(), "io", malformed),
-        (without_export.to_string(), "format-unsupported", mismatched),
+        (
+            without_export.to_string(),
+            "format-unsupported",
+            missing_export,
+        ),
+        (
+            without_export_pins.to_string(),
+            "format-unsupported",
+            missing_export_pins,
+        ),
+        (export_without_pins.to_string(), "io", malformed),
+        (pins_without_export.to_string(), "io", malformed),
         (
             format_1_with_export.to_string(),
             "format-unsupported",
-            mismatched,
+            unsupported,
         ),
+        (network_without_egress.to_string(), "io", malformed),
+        (network_of_a_gateway.to_string(), "io", malformed),
+        (network_with_another_egress.to_string(), "io", malformed),
+        (network_with_a_broken_rule.to_string(), "io", malformed),
     ] {
         root.write("state/config.json", &text);
         let before = root.snapshot();
@@ -1332,6 +1491,54 @@ fn unusable_guest_ram(root: &Root) {
     }
     operate(root, "deprovision", "state", &[]).assert_silent_success();
     assert!(!root.below("state").exists());
+}
+
+/// A start refuses a configuration whose kernel command line holds a token of the sandbox profile,
+/// `nvx_*`, or of `--mount`, `virtfs_*`, as Linux or the guest's init reads the line, or a `--`,
+/// which would hide from Linux the tokens that OpenVMM appends, before it launches OpenVMM.
+/// `provision` records the profile's tokens that the configuration of the VM leaves to the caller,
+/// such as `nvx_entrypoint`, and the start refuses those too.
+#[test]
+fn starts_refuse_the_kernel_tokens_of_the_sandbox_profile_and_of_its_mounts() {
+    let root = Root::new();
+    root.nvx_rs(&provision(
+        "{root/state}",
+        &["--cmdline", "quiet nvx_entrypoint=/bin/true"],
+    ))
+    .assert_silent_success();
+    let config = json(&root.below("state/config.json"));
+    for (cmdline, fragment) in [
+        (None, "nvx_entrypoint is owned by the sandbox profile"),
+        // Linux reads dashes in a parameter's name as underscores.
+        (
+            Some("nvx-sandbox=0"),
+            "nvx-sandbox is owned by the sandbox profile",
+        ),
+        // The guest's init splits the line at whitespace alone, whatever its quotes.
+        (
+            Some("\"a nvx_mode=one-shot\""),
+            "nvx_mode is owned by the sandbox profile",
+        ),
+        (
+            Some("virtfs_tag=microvm"),
+            "virtfs_tag is owned by the sandbox --mount option",
+        ),
+        (
+            Some("quiet -- debug"),
+            "sandbox kernel command line hides the tokens that OpenVMM appends to it",
+        ),
+    ] {
+        if let Some(cmdline) = cmdline {
+            let mut config = config.clone();
+            config["cmdline"] = json!(cmdline);
+            root.write("state/config.json", config.to_string());
+        }
+        let before = root.snapshot();
+        let outcome = operate(&root, "start", "state", &[]);
+        assert_refused(&root, &outcome, "unsupported", &[fragment]);
+        assert_eq!(root.snapshot(), before, "{cmdline:?}");
+    }
+    operate(&root, "deprovision", "state", &[]).assert_silent_success();
 }
 
 /// A state directory must be a directory: a file there fails every operation, and provision
@@ -1429,7 +1636,10 @@ fn recycled_process_id(root: &Root) {
     let path = root.below("state/runtime.json");
     let mut record = json(&path);
     let reference: ProcessRef = serde_json::from_value(record["process"].clone()).unwrap();
-    let openvmm = Unrecorded(Process::open(&reference).unwrap().expect("OpenVMM runs"));
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("OpenVMM runs");
+    };
+    let openvmm = Unrecorded(process);
     let start_time = record["process"]["startTime"].as_u64().unwrap();
     record["process"]["startTime"] = json!(start_time + 1);
     fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
@@ -1437,9 +1647,10 @@ fn recycled_process_id(root: &Root) {
     assert_refused(root, &outcome, "sandbox-exited", &["stale", "not running"]);
     assert!(!path.exists());
     assert!(
-        !openvmm
+        openvmm
             .wait(Instant::now() + Duration::from_millis(200))
-            .unwrap(),
+            .unwrap()
+            .is_none(),
         "the stale record's process was signaled"
     );
     openvmm.kill().unwrap();
@@ -1447,6 +1658,7 @@ fn recycled_process_id(root: &Root) {
         openvmm
             .wait(Instant::now() + Duration::from_secs(10))
             .unwrap()
+            .is_some()
     );
     let outcome = operate(root, "stop", "state", &[]);
     assert_refused(root, &outcome, "sandbox-not-running", &["not running"]);
@@ -1519,11 +1731,189 @@ fn refusals_of_lifecycle_operations() {
     });
 }
 
+/// The host paths of shares of a sandbox's own files, which `provision` and `start` refuse, as
+/// `sandbox run` does all but those of the state directory, which it has none of, and which of its
+/// files each one reaches first: its state directory, image, scratch image, kernel, initramfs, and
+/// OpenVMM, a directory that holds one of them, and a directory inside its state directory.
+pub(crate) const OWN_FILES: [(&str, &str); 11] = [
+    ("{root/control/state}", "state directory"),
+    ("{root/control}", "state directory"),
+    ("{root/control/state/inside}", "state directory"),
+    ("{root/images/distro.erofs}", "image"),
+    ("{root/images}", "image"),
+    ("{root/upper/scratch.ext4}", "scratch image"),
+    ("{root/upper}", "scratch image"),
+    ("{root/build/vmlinux}", "kernel"),
+    ("{root/build/initramfs.cpio.gz}", "initramfs"),
+    ("{root/build}", "kernel"),
+    ("{root/openvmm/target/release/openvmm{exe}}", "OpenVMM"),
+];
+
+/// Returns a root whose image and scratch image are in directories of their own.
+pub(crate) fn own_files_root() -> Root {
+    let root = Root::new();
+    root.write("images/distro.erofs", "distro\n");
+    root.write("upper/scratch.ext4", "scratch\n");
+    root
+}
+
+/// Returns the arguments that provision the sandbox of the image and scratch image of
+/// [`own_files_root`] in `{root/control/state}`, with a share of `host` at `/data`, if given.
+fn own_files_provision(host: Option<&str>) -> Vec<String> {
+    let mut options = vec![
+        "--layer".to_owned(),
+        format!("distro,{{root/images/distro.erofs}},{UUID}"),
+        "--scratch".to_owned(),
+        "{root/upper/scratch.ext4}".to_owned(),
+    ];
+    if let Some(host) = host {
+        options.extend(["--mount".to_owned(), format!("/data,{host}")]);
+    }
+    sandbox("provision", "{root/control/state}", &options)
+}
+
+/// Returns `host`, with its placeholders replaced, and resolved if it is a link, as the root's
+/// OpenVMM is on POSIX hosts, since a share's host path must not be one.
+pub(crate) fn share_host(root: &Root, host: &str) -> String {
+    let host = root.expand(host);
+    if Path::new(&host).is_symlink() {
+        canonical(Path::new(&host)).to_str().unwrap().to_owned()
+    } else {
+        host
+    }
+}
+
+#[test]
+fn provision_refuses_shares_of_its_own_files() {
+    in_parallel(&OWN_FILES, |(host, name)| {
+        let root = own_files_root();
+        fs::create_dir_all(root.below("control/state/inside")).unwrap();
+        let host = share_host(&root, host);
+        let before = root.snapshot();
+        root.nvx_rs(&own_files_provision(Some(&host)))
+            .assert_error("unsupported", &[&format!("overlaps the sandbox's {name} ")]);
+        assert_eq!(root.snapshot(), before, "{host}");
+    });
+}
+
+#[test]
+fn provision_refuses_a_share_that_holds_the_state_directory_that_it_would_create() {
+    let root = own_files_root();
+    fs::create_dir(root.below("control")).unwrap();
+    let before = root.snapshot();
+    root.nvx_rs(&own_files_provision(Some("{root/control}")))
+        .assert_error("unsupported", &["overlaps the sandbox's state directory "]);
+    assert_eq!(root.snapshot(), before);
+}
+
+/// A state directory that only a verbatim path names, as one whose name ends in a period, lies
+/// inside a share of its parent all the same.
+#[cfg(windows)]
+#[test]
+fn provision_refuses_a_share_that_holds_a_state_directory_that_only_a_verbatim_path_names() {
+    let root = Root::new();
+    let outside = tempfile::tempdir().unwrap();
+    let parent = canonical(outside.path());
+    let state = format!(r"\\?\{}\state.", parent.display());
+    fs::create_dir(&state).unwrap();
+    let share = format!("/data,{}", parent.display());
+    root.nvx_rs(&provision(&state, &["--mount", &share]))
+        .assert_error("unsupported", &["overlaps the sandbox's state directory "]);
+    assert!(fs::read_dir(&state).unwrap().next().is_none());
+    fs::remove_dir(&state).unwrap();
+}
+
+/// The OpenVMM that `provision` protects is the root's, which `start` runs, and not the one that
+/// `NVX_OPENVMM` names.
+#[test]
+fn provision_refuses_a_share_of_the_roots_openvmm_whatever_the_variable_names() {
+    let root = own_files_root();
+    let host = share_host(&root, &format!("{{root/{OPENVMM}}}"));
+    let before = root.snapshot();
+    root.nvx_rs_with(
+        &own_files_provision(Some(&host)),
+        &[("NVX_OPENVMM", "{root/single.txt}")],
+    )
+    .assert_error("unsupported", &["overlaps the sandbox's OpenVMM "]);
+    assert_eq!(root.snapshot(), before);
+}
+
+#[test]
+fn start_refuses_recorded_shares_of_its_own_files() {
+    in_parallel(&OWN_FILES, |(host, name)| {
+        let root = own_files_root();
+        root.nvx_rs(&own_files_provision(None))
+            .assert_silent_success();
+        fs::create_dir(root.below("control/state/inside")).unwrap();
+        let host = share_host(&root, host);
+        let mut shared = child(&host, false);
+        shared["file"] = json!(Path::new(&host).is_file());
+        let mut config = json(&root.below("control/state/config.json"));
+        config["export"] = json!({"binds": [bind(0, "/data", true)], "children": [shared]});
+        config["export_pins"] = unpinned(&config["export"]);
+        root.write("control/state/config.json", config.to_string());
+        let before = root.snapshot();
+        root.nvx_rs(&sandbox::<&str>("start", "{root/control/state}", &[]))
+            .assert_error("unsupported", &[&format!("overlaps the sandbox's {name} ")]);
+        assert_eq!(root.snapshot(), before, "{host}");
+        assert!(root.openvmm_records().is_empty(), "{host}");
+    });
+}
+
+/// `start` resolves the recorded shares again, so a share that came to reach the sandbox's own
+/// files through a link since `provision` is refused.
+#[test]
+fn start_refuses_a_share_that_came_to_reach_its_own_files() {
+    let root = Root::new();
+    root.write("external/config.json", "{}");
+    root.nvx_rs(&provision(
+        "{root/state}",
+        &["--mount", "/data,{root/external/config.json}"],
+    ))
+    .assert_silent_success();
+    fs::remove_dir_all(root.below("external")).unwrap();
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(root.below("state"), root.below("external"));
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_dir(root.below("state"), root.below("external"));
+    if let Err(error) = linked {
+        // Windows creates one only with a privilege, or in Developer Mode.
+        assert!(
+            cfg!(windows) && error.raw_os_error() == Some(1314),
+            "cannot create the link: {error}"
+        );
+        eprintln!("skipped: this host does not let the test create a symbolic link");
+        return;
+    }
+    let before = root.snapshot();
+    operate(&root, "start", "state", &[])
+        .assert_error("unsupported", &["overlaps the sandbox's state directory "]);
+    assert_eq!(root.snapshot(), before);
+    assert!(root.openvmm_records().is_empty());
+}
+
+/// Shares beside the sandbox's own files, whose names only start as theirs do, are no shares of
+/// them.
+#[test]
+fn shares_beside_its_own_files_provision_and_start() {
+    let root = own_files_root();
+    root.write("control/state2/data.txt", "data\n");
+    root.write("images/distro.erofs.txt", "notes\n");
+    let mut provision = own_files_provision(Some("{root/control/state2}"));
+    provision
+        .extend(["--mount", "/etc/notes.txt,{root/images/distro.erofs.txt}"].map(str::to_owned));
+    root.nvx_rs(&provision).assert_silent_success();
+    for operation in ["start", "stop", "deprovision"] {
+        root.nvx_rs(&sandbox::<&str>(operation, "{root/control/state}", &[]))
+            .assert_silent_success();
+    }
+}
+
 /// The lock files that Windows refuses to open: every lifecycle operation fails at once for one
 /// that refuses access for good, and provision waits for a removed one, which a file system
 /// without POSIX deletion keeps under its name until its last handle closes (microsoft/nvx#464).
 #[cfg(windows)]
-mod windows {
+pub(crate) mod windows {
     use std::fs::{self, File};
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
@@ -1532,7 +1922,6 @@ mod windows {
     use std::thread;
     use std::time::Duration;
 
-    use nvx::host::store::SandboxStore;
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::{
         DELETE, FILE_DISPOSITION_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -1547,7 +1936,7 @@ mod windows {
     /// lock file.
     fn unprovisioned(root: &Root, state: &str) -> PathBuf {
         let dir = root.below(state);
-        SandboxStore::create(&dir).unwrap();
+        nvx::host::vm::create_private_dir(&dir).unwrap();
         dir.join("sandbox.lock")
     }
 
@@ -1561,7 +1950,7 @@ mod windows {
     /// Deletes the file `path` as a file system without POSIX deletion deletes a file that other
     /// handles hold: its name stays, and opening it fails, until the last handle closes, of which
     /// the returned one is the last unless others hold the file.
-    fn delete_pending(path: &Path) -> File {
+    pub(crate) fn delete_pending(path: &Path) -> File {
         let file = fs::OpenOptions::new()
             .access_mode(DELETE)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)

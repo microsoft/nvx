@@ -1,12 +1,120 @@
 #[cfg(target_os = "linux")]
-pub(crate) use super::linux::tests::{
-    check_identity, owner_only_problem, start_time_from_stat, store_dir_problem,
-};
+pub(crate) use super::linux::tests::{check_identity, start_time_from_stat, store_dir_problem};
+#[cfg(all(windows, feature = "cli"))]
+pub(crate) use super::windows::tests::disconnect_control;
 #[cfg(windows)]
 pub(crate) use super::windows::tests::set_access;
+#[cfg(windows)]
+pub(crate) use super::windows::tests::{accept_control, control_server, wait_exit_handle};
+#[cfg(windows)]
+pub(crate) use super::windows::tests::{access, inherits_file, untrusted_log_job, user_sid};
+#[cfg(all(windows, feature = "cli"))]
+pub(crate) use super::windows::tests::{claim_released_within, with_spawn_window};
 use super::*;
 
-#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn a_bounded_read_refuses_a_regular_file_that_holds_more_than_its_bound() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("record.bin");
+    std::fs::write(&path, b"data").unwrap();
+    assert_eq!(
+        read_at_most(open_regular(&path).unwrap(), 4, "a record").unwrap(),
+        b"data"
+    );
+    let error = read_at_most(open_regular(&path).unwrap(), 3, "a record").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "it holds more than the 3 bytes that a record may hold"
+    );
+    // A file that is missing is a failure of the host's, not a refusal of what a file is.
+    let error = open_regular(&directory.path().join("missing")).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_open_of_a_regular_file_refuses_a_link_and_a_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target.bin");
+    std::fs::write(&target, b"data").unwrap();
+    std::os::unix::fs::symlink(&target, directory.path().join("link")).unwrap();
+    std::fs::create_dir(directory.path().join("directory")).unwrap();
+    for name in ["link", "directory"] {
+        let error = open_regular(&directory.path().join(name)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "it is a link, or not a regular file",
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_private_write_replaces_its_file_whole_and_a_failed_one_leaves_no_temporary_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("record.json");
+    std::fs::write(&path, b"old").unwrap();
+    write_private(&path, b"new").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, PRIVATE_FILE_MODE);
+    }
+    // A directory takes the place of the file, so the rename fails.
+    let occupied = directory.path().join("occupied");
+    std::fs::create_dir(&occupied).unwrap();
+    let error = write_private(&occupied, b"new").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!("cannot write {}", occupied.display())
+    );
+    let mut names: Vec<_> = std::fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["occupied", "record.json"]);
+}
+
+#[test]
+fn a_new_private_file_never_takes_the_place_of_an_existing_entry() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("record.json");
+    std::fs::write(&path, b"old").unwrap();
+    let error = create_new(&path).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error}");
+    assert_eq!(std::fs::read(&path).unwrap(), b"old");
+    // Nor does it follow a link to a file that does not exist yet.
+    #[cfg(unix)]
+    {
+        let target = directory.path().join("target");
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        create_new(&link).unwrap_err();
+        assert!(!target.exists());
+    }
+}
+
+#[test]
+fn a_directory_sync_fails_for_a_missing_directory_only_on_unix() {
+    let directory = tempfile::tempdir().unwrap();
+    sync_dir(directory.path()).unwrap();
+    let missing = directory.path().join("missing");
+    let synced = sync_dir(&missing);
+    #[cfg(unix)]
+    assert_eq!(
+        synced.unwrap_err().to_string(),
+        format!("cannot sync the directory {}", missing.display())
+    );
+    // Windows has no portable way to flush a directory.
+    #[cfg(not(unix))]
+    synced.unwrap();
+}
+
+#[cfg(all(any(target_os = "linux", windows), feature = "cli"))]
 #[test]
 fn a_transport_without_a_native_handle_needs_no_clone_implementation() {
     struct CustomTransport;
@@ -67,7 +175,7 @@ fn the_hosts_identity_and_monotonic_time_are_read() {
 /// The stores tell files apart by the identities that their seals hold, with the 128-bit file
 /// IDs of `FILE_ID_INFO` on Windows, whether they examine a path, an open file, or an entry of
 /// an open directory.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(any(target_os = "linux", windows), feature = "cli"))]
 #[test]
 fn the_stores_tell_files_apart_by_the_identities_that_their_seals_hold() {
     use crate::host::seal::FileSeal;

@@ -12,14 +12,13 @@ use super::*;
 /// `EBADF`.
 #[cfg(target_os = "linux")]
 pub(crate) fn open_metadata_only(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-
     use nix::fcntl::OFlag;
+    use nix::sys::stat::Mode;
 
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(OFlag::O_PATH.bits())
-        .open(path)
+    // `nix` passes `O_PATH` on, where `OpenOptionsExt::custom_flags` masks out the bits of
+    // `O_ACCMODE`, which on musl include `O_PATH`: a musl build would open the file for reading.
+    let file = nix::fcntl::open(path, OFlag::O_PATH | OFlag::O_CLOEXEC, Mode::empty())?;
+    Ok(File::from(file))
 }
 
 /// Opens `path` for its metadata alone, as the Linux variant does. Without `FILE_READ_DATA`,
@@ -89,19 +88,19 @@ fn a_seal_holds_the_identity_kind_length_and_times_of_an_open_file() {
     assert_eq!(seal_of(&link), seal_of(&other));
     assert_ne!(seal_of(&other).file_id(), seal.file_id());
     let metadata = fs::metadata(&path).unwrap();
-    assert_eq!(seal.modified(), seal_time(metadata.modified().unwrap()));
+    assert_eq!(seal.modified, seal_time(metadata.modified().unwrap()));
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt;
 
-        let changed = seal.changed().unwrap();
+        let changed = seal.changed.unwrap();
         assert_eq!(
             (changed.seconds, i64::from(changed.nanoseconds)),
             (metadata.ctime(), metadata.ctime_nsec())
         );
     }
     #[cfg(windows)]
-    assert_eq!(seal.changed(), None);
+    assert_eq!(seal.changed, None);
     // Every open of the unchanged file seals it alike, whatever its access.
     assert_eq!(FileSeal::of(&open_guarded(&path).unwrap()).unwrap(), seal);
     assert_eq!(FileSeal::of(&open_read(&path).unwrap()).unwrap(), seal);
@@ -165,7 +164,7 @@ fn seals_differ_when_their_file_changes() {
     let touched = seal_of(&path);
     assert_eq!(appended.difference(&touched), Some("modification time"));
     assert_eq!(
-        touched.modified(),
+        touched.modified,
         seal_time(modified + Duration::from_secs(1))
     );
     assert_eq!(touched.difference(&touched.clone()), None);

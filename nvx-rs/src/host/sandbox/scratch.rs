@@ -11,10 +11,9 @@
 //! [`ScratchBinding::check`] checks it before a launch. Neither reads or maps the image's content.
 //! The check opens the image, compares it with the binding, claims it, compares it again, since
 //! the launch whose claim it waited for may have changed it, and returns it open, as a
-//! [`CheckedScratch`], which a [`PreparedLaunch`](super::PreparedLaunch) hands to the VMM: a
-//! replacement, or a change of kind or length, fails the check. On Linux, the file ID is the inode
-//! number, which a file that is created once the image is removed can take again: a replacement
-//! made that way, with the image's length, passes the check.
+//! [`CheckedScratch`]: a replacement, or a change of kind or length, fails the check. On Linux,
+//! the file ID is the inode number, which a file that is created once the image is removed can
+//! take again: a replacement made that way, with the image's length, passes the check.
 //!
 //! # Claims
 //!
@@ -25,25 +24,22 @@
 //! [`ErrorCode::ScratchClaimed`].
 //!
 //! - On Linux, the check opens the image for reading and writing and takes an exclusive `flock`
-//!   lock of that open file description. The VMM inherits the descriptor, which it opens again as
-//!   `/proc/self/fd/N`, and keeps it until it exits, so the claim lasts until both the caller and
-//!   the VMM have closed it. A process that another thread of the caller spawns while the
-//!   descriptor is open holds a copy of it from its fork until it executes its program, and with
-//!   it the claim, for that moment: a check therefore waits for a claim that should be free, for
-//!   [`CLAIM_RELEASE_WAIT`] for example, rather than fail at once.
+//!   lock of that open file description. A VMM that inherits the descriptor keeps it until it
+//!   exits, so the claim lasts until both the caller and the VMM have closed it. A process that
+//!   another thread of the caller spawns while the descriptor is open holds a copy of it from its
+//!   fork until it executes its program, and with it the claim, for that moment: a check
+//!   therefore waits for a claim that should be free, for [`CLAIM_RELEASE_WAIT`] for example,
+//!   rather than fail at once.
 //! - On Windows, the check's handle is a guard that holds no access to the image's content: it
 //!   shares reading and writing, which OpenVMM's open of the image needs, and denies deleting and
 //!   renaming it, so that the image's path names the checked image until the guard is released.
 //!   Two guards exclude each other, since each asks for the delete access that the other denies.
 //!   The check then makes sure that no other process has the image open for writing, as the VMM
 //!   of another sandbox does: an open that denies writing succeeds only then. It then opens the
-//!   image for writing, sharing every access, as the claim's handle. The VMM inherits the guard
-//!   and the claim's handle, and uses neither: so it holds the claim, and its copy of the guard the
-//!   image's path, from its start, even if the caller ends before the VMM has opened the image,
-//!   which closes the caller's own. Once the VMM has opened the image, at authenticated Ready, the
-//!   caller releases the guard, its own and the VMM's copy, through
-//!   [`PreparedLaunch::release`](super::PreparedLaunch::release), and the VMM's handles, open for
-//!   writing, keep the claim.
+//!   image for writing, sharing every access, as the claim's handle. A VMM that inherits the
+//!   claim's handle holds the claim from its start, even if the caller ends before the VMM has
+//!   opened the image, which closes the caller's own; once the VMM has opened the image, its
+//!   handles, open for writing, keep the claim.
 //!
 //! Claims exclude the launches of NVX: a process that writes the image without claiming it, which
 //! on Linux takes no `flock` lock and on Windows does not keep the image open, is not kept out.
@@ -58,20 +54,19 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::geometry::BlockGeometry;
 use super::mount::os_error;
-use super::{block_geometry, refused};
+use super::refused;
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::paths;
 use crate::host::seal::{FileId, FileKind, FileSeal, SealScheme};
 
 /// The version of the serde form of [`ScratchBinding`] that this build writes and checks.
-pub const SCRATCH_BINDING_VERSION: u32 = 1;
+pub(crate) const SCRATCH_BINDING_VERSION: u32 = 1;
 
 /// How long a check of a scratch image that should be free waits for its claim to be released:
 /// long enough for a process that another thread of the caller spawned to execute its program,
 /// and so to close its copy of a claim, as [Claims](self#claims) explains.
-pub const CLAIM_RELEASE_WAIT: Duration = Duration::from_secs(1);
+pub(crate) const CLAIM_RELEASE_WAIT: Duration = Duration::from_secs(1);
 
 /// How often a check tries a claim that is held again.
 const CLAIM_RETRY_INTERVAL: Duration = Duration::from_millis(25);
@@ -110,7 +105,7 @@ impl Access<'static> {
 /// with the fields of a [`FileSeal`] of the same names, and no times, which the VMM changes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ScratchBinding {
+pub(crate) struct ScratchBinding {
     /// [`SCRATCH_BINDING_VERSION`].
     version: u32,
     /// The host that took the binding.
@@ -128,75 +123,48 @@ pub struct ScratchBinding {
 /// A scratch image that [`ScratchBinding::check`] found unchanged and claimed, held open.
 ///
 /// On Linux, the file is the image, open for reading and writing, whose open file description
-/// holds the claim, and which the VMM inherits. On Windows, it is the image's guard, which holds
-/// no access to its content and denies deleting and renaming it, so that the image's path names
-/// the checked image while the guard is held, and the checked scratch also holds the claim's
-/// handle, open for writing; the VMM inherits both. Dropping it closes them, which releases the
-/// claim, and on Windows the guard, unless a VMM that inherited them still holds them; see
-/// [Claims](self#claims).
-///
-/// A [`PreparedLaunch`](super::PreparedLaunch) takes it, with the path at which the check opened
-/// the image, and hands the image to the VMM.
+/// holds the claim, which a VMM that inherits the file keeps. On Windows, it is the image's guard,
+/// which holds no access to its content and denies deleting and renaming it, so that the image's
+/// path names the checked image while the guard is held, and the checked scratch also holds the
+/// claim's handle, open for writing, which a VMM that inherits it keeps. Dropping it closes them,
+/// which releases the claim, and on Windows the guard, unless a VMM that inherited them still
+/// holds them; see [Claims](self#claims).
 #[derive(Debug)]
-pub struct CheckedScratch {
+pub(crate) struct CheckedScratch {
     /// The checked image, or on Windows its guard.
     file: File,
     /// The claim's handle on Windows: the image, open for writing and sharing every access,
     /// which the VMM inherits so that it holds the claim from its start.
     #[cfg(windows)]
+    #[cfg_attr(
+        not(feature = "cli"),
+        allow(
+            dead_code,
+            reason = "it holds the claim, which only the CLI hands to the VMMs that it starts"
+        )
+    )]
     claim: File,
-    /// The path at which the check opened the image.
-    path: PathBuf,
 }
 
 impl CheckedScratch {
-    /// Returns the checked image: on Linux, the image open for reading and writing, and on Windows
-    /// its guard.
-    pub fn file(&self) -> &File {
+    /// Returns the checked image, open for reading and writing, whose open file description holds
+    /// the claim on Linux, which a VMM that inherits a copy of it keeps.
+    #[cfg(not(windows))]
+    pub(crate) fn file(&self) -> &File {
         &self.file
     }
 
-    /// Returns the path at which the check opened the image.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Returns the block geometry that OpenVMM presents for the image as the `scratch` block
-    /// device, read through the checked file, as
-    /// [`CheckedDistro::geometry`](super::distro::CheckedDistro::geometry) reads that of a distro
-    /// layer: the image's length, logical blocks of 512 bytes, and physical blocks of the I/O
-    /// block size of the image's filesystem on Linux, of 4096 bytes on Windows, and of the logical
-    /// block size on other hosts. On Windows, the checked file is the image's guard, which may
-    /// read the image's metadata.
-    ///
-    /// It reads the file's metadata alone, never the image's content. The scratch image of a
-    /// clone must present the geometry of its template's scratch, its length included, as
-    /// [`ClonePlan`](crate::host::template::ClonePlan) checks before the clone's launch.
-    ///
-    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a length or a
-    /// physical block size that OpenVMM refuses, and with [`ErrorKind::Io`](crate::ErrorKind::Io)
-    /// if the metadata cannot be read.
-    pub fn geometry(&self) -> Result<BlockGeometry> {
-        block_geometry(&self.file, &self.path, DESCRIPTION)
-    }
-
-    /// Returns the checked image, which the caller then holds with its claim: an owned descriptor
-    /// on Linux, and on Windows an owned handle, the image's guard, which then holds the claim
+    /// Returns the image's guard, an owned handle, which the caller then holds with the claim
     /// alone, since this closes the claim's handle.
-    pub fn into_file(self) -> File {
+    #[cfg(windows)]
+    pub(crate) fn into_file(self) -> File {
         self.file
     }
 
     /// Returns the claim's handle, which the VMM inherits on Windows.
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "cli"))]
     pub(crate) fn claim(&self) -> &File {
         &self.claim
-    }
-
-    /// Returns the checked image, for a prepared launch to move.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn file_mut(&mut self) -> &mut File {
-        &mut self.file
     }
 }
 
@@ -210,7 +178,7 @@ impl ScratchBinding {
     /// with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) for an image that is missing
     /// or not a regular file, and with [`ErrorKind::Io`](crate::ErrorKind::Io) if the image cannot
     /// be opened or sealed, as on hosts other than Linux and Windows.
-    pub fn bind(path: &Path) -> Result<Self> {
+    pub(crate) fn bind(path: &Path) -> Result<Self> {
         bind_with(&normalized(path)?, Access::WRITABLE)
     }
 
@@ -231,39 +199,8 @@ impl ScratchBinding {
     /// [`ErrorCode::ScratchClaimed`], for an image that another launch still claims at
     /// `deadline`; and with [`ErrorKind::Io`](crate::ErrorKind::Io) if the image cannot be opened,
     /// sealed, or claimed.
-    pub fn check(&self, path: &Path, deadline: Instant) -> Result<CheckedScratch> {
+    pub(crate) fn check(&self, path: &Path, deadline: Instant) -> Result<CheckedScratch> {
         self.check_with(&normalized(path)?, deadline, Access::WRITABLE)
-    }
-
-    /// Returns the host that took the binding.
-    pub fn scheme(&self) -> SealScheme {
-        self.scheme
-    }
-
-    /// Returns the device, or on Windows the volume serial number.
-    pub fn device(&self) -> u64 {
-        self.device
-    }
-
-    /// Returns the inode, or on Windows the file ID.
-    pub fn file_id(&self) -> u128 {
-        self.file_id.0
-    }
-
-    /// Returns the kind of file.
-    pub fn kind(&self) -> FileKind {
-        self.kind
-    }
-
-    /// Returns the length in bytes.
-    pub fn length(&self) -> u64 {
-        self.length
-    }
-
-    /// Returns the binding's version, which a [check](Self::check) requires to be
-    /// [`SCRATCH_BINDING_VERSION`].
-    pub(crate) fn version(&self) -> u32 {
-        self.version
     }
 
     /// Returns the binding of the image that `seal` seals.
@@ -316,7 +253,6 @@ impl ScratchBinding {
             file,
             #[cfg(windows)]
             claim,
-            path: path.to_path_buf(),
         })
     }
 

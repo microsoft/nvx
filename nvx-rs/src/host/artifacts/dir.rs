@@ -6,20 +6,21 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use super::compatibility::compatibility;
 use super::identity::{provenance_identity, read_metadata, sha256_identity};
 use super::require::required;
 use super::{
-    Artifacts, CHECKSUMS_NAME, Guest, INITRAMFS_PROVENANCE_NAME, KERNEL_NAME,
-    KERNEL_PROVENANCE_NAME, OPENVMM_PROVENANCE_NAME, RELEASE_BIN_DIR, RELEASE_GUEST_DIR,
-    REPO_BUILD_DIR, REPO_OPENVMM_DIR, absolute, is_release_dir, openvmm_executable,
+    CHECKSUMS_NAME, Guest, INITRAMFS_PROVENANCE_NAME, KERNEL_NAME, KERNEL_PROVENANCE_NAME,
+    OPENVMM_PROVENANCE_NAME, RELEASE_BIN_DIR, RELEASE_GUEST_DIR, REPO_BUILD_DIR, REPO_OPENVMM_DIR,
+    absolute, is_release_dir, openvmm_executable,
 };
 use crate::error::{Error, Result};
-use crate::host::store::{ArtifactIdentity, RuntimeIdentity};
+use crate::host::runtime::{ArtifactIdentity, RuntimeIdentity};
 
 /// The layout of a directory of NVX artifacts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Layout {
+pub(crate) enum Layout {
     /// A repository checkout: the guest artifacts in `build/`, and OpenVMM in
     /// `openvmm/target/release/`, where a local build writes them and where `nvx-rs download`
     /// installs a release.
@@ -33,10 +34,10 @@ pub enum Layout {
 /// `scripts/nvx_tools/common.py` give for a checkout.
 ///
 /// Paths are joined to the directory, made absolute, without checking that they exist; the
-/// `require_*` methods check them with the messages of `nvx.py`. Unlike [`Artifacts`], nothing
-/// here reads the release's `SOURCE-MANIFEST.json`, which `nvx.py` does not check either.
+/// `require_*` methods check them with the messages of `nvx.py`. Nothing here reads the release's
+/// `SOURCE-MANIFEST.json`, which `nvx.py` does not check either.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ArtifactDir {
+pub(crate) struct ArtifactDir {
     /// The absolute directory.
     root: PathBuf,
     /// Its layout.
@@ -48,24 +49,26 @@ impl ArtifactDir {
     ///
     /// Fails with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) if a relative
     /// `root` meets an unreadable current directory.
-    pub fn repository(root: impl AsRef<Path>) -> Result<Self> {
+    pub(crate) fn repository(root: impl AsRef<Path>) -> Result<Self> {
         Self::new(root.as_ref(), Layout::Repository)
     }
 
     /// Uses an extracted release package.
     ///
     /// Fails as [`repository`](Self::repository) does.
-    pub fn release(root: impl AsRef<Path>) -> Result<Self> {
+    pub(crate) fn release(root: impl AsRef<Path>) -> Result<Self> {
         Self::new(root.as_ref(), Layout::Release)
     }
 
-    /// Uses a directory in the layout that its built artifacts reveal, as
-    /// [`Artifacts::from_dir`] tells them apart: a directory that contains `bin/openvmm[.exe]`,
-    /// `guest/vmlinux`, or `guest/initramfs.cpio.gz` is a release, and any other directory is a
-    /// repository checkout.
+    /// Uses a directory in the layout that its built artifacts reveal.
+    ///
+    /// A repository checkout also has a `guest/` directory, which holds the guest sources, so the
+    /// layouts are told apart by their built artifacts instead: a directory that contains
+    /// `bin/openvmm[.exe]`, `guest/vmlinux`, or `guest/initramfs.cpio.gz` is a release, and any
+    /// other directory is a repository checkout.
     ///
     /// Fails as [`repository`](Self::repository) does.
-    pub fn from_dir(directory: impl AsRef<Path>) -> Result<Self> {
+    pub(crate) fn from_dir(directory: impl AsRef<Path>) -> Result<Self> {
         let directory = directory.as_ref();
         let layout = if is_release_dir(directory) {
             Layout::Release
@@ -84,18 +87,18 @@ impl ArtifactDir {
     }
 
     /// Returns the absolute directory.
-    pub fn root(&self) -> &Path {
+    pub(crate) fn root(&self) -> &Path {
         &self.root
     }
 
     /// Returns the directory's layout.
-    pub fn layout(&self) -> Layout {
+    pub(crate) fn layout(&self) -> Layout {
         self.layout
     }
 
     /// Returns the path of the guest artifact `name`, `artifact_path(name)` of `nvx.py`:
     /// `build/NAME` in a checkout, and `guest/NAME` in a release.
-    pub fn artifact(&self, name: &str) -> PathBuf {
+    pub(crate) fn artifact(&self, name: &str) -> PathBuf {
         let directory = match self.layout {
             Layout::Repository => REPO_BUILD_DIR,
             Layout::Release => RELEASE_GUEST_DIR,
@@ -106,7 +109,7 @@ impl ArtifactDir {
     /// Returns the path of the OpenVMM executable, `openvmm_binary_path()` of `nvx.py`:
     /// `openvmm/target/release/openvmm[.exe]` in a checkout, and `bin/openvmm[.exe]` in a
     /// release.
-    pub fn openvmm(&self) -> PathBuf {
+    pub(crate) fn openvmm(&self) -> PathBuf {
         let directory = match self.layout {
             Layout::Repository => REPO_OPENVMM_DIR.iter().collect(),
             Layout::Release => PathBuf::from(RELEASE_BIN_DIR),
@@ -115,40 +118,30 @@ impl ArtifactDir {
     }
 
     /// Returns the path of the guest kernel, which every guest boots.
-    pub fn kernel(&self) -> PathBuf {
+    pub(crate) fn kernel(&self) -> PathBuf {
         self.artifact(KERNEL_NAME)
     }
 
     /// Returns the path of a guest's initramfs.
-    pub fn initramfs(&self, guest: Guest) -> PathBuf {
+    pub(crate) fn initramfs(&self, guest: Guest) -> PathBuf {
         self.artifact(guest.initramfs_name())
     }
 
     /// Returns the path of the package manifest of a guest's initramfs.
-    pub fn package_manifest(&self, guest: Guest) -> PathBuf {
+    pub(crate) fn package_manifest(&self, guest: Guest) -> PathBuf {
         self.artifact(&guest.package_manifest_name())
     }
 
     /// Returns the path of a guest's distro layer, if the guest provides one.
-    pub fn distro_layer(&self, guest: Guest) -> Option<PathBuf> {
+    pub(crate) fn distro_layer(&self, guest: Guest) -> Option<PathBuf> {
         guest.distro_layer_name().map(|name| self.artifact(name))
     }
 
     /// Returns the path of the manifest of a guest's distro layer, if the guest provides one.
-    pub fn distro_manifest(&self, guest: Guest) -> Option<PathBuf> {
+    pub(crate) fn distro_manifest(&self, guest: Guest) -> Option<PathBuf> {
         guest
             .distro_manifest_name()
             .map(|name| self.artifact(&name))
-    }
-
-    /// Checks that the OpenVMM executable is a regular file and returns its path.
-    ///
-    /// Fails with [`ErrorCode::ArtifactMissing`] and the message `OpenVMM release binary not
-    /// found: PATH`.
-    ///
-    /// [`ErrorCode::ArtifactMissing`]: crate::ErrorCode::ArtifactMissing
-    pub fn require_openvmm(&self) -> Result<PathBuf> {
-        required(self.openvmm(), "OpenVMM release binary")
     }
 
     /// Checks that the guest kernel is a regular file and returns its path.
@@ -157,7 +150,7 @@ impl ArtifactDir {
     /// PATH`.
     ///
     /// [`ErrorCode::ArtifactMissing`]: crate::ErrorCode::ArtifactMissing
-    pub fn require_kernel(&self) -> Result<PathBuf> {
+    pub(crate) fn require_kernel(&self) -> Result<PathBuf> {
         required(self.kernel(), "Linux direct kernel")
     }
 
@@ -168,31 +161,15 @@ impl ArtifactDir {
     /// found: PATH`, such as `Ubuntu Base initramfs not found: PATH`.
     ///
     /// [`ErrorCode::ArtifactMissing`]: crate::ErrorCode::ArtifactMissing
-    pub fn require_initramfs(&self, guest: Guest) -> Result<PathBuf> {
+    pub(crate) fn require_initramfs(&self, guest: Guest) -> Result<PathBuf> {
         required(
             self.initramfs(guest),
             &format!("{} initramfs", guest.distribution()),
         )
     }
 
-    /// Returns the artifacts of a sandbox, as `nvx-rs sandbox run` and `nvx-rs sandbox start`
-    /// require them: the OpenVMM executable, the kernel, and the Alpine initramfs, in that order,
-    /// located in this directory.
-    ///
-    /// Fails with [`ErrorCode::ArtifactMissing`] for the first one that is not a regular file,
-    /// with the messages of [`require_openvmm`](Self::require_openvmm) and
-    /// [`require_kernel`](Self::require_kernel), or `initramfs not found: PATH`.
-    ///
-    /// [`ErrorCode::ArtifactMissing`]: crate::ErrorCode::ArtifactMissing
-    pub fn sandbox_artifacts(&self) -> Result<Artifacts> {
-        self.require_openvmm()?;
-        self.require_kernel()?;
-        required(self.initramfs(Guest::Alpine), "initramfs")?;
-        Ok(Artifacts::located(self))
-    }
-
     /// Returns the paths of every artifact, for a caller to show or record.
-    pub fn paths(&self) -> ArtifactPaths {
+    pub(crate) fn paths(&self) -> ArtifactPaths {
         ArtifactPaths {
             layout: self.layout,
             root: self.root.clone(),
@@ -212,10 +189,10 @@ impl ArtifactDir {
         }
     }
 
-    /// Returns the identity of the sandbox runtime of this directory, the one that
-    /// [`sandbox_artifacts`](Self::sandbox_artifacts) and [`Artifacts::from_dir`] name: its
-    /// OpenVMM executable, its kernel, and its Alpine initramfs, as the directory's install
-    /// metadata names them, under the contracts that this crate speaks.
+    /// Returns the identity of the sandbox runtime of this directory: its OpenVMM executable, its
+    /// kernel, and its Alpine initramfs, as the directory's install metadata names them, and the
+    /// [compatibility](super::compatibility::compatibility) of the CLI's contracts with its
+    /// bundled guests.
     ///
     /// The metadata names each artifact by the SHA-256 digest that its build or its package
     /// recorded, so nothing here reads or hashes an artifact:
@@ -234,7 +211,7 @@ impl ArtifactDir {
     /// [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) when the metadata is missing or
     /// unreadable, or names no valid digest of an artifact. A file of metadata that is not a
     /// regular file, such as a FIFO, is refused without being waited on.
-    pub fn runtime_identity(&self) -> Result<RuntimeIdentity> {
+    pub(crate) fn runtime_identity(&self) -> Result<RuntimeIdentity> {
         let [openvmm, kernel, initramfs] = match self.layout {
             Layout::Release => self.listed_identities()?,
             Layout::Repository => [
@@ -255,7 +232,12 @@ impl ArtifactDir {
                 )?,
             ],
         };
-        Ok(RuntimeIdentity::new(openvmm, kernel, initramfs))
+        Ok(RuntimeIdentity::new(
+            openvmm,
+            kernel,
+            initramfs,
+            compatibility()?,
+        ))
     }
 
     /// Returns the identities of the OpenVMM executable, kernel, and Alpine initramfs of a
@@ -314,33 +296,33 @@ impl ArtifactDir {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
-pub struct ArtifactPaths {
+pub(crate) struct ArtifactPaths {
     /// The directory's layout.
-    pub layout: Layout,
+    pub(crate) layout: Layout,
     /// The absolute directory.
-    pub root: PathBuf,
+    pub(crate) root: PathBuf,
     /// The OpenVMM executable.
-    pub openvmm: PathBuf,
+    pub(crate) openvmm: PathBuf,
     /// The guest kernel.
-    pub kernel: PathBuf,
+    pub(crate) kernel: PathBuf,
     /// The artifacts of each guest, in the order of [`Guest::ALL`].
-    pub guests: Vec<GuestPaths>,
+    pub(crate) guests: Vec<GuestPaths>,
 }
 
 /// The paths of the artifacts of one guest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
-pub struct GuestPaths {
+pub(crate) struct GuestPaths {
     /// The guest's name, [`Guest::name`].
-    pub name: &'static str,
+    pub(crate) name: &'static str,
     /// The guest's distribution, [`Guest::distribution`].
-    pub distribution: &'static str,
+    pub(crate) distribution: &'static str,
     /// The initramfs.
-    pub initramfs: PathBuf,
+    pub(crate) initramfs: PathBuf,
     /// The package manifest of the initramfs.
-    pub package_manifest: PathBuf,
+    pub(crate) package_manifest: PathBuf,
     /// The distro layer, if the guest provides one.
-    pub distro_layer: Option<PathBuf>,
+    pub(crate) distro_layer: Option<PathBuf>,
     /// The manifest of the distro layer, if the guest provides one.
-    pub distro_manifest: Option<PathBuf>,
+    pub(crate) distro_manifest: Option<PathBuf>,
 }

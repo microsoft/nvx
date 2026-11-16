@@ -15,15 +15,6 @@ pub(crate) fn mapping_error(system: &mut impl System, status: i32, entry: u32) {
     write_stderr(message.as_bytes());
 }
 
-/// Reports a host mapping that stays mounted after the table's teardown through both
-/// diagnostic channels.
-pub(crate) fn unmapping_error(system: &mut impl System, status: i32, entry: u32) {
-    error(system, "host-unmapping", status);
-    let message =
-        format!("NVX-MANAGED-ERROR: stage=host-unmapping status={status} entry={entry}\n");
-    write_stderr(message.as_bytes());
-}
-
 /// Writes a diagnostic to the process's standard error, ignoring write failures.
 pub(crate) fn write_stderr(message: &[u8]) {
     sys::write_standard_error(message);

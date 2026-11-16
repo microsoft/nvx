@@ -7,9 +7,9 @@
 //! [last section](#host-mapping-table) describes, and hands their mappings to the root of its
 //! caller's choice.
 //!
-//! NVX mounts mappings through its mapper, which binds each beneath the descriptor of its root.
-//! The mapper, like the rest of the guest's space, is NVX's internal reference code: hidden from
-//! this documentation, unstable, and crate-private once nothing outside NVX uses it.
+//! The caller mounts the mappings through a mapper of its own. NVX's mapper, which binds each
+//! beneath the descriptor of its root, is part of the guest's space, nvx-init's internal
+//! reference code, private to this crate.
 //!
 //! # Host mapping table
 //!
@@ -19,18 +19,15 @@
 //! target, and its access. A [`MappingTable`] keeps the agent's account of the table: it checks
 //! each part against what the host announced and against the entries that it applied, hands the
 //! part's mappings to the caller, which applies them beneath the root of its choice, such as
-//! through a mapper or a layered root, and latches at the first that fails, which it reports with
-//! its entry in the table, so that the agent starts no workload on a partial table. The root keeps
-//! the mappings until its teardown.
+//! through a mapper, and latches at the first that fails, which it reports with its entry in the
+//! table, so that the agent starts no workload on a partial table. The caller keeps the mappings
+//! until its teardown.
 //!
-//! NVX's managed agent applies its host mapping table through one, and through a mapper beneath
-//! its own root, `/`, in direct mode, or beneath the container's assembled root in sandbox mode,
-//! from its mount of the host's export, an aggregate, whose root, which lists the aggregate's
-//! children, no table maps: a table refuses an empty source.
+//! A table takes its entries from an aggregate export, whose root, which lists the aggregate's
+//! children, no table maps: it refuses an empty source.
 
 mod kernel;
-#[doc(hidden)]
-pub mod mapper;
+pub(crate) mod mapper;
 mod table;
 
 use std::ffi::OsStr;
@@ -41,12 +38,9 @@ use std::path::{Path, PathBuf};
 use super::sys::{self, FileKind, MountAttributes, MountFlags};
 
 pub(crate) use self::kernel::{Kernel, SystemKernel};
-#[doc(hidden)]
-pub use self::mapper::{
-    ApplyError, Mapper, MappingError, Reserved, SourceRoot, Step, TargetRoot, TeardownError,
-    UnmountFailure, bind,
+pub(crate) use self::mapper::{
+    Mapped, Mapper, MappingError, Reserved, SourceRoot, Step, TargetRoot, unbind_with,
 };
-pub(crate) use self::mapper::{Mapped, bind_with, unbind_with};
 pub use self::table::{MappingTable, Refusal, TableError};
 
 /// The longest source or target of a [`Mapping`], in bytes: Linux's `PATH_MAX` without its

@@ -6,13 +6,73 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::endpoint::UnixTransport;
-pub(crate) use super::private::{owner_only_problem, store_dir_problem};
+#[cfg(feature = "cli")]
+use super::endpoint::endpoint_server_pid_until;
+pub(crate) use super::private::store_dir_problem;
 use super::process::wait_step;
 pub(crate) use super::process::{check_identity, start_time_from_stat};
 use super::*;
-use crate::host::platform::Transport;
 
+#[cfg(feature = "cli")]
+#[test]
+fn a_full_control_backlog_never_replaces_the_callers_probe_deadline() {
+    use std::os::unix::net::UnixListener;
+
+    use nix::sys::socket::{Backlog, listen};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("control.sock");
+    let endpoint = path.to_str().unwrap();
+    let listener = UnixListener::bind(&path).unwrap();
+    listen(&listener, Backlog::new(1).unwrap()).unwrap();
+    let mut clients = Vec::new();
+    loop {
+        assert!(clients.len() < 16, "the configured backlog must fill");
+        match crate::host::sys::connect_nonblocking(endpoint) {
+            Ok(client) => clients.push(client),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("cannot fill the control backlog: {error}"),
+        }
+    }
+    let started = Instant::now();
+    let error =
+        endpoint_server_pid_until(endpoint, started + Duration::from_millis(50)).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(
+        started.elapsed() < Duration::from_millis(250),
+        "{:?}",
+        started.elapsed()
+    );
+    for _ in &clients {
+        drop(listener.accept().unwrap());
+    }
+    drop(clients);
+    assert_eq!(
+        endpoint_server_pid_until(endpoint, started)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert_eq!(
+        endpoint_server_pid_until(endpoint, Instant::now() + Duration::from_secs(5)).unwrap(),
+        Some(std::process::id())
+    );
+    drop(listener);
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        endpoint_server_pid_until(endpoint, started)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::TimedOut
+    );
+}
+
+#[cfg(feature = "cli")]
 #[test]
 fn a_duplicated_transport_keeps_the_verified_connection_without_reconnecting() {
     use std::io::Write;
@@ -50,6 +110,208 @@ fn a_duplicated_transport_keeps_the_verified_connection_without_reconnecting() {
     assert_eq!(&response, b"response");
     drop(duplicate);
     assert_eq!(peer.read(&mut response).unwrap(), 0);
+}
+
+#[test]
+fn a_transferred_listener_cannot_authenticate_its_exited_creator() {
+    use std::os::fd::AsFd;
+    use std::os::unix::net::UnixListener;
+
+    let child = "NVX_TEST_TRANSFERRED_CONTROL_LISTENER";
+    let endpoint = "NVX_TEST_TRANSFERRED_CONTROL_ENDPOINT";
+    let verified = "NVX_STALE_CONTROL_PEER_REJECTED";
+    if let Some(pid) = std::env::var_os(child) {
+        let pid: u32 = pid.to_str().unwrap().parse().unwrap();
+        let endpoint = std::env::var(endpoint).unwrap();
+        let listener = UnixListener::from(std::io::stdin().as_fd().try_clone_to_owned().unwrap());
+        let probe = crate::host::sys::connect_nonblocking(&endpoint).unwrap();
+        assert_eq!(crate::host::sys::peer_pid(&probe).unwrap(), pid);
+        drop(listener.accept().unwrap());
+        drop(probe);
+        // Match the stale creator's PID without changing the host's PID allocator.
+        let error = connect_endpoint(&endpoint, pid, Duration::from_secs(2))
+            .err()
+            .expect("a stale listener's numeric PID must not authenticate it");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("original socket peer exited"));
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+        println!("{verified} pid={pid}");
+        return;
+    }
+    run_with_transferred_listener(
+        "host::platform::linux::tests::a_transferred_listener_cannot_authenticate_its_exited_creator",
+        true,
+        verified,
+    );
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn a_child_endpoint_accepts_its_exited_child_until_the_child_is_reaped() {
+    use std::io::Write;
+    use std::os::fd::AsFd;
+    use std::os::unix::net::UnixListener;
+
+    use nix::sys::wait::{Id, WaitPidFlag, waitid, waitpid};
+    use nix::unistd::Pid;
+
+    let verified = "NVX_UNREAPED_CHILD_PEER_ACCEPTED";
+    if let Some(pid) = std::env::var_os("NVX_TEST_TRANSFERRED_CONTROL_LISTENER") {
+        let pid: u32 = pid.to_str().unwrap().parse().unwrap();
+        let endpoint = std::env::var("NVX_TEST_TRANSFERRED_CONTROL_ENDPOINT").unwrap();
+        let listener = UnixListener::from(std::io::stdin().as_fd().try_clone_to_owned().unwrap());
+        // The listener's creator is this process's child: it exits, and only this process reaps it.
+        let creator = Pid::from_raw(i32::try_from(pid).unwrap());
+        waitid(
+            Id::Pid(creator),
+            WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT,
+        )
+        .unwrap();
+        let error = connect_endpoint(&endpoint, pid, Duration::from_secs(2))
+            .err()
+            .expect("other connections must still refuse an exited peer");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("original socket peer exited"));
+        drop(listener.accept().unwrap());
+        let mut transport = connect_child_endpoint(&endpoint, pid).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.write_all(b"output").unwrap();
+        let mut output = [0; 6];
+        let count = transport
+            .read(&mut output, Some(Duration::from_secs(2)))
+            .unwrap();
+        assert_eq!(&output[..count], b"output");
+        waitpid(creator, None).unwrap();
+        let error = connect_child_endpoint(&endpoint, pid)
+            .err()
+            .expect("a reaped peer must not authenticate");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("original socket peer exited"));
+        println!("{verified} pid={pid}");
+        return;
+    }
+    run_with_transferred_listener(
+        "host::platform::linux::tests::a_child_endpoint_accepts_its_exited_child_until_the_child_is_reaped",
+        false,
+        verified,
+    );
+}
+
+/// Runs this binary's test `test` in a Python process that a child of its own, the creator, gave
+/// a listener at a new socket before it exited, and checks that the test passed and printed
+/// `verified`. The test finds the listener on its standard input, the creator's PID in
+/// `NVX_TEST_TRANSFERRED_CONTROL_LISTENER`, and the socket's path in
+/// `NVX_TEST_TRANSFERRED_CONTROL_ENDPOINT`. The process reaps the creator first if `reap`, and
+/// leaves it to the test otherwise.
+fn run_with_transferred_listener(test: &str, reap: bool, verified: &str) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("control.sock");
+    let mut command = Command::new("python3");
+    command
+        .args([
+            "-c",
+            r#"import array, os, socket, sys
+receiver, sender = socket.socketpair()
+creator = os.fork()
+if creator == 0:
+    receiver.close()
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(sys.argv[1])
+    listener.listen()
+    sender.sendmsg([b"L"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                            array.array("i", [listener.fileno()]))])
+    os._exit(0)
+sender.close()
+data, messages, flags, address = receiver.recvmsg(1, socket.CMSG_SPACE(array.array("i").itemsize))
+assert data == b"L" and len(messages) == 1
+assert messages[0][:2] == (socket.SOL_SOCKET, socket.SCM_RIGHTS)
+descriptors = array.array("i")
+descriptors.frombytes(messages[0][2])
+assert len(descriptors) == 1
+if sys.argv[4] == "reap":
+    assert os.waitpid(creator, 0) == (creator, 0)
+os.dup2(descriptors[0], 0)
+if descriptors[0] != 0:
+    os.close(descriptors[0])
+receiver.close()
+os.environ["NVX_TEST_TRANSFERRED_CONTROL_LISTENER"] = str(creator)
+os.execv(sys.argv[2], [sys.argv[2], "--exact", sys.argv[3], "--nocapture", "--test-threads=1"])
+"#,
+        ])
+        .arg(&path)
+        .arg(std::env::current_exe().unwrap())
+        .arg(test)
+        .arg(if reap { "reap" } else { "keep" })
+        .env("NVX_TEST_TRANSFERRED_CONTROL_ENDPOINT", &path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crate::host::tests::spawn_locked(&mut command)
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert!(
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains(verified),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_control_connection_fails_closed_without_original_peer_pidfds() {
+    use std::os::unix::net::UnixListener;
+
+    let child = "NVX_TEST_CONTROL_PIDFD_DENIAL";
+    let Some(errno) = std::env::var_os(child) else {
+        for errno in [nix::libc::ENOPROTOOPT, nix::libc::EPERM, nix::libc::EINVAL] {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "host::platform::linux::tests::a_control_connection_fails_closed_without_original_peer_pidfds",
+                    "--nocapture",
+                ])
+                .env(child, errno.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            crate::host::sys::tests::refuse_peer_pidfd_on_spawn(&mut command, errno);
+            let output = crate::host::tests::spawn_locked(&mut command)
+                .unwrap()
+                .wait_with_output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains(&format!("NVX_CONTROL_PEER_PIDFD_REFUSED {errno}")),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    };
+    let errno: i32 = errno.to_str().unwrap().parse().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("control.sock");
+    let _listener = UnixListener::bind(&path).unwrap();
+    let error = connect_endpoint(
+        path.to_str().unwrap(),
+        std::process::id(),
+        Duration::from_secs(2),
+    )
+    .err()
+    .expect("an unverifiable peer must not authenticate by numeric PID alone");
+    let expected = if errno == nix::libc::EINVAL {
+        std::io::ErrorKind::PermissionDenied
+    } else {
+        std::io::ErrorKind::Unsupported
+    };
+    assert_eq!(error.kind(), expected);
+    println!("NVX_CONTROL_PEER_PIDFD_REFUSED {errno}");
 }
 
 #[test]
@@ -128,7 +390,7 @@ fn a_restore_ready_client_that_closed_before_its_connection_was_accepted_is_read
         let mut received = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(10);
         while listener
-            .receive(pid, &mut received, 64, Duration::from_millis(50))
+            .receive_verified(pid, &mut received, 64, Duration::from_millis(50))
             .unwrap()
         {
             assert!(Instant::now() < deadline, "the endpoint did not close");
@@ -153,53 +415,55 @@ fn a_restore_ready_client_that_closed_before_its_connection_was_accepted_is_read
     let mut received = Vec::new();
     assert!(
         listener
-            .receive(pid, &mut received, 64, Duration::from_millis(50))
+            .receive_verified(pid, &mut received, 64, Duration::from_millis(50))
             .unwrap()
     );
     drop(client);
     assert_eq!(receive_all(&mut listener), b"");
 }
 
-#[test]
-fn a_unix_transport_reports_what_its_peer_has_not_read() {
-    let (stream, mut peer) = UnixStream::pair().unwrap();
-    let mut transport = UnixTransport { stream };
-    assert_eq!(transport.unread().unwrap(), Some(0));
-    let data = b"an attachment";
-    transport.write_all(data, None).unwrap();
-    // The kernel charges the socket for the write's buffer, more than its bytes, until the
-    // peer read it whole: a read of a prefix leaves the charge as it was.
-    let queued = transport.unread().unwrap().unwrap();
-    assert!(queued >= data.len(), "{queued}");
-    let mut received = [0; 6];
-    peer.read_exact(&mut received).unwrap();
-    assert_eq!(transport.unread().unwrap(), Some(queued));
-    let mut rest = vec![0; data.len() - received.len()];
-    peer.read_exact(&mut rest).unwrap();
-    assert_eq!(transport.unread().unwrap(), Some(0));
+/// Returns the permission bits of the mode of the file at `path`, not following a link.
+fn permission_bits(path: &std::path::Path) -> u32 {
+    fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
+}
 
-    // Writes of a byte each queue a buffer each, which the kernel charges the same for, and
-    // which the peer's read of any prefix frees.
-    let charges = data
-        .chunks(1)
-        .map(|byte| {
-            transport.write_all(byte, None).unwrap();
-            transport.unread().unwrap().unwrap()
-        })
-        .collect::<Vec<_>>();
-    let step = charges[0];
-    assert!(step > 0, "{charges:?}");
-    assert!(
-        charges
-            .iter()
-            .enumerate()
-            .all(|(index, charge)| *charge == (index + 1) * step),
-        "{charges:?}"
-    );
-    peer.read_exact(&mut received[..1]).unwrap();
-    let queued = charges[charges.len() - 1];
-    assert_eq!(transport.unread().unwrap(), Some(queued - step));
-    let mut rest = vec![0; data.len() - 1];
-    peer.read_exact(&mut rest).unwrap();
-    assert_eq!(transport.unread().unwrap(), Some(0));
+#[cfg(feature = "cli")]
+#[test]
+fn a_fifo_in_place_of_a_private_file_is_left_as_it_is_without_waiting_for_a_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("lock");
+    nix::unistd::mkfifo(&path, Mode::S_IRUSR).unwrap();
+    // An open of the FIFO for reading would wait for a writer, which never comes.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let fifo = path.clone();
+    let mode = Mode::S_IRUSR | Mode::S_IWUSR;
+    thread::spawn(move || sender.send(restore_private_file_mode(&fifo, mode)));
+    receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the FIFO was opened for reading")
+        .unwrap();
+    assert_eq!(permission_bits(&path), 0o400);
+}
+
+#[test]
+fn a_store_directory_gets_mode_700_even_where_the_umask_withholds_reading_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store");
+    // A umask that clears the owner's permission to read what it creates, in a thread of the
+    // test's own, whose umask no other thread shares.
+    let problem = thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                nix::sched::unshare(nix::sched::CloneFlags::CLONE_FS).unwrap();
+                nix::sys::stat::umask(Mode::from_bits_truncate(0o477));
+                create_store_dir(&path)
+            })
+            .join()
+            .unwrap()
+    });
+    let mode = permission_bits(&path);
+    // Lets the temporary directory go, even if the umask's mode stayed.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(problem.unwrap(), None);
+    assert_eq!(mode, 0o700);
 }

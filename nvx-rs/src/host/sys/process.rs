@@ -1,6 +1,5 @@
 //! Process descriptors, and the hook that detaches a spawned process from its caller.
 
-use std::fs::File;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
@@ -25,23 +24,6 @@ use super::Errno;
 /// the descriptors that a detached spawn marks close-on-exec are the ones above it.
 pub(crate) const LAST_STANDARD_STREAM: RawFd = libc::STDERR_FILENO;
 
-/// Moves `file` to a descriptor above [`LAST_STANDARD_STREAM`], under which a spawn can pass it to
-/// its process, if it is not there already: as when the caller had closed a standard stream, whose
-/// descriptor an open then took.
-///
-/// The new descriptor is a close-on-exec copy of the old one, which is then closed. It shares the
-/// file's open file description, and with it the file's offset and `flock` locks.
-pub(crate) fn move_above_standard_streams(file: &mut File) -> io::Result<()> {
-    if file.as_raw_fd() > LAST_STANDARD_STREAM {
-        return Ok(());
-    }
-    let copy = fcntl(&*file, FcntlArg::F_DUPFD_CLOEXEC(LAST_STANDARD_STREAM + 1))?;
-    // SAFETY: fcntl returned a fresh descriptor, which nothing else owns. Replacing the file
-    // closes the old descriptor.
-    *file = File::from(unsafe { OwnedFd::from_raw_fd(copy) });
-    Ok(())
-}
-
 /// A pidfd: an owned descriptor that refers to one process. Signals sent through it reach that
 /// process or fail, even once another process reuses its ID.
 pub(crate) struct PidFd(OwnedFd);
@@ -64,6 +46,11 @@ impl PidFd {
         let descriptor = Errno::result(unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) })?;
         // SAFETY: the kernel returned a fresh descriptor that nothing else owns.
         Ok(Self(unsafe { OwnedFd::from_raw_fd(descriptor as RawFd) }))
+    }
+
+    /// Returns an independently owned, close-on-exec copy of this pidfd.
+    pub(crate) fn try_clone_handle(&self) -> io::Result<OwnedFd> {
+        self.0.try_clone()
     }
 
     /// Waits up to `timeout` for the process to exit, and returns whether it has.
@@ -97,17 +84,42 @@ impl PidFd {
     ///
     /// Fails with `ESRCH` if the process has exited.
     pub(crate) fn kill(&self) -> io::Result<()> {
+        self.send_signal(Signal::SIGKILL as libc::c_int)?;
+        Ok(())
+    }
+
+    /// Returns whether the process still holds its ID: it runs, or it has exited and has not
+    /// been reaped, as signal 0 shows without signaling it. No other process can take the ID
+    /// before the process is reaped.
+    pub(crate) fn holds_its_id(&self) -> io::Result<bool> {
+        match self.send_signal(0) {
+            // Another user's process refuses the signal, but it holds its ID.
+            Ok(()) | Err(Errno::EPERM) => Ok(true),
+            Err(Errno::ESRCH) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Sends `signal` to the process, or with 0, only checks that it could.
+    fn send_signal(&self, signal: libc::c_int) -> Result<(), Errno> {
         // SAFETY: the descriptor is a valid pidfd, and a null siginfo with no flags is allowed.
         Errno::result(unsafe {
             libc::syscall(
                 libc::SYS_pidfd_send_signal,
                 self.0.as_raw_fd(),
-                Signal::SIGKILL as libc::c_int,
+                signal,
                 ptr::null::<libc::siginfo_t>(),
                 0,
             )
-        })?;
-        Ok(())
+        })
+        .map(drop)
+    }
+}
+
+impl From<OwnedFd> for PidFd {
+    /// Takes `descriptor`, which must be a pidfd, such as `SO_PEERPIDFD` returns.
+    fn from(descriptor: OwnedFd) -> Self {
+        Self(descriptor)
     }
 }
 

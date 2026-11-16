@@ -135,7 +135,7 @@ fn shares(count: usize) -> Vec<String> {
 fn sandbox_refusals() -> Vec<Refusal> {
     let network_outside =
         &["network policy options are only valid for sandbox run or provision"][..];
-    let exec_options = &["managed execution options", "sandbox exec"][..];
+    let exec_options = &["managed execution options", "sandbox run or exec"][..];
     vec![
         refusal(
             "dry run outside run",
@@ -158,19 +158,19 @@ fn sandbox_refusals() -> Vec<Refusal> {
         )
         .with_file("env.json", ENVIRONMENT),
         refusal(
-            "cwd outside exec",
+            "cwd outside run or exec",
             "unsupported",
-            ["sandbox", "run", "--cwd", "/"],
+            ["sandbox", "deprovision", "--cwd", "/"],
             exec_options,
         ),
         refusal(
-            "environment outside exec",
+            "environment outside run or exec",
             "unsupported",
             ["sandbox", "start", "--environment", "A=1"],
             exec_options,
         ),
         refusal(
-            "environment file outside exec",
+            "environment file outside run or exec",
             "unsupported",
             [
                 "sandbox",
@@ -182,10 +182,23 @@ fn sandbox_refusals() -> Vec<Refusal> {
         )
         .with_file("env.json", ENVIRONMENT),
         refusal(
-            "inherited environment outside exec",
+            "inherited environment outside run or exec",
             "unsupported",
             ["sandbox", "stop", "--inherit-default-environment"],
             exec_options,
+        ),
+        // A run checks the execution of its workload, as exec does, before it launches anything.
+        refusal(
+            "relative working directory of run",
+            "unsupported",
+            sandbox_run(&["--cwd", "tmp"]),
+            &["working directory", "absolute"],
+        ),
+        refusal(
+            "environment entry without name of run",
+            "unsupported",
+            sandbox_run(&["--environment", "=x"]),
+            &["KEY=VALUE"],
         ),
         refusal(
             "environment file too large",
@@ -559,10 +572,12 @@ fn sandbox_refusals() -> Vec<Refusal> {
             sandbox_run(&["--hostname", "bad host"]),
             &["hostname", "RFC 1123"],
         ),
+        // A provision checks the arguments, though a run executes them over NVXC, where they may
+        // hold whitespace.
         refusal(
             "argument with space",
             "unsupported",
-            sandbox_run(&["--arg", "a b"]),
+            provision("{root/state}", &["--arg", "a b"]),
             &["arguments", "whitespace"],
         ),
         refusal(
@@ -729,6 +744,7 @@ fn sandbox_refusals() -> Vec<Refusal> {
 fn run_refusals() -> Vec<Refusal> {
     let targets = "with several shares, or a shared file";
     let budget = &["--mount", "--cmdline", "1024"][..];
+    let overflow = crate::openvmm::two_share_command_line_room() + 1;
     let two_shares = |cmdline: &str| {
         run_dry(&[
             "--mount",
@@ -740,7 +756,7 @@ fn run_refusals() -> Vec<Refusal> {
         ])
     };
     let mut many = vec!["run".to_owned()];
-    many.extend(shares(20));
+    many.extend(shares(42));
     many.push("--dry-run".to_owned());
     vec![
         refusal(
@@ -759,57 +775,51 @@ fn run_refusals() -> Vec<Refusal> {
         refusal(
             "run: net of a restore",
             "unsupported",
-            run_dry(&[
+            [
+                "run",
                 "--restore-snapshot",
-                "{root/snapshot}",
+                "base",
+                "--store-dir",
+                "{root/store}",
                 "--net",
                 "10.0.0.2/24",
                 "--network-profile",
                 "portable",
-            ]),
-            &["--net", "restore", "network addressing"],
+            ],
+            &["--net is not accepted for restore"],
         ),
         refusal(
             "run: net without profile of a restore",
             "unsupported",
-            run_dry(&[
+            [
+                "run",
                 "--restore-snapshot",
-                "{root/snapshot}",
+                "base",
+                "--store-dir",
+                "{root/store}",
                 "--net",
                 "10.0.0.2/24",
-            ]),
-            &["--net", "restore", "network addressing"],
+            ],
+            &["--net is not accepted for restore"],
+        ),
+        // A cold boot takes none of the options of a restore.
+        refusal(
+            "run: store without snapshot",
+            "unsupported",
+            run_dry(&["--store-dir", "{root/store}"]),
+            &["--store-dir requires --restore-snapshot"],
         ),
         refusal(
-            "run: ready path without snapshot",
+            "run: restore inputs without snapshot",
             "unsupported",
-            run_dry(&["--restore-ready-path", "{root/ready.sock}"]),
-            &["--restore-ready-path requires --restore-snapshot"],
-        ),
-        // A cold boot installs the policy of its options anyway.
-        refusal(
-            "run: network policy replacement without snapshot",
-            "unsupported",
-            run_dry(&[
-                "--restore-network-policy",
-                "--net",
-                "10.0.0.2/24",
-                "--network-profile",
-                "portable",
-            ]),
-            &["--restore-network-policy requires --restore-snapshot"],
+            run_dry(&["--layer", LAYER, "--upper", "ram"]),
+            &["--layer requires --restore-snapshot"],
         ),
         refusal(
-            "run: restore processors without snapshot",
+            "run: state directory without snapshot",
             "unsupported",
-            run_dry(&["--restore-processors", "1"]),
-            &["--restore-processors requires --restore-snapshot"],
-        ),
-        refusal(
-            "run: restore memory without snapshot",
-            "unsupported",
-            run_dry(&["--restore-memory-mib", "1024"]),
-            &["--restore-memory-mib requires --restore-snapshot"],
+            run_dry(&["--state-dir", "{root/state}"]),
+            &["--state-dir requires --restore-snapshot"],
         ),
         refusal(
             "run: memory capacity of a restore",
@@ -820,7 +830,7 @@ fn run_refusals() -> Vec<Refusal> {
                 "--memory-capacity-mib",
                 "1024",
             ]),
-            &["--memory-capacity-mib", "fresh boot"],
+            &["--memory-capacity-mib is not accepted for restore"],
         ),
         refusal(
             "run: Ubuntu guest of a restore",
@@ -853,58 +863,176 @@ fn run_refusals() -> Vec<Refusal> {
             &["--memory-capacity-mib", "--memory-mib"],
         )
         .with_file("build/initramfs-ubuntu.cpio.gz", INITRAMFS),
+        // A restore names a snapshot of a store, and no longer a raw OpenVMM snapshot, which it
+        // refuses before it reads anything.
         refusal(
-            "run: restore processors above processors",
+            "run: raw snapshot without a store",
             "unsupported",
-            run_dry(&[
-                "--processors",
-                "2",
-                "--restore-snapshot",
-                "{root/snapshot}",
-                "--restore-processors",
-                "4",
-            ]),
-            &["--restore-processors", "--processors"],
-        ),
-        // A restore reads its snapshot's manifest, dry or not, to attach the boot console that
-        // the snapshot had, and refuses one that it cannot read, which OpenVMM could not restore.
-        refusal(
-            "run: restore of a missing snapshot",
-            "not-found",
-            run_dry(&["--restore-snapshot", "{root/missing}"]),
-            &["cannot read the snapshot manifest {root/missing/manifest.bin}: "],
-        ),
-        refusal(
-            "run: restore of a missing snapshot without a dry run",
-            "not-found",
-            ["run", "--restore-snapshot", "{root/missing}"],
-            &["cannot read the snapshot manifest {root/missing/manifest.bin}: "],
-        ),
-        refusal(
-            "run: restore of a snapshot without a manifest",
-            "not-found",
-            run_dry(&["--restore-snapshot", "{root/snapshot}"]),
-            &["cannot read the snapshot manifest {root/snapshot/manifest.bin}: "],
-        )
-        .with_file("snapshot/state.bin", Content::Text("state\n")),
-        refusal(
-            "run: restore of a malformed manifest",
-            "io",
-            run_dry(&["--restore-snapshot", "{root/snapshot}"]),
-            &["the snapshot manifest {root/snapshot/manifest.bin} is malformed: it is truncated"],
+            ["run", "--restore-snapshot", "{root/snapshot}"],
+            &[
+                "--restore-snapshot requires --store-dir",
+                "no longer a raw OpenVMM snapshot",
+            ],
         )
         .with_file("snapshot/manifest.bin", Content::Bytes(&[1 << 3])),
         refusal(
-            "run: restore of a manifest of another format",
-            "format-unsupported",
-            run_dry(&["--restore-snapshot", "{root/snapshot}"]),
-            &[
-                "the snapshot manifest {root/snapshot/manifest.bin} has format version 3, which \
-                 this build does not read; capture the snapshot again with the OpenVMM of this \
-                 build",
+            "run: raw snapshot in place of a name",
+            "unsupported",
+            [
+                "run",
+                "--restore-snapshot",
+                "{root/snapshot}",
+                "--store-dir",
+                "{root}",
             ],
+            &["is not a snapshot name", "no longer a raw OpenVMM snapshot"],
         )
-        .with_file("snapshot/manifest.bin", Content::Bytes(&[1 << 3, 3])),
+        .with_file("snapshot/manifest.bin", Content::Bytes(&[1 << 3])),
+        refusal(
+            "run: restore from a missing store",
+            "not-found",
+            [
+                "run",
+                "--restore-snapshot",
+                "base",
+                "--store-dir",
+                "{root/missing}",
+                "--state-dir",
+                "{root/state}",
+            ],
+            &["{root/missing}"],
+        ),
+        // The restore's sandbox needs a directory that the run creates, outside the store, and
+        // removes once it ends.
+        refusal(
+            "run: restore without a state directory",
+            "unsupported",
+            [
+                "run",
+                "--restore-snapshot",
+                "base",
+                "--store-dir",
+                "{root/store}",
+            ],
+            &["--restore-snapshot requires --state-dir"],
+        ),
+        // An empty path names the working directory, which the run would provision and remove.
+        refusal(
+            "run: restore into an empty state directory path",
+            "unsupported",
+            [
+                "run",
+                "--restore-snapshot",
+                "base",
+                "--store-dir",
+                "{root/store}",
+                "--state-dir=",
+            ],
+            &["--restore-snapshot requires --state-dir"],
+        ),
+        refusal(
+            "run: restore into an existing state directory",
+            "unsupported",
+            [
+                "run",
+                "--restore-snapshot",
+                "base",
+                "--store-dir",
+                "{root/store}",
+                "--state-dir",
+                "{root}",
+            ],
+            &["--state-dir {root} exists"],
+        ),
+        refusal(
+            "run: restore into the store",
+            "unsupported",
+            [
+                "run",
+                "--restore-snapshot",
+                "base",
+                "--store-dir",
+                "{root/store}",
+                "--state-dir",
+                "{root/store/run}",
+            ],
+            &["state directory must be outside the snapshot store"],
+        ),
+        // The restore's workload is an exec request, which the run checks as `snapshot restore`
+        // does, before it opens the store or provisions anything.
+        refusal(
+            "run: restore of a relative entrypoint",
+            "unsupported",
+            [
+                "run",
+                "--restore-snapshot",
+                "base",
+                "--store-dir",
+                "{root/missing}",
+                "--state-dir",
+                "{root/state}",
+                "--entrypoint",
+                "echo",
+            ],
+            &["managed exec entrypoint must be absolute"],
+        ),
+        // The snapshot and the restore's own sandbox fix what a cold boot sets, and a restore
+        // provisions a sandbox, which no dry run shows.
+        refusal(
+            "run: dry run of a restore",
+            "unsupported",
+            [
+                "run",
+                "--restore-snapshot",
+                "base",
+                "--store-dir",
+                "{root/store}",
+                "--dry-run",
+            ],
+            &["--dry-run is not accepted for restore"],
+        ),
+        refusal(
+            "run: share of a restore",
+            "unsupported",
+            [
+                "run",
+                "--restore-snapshot",
+                "base",
+                "--store-dir",
+                "{root/store}",
+                "--mount",
+                "/data,{root/share}",
+            ],
+            &["--mount is not accepted for restore"],
+        ),
+        refusal(
+            "run: command line of a restore",
+            "unsupported",
+            [
+                "run",
+                "--restore-snapshot",
+                "base",
+                "--store-dir",
+                "{root/store}",
+                "--cmdline",
+                "quiet",
+            ],
+            &["--cmdline is not accepted for restore"],
+        ),
+        refusal(
+            "run: processors of a restore",
+            "unsupported",
+            [
+                "run",
+                "--processors",
+                "2",
+                "--restore-snapshot",
+                "base",
+                "--store-dir",
+                "{root/store}",
+            ],
+            &["--processors is not accepted for restore"],
+        ),
         refusal(
             "run: policy file with allow rules",
             "unsupported",
@@ -1230,13 +1358,12 @@ fn run_refusals() -> Vec<Refusal> {
             ]),
             &["--mount target", "\"/voil\u{e0}\"", targets],
         ),
-        // The target of one directory share reaches the kernel command line in OpenVMM's
-        // virtfs_dir= token.
+        // A single directory is now checked for the same planned nvx_share= row as an aggregate.
         refusal(
             "run: quoted target of one share",
             "unsupported",
             run_dry(&["--mount", "/a\"b,{root/share}"]),
-            &["--mount target", "\"/a\\\"b\"", "one kernel token"],
+            &["--mount target", "\"/a\\\"b\"", "quotes"],
         ),
         refusal(
             "run: target with a dot component",
@@ -1331,14 +1458,27 @@ fn run_refusals() -> Vec<Refusal> {
         refusal(
             "run: budget exceeded by a byte",
             "unsupported",
-            two_shares(&"x".repeat(842)),
+            two_shares(&"x".repeat(overflow)),
             budget,
         ),
         // The budget is of bytes: each of these characters takes two.
         refusal(
             "run: budget in UTF-8 bytes",
             "unsupported",
-            two_shares(&"\u{e9}".repeat(421)),
+            two_shares(&("\u{e9}".repeat(overflow / 2) + &"x".repeat(overflow % 2))),
+            budget,
+        ),
+        // A single directory also has a planned boot bind now; keep the former unbounded
+        // positive case as a checked refusal rather than dropping its input.
+        refusal(
+            "run: long command line of one directory share",
+            "unsupported",
+            run_dry(&[
+                "--mount",
+                "/data,{root/share}",
+                "--cmdline",
+                &"x".repeat(1100),
+            ]),
             budget,
         ),
         refusal(
@@ -1352,7 +1492,7 @@ fn run_refusals() -> Vec<Refusal> {
             "run: caller owner on Windows",
             "unsupported",
             run_dry(&["--mount", "/data,{root/share}", "--mount-owner", "caller"]),
-            &["--mount-owner caller", "Linux"],
+            &["caller owner", "Linux"],
         )
         .on(Hosts::Windows),
         refusal(

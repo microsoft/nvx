@@ -78,6 +78,32 @@ fn run_downloads_the_release_of_a_checkout_without_artifacts() {
 }
 
 #[test]
+fn run_downloads_before_checking_mount_sources_that_installation_can_create() {
+    for source in ["build", "build/vmlinux"] {
+        let root = checkout(&INSTALLED);
+        fs::remove_dir(root.below("build")).unwrap();
+        let mount = format!("/workspace,{},ro", root.below(source).display());
+        let outcome = root.nvx_rs(&["run", "--dry-run", "--mount", &mount]);
+        assert_eq!(outcome.status, Some(1), "{}", outcome.describe());
+        assert!(outcome.stdout.is_empty(), "{}", outcome.describe());
+        let stderr = outcome.stderr();
+        assert!(
+            stderr.lines().last().unwrap().starts_with(
+                "error[unavailable]: download needs a Git checkout to find its release: "
+            ),
+            "{}",
+            outcome.describe()
+        );
+        assert!(
+            outcome.stderr().contains("holds no NVX artifacts"),
+            "{}",
+            outcome.describe()
+        );
+        assert_no_staging(&root);
+    }
+}
+
+#[test]
 fn run_downloads_nothing_over_some_artifacts() {
     let root = checkout(&["build/vmlinux"]);
     let before = root.snapshot();
@@ -120,6 +146,18 @@ fn commands_download_nothing_for_options_that_they_refuse() {
     // root, without the download that would provide it, and leaves the checkout as it is.
     for arguments in [
         vec!["run", "--dry-run", "--mount-owner", "vmm"],
+        vec!["run", "--dry-run", "--cmdline", "nvx_mode=invalid"],
+        vec!["run", "--dry-run", "--mount", "/etc,{root/build},ro"],
+        vec![
+            "run",
+            "--dry-run",
+            "--mount",
+            "/a,{root/build},ro",
+            "--mount",
+            "/b,{root/build},ro",
+            "--mount-deny",
+            "relative",
+        ],
         vec![
             "sandbox",
             "run",
@@ -129,6 +167,17 @@ fn commands_download_nothing_for_options_that_they_refuse() {
             SCRATCH,
             "--cmdline",
             "nvx_sandbox=0",
+        ],
+        // A balanced quote passes the plan, but not the managed command line of the launch.
+        vec![
+            "sandbox",
+            "run",
+            "--layer",
+            LAYER,
+            "--scratch",
+            SCRATCH,
+            "--cmdline",
+            "a=\"b c\"",
         ],
     ] {
         let root = checkout(&INSTALLED);
@@ -143,34 +192,60 @@ fn commands_download_nothing_for_options_that_they_refuse() {
 }
 
 #[test]
-fn restores_download_nothing_for_snapshots_that_they_cannot_read() {
-    // A restore reads its snapshot's manifest first, and one that it cannot read fails it as
-    // options that it refuses do: after the missing artifact, without the download that would
-    // provide it, and with the checkout as it was.
-    for arguments in [
-        vec!["run", "--restore-snapshot", "missing", "--dry-run"],
-        vec!["run", "--restore-snapshot", "missing"],
+fn restores_download_nothing_for_snapshots_that_they_cannot_open() {
+    // A restore refuses a raw OpenVMM snapshot, and opens its snapshot's store, before it reads
+    // anything else: one that it cannot open fails it before the download that a provision of
+    // its sandbox would make, and leaves the checkout as it was.
+    for (arguments, code) in [
+        (vec!["run", "--restore-snapshot", "missing"], "unsupported"),
+        (
+            vec![
+                "run",
+                "--restore-snapshot",
+                "base",
+                "--store-dir",
+                "store",
+                "--state-dir",
+                "state",
+            ],
+            "not-found",
+        ),
     ] {
         let root = checkout(&INSTALLED);
         let before = root.snapshot();
         let outcome = root.nvx_rs(&arguments);
-        outcome.assert_error("artifact-missing", &["OpenVMM"]);
-        let mut after = root.snapshot();
-        after.remove("build/.nvx-download.lock");
-        assert_eq!(after, before, "{arguments:?}");
+        outcome.assert_error(code, &[]);
+        assert_eq!(root.snapshot(), before, "{arguments:?}");
     }
 }
 
 #[test]
 fn provision_and_deprovision_need_no_artifact_root() {
-    // A provision runs no artifact, and a deprovision of a sandbox that records no launch reads
-    // none, so both succeed where nvx-rs finds no artifact root: from an executable outside any
-    // release or checkout, without --root.
+    // A provision runs no artifact, and checks its shares against the artifacts only where it
+    // finds them, and a deprovision of a sandbox that records no launch reads none, so both
+    // succeed where nvx-rs finds no artifact root: from an executable outside any release or
+    // checkout, without --root.
     let root = Root::new();
     let elsewhere = tempfile::tempdir().unwrap();
     let executable = elsewhere
         .path()
         .join(Path::new(NVX_RS).file_name().unwrap());
+    #[cfg(unix)]
+    {
+        // Concurrent forks of this test process must inherit no writable executable.
+        let copied = Command::new("cp")
+            .arg("-p")
+            .arg(NVX_RS)
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(
+            copied.status.success(),
+            "cannot copy the executable: {}",
+            String::from_utf8_lossy(&copied.stderr)
+        );
+    }
+    #[cfg(windows)]
     fs::copy(NVX_RS, &executable).unwrap();
     let nvx_rs = |arguments: &[String]| {
         let output = Command::new(&executable)
@@ -185,10 +260,11 @@ fn provision_and_deprovision_need_no_artifact_root() {
             String::from_utf8_lossy(&output.stderr)
         );
     };
-    let provision: Vec<String> = crate::provision(&root, "state", "")
+    let mut provision: Vec<String> = crate::provision(&root, "state", "")
         .iter()
         .map(|argument| root.expand(argument))
         .collect();
+    provision.extend(["--mount".to_owned(), root.expand("/data,{root/share}")]);
     nvx_rs(&provision);
     nvx_rs(&crate::lifecycle("deprovision", &root, "state"));
     assert!(!root.below("state").exists());
@@ -245,8 +321,11 @@ fn sandbox_run_reads_a_packaged_layer_once_no_download_replaces_it() {
         spec.as_str(),
         "--scratch",
         SCRATCH,
-        "--cmdline",
-        "fake_exit_status=7",
+        "--entrypoint",
+        "/bin/sh",
+        "--arg=-c",
+        "--arg",
+        "exit 7",
     ];
     std::thread::scope(|scope| {
         let run = scope.spawn(|| root.nvx_rs(&arguments));

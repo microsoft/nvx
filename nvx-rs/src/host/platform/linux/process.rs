@@ -18,7 +18,7 @@ use crate::host::sys::{self, Errno, PidFd};
 /// exits, as on Windows: a zombie whose main thread exited first still runs while its other threads
 /// exit, and they keep the process's descriptors, such as an inherited log and its lock, open.
 /// Zombies without other threads count as exited.
-pub fn process_start_time(pid: u32) -> io::Result<Option<u64>> {
+pub(crate) fn process_start_time(pid: u32) -> io::Result<Option<u64>> {
     let Some(stat) = read_stat(pid)? else {
         return Ok(None);
     };
@@ -113,6 +113,11 @@ impl ProcessHandle {
     /// Whether the process's exit wakes its waiters: it does through a pidfd.
     pub(crate) fn has_exit_event(&self) -> bool {
         self.0.is_some()
+    }
+
+    /// Duplicates the pidfd, or reports a polling-only host without attempting a duplicate.
+    pub(crate) fn exit_handle(&self) -> io::Result<Option<std::os::fd::OwnedFd>> {
+        self.0.as_ref().map(PidFd::try_clone_handle).transpose()
     }
 
     /// Waits until the process exits or `deadline` passes, and returns whether it exited, or

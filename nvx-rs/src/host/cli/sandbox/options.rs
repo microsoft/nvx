@@ -7,17 +7,20 @@ use crate::ErrorCode;
 use crate::host::cli::args::{Parser, Receiver, Spec, Syntax, choice, integer};
 use crate::host::cli::network::{NativeRules, NetworkOptions};
 use crate::host::cli::{Exit, Result};
+use crate::host::config::NetworkConfig;
 use crate::host::network::{
     Access, EgressRule, EgressRules, HostLoopback, LoopbackForward, NetworkPolicy, NetworkProxy,
+    openvmm_arguments,
 };
 use crate::host::paths;
+use crate::host::sandbox::distro::DistroFormat;
+use crate::host::sandbox::layer::SandboxLayer;
 use crate::host::sandbox::mount::{MountOwner, PolicyKind};
 use crate::host::sandbox::options::{PolicyPathOption, SandboxOperation};
-use crate::host::sandbox::plan::guest_gateway;
 use crate::host::sandbox::{
-    DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, SandboxLayer, SandboxNetwork,
-    parse_workload_identity,
+    DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, parse_workload_identity,
 };
+use crate::net::{Ipv4Cidr, guest_gateway};
 use crate::protocol::root::RootUpper;
 
 /// The usage and help of the parser.
@@ -30,12 +33,20 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
-  --layer ROLE,PATH,EROFS_UUID
+  --layer ROLE,PATH,IMAGE_UUID
+  --layer-format {erofs,gpt}
+                        the image format of run and provision (default:
+                        erofs); IMAGE_UUID is the filesystem UUID or GPT disk
+                        GUID
   --scratch SCRATCH
   --upper {scratch,ram}
                         where the overlay keeps the sandbox's writes: scratch
                         (default), on the ext4 image of --scratch, or ram, on
                         a tmpfs in guest memory, without a scratch image
+  --ram-upper-percent PERCENT
+                        the RAM upper's cap of run and provision, from 1 to 90
+                        percent of guest memory (default: 50); requires
+                        --upper ram
   --state-dir STATE_DIR
   --entrypoint ENTRYPOINT
   --arg SANDBOX_ARG
@@ -47,20 +58,23 @@ options:
   --timeout TIMEOUT     control operation timeout, and the longest wait for
                         another lifecycle transition of the sandbox, in
                         seconds (default: 60)
+  --wait WAIT           the longest wait for another exec of the sandbox, in
+                        seconds (default: 60)
   --exec-timeout-ms EXEC_TIMEOUT_MS
                         guest workload timeout in milliseconds; zero disables
                         it
-  --cwd CWD             absolute guest working directory for managed exec
-                        (default: /)
+  --cwd CWD             absolute guest working directory of the workload of run
+                        or exec (default: /)
   --environment KEY=VALUE
-                        set the exact managed exec environment; repeat for
-                        multiple entries
+                        set the exact environment of the workload of run or
+                        exec; repeat for multiple entries
   --environment-file PATH
-                        read the exact managed exec environment from a JSON
-                        string array
+                        read the exact environment of the workload of run or
+                        exec from a JSON string array
   --inherit-default-environment
-                        layer the managed exec environment over the guest
-                        default environment instead of replacing it
+                        layer the environment of the workload of run or exec
+                        over the guest default environment instead of
+                        replacing it
   --hypervisor {auto,whp,kvm,mshv}
   --mount GUEST_TARGET,HOST_PATH[,ro|rw]
                         live-share a host directory, or a single regular host
@@ -110,13 +124,15 @@ options:
                         write a bounded local JSON outcome report for run or
                         exec
   --cmdline CMDLINE
-  --dry-run             print the one-shot run command without launching it",
+  --dry-run             print the OpenVMM command of run without launching it",
 };
 
 /// The operations, in the order in which usage messages list them.
 const OPERATIONS: [&str; 6] = ["run", "provision", "start", "exec", "stop", "deprovision"];
 /// The choices of `--upper`, the names of the uppers.
 const UPPERS: [&str; 2] = [RootUpper::Scratch.as_str(), RootUpper::Ram.as_str()];
+/// The image formats that run and provision accept.
+const LAYER_FORMATS: [&str; 2] = ["erofs", "gpt"];
 /// The choices of `--hypervisor`.
 pub(in crate::host::cli) const HYPERVISORS: [&str; 4] = ["auto", "whp", "kvm", "mshv"];
 /// The choices of `--mount-owner`.
@@ -137,10 +153,12 @@ fn seconds(value: &str) -> std::result::Result<f64, String> {
 
 /// The options of `nvx-rs sandbox`, which parse with the defaults of the former
 /// `nvx.py sandbox`.
-pub(in crate::host::cli) const OPTIONS: [Spec; 34] = [
+pub(in crate::host::cli) const OPTIONS: [Spec; 37] = [
     Spec::one("--layer"),
+    Spec::one("--layer-format"),
     Spec::one("--scratch"),
     Spec::one("--upper"),
+    Spec::one("--ram-upper-percent"),
     Spec::one("--state-dir"),
     Spec::one("--entrypoint"),
     Spec::one("--arg"),
@@ -148,6 +166,7 @@ pub(in crate::host::cli) const OPTIONS: [Spec; 34] = [
     Spec::one("--workload-user"),
     Spec::one("--memory-mib"),
     Spec::one("--timeout"),
+    Spec::one("--wait"),
     Spec::one("--exec-timeout-ms"),
     Spec::one("--cwd"),
     Spec::one("--environment"),
@@ -181,10 +200,14 @@ pub(crate) struct Options {
     pub(crate) operation: SandboxOperation,
     /// `--layer`, parsed as `SandboxLayer.parse` parses it.
     pub(crate) layers: Vec<SandboxLayer>,
+    /// `--layer-format`, if given; run and provision default to EROFS.
+    pub(crate) layer_format: Option<DistroFormat>,
     /// `--scratch`, as given.
     pub(crate) scratch: Option<String>,
     /// `--upper`, if given; a launch keeps its upper on scratch without it.
     pub(crate) upper: Option<RootUpper>,
+    /// `--ram-upper-percent`, if given; a RAM upper defaults to 50.
+    pub(crate) ram_upper_percent: Option<u8>,
     /// `--state-dir`, as given.
     pub(crate) state_dir: Option<String>,
     /// `--entrypoint`.
@@ -199,6 +222,8 @@ pub(crate) struct Options {
     pub(crate) memory_mib: u64,
     /// `--timeout` in seconds, 60 by default.
     pub(crate) timeout: f64,
+    /// `--wait` in seconds, 60 by default.
+    pub(crate) wait: f64,
     /// `--exec-timeout-ms`, 0 by default.
     pub(crate) exec_timeout_ms: u32,
     /// `--cwd`.
@@ -233,8 +258,10 @@ impl Default for Options {
         Self {
             operation: SandboxOperation::Run,
             layers: Vec::new(),
+            layer_format: None,
             scratch: None,
             upper: None,
+            ram_upper_percent: None,
             state_dir: None,
             entrypoint: DEFAULT_ENTRYPOINT.to_owned(),
             args: Vec::new(),
@@ -242,6 +269,7 @@ impl Default for Options {
             workload_user: DEFAULT_WORKLOAD_IDENTITY,
             memory_mib: 256,
             timeout: 60.0,
+            wait: 60.0,
             exec_timeout_ms: 0,
             cwd: None,
             environment: Vec::new(),
@@ -277,12 +305,22 @@ impl Receiver for Options {
             "--layer" => self
                 .layers
                 .push(SandboxLayer::parse(&text()).map_err(|error| error.message().to_owned())?),
+            "--layer-format" => {
+                self.layer_format = Some(match choice(&text(), &LAYER_FORMATS)? {
+                    "gpt" => DistroFormat::Gpt,
+                    _ => DistroFormat::Erofs,
+                });
+            }
             "--scratch" => self.scratch = Some(text()),
             "--upper" => {
                 self.upper = Some(match choice(&text(), &UPPERS)? {
                     "ram" => RootUpper::Ram,
                     _ => RootUpper::Scratch,
                 });
+            }
+            "--ram-upper-percent" => {
+                self.ram_upper_percent =
+                    Some(integer(&text(), crate::protocol::root::RAM_UPPER_CAPS)?);
             }
             "--state-dir" => self.state_dir = Some(text()),
             "--entrypoint" => self.entrypoint = text(),
@@ -294,6 +332,7 @@ impl Receiver for Options {
             }
             "--memory-mib" => self.memory_mib = integer(&text(), 1..=MAX_MEMORY_MIB)?,
             "--timeout" => self.timeout = seconds(&text())?,
+            "--wait" => self.wait = seconds(&text())?,
             "--exec-timeout-ms" => self.exec_timeout_ms = integer(&text(), 0..=u32::MAX)?,
             "--cwd" => self.cwd = Some(text()),
             "--environment" => self.environment.push(text()),
@@ -363,21 +402,20 @@ pub(crate) fn path_string(path: &Path) -> Result<String> {
     })
 }
 
-/// Returns the network that the network options of `options` describe, with `rules`, the egress
+/// Returns the network that `network` describes, with `rules`, the egress
 /// rules that [`NetworkOptions::egress_rules`] resolved: the typed policy at the guest network of
-/// `--net`, which [`SandboxNetwork::new`] checks before any launch, or `None` without `--net`, which
-/// no other network option may then accompany.
+/// `--net`, which it checks before any launch, as OpenVMM lowers it, or `None` without `--net`,
+/// which no other network option may then accompany.
 ///
 /// Omitted options take OpenVMM's defaults: egress allowed, ingress denied, and host-loopback
 /// access from the guest alone, [`HostLoopback::Outbound`]. As OpenVMM does, the policy takes
 /// egress rules only with an explicit `--network-egress`, and reads `--network-egress-allow`,
 /// `--network-egress-deny`, and `--host-loopback-forward` in OpenVMM's form. `--network-proxy` must
 /// name the guest's gateway, and makes the policy proxy-only, with no scheme in its URL.
-pub(super) fn sandbox_network(
-    options: &Options,
+pub(in crate::host::cli) fn sandbox_network(
+    network: &NetworkOptions,
     rules: &NativeRules,
-) -> Result<Option<SandboxNetwork>> {
-    let network = &options.network;
+) -> Result<Option<NetworkConfig>> {
     let Some(net) = &network.net else {
         let network_options = network.network_egress.is_some()
             || network.network_ingress.is_some()
@@ -395,7 +433,11 @@ pub(super) fn sandbox_network(
         }
         return Ok(None);
     };
-    let gateway = guest_gateway(net)?;
+    // `Ipv4Cidr` gives a guest network's refusal, and one that it accepts has a gateway: its
+    // network's first address.
+    let guest_network =
+        Ipv4Cidr::parse(net).map_err(|message| Exit::error(ErrorCode::Unsupported, message))?;
+    let gateway = guest_gateway(net).expect("a guest network that parses has a gateway");
     if network.network_egress.is_none() && (!rules.allow.is_empty() || !rules.deny.is_empty()) {
         return Err(Exit::error(
             ErrorCode::Unsupported,
@@ -439,5 +481,10 @@ pub(super) fn sandbox_network(
             .map_err(|error| refused("--network-proxy", error))?;
         policy.proxy = Some(proxy);
     }
-    Ok(Some(SandboxNetwork::new(net, policy)?))
+    // A policy that OpenVMM's options cannot express is refused before anything launches.
+    openvmm_arguments(Some(&policy), net)?;
+    Ok(Some(NetworkConfig {
+        guest_network: Some(guest_network),
+        policy,
+    }))
 }

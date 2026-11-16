@@ -20,7 +20,7 @@ pub(crate) fn connect_datagram(peer: SocketAddrV4) -> Result<FileDescriptor, Err
 }
 
 /// An unconnected, close-on-exec IPv4 UDP socket, from which `nvx-ingress` sends its
-/// announcements, and which a clone's application binds for the `nvx-ingress` that it starts.
+/// announcements, and which its `start` command binds for the announcer.
 ///
 /// Dropping it closes the socket, which the C program left to its exit.
 #[derive(Debug)]
@@ -79,8 +79,7 @@ impl UdpSocket {
     }
 }
 
-/// Gives up the socket to its new owner, which `crate::guest::spawn` hands to a child as one of
-/// its standard streams.
+/// Gives up the socket to its new owner, which a command hands to a child as a standard stream.
 impl From<UdpSocket> for OwnedFd {
     fn from(socket: UdpSocket) -> Self {
         socket.0

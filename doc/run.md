@@ -63,8 +63,9 @@ nvx-rs/target/release/nvx-rs run \
 Networking requires the explicit `portable` capability profile. It uses the
 same in-process data plane on KVM, MSHV, and WHP; a cold boot that omits
 either `--net` or `--network-profile portable` is rejected before OpenVMM
-starts. A restore takes its addresses from the snapshot instead; see
-[Networked snapshots](#networked-snapshots).
+starts. A restore takes its NIC, with its addresses, from the snapshot
+instead, and installs a network policy of its own on it; see
+[`snapshot restore`](usage.md#snapshot-restore).
 
 Select an explicit processor count after building the matching specialized guest kernel:
 
@@ -282,7 +283,7 @@ IPv4 or IPv6 exclusions to those native rules:
 }
 ```
 
-Pass the file with `--network-egress-policy-file PATH` on `run`, one-shot
+Pass the file with `--network-egress-policy-file PATH` on `run`,
 `sandbox run`, or `sandbox provision`. An explicit `--network-egress allow` or
 `deny` is required. The file option cannot be mixed with
 `--network-egress-allow` or `--network-egress-deny`.
@@ -371,23 +372,28 @@ one: give `--virtio-console` a Unix socket or, on Windows, a named pipe in the
 `//./pipe/openvmm-microvm-NAME` namespace, as in `listen=PATH`; see
 [Boot Console](design/3.3-consoles.md#331-boot-console).
 
-Most `nvx-rs run` options pass through unchanged: `--machine`, `--processors`,
-`--cpu-profile`, `--mount`, `--net`, `--network-profile`, `--cmdline`,
-`--restore-snapshot`, `--restore-processors`, and `--restore-ready-path`. The
-`nvx-rs run` performs these translations and additions:
+Most options of a cold boot of `nvx-rs run` pass through unchanged:
+`--machine`, `--processors`, `--cpu-profile`, `--net`, and
+`--network-profile`. The `nvx-rs run` performs these translations and
+additions:
 
 | `nvx-rs run` | Direct OpenVMM option |
 | --- | --- |
-| `--guest alpine` | `--initrd .../initramfs.cpio.gz` on a fresh boot |
-| `--guest ubuntu` | `--initrd .../initramfs-ubuntu.cpio.gz` and a 512 MiB default on a fresh boot |
-| `--guest azurelinux` | `--initrd .../initramfs-azurelinux.cpio.gz` and a 512 MiB default on a fresh boot |
+| `--guest alpine` | `--initrd .../initramfs.cpio.gz` |
+| `--guest ubuntu` | `--initrd .../initramfs-ubuntu.cpio.gz` and a 512 MiB default |
+| `--guest azurelinux` | `--initrd .../initramfs-azurelinux.cpio.gz` and a 512 MiB default |
 | `--hypervisor auto` | `--hypervisor kvm` on Linux or `--hypervisor whp` on Windows |
 | `--memory-mib N` | `--memory NM` |
-| `--memory-capacity-mib N` | `--memory-capacity NM` on a fresh boot |
-| `--restore-memory-mib N` | `--restore-memory NM` |
-| A fresh boot | `--virtio-console console`, which attaches the guest's console, the boot console `hvc1`, to the terminal |
-| A restore of a snapshot whose boot console was on the terminal | `--virtio-console console`, which attaches that console to the terminal again |
+| `--memory-capacity-mib N` | `--memory-capacity NM` |
+| `--mount` | `--mount-aggregate /run/nvx/hostfs/root`, with one `--mount-child` for each outermost mapped directory and each mapped file outside them, and `--mount-write` for a read-write `--mount` inside a read-only one; see [virtio-fs host mapping](#virtio-fs-host-mapping) |
+| `--cmdline TEXT` | `--cmdline` with `TEXT` among the tokens of the guest's view, mode, and shares, which NVX renders |
+| Every cold boot | `--virtio-console listen=ENDPOINT`, whose client, `nvx-rs run`, connects the guest's console, the boot console `hvc1`, to the terminal, and the `--microvm-control-console`, `--microvm-control-auth-stdin`, `--microvm-report`, and `--guest-shutdown-action exit` that every launch of NVX passes |
 | `--dry-run` | No equivalent; this only prints the generated command |
+
+`nvx-rs run --restore-snapshot NAME --store-dir PATH --state-dir PATH` restores
+only a named snapshot that `nvx-rs snapshot capture` published, once, as
+`nvx-rs snapshot restore` does, and refuses a raw OpenVMM snapshot directory;
+see [`run`](usage.md#run). OpenVMM itself restores a raw snapshot, as below.
 
 Always include `--single-process`. Include `--virtio-console console` to type
 into the guest's shell on a fresh boot: without a boot console, the guest's
@@ -395,17 +401,11 @@ console is the byte channel, `hvc0`, which takes no input, so OpenVMM discards
 the terminal's keystrokes, though Ctrl-Q still opens its REPL. A restore keeps
 the console of its snapshot. OpenVMM requires `--virtio-console console` again
 to restore a snapshot of a boot that passed it, and refuses `--virtio-console`
-for a snapshot without a boot console. `nvx-rs run` reads the snapshot's
-`manifest.bin`, even with `--dry-run`, and passes `--virtio-console console`
-to a restore exactly when the snapshot's boot console was on the terminal; it
-refuses a snapshot whose manifest it cannot read, which OpenVMM could not
-restore either. When restoring, omit `--memory`, `--kernel`, `--initrd`, and
-`--net`, whose addresses the snapshot keeps; see
+for a snapshot without a boot console. When restoring, omit `--memory`,
+`--kernel`, `--initrd`, and `--net`, whose addresses the snapshot keeps; see
 [Networked snapshots](#networked-snapshots). Every restore gives the guest
-fresh entropy through the time ABI's restore packet. Do not pass
-`--guest ubuntu` during restore; the captured RAM and machine contract already
-identify the restored guest. For example, for a snapshot of a boot with
-`--virtio-console console`:
+fresh entropy through the time ABI's restore packet. For example, for a
+snapshot of a boot with `--virtio-console console`:
 
 ```bash
 ./bin/openvmm \
@@ -616,11 +616,14 @@ attachments, and so does a restore, unless it installs a new policy on a
 A snapshot captured with `--net` keeps its NIC's addresses and the digest of
 its network policy. Restore it with `--network-profile portable`, without
 `--net`, and with the network policy options of the capture, which OpenVMM
-checks against that digest before the guest runs. `nvx-rs run` passes them to
-OpenVMM as given, and refuses `--net` on a restore:
+checks against that digest before the guest runs:
 
 ```bash
-nvx-rs/target/release/nvx-rs run \
+./bin/openvmm \
+  --single-process \
+  --machine microvm \
+  --processors 1 \
+  --hypervisor kvm \
   --restore-snapshot /var/lib/nvx/snapshot \
   --network-profile portable \
   --network-egress deny \
@@ -647,7 +650,11 @@ options of the new policy, which may include `--network-ingress allow`,
 explicit `--host-loopback allow`, and forwards, for example:
 
 ```bash
-nvx-rs/target/release/nvx-rs run \
+./bin/openvmm \
+  --single-process \
+  --machine microvm \
+  --processors 1 \
+  --hypervisor kvm \
   --restore-snapshot /var/lib/nvx/template \
   --restore-network-policy \
   --network-profile portable \
@@ -674,9 +681,14 @@ workload that has already run, but under the deny-all that workload had no
 connectivity, so nothing in the snapshot depends on the policy, and the restore
 grants it connectivity that it never had. OpenVMM rejects the option for a cold
 boot, for a snapshot without a NIC or whose NIC was captured with any other
-policy, and for a `workload-start` or `instance-checkpoint` snapshot, and
-`nvx-rs run` rejects it without `--restore-snapshot`. A [platform NIC
-template](#platform-nic-templates) takes the option too.
+policy, and for a `workload-start` or `instance-checkpoint` snapshot. A
+[platform NIC template](#platform-nic-templates) takes the option too, and so
+does each restore of a named snapshot, a platform snapshot whose NIC
+`nvx-rs snapshot capture --net` captured under the complete deny-all policy,
+through `nvx-rs run --restore-snapshot` or `nvx-rs snapshot restore`, which
+install the policy of their network options, and whose guest learns its DNS
+server and whether to announce its listeners from its activation, as
+[`snapshot restore`](usage.md#snapshot-restore) describes.
 
 ### Platform NIC templates
 
@@ -744,8 +756,7 @@ slot's device and the guest's kernel command line stay as captured, without a
 its host, mount tag `microvm` itself, and bind each child where it needs it.
 The dormant slot of a snapshot of another tier, or without a tier, still
 binds only a `--mount`, and a snapshot captured with an export requires that
-export again. `nvx-rs run`, which passes no sandbox blocks, cannot restore a
-platform snapshot.
+export again.
 
 ## Snapshots of an earlier OpenVMM
 
@@ -754,10 +765,8 @@ boot layout 1, time ABI 1, restore packet 1, and snapshot manifest 2, whose
 version 1 is upstream OpenVMM's. It reads no snapshot of an earlier OpenVMM,
 whose manifest it refuses with `E_SNAPSHOT_VERSION` by its version, or by its
 missing format magic for the earliest manifests of version 2, before it
-decodes the rest, and `nvx-rs` refuses a template of an earlier OpenVMM by its
-snapshot format.
-Capture them again; to restore them as they are, use NVX commit
-`304f8e1686b4fba188ad2d9c8d932498a6ca2980` with the OpenVMM that it pins.
+decodes the rest: capture such a snapshot again, as [Upgrades](#upgrades) says
+of every snapshot of other artifacts.
 
 The machine is the one that the earlier OpenVMM called microVM ABI 3: no
 virtio device offers `VIRTIO_F_ACCESS_PLATFORM`, no console offers its size
@@ -769,39 +778,50 @@ same on every backend (see
 
 ## Snapshot restore readiness
 
-Restore an existing microVM snapshot with an optional host-readiness endpoint:
+Restore an existing microVM snapshot with OpenVMM and an optional
+host-readiness endpoint:
 
 ```bash
-nvx-rs/target/release/nvx-rs run \
+./bin/openvmm \
+  --single-process \
   --machine microvm \
   --processors 8 \
+  --hypervisor kvm \
   --restore-snapshot /var/lib/nvx/snapshot \
   --restore-processors 4 \
-  --restore-memory-mib 1024 \
+  --restore-memory 1024M \
   --restore-ready-path /run/nvx/restore-ready.sock
 ```
 
+`nvx-rs run --restore-snapshot`, `nvx-rs snapshot restore`, and each
+`nvx-rs sandbox start` of a restored sandbox own the endpoint of their
+restore, whose event they accept only from the VM's own OpenVMM process, and
+restore the processors that their snapshot had online.
+
 The endpoint must already be listening. OpenVMM connects to a Unix domain
 socket on Linux or a `//./pipe/...` named pipe on Windows and writes exactly
-`OPENVMM_RESTORE_READY_V1\n` after snapshot verification, attachment
-resolution, worker startup, gated guest repair, and host-input re-enable
-complete while the restored vCPU remains stopped. With
+`OPENVMM_RESTORE_READY_V1\n` once it has verified the snapshot, resolved its
+attachments, and started the VM's workers, and before it releases a restored
+vCPU, so the event precedes the guest's repair. A restore that requires the
+guest's acknowledgement gates host input from before the event until the
+guest's repair acknowledges the restore. With
 `--restore-processors`, the snapshot keeps its immutable eight-vCPU capacity;
 the source must have captured a canonical `maxcpus` boot-online prefix, and the
-guest onlines exactly the requested prefix before readiness and host input
-release. Targets are limited to 1, 2, 4, or 8 and cannot be below the captured
-boot-online count or above capacity. Platform snapshots opt in the same way, so
-each clone of one platform capture can bring its own prefix online. Legacy
-snapshots reject the option. The
+guest's repair onlines exactly the requested prefix while host input stays
+gated, before it acknowledges the restore. Targets are limited to 1, 2, 4, or 8
+and cannot be below the captured boot-online count or above capacity. Platform
+snapshots opt in the same way, so each clone of one platform capture can bring
+its own prefix online. Legacy snapshots reject the option. The
 peer must accept and read while startup is in progress; Windows flush
 completion waits for the named-pipe peer to consume the frame. Failure to
 write the complete event aborts and tears down the restore.
 
 For restore-time memory expansion, capture a fresh snapshot with
 `--memory-mib 512 --memory-capacity-mib 2048`, then select a target with
-`--restore-memory-mib 512`, `1024`, or `2048`. The snapshot's `memory.bin`
+`--restore-memory 512M`, `1024M`, or `2048M`. The snapshot's `memory.bin`
 remains exactly 512 MiB; selected expansion ranges receive fresh per-launch
-backing and are onlined before restore readiness.
+backing before any restored vCPU runs, and the guest's repair onlines them
+while host input stays gated, before it acknowledges the restore.
 
 ## virtio-fs host mapping
 
@@ -857,46 +877,50 @@ nvx-rs/target/release/nvx-rs run \
   --mount "/results/output.txt,/srv/app/results/output.txt,rw"
 ```
 
-With several mappings, or a shared file, NVX attaches the slot as an
-aggregate: OpenVMM's `--mount-aggregate /run/nvx/shares` with one
-`--mount-child NAME,HOST_PATH,MODE[,file]` per mapping, in order, where
-OpenVMM's `file` flag marks a shared file, so OpenVMM refuses a directory that
-replaced the file rather than export all of it. The initramfs mounts
-the aggregate at `/run/nvx/shares`, whose root lists one entry per mapping and
-only root can enter, and binds each entry at its target with its mode and
-`nosuid,nodev`, as an `nvx_share=NAME,TARGET,MODE[,file]` token on the kernel
-command line describes. The `file` suffix marks a shared file, which the
-initramfs binds at a regular file that it creates at the target, along with
-the target's missing directories; an existing target must already be a
-regular file. A
-mapping's name is its index, a hyphen, and the first 32 hexadecimal digits of
-the SHA-256 digest of its target. A snapshot records every name, so it pins
-each target: a restore that requests another target fails before the guest
-runs, rather than resume binds at the snapshot's targets.
-OpenVMM enforces each mapping's access mode on the host, so a read-only mapping
-rejects writes with `EROFS` even if guest root remounts its bind read-write or
-writes through `/run/nvx/shares`. A rename between mappings fails with
-`EXDEV`, and so does a hard link, unless its destination is read-only, which
-fails with `EROFS` first. OpenVMM serves a shared file alone: the guest cannot
-list, inspect, or change the file's directory or reach its siblings, a lookup
-below the file fails with `ENOTDIR`, and a read-write file can be rewritten in
-place but not replaced, renamed, or removed. OpenVMM follows the file's name,
-so the guest sees the file that host software, such as an editor, saves over
-it, and requests fail with `EACCES` while anything but a regular file holds the
-name. Guest targets that equal or contain one another or `/run/nvx/shares`,
-and host paths that equal or contain one another, such as a shared file inside
-a shared directory or two hard links to one file, are rejected before boot.
+NVX attaches the slot as an aggregate, even for one mapping: OpenVMM's
+`--mount-aggregate /run/nvx/hostfs/root` with one
+`--mount-child INDEX,HOST_PATH,MODE[,file]` per child, numbered from 0. The
+children are the outermost mapped directories and the mapped files outside
+them, so a `--mount` of a directory again, or of a path inside a mapped
+directory, maps a part of that directory's child rather than a child of its
+own. OpenVMM's `file` flag marks a child that is a shared file, so OpenVMM
+refuses a directory that replaced the file rather than export all of it. A
+child is read-write only if it holds a read-write mapping, and OpenVMM then
+limits its writes to its read-write mappings, which NVX passes as
+`--mount-write` paths when they lie inside a read-only one. A read-only
+mapping inside a writable part of its child, such as inside a read-write
+mapping without `--mount-write` paths, is rejected before boot, since OpenVMM
+cannot keep a path read-only there. The initramfs mounts the
+aggregate at `/run/nvx/hostfs/root`, whose root lists one entry per child and
+only root can enter, and binds each mapping at its target with its mode and
+`nosuid,nodev`, as an `nvx_share=SOURCE,TARGET,MODE[,file]` token on the
+kernel command line describes: `SOURCE` is the index of the mapping's child,
+followed by the mapping's path inside it, if any, such as `0/single.txt`. The
+`file` suffix marks a shared file, which the initramfs binds at a regular file
+that it creates at the target, along with the target's missing directories; an
+existing target must already be a regular file.
+OpenVMM enforces each mapping's access on the host, so a read-only mapping
+rejects writes with `EROFS`, except inside a read-write mapping that it
+contains, even if guest root remounts its bind read-write or writes through
+`/run/nvx/hostfs/root`. A rename between children fails with `EXDEV`, and so
+does a hard link, unless its destination is read-only, which fails with
+`EROFS` first. OpenVMM serves a file child alone: the guest cannot list,
+inspect, or change the file's directory or reach its siblings, a lookup below
+the file fails with `ENOTDIR`, and a read-write file can be rewritten in place
+but not replaced, renamed, or removed. OpenVMM follows the file's name, so the
+guest sees the file that host software, such as an editor, saves over it, and
+requests fail with `EACCES` while anything but a regular file holds the name.
+A mapped file inside a mapped directory is part of that directory's child
+instead, whose mapping reaches the file's siblings. Guest targets that equal or
+contain one another are rejected before boot.
 The number of mappings is bounded only by the 1024-byte
 budget that their tokens and `--cmdline` share on the kernel command line.
-A snapshot captured with mappings requires the same mappings, in the same
-order, with the same canonical host paths, kinds, targets, modes, and
-filesystem identities, so a restore refuses a shared file that was replaced
-since the capture.
 A repeatable `--mount-deny HOST_PATH` hides an existing file or directory
 inside a mapped root. With several mappings, or a shared file, each
 `--mount-deny`, `--mount-allow`, and `--mount-write` path must be absolute, and
-it applies to the mapping whose root contains it. A shared file takes none of
-them, because its mode applies to the whole file. Denied
+it applies to the child whose root contains it, whichever of the child's
+mappings reaches it. A file child takes none of them, because its mode applies
+to the whole file. Denied
 names are omitted from directory listings and remain
 inaccessible through `..`, a symlink/junction, or another mount of the same
 virtio-fs device. Names may contain spaces, but not begin or end with one.
@@ -906,8 +930,7 @@ duplicate, overlapping, and nested-mount
 rules are rejected before boot. A repeatable `--mount-allow HOST_PATH`
 exposes a path inside a denied path again, and a repeatable
 `--mount-write HOST_PATH` makes a path one of the only writable parts of an
-`rw` mapping; see [Access policy](#access-policy). A snapshot captured with
-these paths requires the same denied, allowed, and writable paths.
+`rw` mapping; see [Access policy](#access-policy).
 In an `rw` mapping, the guest can create symbolic links, and OpenVMM stores
 each target exactly as given. The guest resolves links in its own namespace;
 OpenVMM never follows a link while resolving a host path, so a link to an
@@ -917,37 +940,27 @@ are WSL-style reparse points, which Windows path resolution never follows.
 Treat links in a writable share as untrusted when host software later reads
 the directory.
 On a Linux host, the guest can also swap two names in an `rw` mapping
-atomically with `renameat2(RENAME_EXCHANGE)`, as `exch` does, and a snapshot
-captured right after the swap keeps each name with its object. A Windows host
+atomically with `renameat2(RENAME_EXCHANGE)`, as `exch` does. A Windows host
 rejects rename flags with `EINVAL` and changes neither name.
 By default, OpenVMM performs every guest operation on the mapping as its own
 user. On a Linux host, `--mount-owner caller` instead performs each one as the
 guest caller's UID and GID and squashes guest root to the owner of the shared
 host directory or file, so files that guest root creates are owned by that
-owner rather than by root or OpenVMM; see [File ownership](#file-ownership). A
-snapshot captured with a mapping also requires the same `--mount-owner` mode.
-Capture and restore inspect and reopen the guest's open files as OpenVMM's
-user, so unless OpenVMM runs as root, they fail while the guest holds a file
-that only its caller can reach or reopen, such as one open for writing.
-A snapshot captured without a mapping may restore with one new `--mount` of a
-directory, but not with several or with a file, because `nvx-rs run` restores
-only snapshots without sandbox blocks, whose dormant slot takes no aggregate;
-OpenVMM binds an aggregate to the dormant slot of a
-[platform snapshot](#platform-filesystem-exports). After resume, mount it
-explicitly inside the guest because the initramfs hook has already completed:
+owner rather than by root or OpenVMM; see [File ownership](#file-ownership).
 
-```sh
-mkdir -p /mnt/host
-mount -t virtiofs microvm /mnt/host
-```
+`nvx-rs` snapshots no VM with mappings: `snapshot capture` captures a VM
+without them, and `run --restore-snapshot` refuses the share options. A
+restored sandbox maps the shares of its own `--mount` options, which
+[`snapshot restore`](usage.md#snapshot-restore) takes, once its guest is
+ready, as [Live host shares](#live-host-shares) describes.
 
 ## Experimental single-workload sandbox
 
 The `sandbox` command of [`nvx-rs`](usage.md#nvx-rs) launches the microVM
-with one compressed EROFS distro layer under a writable upper: by default one
-preformatted ext4 scratch image, or a tmpfs in guest memory with
-`--upper ram`, as [Overlay upper](#overlay-upper) describes. Build the distro
-layer with `nvx.py`:
+with one distro layer, a compressed EROFS image or a GPT disk, under a writable
+upper: by default one preformatted ext4 scratch image, or a tmpfs in guest
+memory with `--upper ram`, as [Overlay upper](#overlay-upper) describes. Build
+the distro layer with `nvx.py`:
 
 ```bash
 python3 scripts/nvx.py build-distro-layer \
@@ -959,22 +972,41 @@ Read the deterministic UUID from
 `build/ubuntu-distro.erofs.manifest.json`, create scratch, for example with
 [`build-scratch-template`](usage.md#build-scratch-template), which formats the
 sandbox scratch template at the path that `--output` gives, or with
-`mkfs.ext4` itself, then launch the Ubuntu workload through the existing
-Alpine control initramfs:
+`mkfs.ext4` itself, then run an Ubuntu workload in a sandbox that the Alpine
+control initramfs boots and nvx-init manages:
 
 ```bash
 python3 scripts/nvx.py build-scratch-template --output /var/lib/nvx/scratch.ext4
 nvx-rs/target/release/nvx-rs sandbox \
   --layer distro,build/ubuntu-distro.erofs,11111111-1111-1111-1111-111111111111 \
   --scratch /var/lib/nvx/scratch.ext4 \
-  --entrypoint /bin/sh \
+  --entrypoint /bin/sh --arg=-c --arg='cat /etc/os-release' \
   --workload-user 65534:65534 \
   --memory-mib 256
 ```
 
-CI uses `/sbin/nvx-sandbox-smoke` as the entrypoint to verify the security
-profile that this section describes before clean guest exit. Before any other
-check, it requires:
+`sandbox run`, the default operation, keeps no state. It launches the VM that
+a `provision` and a `start` of its options would launch, in a fresh temporary
+VM directory, and prints its OpenVMM command as `>> COMMAND`. Once nvx-init is
+ready and has mapped the shares, the run executes its workload once over the
+control session, as [`sandbox exec`](#managed-lifecycle) does, with the same
+`--cwd`, `--environment`, `--environment-file`,
+`--inherit-default-environment`, and `--exec-timeout-ms` options, and streams
+its standard input, output and error as `sandbox exec` does. It then asks
+nvx-init to stop the VM, terminates OpenVMM if it does not exit within
+`--timeout` seconds, warning that it did, and removes the VM directory, and
+finally exits with the workload's status. A VM that exits before nvx-init is
+ready, as when the guest
+refuses the workload identity, fails the run as it fails a `start`, with the
+category and status of the outcome report that OpenVMM published, such as
+`guest-exit status 125`. `--outcome-report` forwards that report, of the VM's
+stop, with the permissions that OpenVMM gave it. Ctrl-C ends the VM, and the
+run then exits with status 130. `--dry-run` prints the command and launches
+nothing.
+
+CI runs `/sbin/nvx-sandbox-smoke`, with `--arg init`, as below, as the workload
+of `sandbox run` and `sandbox exec`, to verify the security profile of the
+executions that nvx-init runs. Before any other check, it requires:
 
 - the fixed `65534:65534` identity as the real, effective, saved, and
   file-system IDs, no supplementary groups, and `HOME=/nonexistent`;
@@ -1002,9 +1034,15 @@ check, it requires:
 
 A managed workload that mounted into the agent's namespace would stack its
 runtime mounts on those of earlier requests, so the single-mount check also
-covers repeated managed execs. With `--arg entry`, for a managed execution, it
-also requires every mount other than `/dev` and its devpts instance to be
-`nodev`, as the managed agent's execution entry makes them. With
+covers repeated managed execs. With `--arg init` as its first argument, for an
+execution of `sandbox run`, or in a sandbox that `sandbox start` started, which
+nvx-init runs as a plain process in the VM's root, it checks the host name,
+which nvx-init's kernel command line encodes in hexadecimal, instead of the
+namespaces, and no cgroup:
+such an execution shares nvx-init's mount, PID, and UTS namespaces and its
+cgroup. With `--arg entry`, for a managed execution, it also requires every
+mount other than `/dev` and its devpts instance to be `nodev`, as the managed
+agent's execution entry and nvx-init's root make them. With
 `--arg limits --arg MEMORY_MAX --arg PIDS_MAX`, for a workload whose cgroup has
 those limits, it also requires the memory controller to kill an allocation of
 twice `MEMORY_MAX` with `SIGKILL` while a 1 MiB allocation succeeds, and the
@@ -1056,30 +1094,28 @@ unused fields, no object may repeat a field, and arrays and objects nest at most
 32 deep, whatever features of `serde_json` other crates of a build enable. The
 artifact name, SHA-256 digest, and package metadata still bind it to the layer.
 
-This is the cold-filesystem bootstrap described in
-[the sandbox design](design/4.1-guest-filesystem-and-image-model.md#411-layered-sandbox-root), not the final
-production agent. It accepts no environment variables or secrets and does not
-expose sandbox snapshot capture or restore, the configuration region, or runtime RPC.
-Entrypoints, arguments, and guest share targets are individual kernel-command-line
-tokens and therefore cannot contain whitespace, control characters, double
-quotes, or any UTF-8 byte that Linux treats as whitespace, including `0xa0`.
+A run is the cold-filesystem bootstrap described in
+[the sandbox design](design/4.1-guest-filesystem-and-image-model.md#411-layered-sandbox-root), which nvx-init
+manages. It does not expose snapshot capture or restore, which
+[named snapshots](#named-snapshots) provide, the configuration region, or
+runtime RPC. Guest share targets cannot contain
+whitespace, control characters, double quotes, or any UTF-8 byte that Linux
+treats as whitespace, including `0xa0`, while the workload's entrypoint and
+arguments, which nvx-init receives over the control session, may.
 Sandbox `--cmdline` uses Linux's quote and separator rules, and refuses reserved
 names even when quoted or written with hyphens instead of underscores. Validation
-uses the same trimmed text that is rendered and also checks the guest bootstrap's
-whitespace-only view, so reserved settings inside quoted values cannot override
-the generated settings. It also
-refuses a `--` or unclosed quote that hides the generated root tokens.
-The workload enters private mount/PID/UTS namespaces with
-a private `/dev`, an agent-owned cgroup, no capabilities, and `no_new_privs`.
-It always runs as the fixed non-root `UID:GID` selected at VM creation
-(`65534:65534` by default). The guest verifies that exactly one matching user,
-its primary group, and its absolute home directory exist in the assembled
-root; otherwise the workload is never started.
-The outer agent retains the initramfs root; the capability-stripped child
-enters only the assembled root with `chroot`, because Linux cannot
-`pivot_root` away from an initramfs `rootfs`. A
-[managed](#managed-lifecycle) execution instead moves the assembled root over
-`/` in its own mount namespace.
+reads the text that the kernel command line holds, after the generated settings,
+and also checks the guest bootstrap's whitespace-only view, so reserved settings
+inside quoted values cannot override the generated settings. It also refuses a
+`--` or unclosed quote that hides the tokens that OpenVMM appends, and double
+quotes, which the VM control console cannot represent.
+nvx-init runs the workload as a plain process in the VM's root, with no
+capabilities and `no_new_privs`, as it runs every
+[managed](#managed-lifecycle) execution. The workload always runs as the fixed
+non-root `UID:GID` selected at VM creation (`65534:65534` by default). The
+guest verifies that exactly one matching user, its primary group, and its
+absolute home directory exist in the assembled root; otherwise the workload is
+never started.
 
 ### Overlay upper
 
@@ -1091,9 +1127,10 @@ for `sandbox run` and `sandbox provision`:
   writes uses host storage, fails with `ENOSPC` when the image is full, and
   survives a managed sandbox's `stop` and next `start`.
 - `ram` keeps the upper in guest memory, with no scratch image or block device.
-  The kernel command line declares `nvx_overlay_upper=ramfs`, and the guest
-  mounts a tmpfs for the upper, `nosuid` and `nodev`, at the kernel's default
-  size, half of the guest's RAM, beyond which a write fails with `ENOSPC`. The
+  The kernel command line declares `nvx_overlay_upper=ramfs` and the cap of
+  `--ram-upper-percent`, from 1 through 90 percent of the guest's RAM, 50 by
+  default, and the guest mounts a tmpfs for the upper, `nosuid` and `nodev`, of
+  that size, beyond which a write fails with `ENOSPC`. The
   kernel cannot reclaim its pages while the files exist, since the guest has no
   swap. Nothing that the workload writes outlives its VM: each `start` of a
   managed sandbox begins with an empty upper.
@@ -1108,11 +1145,17 @@ nvx-rs/target/release/nvx-rs sandbox \
 
 `--upper ram` refuses `--scratch`, and only `run` and `provision` take
 `--upper`: a provisioned sandbox keeps the upper that its configuration
-records. OpenVMM admits a RAM upper only with exactly one read-only `distro`
-block device, and refuses it for snapshot capture and restore, and the guest
-refuses a RAM upper beside a scratch block device. With either upper, the
-overlay keeps `metacopy=on` and `xino=on`, which `/sbin/nvx-sandbox-smoke`
-checks.
+records. A restore, of [`snapshot restore`](usage.md#snapshot-restore) or
+`run --restore-snapshot`, takes `--upper` and `--ram-upper-percent` as
+`provision` does, and hands its guest the RAM upper's cap in its activation,
+since the snapshot keeps the kernel command line of its capture. OpenVMM
+admits the RAM upper of a cold boot, `nvx_overlay_upper=ramfs`, only with
+exactly one read-only `distro` block device, and refuses it for a snapshot
+capture or restore: a restore over a RAM upper attaches the snapshot's dormant
+scratch without a file instead, with OpenVMM's `--restore-absent-scratch`. The
+guest of a cold boot refuses a RAM upper beside a scratch block device. With
+either upper, the overlay keeps `metacopy=on` and `xino=on`, which
+`/sbin/nvx-sandbox-smoke` checks.
 
 The `sandbox-ram-upper` scenario of `test-microvm --backend BACKEND` is the
 acceptance for the RAM upper. Like the
@@ -1120,20 +1163,148 @@ acceptance for the RAM upper. Like the
 subprocesses with the Ubuntu layer that `nvx-rs download` installs, but it
 attaches no scratch image. It checks that `provision`
 refuses `--upper ram` beside `--scratch`, and `start` refuses `--upper`, before
-either creates any state. A one-shot `run` of `/sbin/nvx-sandbox-smoke` must
-print an OpenVMM command with one sandbox block device, the read-only distro
-layer, and `nvx_overlay_upper=ramfs` in place of the scratch token, and the
-probe must pass its profile checks over a tmpfs upper. The run's
-`--outcome-report`, under the scenario's temporary directory, must report
-success and a complete teardown, and also names its OpenVMM to the scenario's
-process checks and cleanup, which find VMs by that directory. A managed sandbox
+either creates any state. A run of `/sbin/nvx-sandbox-smoke`, which keeps no
+state, must print an OpenVMM command with one sandbox block device, the
+read-only distro layer, `nvx_overlay_upper=ramfs` in place of the scratch
+token, with the default cap, `nvx_ram_upper_percent=50`, and `nvx_sandbox=1`
+without an OpenVMM lifecycle option, so that nvx-init manages its VM, and the
+probe must pass its checks of an execution of nvx-init over a tmpfs upper. The
+run's `--outcome-report`, under the scenario's temporary directory, must report
+the success of the VM's stop and a complete teardown, and its `--cmdline` names
+that directory, which names its OpenVMM to the scenario's process checks and
+cleanup, which find VMs by that directory. A managed sandbox
 must record `ram` without a scratch image, pass the probe's managed checks, show
 its guest one virtio block device and the RAM upper's token, and read back a
 file that an earlier request wrote. After a `stop` and a new `start`, the file
 is gone. The scenario's evidence, with a `sandbox-ram-upper-` prefix, holds its
-bounded command observations, the runtime record, the output of the one-shot
-run, of the probe, and of the guest's view, and the outcome reports of the
-one-shot run and of both stops.
+bounded command observations, the runtime record, the output of the run, of
+the probe, and of the guest's view, and the outcome reports of the run and of
+both stops.
+
+The `sandbox-gpt-layer` scenario of `test-microvm --backend BACKEND` is the
+acceptance for a GPT disk, over either upper. It writes a GPT disk in its
+temporary directory, whose first partition holds a few bytes and whose second,
+its one layer, a guest of the Alpine control initramfs formats as ext4 and
+fills with a copy of the tree of the Ubuntu EROFS layer. Then, over a scratch
+upper and then a RAM upper, a run of `/sbin/nvx-sandbox-smoke` with
+`--layer-format gpt` must print an OpenVMM command with the disk as its
+read-only distro block device, and a scratch block device for a scratch upper
+alone, whose kernel command line names the disk's GUID,
+`nvx_layer=distro,0xd0003000,gpt:GUID`, the upper's token alone,
+`nvx_sandbox=1`, and `nvx_mode=managed`. The probe must pass its checks of an
+execution of nvx-init, and the run's `--outcome-report` must report the
+success of the VM's stop and a complete teardown. A managed sandbox must record
+the disk's format and GUID and the upper, pass the probe's managed checks, and
+show its guest the same tokens, one virtio block device more for a scratch
+upper, and the disk's layer partition as the lower directory of its root,
+`/run/nvx/layers/p2`, before it stops with a successful outcome report and a
+complete teardown and is deprovisioned. The disk keeps its digest throughout.
+The scenario's evidence, with a `sandbox-gpt-layer-` prefix, holds the console
+of the guest that wrote the disk, the bounded command observations, the runtime
+record, the output of each run, probe, and view of the guest, and the outcome
+reports of each run and stop. With `sandbox-lifecycle` and
+`managed-exec-config`, which boot the EROFS layer over a scratch upper, and
+`sandbox-ram-upper`, CI runs it on KVM, MSHV, and WHP: the CLI's twelve cold
+cells, which the [case matrix](acceptance-case-matrix.md#cold-boots) lists.
+
+### Named snapshots
+
+`nvx-rs snapshot capture` captures a VM that nvx-init runs, before any
+workload, with a placeholder image, a dormant scratch, and a NIC only if
+`--net` gives it one, into a named snapshot of a store, which
+`nvx-rs snapshot restore` and `nvx-rs run --restore-snapshot` restore under the
+snapshot's lock, with an image, an upper, and a network policy of their own;
+see [`snapshot capture`](usage.md#snapshot-capture) and
+[`snapshot restore`](usage.md#snapshot-restore). The public `snapshot-core` and
+`snapshot-tiers` scenarios of `test-microvm --backend BACKEND` are their
+acceptance, with the Ubuntu layer and the scratch template that
+`nvx-rs download` installs, and `untiered-network-policy` that of a restore's
+network policy. The workload of each restore of the first two is a probe, a
+script that `/bin/sh -c` runs, which reports the guest's clock and uptime,
+fresh random values, its machine ID, host name, and identity, the lower and
+upper directories of its root's overlay, its block devices and network
+interfaces, the distribution of its image, and the marker file of its host
+share at `/data`, if it has one.
+
+The `snapshot-core` scenario captures one snapshot, whose directory must hold
+exactly `key.bin`, `snapshot.json`, and `openvmm/`, each file with one link,
+while no directory or OpenVMM process of the capture's VM remains. After a
+downtime longer than the capture, two `run --restore-snapshot` restores of the
+Ubuntu EROFS layer, in RAM as `65534:65534` and over a fresh copy of the
+scratch template as `1:1`, each with a host name of its own, must run as the
+restore's identity with its host name, the layer as the root's lower directory
+over the upper, the snapshot's two block devices, and no NIC, with a clock
+that reads the host's time and an uptime that kept the time before the capture
+and counts the downtime, and must report different random values, kernel
+UUIDs, machine IDs, and temporary file names. A `snapshot restore` over a
+scratch image of half the dormant scratch's length is refused before any VM
+starts: its error names the lengths of the requested scratch and of the
+dormant one, which attributes the failure to the request, and its sandbox,
+which a failed start keeps provisioned, must hold `config.json` and
+`sandbox.lock` alone, where a launch leaves OpenVMM's log and outcome report
+and the view of the snapshot, until `sandbox deprovision` removes it. A
+`run --restore-snapshot` over a zeroed scratch image of the dormant scratch's
+length, which the guest cannot mount as its upper, ends its VM before its
+workload runs and frees the snapshot's lock, which the restores that follow
+take: nvx-init ends the VM with the status of a root that does not assemble,
+54, and the run reports the guest's exit with the restore's evidence and what
+it attributes the failure to, the request, such as
+`OpenVMM exited during startup: guest-exit status 54; restore failed during
+Activate: UnusableRoot, attributed to the request`.
+
+Then three `snapshot restore` restores start at once, each with a host name
+and a read-only host share of its own, the last over a scratch upper and the
+others in RAM, and a workload that ends only once the scenario creates a
+`release` file in its share, which the guest reads live. While the first holds
+the snapshot's lock, a `run --restore-snapshot` restore that may wait one
+second for the lock fails with `sandbox-busy` before its workload runs, and
+neither of the other two may link its view of the snapshot, which a restore
+does only once it holds the lock. Once the scenario releases the first, one of
+the other two takes the lock, and the last may link its view only once the
+scenario releases that one. The three sandboxes then run at once: each guest
+must read the marker of its own share, and a file that a `sandbox exec` writes
+in one sandbox's `/tmp`, in its upper, must appear in no other. Each must stop with an outcome report of a successful restored VM
+without a network policy and a complete teardown, and be deprovisioned. No
+restore may change the snapshot's files, leave a link to them, or leave an
+OpenVMM process.
+
+The `snapshot-tiers` scenario captures one snapshot of the platform tier, the
+one tier that `snapshot capture` captures, and restores it with
+`snapshot restore` into a managed sandbox of each image format over each
+upper: the Ubuntu EROFS layer, and a GPT disk of its tree that a guest of the
+Alpine control initramfs writes, as `sandbox-gpt-layer` does, each over a
+fresh copy of the scratch template and in RAM. Each guest must have its image
+as its root's lower directory, `/run/nvx/layers/distro` or
+`/run/nvx/layers/p2`, over its upper, and a `sandbox exec` in its sandbox must
+see the same root of the same guest. Each sandbox must stop cleanly and be
+deprovisioned, and the restores change neither image nor the snapshot.
+
+Both scenarios journal the OpenVMM processes of their managed restores, as
+the other scenarios of the `snapshot-isolation`
+[adversarial campaign](adversarial-testing.md) journal theirs. Their evidence,
+with a `snapshot-core-` or `snapshot-tiers-` prefix, holds the bounded command
+observations, the output of each command, and the outcome reports of the
+managed sandboxes, and that of `snapshot-tiers` the console of the guest that
+wrote its GPT disk. CI runs them on KVM, MSHV, and WHP with the public sandbox
+scenarios.
+
+The public `untiered-network-policy` scenario captures a snapshot with `--net`,
+whose NIC has the complete deny-all policy, and restores it four times with
+the Ubuntu layer over a RAM upper, each under a network policy of its own: the
+capture's deny-all, and private-network ingress with allowed egress, through
+`snapshot restore`, whose sandboxes it then stops and deprovisions; and egress
+rules that admit DNS over IPv4 and one host service, and explicit
+host-loopback access with a forward, under egress rules that admit DNS over
+IPv6 alone, through `run --restore-snapshot`. Each restored guest must name
+the DNS server of its policy in its resolver, and no gateway without one, run
+the announcer of its listeners exactly when its policy publishes them, and
+reach exactly the host services that its policy admits, and the host must
+reach the guest's server through the forward, and through the port that the
+policy publishes, on host loopback alone or to the host's private networks.
+Before it provisions anything, the CLI must refuse a restore without
+`--network-profile`, and one that names the NIC's address with `--net`. No
+restore may change the snapshot or leave its sandbox or an OpenVMM process.
+CI runs it with the other public sandbox scenarios.
 
 ### Live host shares
 
@@ -1191,35 +1362,28 @@ the guest mounts the shares inside the container root with `nosuid,nodev`,
 before any workload enters its private mount namespace. How it learns of them
 depends on the lifecycle.
 
-A one-shot `sandbox run` delivers them at boot. The guest agent creates each
-target inside the container root and mounts the share there. With several
-shares, or a shared file, it mounts the aggregate at `/run/nvx/shares`, outside
-the container root, and binds each child at its target with its mode, in
-order, as the `nvx_share=NAME,TARGET,MODE[,file]` tokens that NVX adds to the
-kernel command line describe. It binds a shared file at a regular file, which
-it creates when the container root has nothing at the target. The number of
-shares is bounded only by the sandbox's 1024-byte kernel command-line budget.
-
-A managed sandbox delivers them once its guest agent is ready. OpenVMM exports
-every share as a child of one aggregate, which the guest mounts at
+A sandbox, of `run` or of `start`, delivers them once its guest agent is
+ready. OpenVMM exports every share as a child of one aggregate, which the guest
+mounts at
 `/run/nvx/hostfs/root`, where only root can enter, and the kernel command line
-announces only the number of mappings, as `nvx_maps=COUNT`. Once the guest
+announces only the number of mappings, as `nvx_maps=COUNT`, or, for a restore,
+whose snapshot keeps the command line of its capture, the guest's activation.
+Once the guest
 agent answers, `start` sends it the mapping table, in order, in as many
 requests as it takes. The agent mounts each entry at its target with its mode,
 and creates a missing target only on the container overlay, never inside
 another mapping, as a directory or, for a shared file, a regular file. It
 refuses every workload until it has mounted the whole table. A mapping that
-the guest refuses or cannot mount fails `start`, after the guest shuts down as
-`stop` has it do, so the sandbox never runs with part of its shares; `start`
-terminates OpenVMM only if the guest does not shut down within `--timeout`.
-The kernel command line does not bound the number of a managed sandbox's
+the guest refuses or cannot mount fails `run` or `start`, after the guest
+shuts down as `stop` has it do, so the sandbox never runs with part of its
+shares; they terminate OpenVMM only if the guest does not shut down within
+`--timeout`. The kernel command line does not bound the number of a sandbox's
 shares; the 256 children of one aggregate do.
 
-A one-shot workload exit, a managed `stop`, and any failure after a share is
-mounted unmount the binds or mappings in reverse order, then the aggregate or
-the export, before the overlay is unmounted or the VM powers off, unless the
-guest stops answering, or `start` is interrupted, and OpenVMM is terminated
-first. Each target
+A managed `stop`, and any failure after a share is mounted, unmount the binds
+or mappings in reverse order, then the aggregate or the export, before the
+overlay is unmounted or the VM powers off, unless the guest stops answering, or
+`start` is interrupted, and OpenVMM is terminated first. Each target
 must be an absolute, canonical path; `/`, `/etc`, `/run`, and `/run/nvx`, and
 the `/etc/machine-id`, `/etc/resolv.conf`, `/proc`, `/sys`, `/dev`,
 `/.nvx-agent`, and `/run/nvx/time` trees, are reserved for the container
@@ -1228,9 +1392,9 @@ runtime, which replaces `/etc/machine-id` with the workload's machine ID, keeps
 `/run/nvx`, and binds its time state over `/run/nvx/time`.
 The guest refuses a target whose path crosses a symbolic link in a container
 layer, a target that a container layer holds as another kind of file than the
-share's, and overlapping targets, and a one-shot guest a repeated child. Any
-validation or mount failure aborts a one-shot sandbox with status 125, and
-fails a managed `start`, instead of starting the workload without its shares.
+share's, and overlapping targets. Any validation or mount failure fails a
+`run` or a managed `start`, instead of starting the workload without its
+shares.
 
 An `rw` share supports the symbolic links that package managers and
 language toolchains create; see
@@ -1244,13 +1408,33 @@ inside a writable part of a share. On Windows, it refuses a path that only a
 verbatim `\\?\` path names, such as that of a directory whose name ends in a
 period or a space, which the path without the prefix would not name. The
 shares' children follow their resolved host paths. A managed sandbox stores
-the plan in its configuration, in format 8, and each `start` checks it again,
-as `run` does once it has verified the distro layer: it refuses a host path
-that no longer holds a directory or regular file as recorded, a recorded path
-whose file identity changed, and shares whose host paths came to overlap, such
-as through a hard link or a bind mount. NVX no longer reads configurations of
-formats 2 to 6, which recorded the shares as requested; deprovision such a
-sandbox and provision it again.
+the plan, with those identities beside it, in its typed configuration, in
+format 10. Each `start` checks it again, as `run` does once it has verified the
+distro layer: it refuses a host path that no longer holds a directory or
+regular file as recorded, a recorded path whose file identity changed, and
+shares whose host paths came to overlap, such as through a hard link or a bind
+mount. NVX no longer reads earlier configuration formats, including those that
+recorded the shares as requested, nor a configuration that earlier builds wrote
+without those identities beside the plan; deprovision such a sandbox and
+provision it again.
+
+A share must not reach the sandbox's own files, which the workload could
+otherwise read or change: `provision` refuses a share whose resolved host path
+equals, contains, or lies inside the sandbox's state directory, its image, its
+scratch image, or the OpenVMM, kernel, or initramfs of the artifact root, or
+the OpenVMM that `NVX_OPENVMM` names, before it records the sandbox, and
+`start` refuses one again before it launches the VM. The `start` of a restored
+sandbox also refuses a share that reaches its snapshot store, whose files the
+view of each restore links, before it takes the snapshot's lock.
+`start` resolves the recorded host paths again, so a share that came to reach
+one of these files through a link since `provision` is refused too. A
+`provision` that finds no artifact root leaves the artifacts to `start`. A
+`run`, which has no state directory, refuses a share that reaches any of the
+others, or the temporary VM directory in which it would launch its VM, before
+it launches that VM. Only
+resolved paths are compared, so don't share a directory that holds a link
+through which the host reaches one of these files, nor a hard link or bind
+mount of one.
 
 #### Access policy
 
@@ -1276,9 +1460,9 @@ or link reaches the share:
   link`), so the link cannot make the file writable.
 
 Each path must exist inside the share's host directory, and is attributed to
-a share like `--mount-deny`. `sandbox` resolves it once, when it plans the
-share, so it may cross a symbolic link or junction to a path inside the same
-directory; `run` passes it to OpenVMM, which refuses a path that crosses one.
+a share like `--mount-deny`. `sandbox` and `run` resolve it once, when they
+plan the shares, so it may cross a symbolic link or junction to a path inside
+the same directory.
 Its names may contain spaces, but not begin or end with one, nor contain
 other whitespace, colons, or backslashes.
 Allowed paths follow the share's write policy: without `--mount-write`, an
@@ -1440,33 +1624,14 @@ relays the workload's TCP connections to that port whatever they carry, so the
 proxy decides what passes. The port can't be 53: OpenVMM answers DNS at the
 gateway's port 53, over TCP too, before it relays a connection to a proxy, so
 the proxy would receive nothing and the workload would reach the host's
-resolver instead. NVX gives the workload no proxy settings: pass the proxy's
-URL as the workload expects it, such as
+resolver instead. NVX gives the workloads of a cold boot no proxy settings:
+pass the proxy's URL as the workload expects it, such as
 `--inherit-default-environment --environment HTTPS_PROXY=http://10.0.0.1:3128`
-on a managed `exec`. The plan of the NVX Rust API reports the URL as the guest
-sees it, `SCHEME://GATEWAY:PORT`, or `GATEWAY:PORT` for a proxy without a
-scheme, as `--network-proxy` names it.
-
-Earlier releases passed the network options to OpenVMM. The planner now
-refuses, before launch:
-
-- a proxy with egress allowed, with egress rules, with `--network-ingress
-  allow`, with `--host-loopback allow` or without `--host-loopback`, with
-  forwards, or on port 53, which OpenVMM accepted;
-- UDP forwards with egress denied by default, or with a deny rule that covers
-  the guest network, which OpenVMM accepted but whose replies its egress policy
-  dropped;
-- `--host-loopback allow` with a `/30` guest network, which OpenVMM accepted;
-- a network option without `--net`, a malformed `--net`, rule, forward, or
-  proxy, and a proxy that is not at the gateway, which OpenVMM refused as it
-  started.
-
-A policy with `--network-egress deny` and `--host-loopback deny`, and no allow
-rules, `--network-ingress allow`, or `--network-proxy`, now attaches no network
-device, where OpenVMM attached one that carried nothing. `start` refuses a
-sandbox that an earlier release provisioned, whose configuration records the
-network options rather than the typed policy; deprovision it and provision it
-again.
+on a managed `exec`. The guest of a restore whose own network policy is
+proxy-only gives its workloads the proxy in their default environment instead,
+as [`snapshot restore`](usage.md#snapshot-restore) describes. The plan of the
+NVX Rust API reports the URL as the guest sees it, `SCHEME://GATEWAY:PORT`, or
+`GATEWAY:PORT` for a proxy without a scheme, as `--network-proxy` names it.
 
 The `sandbox-proxy-only` scenario of `test-microvm --backend BACKEND` is the
 acceptance for proxy-only networking. Like the
@@ -1525,9 +1690,8 @@ absence, and the distro policy that accepted it. It records the layer at its
 resolved path, so for a layer given through a link to another name, it also
 verifies the manifest beside the link's target. `start` checks the binding
 from metadata alone, without reading the layer again, and refuses a layer or
-manifest that was replaced, modified, added, or removed since `provision`, and a
-configuration without a binding, as older releases wrote; deprovision such a
-sandbox and provision it again. `provision` and `start` refuse a manifest path
+manifest that was replaced, modified, added, or removed since `provision`.
+`provision` and `start` refuse a manifest path
 that they cannot look up, as through a link loop, rather than take it for no
 manifest. Keep provisioned layers and their manifests read-only, and never
 rewrite them in place.
@@ -1548,27 +1712,15 @@ it runs, a second sandbox, or a `run`, on the same image fails with
 the device and inode number, which a file that is created once the image is
 removed can take again: such a replacement, of the same length, is not refused.
 A sandbox whose upper is in RAM has no scratch image to bind or claim.
-`run` and `start` hand OpenVMM the files that their checks opened, rather than
-paths that something could replace meanwhile. On Linux, OpenVMM inherits their
-descriptors, and its command line names them `/proc/self/fd/N`, as the command
-that `run` prints shows; on Windows, its command line names them by their final
-paths, `\\?\` paths that go through no link, and the checked files keep the
-images from being replaced, renamed, or deleted, until the guest is ready for
-`start`, and until OpenVMM exits for `run`. OpenVMM inherits the checked files
-too, so that its copies keep the images in place even if `run` or `start` ends
-before OpenVMM has opened them, as when it crashes, until OpenVMM exits; the
-sandbox's next transition ends the OpenVMM of such a `start`.
-There, a final path with a comma, semicolon, or unbalanced brackets, or ending
-in `.vhd`, `.vhdx`, `.vmgs`, or `.iso`, which OpenVMM could not attach as a raw
-image, fails the launch. Images are attached raw: stage an image in a container
+`run` binds the scratch image itself, and checks the binding and claims the
+image as `start` does. `run` and `start` then hand OpenVMM the paths of the
+images that they checked, which OpenVMM opens itself: keep the images in place
+while the VM uses them. Images are attached raw: stage an image in a container
 format, such as a VHD, as a raw file first.
 
 `provision` records the guest memory of `--memory-mib`, which it takes from 1
-to 17592186044415 MiB, as `run` does. `provision` in `nvx.py` and in earlier
-releases of `nvx-rs` recorded any integer, such as 0 or -1, whose RAM OpenVMM
-then refused at every start. `start` refuses a configuration that records
-memory outside that range before it launches OpenVMM; deprovision such a
-sandbox and provision it again.
+to 17592186044415 MiB, as `run` does, and `start` refuses a configuration that
+records memory outside that range before it launches OpenVMM.
 
 Lifecycle transitions fail closed: `start` rejects a sandbox that is already
 running; `exec` and `stop` require a live OpenVMM process; and `deprovision`
@@ -1585,7 +1737,8 @@ because the runtime state is stale, while `start` launches OpenVMM again and
 
 `start` records the runtime identity of the artifacts with the VM: the SHA-256
 digests of OpenVMM, the kernel, and the Alpine initramfs, as the install
-metadata lists them, without hashing an artifact. A release lists them in its
+metadata lists them, without hashing an artifact, and the versions of the
+CLI's contracts with its guests. A release lists the digests in its
 `SHA256SUMS`, and a checkout in the build provenance that `nvx.py` writes to
 `build/` with each artifact that it builds, and that `nvx-rs download`
 installs. The transitions drive only a VM that artifacts of the same identity
@@ -1596,13 +1749,9 @@ terminates its OpenVMM without a guest shutdown, waits up to `--timeout`
 seconds for it to exit, and warns that it did. A `stop` that cannot determine
 the OpenVMM process, whose terminated OpenVMM does not exit in time, or whose
 wait Ctrl-C ends, keeps the sandbox's runtime record, and the next `stop`
-retries. The store reads
-runtime records of its own format only, so
-stop every running sandbox with the NVX version that started it before you
-switch versions: a version with another format fails every transition of such
-a sandbox with a message that names the format of its record. An OpenVMM that
-an interrupted `start` of an earlier version left behind has no record, and
-that version asked for it to be ended by hand: end it before the switch too.
+retries. The store's records belong to the version of NVX that wrote them, so
+stop and deprovision each sandbox with the version that started it before you
+switch versions, as [Upgrades](#upgrades) says.
 
 `provision`, `start`, `stop`, and `deprovision` hold the store's lock,
 `sandbox.lock` in the state directory, until they return, so the transitions
@@ -1610,13 +1759,21 @@ of one sandbox take effect one at a time: each waits up to `--timeout` seconds
 for any other in progress, and of two overlapping starts, exactly one launches
 OpenVMM while the other then fails because the sandbox is already running.
 `exec` holds the lock only while it finds the running OpenVMM, so a long
-workload does not delay `stop`. A provisioned state directory keeps
-`sandbox.lock`, and `deprovision` removes it with NVX's other files. A
+workload does not delay `stop`. One `exec` at a time runs in a sandbox, across
+processes: an `exec` takes the sandbox's exec lock, `exec.lock` in the state
+directory, before it finds the running OpenVMM, and holds it until the command
+ends: once its workload has ended, or, after Ctrl-C or once `--timeout` has
+passed, without waiting for the guest to end the workload. An `exec` that
+finds it held tries again until `--wait` seconds, 60 by default, have passed,
+and then fails with `sandbox-busy`. `stop` takes no exec
+lock, so it proceeds while a workload runs. A provisioned state directory keeps
+`sandbox.lock`, and `exec.lock` from its first `exec` on, and `deprovision`
+removes them with NVX's other files. A
 transition that leaves a state directory without `config.json`, such as one of
 a sandbox that was never provisioned, removes `sandbox.lock` as it releases the
-lock. These are the rules of the sandbox store, which other orchestrators of
-sandboxes share through `nvx-rs`. On NFS, where a removed file that is still
-open, such as a lock file, stays as `.nfs*` until its last handle closes, and
+lock. These are the rules of the CLI's own store of a sandbox. On NFS, where a
+removed file that is still open, such as a lock file, stays as `.nfs*` until
+its last handle closes, and
 on Windows file systems without POSIX deletion such as ReFS, where a removed
 lock file stays under its name, such files keep the emptied directory, so
 `deprovision` then releases the lock before it removes the directory. A
@@ -1653,26 +1810,28 @@ array requests an empty environment. `--inherit-default-environment` layers
 the supplied entries over that default environment instead of replacing it,
 each entry replacing the default variable of the same name; without supplied
 entries it has no effect. Inline values are visible in host process arguments
-and should not be used for secrets. These options apply only to managed
-`sandbox exec`; one-shot execution rejects them. Each managed exec enters
-private mount, PID, and UTS namespaces of its own, as the first process of its
-PID namespace, through the guest agent's execution entry, which also makes
-every mount but `/dev` and its devpts instance `nodev`. The workload sees one
-machine ID for the life of the VM. On `stop`, the guest agent unmounts the
-mappings of the live shares, and the guest then unmounts the host export,
-overlay, layers, and upper in dependency order before the VM powers off, as
-it unmounts the shares when a one-shot workload exits. The legacy
-operation-less `sandbox`
-form is `sandbox run`; it remains one-shot and rejects `--state-dir` or any
-request to retain VM state.
+and should not be used for secrets. These options apply to `sandbox exec`,
+and to `sandbox run`, which executes its one workload as `exec` does. nvx-init,
+the VM's init, runs each managed exec as a plain process in a process group of
+its own, in the VM's root and in nvx-init's mount, PID, and UTS namespaces and
+cgroup: the VM is the
+boundary of its workloads. Every mount of the root but `/dev` and its devpts
+instance is `nodev`. The workload sees one machine ID for the life of the VM.
+On `stop`, nvx-init syncs the file systems and powers the VM off with them
+mounted, and the next `start` replays the journal of the scratch file system.
+The operation-less `sandbox` form is `sandbox run`, which keeps no state and
+rejects `--state-dir`.
 
 Environment files are limited to 1 MiB of UTF-8 JSON. Environments contain at
 most 256 unique, nonempty names. Each `KEY=VALUE` entry and working-directory
 path is limited to 4096 UTF-8 bytes; the combined execution request must also
-fit the existing 64 KiB control-payload bound. A managed `exec` forwards at
-most 1 MiB of combined standard output and standard error; the guest agent
-kills a workload that writes more, and `exec` exits with status 125 and reports
-the `output-limit` category.
+fit the existing 64 KiB control-payload bound. A managed `exec` streams its
+standard input to the workload, which sees it end when the command's own
+input ends, and the workload's standard output and standard error back as
+they arrive, without a limit on their size; the workload must end within
+`--timeout`, which bounds the whole exchange, or `exec` fails with
+`timed-out`. Ctrl-C asks the guest to end the workload, and `exec` exits with
+status 130 without waiting for it, while the sandbox runs on.
 
 The `managed-exec-config` scenario of `test-microvm --backend BACKEND` is the
 authoritative acceptance for these public options. It invokes
@@ -1707,15 +1866,16 @@ control initramfs, Ubuntu EROFS layer, and fresh copies of the same scratch
 template, so it has the same artifact requirements. It checks that:
 
 - `provision` rejects a root `--workload-user` before it creates any state, and
-  the guest refuses an identity that the Ubuntu image lacks before a one-shot
-  workload starts, and in a managed `start`, which then fails with
+  the guest refuses an identity that the Ubuntu image lacks before any
+  workload starts, in a run and in a managed `start`, which both then fail with
   `guest-exit status 125` from the outcome report that OpenVMM must publish
-  before it exits, and leaves only `config.json`, `sandbox.lock`,
+  before it exits, and the start leaves only `config.json`, `sandbox.lock`,
   `openvmm.log`, and that `outcome.json`, without a runtime record,
   capability, control socket, report staging file, or OpenVMM process;
 - every operation fails on a state directory that was never provisioned, a
   repeated `provision` leaves the configuration unchanged, and `exec` and
-  `stop` fail before `start`;
+  `stop` fail before `start`, though the `exec` leaves the `exec.lock` that the
+  state directory keeps from then on;
 - a repeated `start` and a `deprovision` of a running sandbox fail without
   changing its runtime record, capability, or OpenVMM process, and the
   sandbox keeps serving requests;
@@ -1725,13 +1885,12 @@ template, so it has the same artifact requirements. It checks that:
   is on scratch;
 - `/sbin/nvx-sandbox-smoke` passes its security profile checks in a sandbox
   provisioned with `--hostname`, after earlier requests;
-- a request that writes more than the 1 MiB output bound exits with status
-  125 and an `output-limit` outcome report after the host has received more
-  than 1 MiB less one 32 KiB read chunk and at most 1 MiB, and a request whose
+- a request that writes 2 MiB streams all of it, with no limit on its output,
+  and exits with status 0 and an `exit` outcome report, and a request whose
   `--outcome-report` path exists fails before its workload runs and leaves the
   file intact;
 - `stop` ends OpenVMM and its control socket or pipe, leaves only
-  `config.json`, `sandbox.lock`, `openvmm.log`, and a successful
+  `config.json`, `sandbox.lock`, `exec.lock`, `openvmm.log`, and a successful
   `outcome.json`, and leaves a cleanly unmounted scratch file system, after
   which `exec` and `stop` fail;
 - two overlapping `start` calls then launch a single OpenVMM process: one
@@ -1744,12 +1903,13 @@ template, so it has the same artifact requirements. It checks that:
   changing the runtime record or OpenVMM process, while the checkout's CLI
   still serves requests. Its `stop` then terminates OpenVMM without a guest
   shutdown and warns that it did, and leaves only `config.json`,
-  `sandbox.lock`, and `openvmm.log`, without a control socket or pipe, after
-  which its `stop` finds the sandbox not running, and the sandbox starts again;
+  `sandbox.lock`, `exec.lock`, and `openvmm.log`, without a control socket or
+  pipe, after which its `stop` finds the sandbox not running, and the sandbox
+  starts again;
 - after OpenVMM exits without a `stop`, `exec` reports the stale runtime state
   once and clears it, after which `stop` finds the sandbox not running, and the
-  state directory holds only `config.json`, `sandbox.lock`, and `openvmm.log`,
-  without a control socket or pipe; and
+  state directory holds only `config.json`, `sandbox.lock`, `exec.lock`, and
+  `openvmm.log`, without a control socket or pipe; and
 - `deprovision` removes only NVX's files: it fails and keeps a foreign file in
   the state directory, and once that file is gone, it removes the directory,
   which a later `exec` does not recreate.
@@ -1762,21 +1922,42 @@ fixture for recovery only if that cleanup fails. Its evidence, written to the
 output directory with a `sandbox-lifecycle-` prefix, holds bounded command
 observations (arguments, statuses, output sizes, and state-directory entries),
 the runtime record, the OpenVMM logs, the VM-level and exec outcome reports, the
-guest probe's transcript, and the console of the refused one-shot run, each
-limited to its last 64 KiB. The command observations hold no workload output,
+guest probe's transcript, and the output of the refused run, each limited to
+its last 64 KiB. The command observations hold no workload output,
 and no evidence holds the control capability.
 
 Decoder, helper, and direct control-session tests remain useful supplemental
 coverage for protocol boundaries and guest implementation details. They do not
 replace or establish support through the public `nvx-rs sandbox` interface.
 
-`run --outcome-report PATH` and one-shot `sandbox run --outcome-report PATH`
-forward OpenVMM's bounded local JSON report. Managed `sandbox exec` writes only
-the operation, bounded result category, numeric status, and an opaque operation
-ID to its requested report; stdout, stderr, arguments, environment values, and
-credentials remain excluded. `sandbox stop` waits for OpenVMM teardown and
-retains the latest VM-level report as `outcome.json` in the state directory.
+`run --outcome-report PATH` and `sandbox run --outcome-report PATH` forward
+OpenVMM's bounded local JSON report, with the permissions that OpenVMM gave it:
+that of the VM's stop, for `sandbox run`, whose exit status is its workload's.
+Managed `sandbox exec` writes only the operation, bounded result category,
+numeric status, and an opaque operation ID to its requested report; stdout,
+stderr, arguments, environment values, and credentials remain excluded.
+`sandbox stop` waits for OpenVMM teardown and retains the latest VM-level report
+as `outcome.json` in the state directory.
 On Linux, NVX starts OpenVMM with the caller's umask without the owner's bits,
 so OpenVMM's reports keep their owner's read and write permissions whatever
 that umask, unless their directory has a default POSIX ACL, which Linux
 applies instead of the umask. Neither OpenVMM nor NVX uploads these files.
+
+## Upgrades
+
+NVX keeps no state from one version to the next, and migrates none: each
+version starts with fresh state. A version keeps the state directories of its
+sandboxes and its snapshot stores in formats of its own, and may refuse those
+that another version wrote, as it refuses a sandbox's configuration of another
+format with `format-unsupported`, or fail to read their records at all. A
+snapshot restores only under the runtime identity that captured it, which
+names the OpenVMM, kernel, and Alpine initramfs of its artifacts and the
+versions of the CLI's contracts with its guests, so a restore refuses it once
+an upgrade has installed new artifacts. To upgrade:
+
+1. With the version that you leave, stop and deprovision each sandbox, which
+   also ends the VM of a start that was interrupted.
+2. Switch to the new version of `nvx-rs` and its artifacts.
+3. Capture the snapshots again, into new stores, since a store never replaces
+   a snapshot's name, and provision or restore the sandboxes again. No command
+   removes a snapshot: remove an old store once no sandbox restores from it.

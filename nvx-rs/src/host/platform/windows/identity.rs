@@ -1,28 +1,45 @@
 //! The identities of files and directories, whether a file is deleted, and the open directories
 //! through which operations name their entries.
 
+#[cfg(feature = "cli")]
 use std::ffi::OsStr;
-use std::fs::{self, OpenOptions};
+use std::fs;
+#[cfg(any(test, feature = "cli"))]
+use std::fs::OpenOptions;
 use std::io;
+#[cfg(feature = "cli")]
+use std::mem;
+#[cfg(feature = "cli")]
 use std::os::windows::ffi::OsStrExt;
+#[cfg(any(test, feature = "cli"))]
 use std::os::windows::fs::OpenOptionsExt;
-use std::os::windows::io::{AsRawHandle, OwnedHandle};
+#[cfg(any(test, feature = "cli"))]
+use std::os::windows::io::AsRawHandle;
+#[cfg(feature = "cli")]
+use std::os::windows::io::OwnedHandle;
+#[cfg(any(test, feature = "cli"))]
 use std::path::Path;
-use std::{mem, ptr};
+#[cfg(feature = "cli")]
+use std::ptr;
 
-use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, HANDLE};
+#[cfg(feature = "cli")]
+use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
+use windows_sys::Win32::Foundation::HANDLE;
+#[cfg(any(test, feature = "cli"))]
+use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, GetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
 };
 
+#[cfg(feature = "cli")]
 use super::{owned, raw};
 
 /// Returns the volume serial number and 64-bit file index of a file or directory, which a file
 /// system such as ReFS does not keep unique.
 ///
 /// The object is opened without access rights, which succeeds even while OpenVMM holds it open.
-pub fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
+#[cfg(any(test, feature = "cli"))]
+pub(crate) fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
     let file = OpenOptions::new()
         .access_mode(0)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
@@ -34,6 +51,7 @@ pub fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
 /// following its links, as [`opened_file_id`] gives it.
 ///
 /// The object is opened without access rights, which succeeds even while OpenVMM holds it open.
+#[cfg(feature = "cli")]
 pub(crate) fn file_id(path: &Path) -> io::Result<(u64, u128)> {
     let file = OpenOptions::new()
         .access_mode(0)
@@ -49,6 +67,7 @@ pub(crate) fn file_id(path: &Path) -> io::Result<(u64, u128)> {
 ///
 /// Win32 reports a pending deletion as a denied access, so the file is opened with the native API,
 /// whose status tells the two apart, relative to its directory, which spares a native path.
+#[cfg(feature = "cli")]
 pub(crate) fn is_deleted(path: &Path) -> bool {
     use windows_sys::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT;
     use windows_sys::Win32::Foundation::{STATUS_DELETE_PENDING, STATUS_OBJECT_NAME_NOT_FOUND};
@@ -77,8 +96,10 @@ pub(crate) fn is_deleted(path: &Path) -> bool {
 ///
 /// They use the native API, whose status tells a file whose deletion is pending from one whose
 /// access control list refuses the open, which Win32 both reports as a denied access.
+#[cfg(feature = "cli")]
 pub(crate) struct Directory(fs::File);
 
+#[cfg(feature = "cli")]
 impl Directory {
     /// Opens the directory `path`, following its links, without access rights, which the opens of
     /// its entries do not need.
@@ -108,89 +129,6 @@ impl Directory {
             Err(STATUS_OBJECT_NAME_NOT_FOUND) => Ok(None),
             Err(status) => Err(status_error(status)),
         }
-    }
-
-    /// Opens its entry `name` for reading, not following a link or other reparse point, or
-    /// returns `None` if it has no such entry, or one whose deletion is pending, which a file
-    /// system without POSIX deletion keeps under its name until its last handle closes, and which
-    /// is removed. The caller checks what the entry is.
-    pub(crate) fn open_file(&self, name: &str) -> io::Result<Option<fs::File>> {
-        use windows_sys::Wdk::Storage::FileSystem::{
-            FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
-        };
-        use windows_sys::Win32::Foundation::{STATUS_DELETE_PENDING, STATUS_OBJECT_NAME_NOT_FOUND};
-        use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
-
-        match self.open_entry(
-            OsStr::new(name),
-            FILE_GENERIC_READ,
-            FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
-        ) {
-            Ok(entry) => Ok(Some(fs::File::from(entry))),
-            Err(STATUS_OBJECT_NAME_NOT_FOUND | STATUS_DELETE_PENDING) => Ok(None),
-            Err(status) => Err(status_error(status)),
-        }
-    }
-
-    /// Opens the directory `path` without following a link or other reparse point at its own
-    /// name, though those on the way to it are followed, and without access rights, which the
-    /// opens of its entries do not need, or returns `None` if it does not exist. Fails if it is a
-    /// link, a junction or another reparse point, or not a directory.
-    pub(crate) fn search(path: &Path) -> io::Result<Option<Self>> {
-        let opened = OpenOptions::new()
-            .access_mode(0)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path);
-        let dir = match opened {
-            Ok(dir) => dir,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let attributes = handle_information(dir.as_raw_handle() as HANDLE)?.dwFileAttributes;
-        if attributes & FILE_ATTRIBUTE_DIRECTORY == 0
-            || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-        {
-            return Err(io::Error::other(format!(
-                "{} is a link, or not a directory",
-                path.display()
-            )));
-        }
-        Ok(Some(Self(dir)))
-    }
-
-    /// Opens its subdirectory `name` as [`open_dir`](Self::open_dir) does: Windows needs no right
-    /// to list a directory to name its entries.
-    pub(crate) fn search_dir(&self, name: &str) -> io::Result<Option<Self>> {
-        self.open_dir(name)
-    }
-
-    /// Opens its subdirectory `name`, not following a link or other reparse point, or returns
-    /// `None` if it has no such entry, or one whose deletion is pending. Fails if the entry is a
-    /// link, a junction or another reparse point, or not a directory.
-    pub(crate) fn open_dir(&self, name: &str) -> io::Result<Option<Self>> {
-        use windows_sys::Wdk::Storage::FileSystem::{
-            FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
-        };
-        use windows_sys::Win32::Foundation::{
-            STATUS_DELETE_PENDING, STATUS_NOT_A_DIRECTORY, STATUS_OBJECT_NAME_NOT_FOUND,
-        };
-        use windows_sys::Win32::Storage::FileSystem::{FILE_READ_ATTRIBUTES, SYNCHRONIZE};
-
-        let refused = || io::Error::other(format!("{name} is a link, or not a directory"));
-        let entry = match self.open_entry(
-            OsStr::new(name),
-            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
-        ) {
-            Ok(entry) => entry,
-            Err(STATUS_OBJECT_NAME_NOT_FOUND | STATUS_DELETE_PENDING) => return Ok(None),
-            Err(STATUS_NOT_A_DIRECTORY) => return Err(refused()),
-            Err(status) => return Err(status_error(status)),
-        };
-        if handle_information(raw(&entry))?.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(refused());
-        }
-        Ok(Some(Self(fs::File::from(entry))))
     }
 
     /// Removes its file `name`, if it has one. A file whose deletion is pending already, which a
@@ -280,6 +218,7 @@ impl Directory {
 /// Deletes the file that `file`, opened with the right to delete it, holds: with POSIX semantics
 /// where the file system supports them, so that its name goes at once, even while other handles
 /// hold it, and otherwise once the last handle to it closes.
+#[cfg(feature = "cli")]
 fn delete_opened(file: &OwnedHandle) -> io::Result<()> {
     use windows_sys::Win32::Foundation::{ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -338,6 +277,7 @@ pub(super) fn status_error(status: windows_sys::Win32::Foundation::NTSTATUS) -> 
 
 /// Returns the volume serial number and 64-bit file index of the file that `file` holds open,
 /// which a file system such as ReFS does not keep unique: [`opened_file_id`] tells files apart.
+#[cfg(feature = "cli")]
 pub(crate) fn opened_file_identity(file: &fs::File) -> io::Result<(u64, u64)> {
     handle_identity(file.as_raw_handle() as HANDLE)
 }
@@ -351,14 +291,8 @@ pub(crate) fn opened_file_id(file: &fs::File) -> io::Result<(u64, u128)> {
     Ok((seal.device(), seal.file_id()))
 }
 
-/// Returns the number of names, its hard links, of the file that `file` holds open.
-pub(crate) fn link_count(file: &fs::File) -> io::Result<u64> {
-    Ok(u64::from(
-        handle_information(file.as_raw_handle() as HANDLE)?.nNumberOfLinks,
-    ))
-}
-
 /// Returns the volume serial number and 64-bit file index of the file that `handle` holds open.
+#[cfg(any(test, feature = "cli"))]
 fn handle_identity(handle: HANDLE) -> io::Result<(u64, u64)> {
     let information = handle_information(handle)?;
     Ok((
@@ -369,8 +303,7 @@ fn handle_identity(handle: HANDLE) -> io::Result<(u64, u64)> {
 
 /// Returns the information of the file that `handle` holds open.
 pub(super) fn handle_information(handle: HANDLE) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
-    // SAFETY: BY_HANDLE_FILE_INFORMATION is plain data for which all-zero bytes are valid.
-    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: the caller passes an open handle, and the output pointer is valid.
     if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
         return Err(io::Error::last_os_error());

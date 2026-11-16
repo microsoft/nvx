@@ -12,7 +12,7 @@ use super::events::{CheckId, DETAIL_MAX, ViolationCode, escape_text};
 use super::state::{CheckState, CheckStatus, TimeState};
 use super::system::{
     DAEMON_NAME, DAEMON_PID_PATH, DEFAULT_STALL_TIMEOUT_S, MsrDescriptor, Runtime, msr_error,
-    rates_load, state_apply, state_load,
+    rates_load, state_apply_until, state_load,
 };
 use crate::guest::status::CommandError;
 use crate::guest::sys::x86::cpuid::{self, Register};
@@ -42,12 +42,13 @@ const HYPERV_VENDOR: [u32; 3] = [
 const HYPERV_MAXIMUM_LEAF: u32 = cpuid::LEAF_HYPERVISOR + 5;
 /// The interface signature of Hyper-V's CPUID leaf 0x40000001, "Hv#1".
 const HYPERV_INTERFACE: u32 = u32::from_le_bytes(*b"Hv#1");
+/// The version of OpenVMM's time ABI that the guest speaks: its clocks and timers, and their
+/// repair after a restore. It must match `TIME_ABI_VERSION` in OpenVMM's
+/// `vmm_core/virt/src/time_abi/mod.rs`, which the ignored test `tests/openvmm_vectors.rs` checks.
+const TIME_ABI_VERSION: u32 = 1;
 /// The build of leaf 0x40000002, OpenVMM's NVX build: "NVX", then the time ABI version as the
 /// major version in the upper half of EBX, version 2.0.
-const HYPERV_BUILD: [u32; 2] = [
-    u32::from_le_bytes(*b"NVX\0"),
-    (crate::contract::TIME_ABI_VERSION as u32) << 16,
-];
+const HYPERV_BUILD: [u32; 2] = [u32::from_le_bytes(*b"NVX\0"), TIME_ABI_VERSION << 16];
 /// The partition privileges of leaf 0x40000003's EAX: the hypercall, VP-index, frequency, and
 /// TSC invariant-control MSRs.
 const HYPERV_PRIVILEGES: u32 = (1 << cpuid::HYPERV_EAX_HYPERCALL)
@@ -316,7 +317,7 @@ pub(crate) fn record_check(
     } else {
         CheckStatus::Ok
     };
-    state_apply(|state| {
+    state_apply_until(runtime.deadline, |state| {
         let generation = if phase == Phase::Boot {
             0
         } else {
@@ -926,14 +927,28 @@ fn compare_cpu_rate(runtime: &Runtime<'_>, checks: &mut Checks) {
 
 /// Runs checks that must precede snapshot capture.
 pub(crate) fn run_capture_checks(runtime: &Runtime<'_>, checks: &mut Checks) {
+    run_capture_checks_until(runtime, checks, None).expect("unbounded checks cannot time out");
+}
+
+/// Runs capture checks with one explicit pre-request deadline between their operations.
+pub(crate) fn run_capture_checks_until(
+    runtime: &Runtime<'_>,
+    checks: &mut Checks,
+    deadline: Option<Instant>,
+) -> Result<(), Errno> {
+    sys::FileLock::check_deadline(deadline)?;
     if let Ok((tsc, lapic)) = rates_load() {
         checks.tsc_hz = tsc;
         checks.lapic_hz = lapic;
     }
     // Each failure counts a violation in the state before C10 reads the count.
+    sys::FileLock::check_deadline(deadline)?;
     checks.record(runtime, check_clocksource());
+    sys::FileLock::check_deadline(deadline)?;
     checks.record(runtime, check_timer_list(checks.online, Duration::ZERO));
+    sys::FileLock::check_deadline(deadline)?;
     checks.record(runtime, check_daemon());
+    sys::FileLock::check_deadline(deadline)
 }
 
 /// Runs restore checks, including checks on newly online CPUs.
@@ -960,7 +975,16 @@ pub(crate) fn run_restore_checks(runtime: &Runtime<'_>, checks: &mut Checks, new
 
 /// Waits for boot-only or all persisted checks and returns completion state.
 pub(crate) fn wait_for_checks(boot_only: bool) -> (TimeState, bool) {
-    let deadline = Instant::now() + STATUS_WAIT;
+    wait_for_checks_until(boot_only, None)
+}
+
+/// Waits no later than the caller deadline or the existing boot-check wait limit.
+pub(crate) fn wait_for_checks_until(
+    boot_only: bool,
+    deadline: Option<Instant>,
+) -> (TimeState, bool) {
+    let limit = Instant::now() + STATUS_WAIT;
+    let deadline = deadline.map_or(limit, |deadline| deadline.min(limit));
     loop {
         let state = state_load().unwrap_or_default();
         if !state.pending(boot_only) {
@@ -969,7 +993,7 @@ pub(crate) fn wait_for_checks(boot_only: bool) -> (TimeState, bool) {
         if Instant::now() >= deadline {
             return (state, false);
         }
-        thread::sleep(STATUS_POLL);
+        thread::sleep(STATUS_POLL.min(deadline.saturating_duration_since(Instant::now())));
     }
 }
 

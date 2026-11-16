@@ -26,7 +26,8 @@ scope, and fix repository defects without committing or pushing. Commands use
    open issues that name them. Act on the classification:
    - `superseded`: report the replacement run and stop, unless the cancelled
      run's cleanup failed.
-   - `merge-group-cancelled`: check the pull request's queue outcome first.
+   - `merge-group-cancelled`: check the pull request's queue outcome first; see
+     [Superseded merge groups](../../../doc/ci.md#superseded-merge-groups).
    - `dev-push-cancelled`: `dev` pushes queue rather than replace each other,
      so investigate it.
    - `benchmark-host-changed`: the runner is no longer the host of its series'
@@ -47,14 +48,25 @@ scope, and fix repository defects without committing or pushing. Commands use
    a decisive log line and the owning code path support, and classify it as a
    product, test, workflow, dependency or toolchain, transient infrastructure,
    or missing-prerequisite failure. Change no code for an external or transient
-   failure unless the repository has a concrete robustness defect.
+   failure unless the repository has a concrete robustness defect. A failed
+   `OpenVMM CI of the pinned revision` job (`openvmm-ci`) means that OpenVMM's
+   own CI has not passed a job that NVX requires for the pinned revision, as its
+   annotations say, unless it could not read OpenVMM's runs;
+   `python3 scripts/nvx.py check-openvmm-ci` checks the pin again. Classify it
+   as OpenVMM's CI result, not an NVX defect: rerun a failed OpenVMM job in
+   OpenVMM, then the `openvmm-ci` job once OpenVMM's CI has passed the pin, as
+   [OpenVMM CI](../../../doc/ci.md#openvmm-ci) describes.
 4. Reproduce the earliest actionable failure with the narrowest equivalent
    command, on the run's platform and backend:
    - quality and CLI failures: `python3 scripts/local_gates.py --run --only
      GATE --files PATH...`, with the paths that the run's change touched
      (`git diff --name-only BASE SHA`), since `--only` keeps only the gates
      that those paths select and fails for any other; or the failed step's
-     command;
+     command. A failed public-API check of
+     [check-nvx-rs](../../actions/check-nvx-rs/action.yml) prints how the
+     public API of `nvx` differs from its snapshots in `nvx-rs/public-api/`; a
+     deliberate change updates them with `python3 scripts/public_api.py
+     --update`;
    - boot, microVM, snapshot, guest-console, and benchmark acceptance failures:
      [nvx-run-microvm](../nvx-run-microvm/SKILL.md), after
      [nvx-prepare-host](../nvx-prepare-host/SKILL.md) selects a profile with

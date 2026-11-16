@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::host::cli::deadline::Deadline;
-use crate::host::store::{JOURNAL_NAME, RUNTIME_NAME, SandboxStore};
+
+mod launch;
+mod liveness;
+mod recovery;
 
 /// How long a test waits for a lock that it released to be free.
 ///
@@ -28,6 +31,13 @@ fn released(mut free: impl FnMut() -> bool) -> bool {
     true
 }
 
+/// Keeps process creation outside another thread's window of inheritable VMM handles.
+#[cfg(windows)]
+fn spawn_locked(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    let _lock = platform::inherit::lock_spawns();
+    command.spawn()
+}
+
 /// Makes `link` a junction to the directory `target`, which any user may create, with `cmd`'s
 /// `mklink /J`, quoting both paths, since `cmd` splits its arguments at commas and semicolons.
 ///
@@ -46,10 +56,7 @@ fn junction(link: &Path, target: &Path) {
             target.display()
         ))
         .stdout(Stdio::null());
-    let status = platform::inherit::spawn_command(&mut command)
-        .unwrap()
-        .wait()
-        .unwrap();
+    let status = spawn_locked(&mut command).unwrap().wait().unwrap();
     assert!(status.success(), "cannot link {}", link.display());
 }
 
@@ -66,10 +73,7 @@ fn allow_everyone(path: &Path, inheritance: &str) {
         .arg("/grant")
         .arg(format!("*S-1-1-0:{inheritance}(F)"))
         .stdout(Stdio::null());
-    let status = platform::inherit::spawn_command(&mut command)
-        .unwrap()
-        .wait()
-        .unwrap();
+    let status = spawn_locked(&mut command).unwrap().wait().unwrap();
     assert!(status.success(), "cannot share {}", path.display());
 }
 
@@ -364,34 +368,4 @@ fn lock_files_that_others_may_access_are_refused() {
     let expected = format!("the sandbox lock {} allows other users", path.display());
     let exit = state.lock(Deadline::after(10.0)).unwrap_err();
     assert_eq!(error(exit), (ErrorCode::Io, expected));
-}
-
-#[test]
-fn the_lock_and_the_files_are_those_of_the_sandbox_store_of_nvx() {
-    let (_directory, state) = state();
-    let store = SandboxStore::open(state.dir()).unwrap();
-    // Each lock excludes the other, so that the commands may move from one to the other.
-    let held = store.lock(None).unwrap();
-    assert_eq!(error(state.lock(Deadline::after(0.1)).unwrap_err()), busy());
-    drop(held);
-    let mut held = None;
-    assert!(released(|| {
-        held = state.lock(Deadline::after(0.0)).ok();
-        held.is_some()
-    }));
-    let deadline = Some(Instant::now() + Duration::from_millis(100));
-    let refused = store.lock(deadline).unwrap_err();
-    assert_eq!(refused.kind(), crate::ErrorKind::TimedOut, "{refused}");
-    drop(held);
-    // The commands find the store's other files where the store keeps them.
-    for (file, path) in [
-        (StateFile::Journal, state.dir().join(JOURNAL_NAME)),
-        (StateFile::Runtime, state.dir().join(RUNTIME_NAME)),
-        (StateFile::Capability, store.capability_path()),
-        (StateFile::Socket, store.socket_path()),
-        (StateFile::Log, store.log_path()),
-        (StateFile::Outcome, store.outcome_path()),
-    ] {
-        assert_eq!(state.path(file), path, "{file:?}");
-    }
 }

@@ -3,13 +3,12 @@
 //! boot and host, and the host's monotonic time.
 
 use std::io;
-use std::os::windows::io::{AsRawHandle, BorrowedHandle, OwnedHandle};
+use std::os::windows::io::OwnedHandle;
 use std::thread;
 use std::time::{Duration, Instant};
 use std::{mem, ptr};
 
 use windows_sys::Win32::Foundation::{
-    CompareObjectHandles, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle,
     ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_SUCCESS, FILETIME, HANDLE, WAIT_OBJECT_0,
     WAIT_TIMEOUT,
 };
@@ -23,7 +22,7 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::System::WindowsProgramming::QueryInterruptTimePrecise;
 
-use super::{last_error, open_handle, owned, raw, wide};
+use super::{last_error, open_handle, raw, wide};
 use crate::host::platform::{parse_host_id, unless_exited};
 
 /// Returns the process creation `FILETIME`, used with the PID as a stable identity.
@@ -116,6 +115,7 @@ pub(super) fn wait_step(left: Duration) -> (u32, Duration) {
 ///
 /// OpenVMM always runs as the calling user, so a process that denies access cannot be the
 /// sandbox's VM, even if it reuses the recorded process ID.
+#[cfg(any(test, feature = "cli"))]
 fn open_existing_process(pid: u32, access: u32) -> io::Result<Option<OwnedHandle>> {
     if let Some(process) = open_handle(pid, access) {
         return Ok(Some(process));
@@ -128,7 +128,8 @@ fn open_existing_process(pid: u32, access: u32) -> io::Result<Option<OwnedHandle
 
 /// Returns the creation time of a live process, `None` if the process no longer exists or
 /// belongs to another user, or an error if its state cannot be determined.
-pub fn process_start_time(pid: u32) -> io::Result<Option<u64>> {
+#[cfg(any(test, feature = "cli"))]
+pub(crate) fn process_start_time(pid: u32) -> io::Result<Option<u64>> {
     let Some(process) =
         open_existing_process(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE)?
     else {
@@ -159,6 +160,11 @@ impl ProcessHandle {
     /// Whether the process's exit wakes its waiters, which it always does on Windows.
     pub(crate) fn has_exit_event(&self) -> bool {
         true
+    }
+
+    /// Returns an independently owned, non-inheritable copy of the existing process handle.
+    pub(crate) fn exit_handle(&self) -> io::Result<Option<OwnedHandle>> {
+        self.process.try_clone().map(Some)
     }
 
     /// Waits until the process exits or `deadline` passes, and returns whether it exited.
@@ -213,73 +219,6 @@ impl ProcessHandle {
     /// keeps.
     pub(crate) fn bytes_read(&self, _pid: u32, _start_time: u64) -> io::Result<u64> {
         read_transfer(raw(&self.process))
-    }
-
-    /// Closes the handle of process `pid` that has the value of this process's handle `ours`,
-    /// which the process inherited from this one: a handle keeps its value in a child that
-    /// inherits it, and a child that never uses it, as a VMM never uses the guards of the checked
-    /// files that it inherits, keeps it there.
-    ///
-    /// The process loses no other handle: the handle is closed only once a copy of it is found to
-    /// hold the object of `ours`, so a process that did not inherit `ours` keeps every handle that
-    /// it has, and the close fails with [`io::ErrorKind::InvalidInput`], or as `DuplicateHandle`
-    /// fails for a value that names no handle of the process. A process that has exited has closed
-    /// its handles, so the close succeeds. Fails with [`io::ErrorKind::PermissionDenied`] through
-    /// a handle that may not duplicate the handles of the process, as one that [`open_process`]
-    /// returns: only that of [`LaunchedProcess::pin`] may.
-    ///
-    /// [`LaunchedProcess::pin`]: crate::host::platform::windows::LaunchedProcess::pin
-    pub(crate) fn close_inherited(&self, pid: u32, ours: BorrowedHandle<'_>) -> io::Result<()> {
-        let value = ours.as_raw_handle() as HANDLE;
-        let exited = || has_exited(&self.process);
-        let mut copy = ptr::null_mut();
-        // SAFETY: the value is looked up among the handles of the process alone, and the output
-        // pointer is valid.
-        let duplicated = unsafe {
-            DuplicateHandle(
-                raw(&self.process),
-                value,
-                GetCurrentProcess(),
-                &mut copy,
-                0,
-                0,
-                DUPLICATE_SAME_ACCESS,
-            )
-        } != 0;
-        if !duplicated {
-            return unless_exited(Err(io::Error::last_os_error()), exited);
-        }
-        let copy =
-            owned(copy).ok_or_else(|| io::Error::other("DuplicateHandle returned no handle"))?;
-        // SAFETY: both handles are open.
-        if unsafe { CompareObjectHandles(raw(&copy), value) } == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "process {pid} did not inherit handle {:#x} of this process",
-                    value as usize
-                ),
-            ));
-        }
-        drop(copy);
-        // SAFETY: without a target process, DuplicateHandle duplicates nothing, and only closes
-        // the handle of the process, which holds the object of `ours`.
-        let closed = unsafe {
-            DuplicateHandle(
-                raw(&self.process),
-                value,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                0,
-                0,
-                DUPLICATE_CLOSE_SOURCE,
-            )
-        } != 0;
-        if closed {
-            Ok(())
-        } else {
-            unless_exited(Err(io::Error::last_os_error()), exited)
-        }
     }
 }
 

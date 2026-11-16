@@ -70,7 +70,7 @@ fn take_pending(signal: Signal) -> bool {
 fn a_write_without_a_reader_fails_without_sigpipe() {
     // The default disposition, under which a `SIGPIPE` would end the test process, applies
     // to the whole process, so the test runs in a process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_SIGPIPE_WRITE_TEST_CHILD",
         "guest::sys::signal::tests::a_write_without_a_reader_fails_without_sigpipe",
     ) {
@@ -139,12 +139,12 @@ fn a_write_takes_back_its_own_sigpipe_beside_one_pending_for_the_process() {
             crate::guest::sys::exit_immediately(check().err().unwrap_or(0))
         }
         nix::unistd::ForkResult::Parent { child } => {
-            let id = child.as_raw().unsigned_abs();
-            let status = crate::guest::process::Child::new(id)
-                .unwrap()
-                .wait()
-                .unwrap();
-            assert_eq!(status.code(), Some(0), "{status:?}");
+            let status = crate::guest::sys::wait(ProcessId::from_pid(child));
+            assert_eq!(
+                status,
+                Some(crate::guest::sys::ChildStatus::Exited(0)),
+                "{status:?}"
+            );
         }
     }
 }
@@ -152,7 +152,7 @@ fn a_write_takes_back_its_own_sigpipe_beside_one_pending_for_the_process() {
 #[test]
 fn a_child_signal_wait_times_out_and_restores_the_mask() {
     // A child that another test thread forks would end the wait early with its `SIGCHLD`.
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_CHILD_SIGNAL_WAIT_TEST_CHILD",
         "guest::sys::signal::tests::a_child_signal_wait_times_out_and_restores_the_mask",
     ) {

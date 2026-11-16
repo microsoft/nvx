@@ -5,13 +5,9 @@ use std::collections::BTreeMap;
 use serde_json::json;
 
 use super::*;
-use crate::contract::{
-    CONTROL_CONTRACT_REVISION, CONTROL_SESSION_PROTOCOL_VERSION, MICROVM_ABI_VERSION,
-    RESTORE_PACKET_VERSION, TIME_ABI_VERSION,
-};
 
 /// Returns the manifest of a package that declares the guests of `sections` and, if
-/// `compatible`, the contracts that this crate speaks.
+/// `compatible`, the versions that this `nvx-rs` drives its bundled guests through.
 fn manifest(sections: &[&str], compatible: bool) -> Value {
     let mut manifest = json!({
         "openvmm": {
@@ -222,6 +218,66 @@ fn a_package_of_other_contracts_installs_but_is_reported() {
             "control_contract_revision: expected \"{CONTROL_CONTRACT_REVISION}\", found \"other\""
         )]
     );
+}
+
+#[test]
+fn release_manifests_must_match_every_bundled_contract() {
+    let manifest = manifest(&[], true);
+    assert!(manifest_mismatches(&manifest).is_empty());
+    for field in [
+        "microvm_abi_version",
+        "time_abi_version",
+        "restore_packet_version",
+        "control_session_protocol_version",
+        "control_contract_revision",
+    ] {
+        let mut incompatible = manifest.clone();
+        incompatible["openvmm"][field] = Value::Null;
+        assert_eq!(manifest_mismatches(&incompatible).len(), 1, "{field}");
+    }
+}
+
+#[test]
+fn mismatches_name_each_field_with_its_expected_and_declared_values() {
+    // A release from before time ABI 2 declares the control revision but neither the time
+    // ABI nor the restore packet, so naming the revision alone would not tell what differs.
+    let manifest = json!({
+        "openvmm": {
+            "microvm_abi_version": MICROVM_ABI_VERSION,
+            "control_session_protocol_version": 2,
+            "control_contract_revision": CONTROL_CONTRACT_REVISION,
+        }
+    });
+    assert_eq!(
+        manifest_mismatches(&manifest),
+        [
+            format!("time_abi_version: expected {TIME_ABI_VERSION}, found none"),
+            format!("restore_packet_version: expected {RESTORE_PACKET_VERSION}, found none"),
+            format!(
+                "control_session_protocol_version: expected \
+                     {CONTROL_SESSION_PROTOCOL_VERSION}, found 2"
+            ),
+        ]
+    );
+    let other = json!({"openvmm": {"control_contract_revision": "other"}});
+    assert!(manifest_mismatches(&other).contains(&format!(
+        "control_contract_revision: expected \"{CONTROL_CONTRACT_REVISION}\", found \"other\""
+    )));
+    assert_eq!(manifest_mismatches(&json!({})).len(), 5);
+}
+
+#[test]
+fn the_repository_manifest_declares_the_bundled_contracts() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join(MANIFEST_NAME);
+    if manifest.is_file() {
+        let manifest: Value =
+            serde_json::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
+        let mismatches = manifest_mismatches(&manifest);
+        assert!(mismatches.is_empty(), "{mismatches:?}");
+    }
 }
 
 #[test]

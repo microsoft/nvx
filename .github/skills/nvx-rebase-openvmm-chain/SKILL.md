@@ -159,9 +159,9 @@ and 6 of nvx-promote-openvmm-pin describe, with these differences:
   `reorganization`).
 - The comparisons of what `nvx-rs` copies from OpenVMM decide the gitlink
   commit's coordinated changes. A release that changes an ABI changes more,
-  such as `nvx::contract`, `SOURCE-MANIFEST.json`, the guest's decoders, and the
-  tests that encode the versions, which the pull request explains under the
-  `tests-modified` label.
+  such as the CLI's compatibility policy, the snapshot manifest's versions,
+  `SOURCE-MANIFEST.json`, the guest's decoders, and the tests that encode the
+  versions, which the pull request explains under the `tests-modified` label.
 - With the submodule at the new head, build OpenVMM with
   `python3 scripts/nvx.py build-openvmm`, and run
   `python3 scripts/nvx.py test-microvm --backend BACKEND` on each backend that

@@ -1,10 +1,11 @@
 # Package and source delivery
 
 `package` stages a release directory, `dist/<version>` by default, from the
-built OpenVMM binary, `nvx-rs` executable, and guest artifacts. [Build](build.md)
-lists the artifacts and provenance it requires and the binary release layout.
-Every package is either binary-only or source-inclusive, and you must choose
-one.
+built OpenVMM binary, `nvx-rs` executable, and guest artifacts.
+[Release packages](build.md#release-packages) lists the artifacts and
+provenance it requires, the executables of each platform's package, and the
+binary release layout. Every package is either binary-only or
+source-inclusive, and you must choose one.
 
 Every package ships the release build of `nvx-rs`, the Rust command-line
 interface that runs NVX's microVMs and sandboxes ([Usage](usage.md#nvx-rs)):
@@ -94,11 +95,13 @@ OpenVMM is MIT licensed: retain its notice, but its source does not have to be
 published merely because it is aggregated with Linux. See
 `THIRD_PARTY_NOTICES.md`.
 
-The `nvx-rs` executables are MIT licensed NVX code that statically links the
-Rust standard library and permissively licensed crates, with musl and LLVM's
-`libunwind` on Linux and the Microsoft C runtime on Windows.
-`THIRD_PARTY_NOTICES.md` lists each with its license; `nvx-rs/Cargo.lock`
-pins every crate by checksum.
+The `nvx-rs` executables and the guest binaries are MIT licensed NVX code,
+built from the `nvx` package, that statically links the Rust standard library
+and permissively licensed crates, with musl and LLVM's `libunwind` on Linux and
+the Microsoft C runtime on Windows. `THIRD_PARTY_NOTICES.md` lists each with
+its license; `nvx-rs/Cargo.lock` pins every crate by checksum. See
+[The nvx package](build.md#the-nvx-package) for the license inputs and the
+tests that keep the notices in step with the lockfile.
 
 ## Release archives
 
@@ -126,21 +129,16 @@ declares other OpenVMM contracts than the `nvx-rs` that installs it speaks,
 such as another microVM ABI, time ABI, restore packet, or control contract,
 and names each field of its manifest that differs.
 
-CI follows the binary-only path. On a `dev` push that changes more than
-documentation, on a ready pull request from a branch of this repository or a
-merge group that changes an input of the platform or package jobs, and on
-scheduled or manually dispatched full runs, a package job for each of the
-`linux-kvm`, `linux-mshv`, and `windows-whp` platforms stages
-`dist/nvx-<version>-<platform>` with `--binary-only` on a GitHub-hosted runner
-of the platform's operating system, beside the platform job that benchmarks the
-same OpenVMM build, then archives it as
-`.tar.gz` on Linux and `.zip` on Windows through the
-[`package-release`](../.github/actions/package-release/action.yml) action,
-with the `nvx-rs` and provenance that the `nvx-rs` build job of that
-operating system built and its NVX CLI job tested. Only `dev` pushes upload
-the archives, so pull requests, merge groups, and full runs prove that their
-packages build without publishing them. The development release job checks
-that each package ships OpenVMM and `nvx-rs` before it publishes them.
+CI follows the binary-only path. A package job for each of the `linux-kvm`,
+`linux-mshv`, and `windows-whp` platforms stages
+`dist/nvx-<version>-<platform>` with `--binary-only`, with the `nvx-rs` and
+provenance that the `nvx-rs` build job of the platform's operating system built
+and its NVX CLI job tested, and archives it as `.tar.gz` on Linux and `.zip` on
+Windows; [Release packages](ci.md#release-packages) describes the jobs and
+when they run. Only `dev` pushes upload the archives, so pull requests, merge
+groups, and full runs prove that their packages build without publishing them.
+The development release job checks that each package ships OpenVMM and
+`nvx-rs` before it publishes them.
 [Continuous integration](ci.md) describes the jobs that gate and publish the
 resulting development release.
 
@@ -154,22 +152,21 @@ released first-parent ancestor.
 ## The nvx crate
 
 [`nvx-rs/`](../nvx-rs/README.md) is also published on crates.io as the `nvx`
-crate, a preview whose versions are pre-releases, `0.1.0-alpha.N`, which Cargo
-selects only for a requirement that names a pre-release. The nightly CI run
-publishes a new version from `dev` whenever the crate changed, with the next
-number, as [crates.io releases](ci.md#cratesio-releases) describes, so a
-change reaches crates.io within a day of its merge.
+crate, a preview whose versions are pre-releases, which Cargo selects only for
+a requirement that names a pre-release: `0.2.0-alpha.N` since the breaking
+release that the [changelog](../CHANGELOG.md) records, and `0.1.0-alpha.N`
+before it. The nightly CI run publishes a new version from `dev` whenever the
+crate changed, with the next number, as
+[crates.io releases](ci.md#cratesio-releases) describes, so a change reaches
+crates.io within a day of its merge. The crate holds the files that Git tracks
+in `nvx-rs/`, among them the package's license, `LICENSE`, its README, and its
+lockfile, `Cargo.lock`; its features, profiles, and binaries are those that
+[The nvx package](build.md#the-nvx-package) lists.
 
 The version that `nvx-rs/Cargo.toml` declares is the lowest that CI
-publishes. A pull request changes it to start another series, such as
-`0.2.0-alpha.1`. Only `nvx`'s version changes in `nvx-rs/Cargo.lock` and
-`tests/runtime-adapter/Cargo.lock`. The `bundled` feature of the published
-crate downloads the release that
-[`nvx-rs/artifacts.json`](../nvx-rs/artifacts.json) pins and fails unless that
-release declares the crate's microVM, time, restore-packet, control-session,
-and control contracts, which CI checks before it publishes. When a contract has
-changed, publication stays blocked until a pull request repins a compatible release;
-see [Bundled artifacts](../nvx-rs/README.md#bundled-artifacts).
+publishes. A pull request changes it to start another series, as the breaking
+release started `0.2.0-alpha.1`. Only `nvx`'s version changes in
+`nvx-rs/Cargo.lock`.
 
 When CI cannot publish, as when the newest version on crates.io records no
 commit that `dev` holds, a pull request declares the next version as above,
@@ -180,7 +177,6 @@ and once it merges, a crate owner publishes that version from a fresh clone of
 git clone --branch dev https://github.com/microsoft/nvx.git nvx-crate
 cd nvx-crate/nvx-rs
 git ls-files --eol . | grep -E 'w/(crlf|mixed)'  # prints nothing
-cargo check --locked --features bundled          # stages the pinned release
 cargo publish --locked --dry-run
 cargo publish --locked
 ```
@@ -194,3 +190,42 @@ that checked its files out with CRLF line endings before then keeps them until
 it checks them out again, and packs them: `0.1.0-alpha.2` came from such a
 clone, so its sources differ from the commit that it records. A fresh clone
 packs the bytes of its commit, which the `git ls-files` check confirms.
+
+### The guest tools
+
+The crate's `guest` feature builds NVX's guest programs, the ten `nvx-*`
+binaries that NVX's guest images install under `/sbin`, and its `guest`
+profile builds them small and stripped. A guest image that NVX does not build
+installs them from the crate with `cargo install`, which builds the crate as
+the root of its build, so that the crate's `guest` profile applies. On a Linux
+host, with Rust 1.89 or later, the `x86_64-unknown-linux-musl` target, and a C
+compiler driver, `cc`, this installs the announcer of the portable network,
+`nvx-ingress`, as the static executable that NVX's images hold:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo install nvx --version VERSION --locked \
+  --no-default-features --features guest --profile guest \
+  --target x86_64-unknown-linux-musl --bin nvx-ingress
+```
+
+- `--version VERSION` names a version that crates.io publishes, such as
+  `0.2.0-alpha.1`, the breaking release, or a later `0.2.0-alpha.N`. Every
+  version is a pre-release, which Cargo selects only for a requirement that
+  names one, so `cargo install nvx` without it finds none.
+- `--no-default-features --features guest` builds the guest programs without
+  the default `host` feature, which no guest program uses.
+- `--profile guest` builds them with the crate's `guest` profile, where
+  `cargo install` would otherwise use `release`.
+- `--locked` builds the dependency versions that the crate's lockfile pins, as
+  NVX's own builds do.
+- `--target x86_64-unknown-linux-musl` links them statically, so that they
+  need no C library in the guest. Without it, Cargo builds them for the host's
+  own target, such as `x86_64-unknown-linux-gnu`, whose executables need the
+  host's C library and dynamic loader.
+
+Repeat `--bin` for each program, or pass `--bins` for all ten. Cargo installs
+them in its own `bin` directory, or in `DIRECTORY/bin` with
+`--root DIRECTORY`. Each program's command line, exit statuses, and output are
+compatibility contracts, which
+[Guest binaries](../nvx-rs/README.md#guest-binaries) lists.

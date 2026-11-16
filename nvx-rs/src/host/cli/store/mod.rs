@@ -6,6 +6,7 @@
 //! STATE/                  one sandbox, private to the current user
 //!   config.json           the configuration of the provisioned sandbox
 //!   sandbox.lock          the lock that serializes its lifecycle transitions
+//!   exec.lock             the admission lock held through each managed exec
 //!   launch.json           the journal of a start in progress, or of one that was interrupted
 //!   runtime.json          the runtime record of its running VM
 //!   control.capability    the control capability of its VM
@@ -14,9 +15,7 @@
 //!   outcome.json          OpenVMM's outcome report of the latest start
 //! ```
 //!
-//! The files have the names under which state directories have always kept them, and the lock
-//! is the lock of the same file that `nvx`'s sandbox store locks, so that a transition that takes
-//! one excludes a transition that takes the other.
+//! The files have the names under which state directories have always kept them.
 //!
 //! The directory is private to the current user, since its records decide which process a later
 //! command signals. On Linux, it belongs to the user with mode 0700, which OpenVMM also requires
@@ -26,20 +25,27 @@
 //! and the Administrators group, as one under the user's profile does. An existing directory that
 //! others may access is refused rather than restricted, since they could have placed files in it,
 //! or still hold them open. The store creates its files readable only by the current user.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "SL3.5b switches the sandbox lifecycle commands to the CLI's own store"
-    )
-)]
-
+//!
+//! A locked launch writes its prepared capability and outputs before spawn, records the spawned
+//! process durably, and publishes the caller's exact saved VM only at commit. Dropping an
+//! uncommitted launch keeps its journal; these transitions do not recover or signal a process.
+//! Its journal also identifies the inherited log claim: held means a launch process may run,
+//! and released proves exit. An endpoint owner is held and rechecked before it is returned;
+//! Linux additionally verifies that this process holds that launch's log.
+//! Taking the next lock recovers an interrupted, uncommitted launch before allowing mutation:
+//! it ends only a verified process, removes its journal and capability only after proved exit,
+//! and refuses indeterminate recovery without changing that evidence.
+mod files;
+mod launch;
+mod liveness;
 mod locked;
 mod names;
+mod record;
 
 use std::io;
 use std::path::{Path, PathBuf};
 
+pub(crate) use self::locked::{LockedState, open_lock};
 pub(crate) use self::names::StateFile;
 use crate::ErrorCode;
 use crate::host::cli::{Exit, Result};

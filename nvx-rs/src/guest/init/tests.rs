@@ -7,6 +7,11 @@
 //! PID 1 theirs, and the check of the real priority needs the privileges of a guest's PID 1. No
 //! check stops a VM: each records the status with which PID 1 would.
 
+mod capture;
+mod exec;
+pub(super) mod restore;
+pub(super) use exec::prepare_child;
+
 use std::collections::VecDeque;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Command;
@@ -17,6 +22,44 @@ use crate::guest::sys::tests::{
     CAP_SYS_NICE, CAP_SYS_RESOURCE, create_fifo, fork_isolated_test, holds_capability, nice_of,
 };
 use crate::guest::sys::{ForkResult, wait};
+
+/// Drives the unchanged helper/signal scripts through production preparation, collection and
+/// shutdown; layered boot itself is exercised by the boot tests.
+fn init(system: &mut impl Waiting, arguments: &[CString]) {
+    let result = serve(system, arguments);
+    finish(system, result.map(|()| 0));
+}
+
+fn serve(system: &mut impl Waiting, arguments: &[CString]) -> Result<(), String> {
+    let helpers = prepare(system, arguments)?;
+    let mut terminating = false;
+    loop {
+        collect(system, helpers, |_, _| {})?;
+        if terminating {
+            return Ok(());
+        }
+        terminating = system.wait_signal() == Some(Signal::SIGTERM);
+    }
+}
+
+trait Waiting: System {
+    fn wait_signal(&mut self) -> Option<Signal>;
+}
+
+impl Waiting for RealSystem {
+    fn wait_signal(&mut self) -> Option<Signal> {
+        let signals = self.signals.as_ref()?;
+        loop {
+            if let Some(event) = signals.read() {
+                return event.signal;
+            }
+            match sys::poll([Pollable::Signals(signals)], None) {
+                Ok(_) | Err(Errno::EINTR) => {}
+                Err(_) => std::thread::sleep(Duration::from_secs(1)),
+            }
+        }
+    }
+}
 
 /// One operation that PID 1 asked its system for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +72,7 @@ enum Call {
     Adopt(i32),
     /// [`System::reap`].
     Reap,
-    /// [`System::wait_signal`].
+    /// [`Waiting::wait_signal`].
     Wait,
     /// [`System::report`] of this line.
     Report(String),
@@ -51,7 +94,7 @@ struct Fake {
     /// The answers of [`System::reap`], in order: a child that ended, or `None` when none did.
     /// Once they run out, no child ended.
     reaped: VecDeque<Option<(i32, ChildStatus)>>,
-    /// The signals that [`System::wait_signal`] returns, in order. The check fails if PID 1 waits
+    /// The signals that [`Waiting::wait_signal`] returns, in order. The check fails if PID 1 waits
     /// for another.
     signals: VecDeque<Signal>,
 }
@@ -79,19 +122,15 @@ impl System for Fake {
             .map_or(Ok(None), |(_, answer)| *answer)
     }
 
-    fn reap(&mut self) -> Option<(ProcessId, ChildStatus)> {
+    fn reap(&mut self) -> Option<(ProcessId, ChildStatus, i32)> {
         self.calls.push(Call::Reap);
         let (process, status) = self.reaped.pop_front().flatten()?;
-        Some((pid(process), status))
-    }
-
-    fn wait_signal(&mut self) -> Option<Signal> {
-        self.calls.push(Call::Wait);
-        Some(
-            self.signals
-                .pop_front()
-                .expect("PID 1 waits for no signal that the check sends"),
-        )
+        let raw = match status {
+            ChildStatus::Exited(code) => code << 8,
+            ChildStatus::Signaled(signal) => signal,
+            ChildStatus::Other => 0x7f,
+        };
+        Some((pid(process), status, raw))
     }
 
     fn report(&mut self, line: &[u8]) {
@@ -102,6 +141,94 @@ impl System for Fake {
     fn shut_down(&mut self, status: u8) {
         self.calls.push(Call::ShutDown(status));
     }
+}
+
+impl Waiting for Fake {
+    fn wait_signal(&mut self) -> Option<Signal> {
+        self.calls.push(Call::Wait);
+        Some(
+            self.signals
+                .pop_front()
+                .expect("PID 1 waits for no signal that the check sends"),
+        )
+    }
+}
+
+#[test]
+fn the_shared_collector_forwards_workload_status_and_keeps_helper_failure_fatal() {
+    let helpers = Helpers {
+        time: pid(42),
+        announcer: Some(pid(43)),
+    };
+    let mut system = Fake {
+        reaped: [
+            Some((51, ChildStatus::Exited(7))),
+            Some((52, ChildStatus::Signaled(35))),
+            Some((43, ChildStatus::Exited(0))),
+        ]
+        .into(),
+        ..Fake::default()
+    };
+    let mut observed = Vec::new();
+    let error = collect(&mut system, helpers, |id, status| {
+        observed.push((id, status))
+    })
+    .unwrap_err();
+    assert_eq!(observed[0].0, 51);
+    assert_eq!(observed[0].1.code(), Some(7));
+    assert_eq!(observed[1].0, 52);
+    assert_eq!(observed[1].1.signal(), Some(35));
+    assert_eq!(observed.len(), 2);
+    assert_eq!(error, "the announcer, process 43, exited with status 0");
+}
+
+#[test]
+fn the_runtime_wakes_for_children_without_control_input_and_prioritizes_a_helper_over_sigterm() {
+    let name = "guest::init::tests::the_runtime_wakes_for_children_without_control_input_and_prioritizes_a_helper_over_sigterm";
+    if isolate_process_test("NVX_INIT_RUNTIME_WAKE_TEST", name) {
+        return;
+    }
+    in_child(|| {
+        sys::reset_child_signal();
+        let signals = SignalDescriptor::new(&SIGNALS).unwrap();
+        let mut helper = Command::new("sleep").arg("30").spawn().unwrap();
+        let helper_id = ProcessId::from_child(&helper);
+        let descriptor = sys::open_pidfd(helper_id).unwrap();
+        let mut runtime = Runtime {
+            system: RealSystem {
+                signals: Some(signals),
+            },
+            helpers: Helpers {
+                time: helper_id,
+                announcer: None,
+            },
+            terminating: false,
+        };
+        let mut execution = Exec::start_simulated(exec::request("exit 7"), None).unwrap();
+        let [wake] = sys::poll([runtime.wake()], Some(Duration::from_secs(5))).unwrap();
+        assert!(
+            wake.readable && !wake.error,
+            "the child's end did not wake init"
+        );
+        assert!(
+            !runtime
+                .service(|id, status| {
+                    execution.observe(id, status);
+                })
+                .unwrap()
+        );
+        assert_eq!(execution.status().unwrap().code(), Some(7));
+        helper.kill().unwrap();
+        assert!(sys::readable_or_hung_up(&[descriptor.borrowed()], 1000).unwrap()[0]);
+        nix::sys::signal::kill(nix::unistd::getpid(), Signal::SIGTERM).unwrap();
+        let error = runtime.service(|_, _| {}).unwrap_err();
+        assert!(error.contains("the time daemon"));
+        assert!(error.contains("signal 9"));
+        assert_eq!(
+            helper.wait().unwrap_err().raw_os_error(),
+            Some(Errno::ECHILD as i32)
+        );
+    });
 }
 
 /// A system whose signals, children, and statuses are the real ones, which changes no priority,
@@ -151,19 +278,10 @@ impl System for Subreaper {
         self.real.adopt(process)
     }
 
-    fn reap(&mut self) -> Option<(ProcessId, ChildStatus)> {
+    fn reap(&mut self) -> Option<(ProcessId, ChildStatus, i32)> {
         let child = self.real.reap()?;
         self.reaped.push(child.0.raw());
         Some(child)
-    }
-
-    fn wait_signal(&mut self) -> Option<Signal> {
-        if let Some(before_wait) = self.before_wait.take() {
-            before_wait();
-        }
-        let signal = self.real.wait_signal();
-        self.signals.extend(signal);
-        signal
     }
 
     fn report(&mut self, line: &[u8]) {
@@ -172,6 +290,17 @@ impl System for Subreaper {
 
     fn shut_down(&mut self, status: u8) {
         self.status = Some(status);
+    }
+}
+
+impl Waiting for Subreaper {
+    fn wait_signal(&mut self) -> Option<Signal> {
+        if let Some(before_wait) = self.before_wait.take() {
+            before_wait();
+        }
+        let signal = self.real.wait_signal();
+        self.signals.extend(signal);
+        signal
     }
 }
 
@@ -204,10 +333,20 @@ impl System for Observer {
         self.real.adopt(process)
     }
 
-    fn reap(&mut self) -> Option<(ProcessId, ChildStatus)> {
+    fn reap(&mut self) -> Option<(ProcessId, ChildStatus, i32)> {
         self.real.reap()
     }
 
+    fn report(&mut self, line: &[u8]) {
+        self.reports.push_str(std::str::from_utf8(line).unwrap());
+    }
+
+    fn shut_down(&mut self, status: u8) {
+        self.status = Some(status);
+    }
+}
+
+impl Waiting for Observer {
     fn wait_signal(&mut self) -> Option<Signal> {
         let processes = std::iter::once(sys::current_process()).chain(self.helpers);
         self.observed = processes
@@ -218,14 +357,6 @@ impl System for Observer {
             })
             .collect();
         Some(Signal::SIGTERM)
-    }
-
-    fn report(&mut self, line: &[u8]) {
-        self.reports.push_str(std::str::from_utf8(line).unwrap());
-    }
-
-    fn shut_down(&mut self, status: u8) {
-        self.status = Some(status);
     }
 }
 
@@ -267,7 +398,7 @@ fn failure(text: &str) -> Call {
 ///
 /// The checks block signals, collect the status of every child that ends, or replace standard
 /// error, which would disturb the harness's other tests.
-fn in_child(check: fn()) {
+fn in_child(check: impl FnOnce() + std::panic::UnwindSafe) {
     match fork_isolated_test().unwrap() {
         ForkResult::Child => {
             let outcome = std::panic::catch_unwind(check);

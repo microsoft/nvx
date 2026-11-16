@@ -4,7 +4,8 @@
 # virtfs_mode= tokens describe. When virtfs_aggregate=1 marks it as an
 # aggregate of host directories and files, its root lists one child per
 # directory or file, which only root can enter, and each
-# nvx_share=CHILD,TARGET,MODE[,file] token binds one child at TARGET with
+# nvx_share=SOURCE,TARGET,MODE[,file] token binds a child or child-relative
+# source from the planned export at TARGET with
 # MODE, without set-user-ID programs or device nodes; the file suffix marks a
 # child that is a host file, which is bound at a file. With --unmount, the
 # binds and then the share are unmounted.
@@ -53,8 +54,20 @@ parse_share() {
     esac
     share_target=${share_rest%,*}
     share_mode=${share_rest##*,}
+    case "/$share_child/" in
+        *"//"* | *"/./"* | *"/../"*) fail "invalid live share $1" ;;
+    esac
     case "$share_child" in
-        '' | . | .. | *[!A-Za-z0-9._-]*) fail "invalid live share $1" ;;
+        */*)
+            share_root=${share_child%%/*}
+            case "$share_root" in
+                '' | *[!0-9]*) fail "invalid live share $1" ;;
+            esac
+            case "$share_child" in
+                *\\*) fail "invalid live share $1" ;;
+            esac
+            ;;
+        *[!A-Za-z0-9._-]*) fail "invalid live share $1" ;;
     esac
     case "$share_mode" in ro | rw) ;; *) fail "invalid live share mode in $1" ;; esac
     case "$share_target" in /?*) ;; *) fail "invalid live share target in $1" ;; esac

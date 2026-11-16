@@ -9,31 +9,20 @@ use std::path::Path;
 use std::time::Duration;
 use std::{mem, ptr};
 
-#[cfg(feature = "cli")]
-use windows_sys::Win32::Foundation::{
-    DUPLICATE_SAME_ACCESS, DuplicateHandle, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
-};
 use windows_sys::Win32::Foundation::{
     GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0,
-};
-#[cfg(feature = "cli")]
-use windows_sys::Win32::System::Console::{
-    GetStdHandle, STD_ERROR_HANDLE, STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
     CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
-    EXTENDED_STARTUPINFO_PRESENT, INFINITE, InitializeProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
     LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
     PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
     STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
     WaitForSingleObject,
 };
-#[cfg(feature = "cli")]
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetExitCodeProcess};
 
-#[cfg(feature = "cli")]
-use super::process::refused_termination;
 use super::process::{ProcessHandle, creation_time};
 use super::{owned, raw, wide};
 use crate::host::platform::check_working_dir;
@@ -67,18 +56,36 @@ impl LaunchedProcess {
         ))
     }
 
-    /// Terminates the process and returns whether it exited within `timeout`.
-    pub(crate) fn terminate(self, timeout: Duration) -> bool {
-        // SAFETY: CreateProcessW returned the handle with full access.
-        unsafe { TerminateProcess(raw(&self.process), 1) };
-        let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(INFINITE - 1);
-        // SAFETY: as above.
-        unsafe { WaitForSingleObject(raw(&self.process), milliseconds) == WAIT_OBJECT_0 }
+    /// Terminates this owned child and waits for its exit before releasing its handle.
+    pub(crate) fn terminate_and_wait(self) -> io::Result<()> {
+        // SAFETY: CreateProcessW returned the owned handle with full access.
+        let termination = if unsafe { TerminateProcess(raw(&self.process), 1) } == 0 {
+            Some(io::Error::last_os_error())
+        } else {
+            None
+        };
+        // SAFETY: the process handle stays open for the whole wait.
+        if unsafe { WaitForSingleObject(raw(&self.process), INFINITE) } == WAIT_OBJECT_0 {
+            return Ok(());
+        }
+        let wait = io::Error::last_os_error();
+        Err(match termination {
+            None => wait,
+            Some(termination) => io::Error::other(format!(
+                "cannot terminate the child: {termination}; cannot wait for its exit: {wait}"
+            )),
+        })
     }
 
     /// Waits up to `timeout` for the process to exit, and returns its exit status if it has,
     /// as `Popen.wait` reads it with `GetExitCodeProcess`.
-    #[cfg(feature = "cli")]
+    #[cfg_attr(
+        not(feature = "cli"),
+        allow(
+            dead_code,
+            reason = "only the CLI's one-shot runs wait for the status of the VMMs that they start"
+        )
+    )]
     pub(crate) fn wait_timeout(&self, timeout: Duration) -> io::Result<Option<u32>> {
         let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(INFINITE - 1);
         // SAFETY: CreateProcessW returned the handle with full access.
@@ -93,21 +100,6 @@ impl LaunchedProcess {
             return Err(io::Error::last_os_error());
         }
         Ok(Some(status))
-    }
-
-    /// Asks the process to end with status 1 without waiting for it, as `Popen.terminate` and
-    /// `Popen.kill` do on Windows.
-    #[cfg(feature = "cli")]
-    pub(crate) fn request_termination(&self) -> io::Result<()> {
-        // SAFETY: CreateProcessW returned the handle with full access.
-        if unsafe { TerminateProcess(raw(&self.process), 1) } == 0 {
-            // A process that is exiting or exited cannot be terminated; Python ignores that too.
-            let refused = refused_termination(io::Error::last_os_error());
-            if refused.is_err() && self.wait_timeout(Duration::ZERO)?.is_none() {
-                return refused;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -213,8 +205,8 @@ impl Drop for InheritableForSpawn {
 /// and two that allow the same handle restore what it was before either. A process that the caller
 /// spawns concurrently without a handle list, as `std::process` does, inherits them if it is
 /// created in that window, and holds them until it exits, the log of OpenVMM's standard output and
-/// error among them, unless the caller spawns it under a `SpawnLock`, as [`spawn_command`] does; a
-/// process that it spawns with a handle list does not.
+/// error among them, unless the caller spawns it under a `SpawnLock`; a process that it spawns with
+/// a handle list does not.
 ///
 /// OpenVMM starts in `job`, which the process attribute that names it assigns before OpenVMM
 /// runs, and which every process that OpenVMM starts then joins too, but no process that the
@@ -229,21 +221,28 @@ impl Drop for InheritableForSpawn {
 ///
 /// [`create_log_job`]: crate::host::platform::windows::create_log_job
 /// [`SpawnLock`]: crate::host::platform::inherit::SpawnLock
-/// [`spawn_command`]: crate::host::platform::inherit::spawn_command
 /// [`log_claim_held`]: crate::host::platform::windows::log_claim_held
-pub(crate) fn spawn_detached(
+pub(crate) fn spawn_with_stdio(
     program: &Path,
     arguments: &[OsString],
     working_dir: &Path,
     stdio: [OwnedHandle; 3],
     inherit: &[Inherited<'_>],
-    breakaway_from_job: bool,
+    mode: SpawnMode,
     job: Option<OwnedHandle>,
 ) -> io::Result<LaunchedProcess> {
-    let mut flags = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
-    if breakaway_from_job {
-        flags |= CREATE_BREAKAWAY_FROM_JOB;
-    }
+    let flags = match mode {
+        SpawnMode::Foreground => 0,
+        SpawnMode::Detached { breakaway_from_job } => {
+            CREATE_NEW_PROCESS_GROUP
+                | CREATE_NO_WINDOW
+                | if breakaway_from_job {
+                    CREATE_BREAKAWAY_FROM_JOB
+                } else {
+                    0
+                }
+        }
+    };
     spawn_listed(
         program,
         arguments,
@@ -255,62 +254,21 @@ pub(crate) fn spawn_detached(
     )
 }
 
-/// Starts OpenVMM in the caller's console, process group, and working directory, as
-/// `subprocess.run` starts a child, with copies of the caller's standard handles as its own.
-///
-/// Unlike `std::process::Command`, which lets the child inherit every inheritable handle of the
-/// caller, it passes the child no other handle of the caller than the handles `inherit`, which
-/// keep their values in the child, through the handle list of [`spawn_detached`], with the same
-/// window, under the same lock, for processes that the caller spawns concurrently without one.
-/// Unlike `std::process::Command` too, which escapes the arguments of a batch file for `cmd.exe`,
-/// it fails with [`io::ErrorKind::InvalidInput`] for a batch file, as [`refuse_batch_file`] says.
-#[cfg(feature = "cli")]
-pub(crate) fn spawn_foreground(
-    program: &Path,
-    arguments: &[OsString],
-    inherit: &[Inherited<'_>],
-) -> io::Result<LaunchedProcess> {
-    let stdio = [
-        standard_handle(STD_INPUT_HANDLE)?,
-        standard_handle(STD_OUTPUT_HANDLE)?,
-        standard_handle(STD_ERROR_HANDLE)?,
-    ];
-    spawn_listed(program, arguments, None, stdio, inherit, None, 0)
-}
-
-/// Returns a copy of the caller's standard handle `which`, or `None` if the caller has none, as
-/// `std::process::Command` gives a child the standard handles of its caller.
-#[cfg(feature = "cli")]
-fn standard_handle(which: STD_HANDLE) -> io::Result<Option<OwnedHandle>> {
-    // SAFETY: GetStdHandle has no preconditions.
-    let handle = unsafe { GetStdHandle(which) };
-    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-        return Ok(None);
-    }
-    let mut copy = ptr::null_mut();
-    // SAFETY: the source and target are this process, and the output pointer is valid; a
-    // standard handle that is not open fails the copy.
-    if unsafe {
-        DuplicateHandle(
-            GetCurrentProcess(),
-            handle,
-            GetCurrentProcess(),
-            &mut copy,
-            0,
-            0,
-            DUPLICATE_SAME_ACCESS,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(owned(copy))
+/// Whether the child stays in the caller's console and job.
+pub(crate) enum SpawnMode {
+    /// Keeps the caller's console, process group, and job membership.
+    Foreground,
+    /// Starts without a console, in a new process group.
+    Detached {
+        /// Leaves the caller's job when that job permits breakaway.
+        breakaway_from_job: bool,
+    },
 }
 
 /// Starts `program` with `arguments` in `working_dir`, or in the caller's working directory, with
 /// the creation flags `flags`, the handles `stdio` as its standard handles, a missing one null,
 /// and the caller's handles `inherit`, and no other handle of the caller, in the job object
-/// `job`, if any, as [`spawn_detached`] describes. Fails with [`io::ErrorKind::InvalidInput`] for
+/// `job`, if any, as [`spawn_with_stdio`] describes. Fails with [`io::ErrorKind::InvalidInput`] for
 /// a working directory beyond Windows' limit or for a batch file, as [`refuse_batch_file`] says.
 fn spawn_listed(
     program: &Path,
@@ -377,8 +335,7 @@ fn spawn_listed(
     } else {
         Some(AttributeList::new(lists)?)
     };
-    // SAFETY: STARTUPINFOEXW is a plain C structure for which all-zero is a valid value.
-    let mut startup: STARTUPINFOEXW = unsafe { mem::zeroed() };
+    let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
     let mut flags = flags | CREATE_UNICODE_ENVIRONMENT;
     if let Some(attributes) = &mut attributes {
@@ -425,8 +382,7 @@ fn spawn_listed(
         startup.lpAttributeList = attributes.as_ptr();
         flags |= EXTENDED_STARTUPINFO_PRESENT;
     }
-    // SAFETY: PROCESS_INFORMATION is a plain C structure for which all-zero is a valid value.
-    let mut information: PROCESS_INFORMATION = unsafe { mem::zeroed() };
+    let mut information = PROCESS_INFORMATION::default();
     #[cfg(test)]
     super::tests::in_window();
     // SAFETY: every string is NUL-terminated, the command line is mutable, and the startup
@@ -460,8 +416,12 @@ fn spawn_listed(
     drop(lock);
     created?;
     drop(owned(information.hThread));
-    let process = owned(information.hProcess)
-        .ok_or_else(|| io::Error::other("CreateProcessW returned no process handle"))?;
+    let process = owned(information.hProcess).ok_or_else(|| {
+        io::Error::other(crate::Error::new(
+            crate::ErrorKind::StillRunning,
+            "CreateProcessW succeeded but returned no process handle to confirm exit",
+        ))
+    })?;
     Ok(LaunchedProcess {
         process,
         pid: information.dwProcessId,

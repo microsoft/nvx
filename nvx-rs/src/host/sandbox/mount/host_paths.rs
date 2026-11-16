@@ -44,7 +44,7 @@ impl HostQueries<'_> {
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), or
 /// [`ErrorKind::Io`](crate::ErrorKind::Io) if a path cannot be resolved or examined.
-pub fn validate_mount_host_paths(mounts: &[SandboxMount]) -> Result<()> {
+pub(crate) fn validate_mount_host_paths(mounts: &[SandboxMount]) -> Result<()> {
     validate_mount_host_paths_with(mounts, &HostQueries::native())
 }
 

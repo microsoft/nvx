@@ -25,6 +25,17 @@ Do not maintain a second copy of the runner setup or its tool versions here.
 | `windows/firewall.ps1`, `windows/openssh.ps1`, `windows/storage.ps1`, `windows/system.ps1` | Adapters that run the cmdlets a Python controller names, taking a JSON request and returning a JSON result. |
 | `build_package.py` | Validate configuration and generate deterministic guest payloads, hashes, and a partial VMSS model patch without accessing Azure or GitHub. |
 
+`cli.py` takes one command, which names the step that it runs:
+
+| Command | Run by | Step |
+| --- | --- | --- |
+| `linux-bootstrap` | `setup-nvx-github-runner.service`, which cloud-init enables and starts after `cloud-final.service`, as root | Verify the instance identity and refresh the compute snapshot, prepare the data disk and the backend, run `setup-linux.sh --runner-only`, enable the metadata block, register the runner, and disable the unit once it has registered |
+| `linux-block-metadata` | `nvx-runner-metadata-block.service`, and the runner service before each start | Block the runner account from Azure instance metadata |
+| `linux-refresh-metadata` | The runner service before each start, as root | Refresh the compute snapshot alone |
+| `linux-verify-mshv` | An administrator; `linux-bootstrap` runs the same check when `backend` is `mshv` and `kernelMode` is `azurelinux-mshv` | Report whether the VM booted as the MSHV root partition |
+| `windows-stage` | `windows/vmss-bootstrap.ps1`, which the Custom Script extension runs | Verify and unpack the package, configure OpenSSH, and start the `Nvx-Setup-GitHub-Runner` task |
+| `windows-bootstrap` | The `Nvx-Setup-GitHub-Runner` task, as SYSTEM, at every startup until registration succeeds | Block Network Service from instance metadata, verify the instance identity, prepare the data disk and the WHP and Hyper-V features, and register the runner |
+
 Linux guests run every step as
 `/usr/bin/python3 -I -B /opt/nvx-bootstrap <command>`. Cloud-init installs the
 distribution's `python3` and writes all guest files from the same payload

@@ -2,10 +2,11 @@
 //!
 //! A [`ProcessRef`] names one process by its ID, its start time, and the [`BootId`] of the host
 //! boot during which it started, which together never name another process. [`Process::open`]
-//! checks a reference against the host and holds the process that it names through a handle of
-//! the operating system: a pidfd on Linux, and a process handle on Windows. Waits and termination
-//! go through that handle, so they reach the referenced process, whether or not the caller
-//! started it, and never another process that reuses its ID. A process that does not match its
+//! checks a reference against the host and returns [`Opened::Running`] with the process held
+//! through a handle of the operating system, or [`Opened::Exited`] with proof that the recorded
+//! process exited. The handle is a pidfd on Linux, and a process handle on Windows. Waits and
+//! termination go through that handle, so they reach the referenced process, whether or not the
+//! caller started it, and never another process that reuses its ID. A process that does not match its
 //! reference is never signaled, and neither is one that a reference from an earlier boot names:
 //! every process of that boot has exited.
 //!
@@ -19,14 +20,11 @@
 //! system's read calls, and [`own_bytes_read`] how many the calling process has, so that a caller
 //! can tell how much of its files a VMM, or the caller itself, read.
 //!
-//! The [`supervisor`](super::supervisor) launches OpenVMM, and its
-//! [`Launched::process`](super::supervisor::Launched::process) holds the child that it started
-//! through a handle of its own.
+//! [`vm::spawn`](super::vm::spawn) launches OpenVMM, and the [`Launched`](super::vm::Launched)
+//! that it returns holds the child that it started through a handle of its own.
 
 use std::fmt;
 use std::io;
-#[cfg(windows)]
-use std::os::windows::io::BorrowedHandle;
 use std::str::FromStr;
 use std::sync::OnceLock;
 use std::thread;
@@ -38,10 +36,17 @@ use super::platform;
 use crate::error::Error;
 
 /// Longest wait for a terminated OpenVMM process to exit.
+#[cfg_attr(
+    not(feature = "cli"),
+    allow(
+        dead_code,
+        reason = "only the CLI waits for the OpenVMM processes that it terminates"
+    )
+)]
 pub(crate) const KILL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Interval at which the exit of a process is polled where no exit event serves: the exit of any
-/// process on Linux hosts without pidfds, and the exit of a child that a
-/// [`Launched`](super::supervisor::Launched) waits for with a timeout on Linux, since
+/// process on Linux hosts without pidfds, and the exit of a child that the crate's spawn of a VMM
+/// waits for with a timeout on Linux, since
 /// [`std::process::Child`] can wait only without one. An exit is noticed at most this late, for
 /// about 40 checks a second.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -131,17 +136,16 @@ impl<'de> Deserialize<'de> for BootId {
 /// A reference to one process: its ID, its start time, and the boot of the host during which it
 /// started, which together never name another process.
 ///
-/// The start time is that of [`platform::process_start_time`]: on Linux, the `starttime` field
-/// of `/proc/<pid>/stat`, in clock ticks since boot, and on Windows, the creation time of the
-/// process as a 64-bit `FILETIME`. A reference is a claim, which a caller may record and read
-/// back after it restarts: [`Process::open`] checks it before anything waits for the process or
-/// signals it.
+/// The start time is, on Linux, the `starttime` field of `/proc/<pid>/stat`, in clock ticks since
+/// boot, and on Windows, the creation time of the process as a 64-bit `FILETIME`. A reference is a
+/// claim, which a caller may record and read back after it restarts: [`Process::open`] checks it
+/// before anything waits for the process or signals it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProcessRef {
     /// Process ID.
     pub pid: u32,
-    /// Start time, in the units of [`platform::process_start_time`].
+    /// Start time: clock ticks since boot on Linux, and a creation `FILETIME` on Windows.
     pub start_time: u64,
     /// The boot of the host during which the process started.
     pub boot: BootId,
@@ -159,6 +163,21 @@ pub enum WaitMethod {
     Polling,
 }
 
+/// An independently owned, close-on-exec copy of a process's pidfd, for a caller's exit waiter.
+///
+/// Implements the standard descriptor traits, including [`std::os::fd::AsFd`]. Dropping it closes
+/// only this copy, without keeping the process running or affecting the original [`Process`].
+#[cfg(target_os = "linux")]
+pub type ExitHandle = std::os::fd::OwnedFd;
+
+/// An independently owned, non-inheritable copy of a process handle, for a caller's exit waiter.
+///
+/// Implements the standard handle traits, including [`std::os::windows::io::AsHandle`]. Dropping it
+/// closes only this copy, without keeping the process running or affecting the original [`Process`].
+/// The duplicate retains the original process handle's access rights.
+#[cfg(windows)]
+pub type ExitHandle = std::os::windows::io::OwnedHandle;
+
 /// A process that this host found running with the identity of a [`ProcessRef`], held through a
 /// handle of the operating system: a pidfd on Linux, and a process handle on Windows.
 ///
@@ -173,8 +192,23 @@ pub struct Process {
     handle: platform::ProcessHandle,
 }
 
+/// The result of checking a recorded process reference against this host.
+#[derive(Debug)]
+pub enum Opened {
+    /// The process matched the recorded boot, ID, and start time; the caller owns its `Process`.
+    Running(Process),
+    /// The recorded process exited: its boot ended, or no running process matches its identity.
+    Exited(Exited),
+}
+
+/// Proof that a verified process exited, produced only by [`Process::wait`] or [`Process::open`].
+///
+/// It proves exit, not the process's exit status, and cannot be constructed by a caller.
+#[derive(Debug)]
+pub struct Exited(());
+
 impl Process {
-    /// Finds the process that `reference` names, and returns `None` if it has exited.
+    /// Finds the process that `reference` names, or returns proof that it has exited.
     ///
     /// The process has exited when no process has its ID, when the process that has it started
     /// at another time, and when the reference comes from another boot.
@@ -186,12 +220,15 @@ impl Process {
     /// other users. Fails with [`io::ErrorKind::InvalidInput`] for a process ID that the host
     /// never assigns, such as 0, and with [`io::ErrorKind::Unsupported`] on hosts other than
     /// Linux and Windows.
-    pub fn open(reference: &ProcessRef) -> io::Result<Option<Self>> {
+    pub fn open(reference: &ProcessRef) -> io::Result<Opened> {
         let handle = open_reference(reference, BootId::current, platform::open_process)?;
-        Ok(handle.map(|handle| Self {
-            reference: reference.clone(),
-            handle,
-        }))
+        Ok(match handle {
+            Some(handle) => Opened::Running(Self {
+                reference: reference.clone(),
+                handle,
+            }),
+            None => Opened::Exited(Exited(())),
+        })
     }
 
     /// Returns the process that `handle` holds, whose identity the caller verified to be
@@ -214,23 +251,36 @@ impl Process {
         }
     }
 
-    /// Waits until the process exits or `deadline` passes, and returns whether it exited.
+    /// Duplicates the existing OS exit-wait handle for a caller to register with its own runtime.
+    ///
+    /// The returned handle is independent of this borrow and remains valid after this `Process`
+    /// is dropped. Returns `None` only on a Linux host that polls without a pidfd. Duplication
+    /// failures have kind [`ErrorKind::Io`](crate::ErrorKind::Io) and retain their original source.
+    #[cfg(any(target_os = "linux", windows))]
+    pub fn exit_handle(&self) -> crate::Result<Option<ExitHandle>> {
+        self.handle.exit_handle().map_err(|error| {
+            Error::io("cannot duplicate the process's exit handle").with_source(error)
+        })
+    }
+
+    /// Waits until the process exits or `deadline` passes, returning exit proof or `None`.
     ///
     /// A process exits with its last thread. The wait sleeps until the exit event of the
     /// process, or with [`WaitMethod::Polling`], checks its identity at a short interval. An
     /// error means that the wait cannot determine whether the process exited.
-    pub fn wait(&self, deadline: Instant) -> io::Result<bool> {
-        wait_handle(
+    pub fn wait(&self, deadline: Instant) -> io::Result<Option<Exited>> {
+        let exited = wait_handle(
             &self.handle,
             self.reference.pid,
             self.reference.start_time,
             deadline,
-        )
+        )?;
+        Ok(exited.then_some(Exited(())))
     }
 
     /// Returns whether the process has exited, without waiting.
     pub fn has_exited(&self) -> io::Result<bool> {
-        self.wait(Instant::now())
+        self.wait(Instant::now()).map(|exited| exited.is_some())
     }
 
     /// Ends the process at once, unless it has exited or is exiting: with `SIGKILL` on Linux, and
@@ -263,21 +313,6 @@ impl Process {
     pub fn bytes_read(&self) -> io::Result<u64> {
         self.handle
             .bytes_read(self.reference.pid, self.reference.start_time)
-    }
-
-    /// Closes the process's handle that has the value of this process's handle `ours`, which the
-    /// process inherited from this one, and never uses, as a VMM never uses the guards of the
-    /// checked files that it inherits on Windows.
-    ///
-    /// The process loses no other handle: a process that did not inherit `ours` keeps every handle
-    /// that it has, and the close fails. A process that has exited has closed its handles, so the
-    /// close succeeds. Fails with [`io::ErrorKind::PermissionDenied`] for a process that
-    /// [`open`](Self::open) found: only the `Process` of a launch, which
-    /// [`Launched::process`](super::supervisor::Launched::process) returns, may close the
-    /// process's handles.
-    #[cfg(windows)]
-    pub(crate) fn close_inherited(&self, ours: BorrowedHandle<'_>) -> io::Result<()> {
-        self.handle.close_inherited(self.reference.pid, ours)
     }
 }
 

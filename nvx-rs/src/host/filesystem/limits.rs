@@ -1,15 +1,22 @@
 //! OpenVMM's limits and host checks for exported roots and access-policy paths.
 
+#[cfg(feature = "cli")]
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+#[cfg(feature = "cli")]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 
-use super::host_path::{is_reparse_point, relative_text};
+#[cfg(feature = "cli")]
+use super::host_path::is_reparse_point;
+use super::host_path::relative_text;
 use super::{MAX_POLICY_BYTES, MAX_POLICY_PATH_BYTES, MAX_POLICY_PATHS};
+#[cfg(feature = "cli")]
 use crate::error::{Error, Result};
-#[cfg(unix)]
+#[cfg(all(unix, feature = "cli"))]
 use crate::host::platform;
 
 /// Applies OpenVMM's rules for exported directories, which it reaches without links.
+#[cfg(feature = "cli")]
 pub(super) fn check_root(root: &Path) -> Result<()> {
     let mut current = PathBuf::new();
     for component in root.components() {
@@ -35,6 +42,7 @@ pub(super) fn check_root(root: &Path) -> Result<()> {
 /// so a policy that OpenVMM would refuse fails at provision rather than at every start: those of
 /// [`policy_limits`], and on the host, no link or reparse point below `root` and no other file
 /// system. Returns their combined length.
+#[cfg(feature = "cli")]
 pub(super) fn check_policy_paths(root: &Path, paths: &[PathBuf], action: &str) -> Result<usize> {
     let unsupported = |message: String| Err(Error::unsupported(message));
     let total = policy_limits(root, paths, action).map_err(Error::unsupported)?;

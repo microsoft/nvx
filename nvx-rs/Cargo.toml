@@ -1,20 +1,16 @@
 [package]
 name = "nvx"
-version = "0.1.0-alpha.3"
+version = "0.2.0-alpha.1"
 edition = "2024"
 rust-version = "1.89"
-description = "NVX mechanics: the OpenVMM control protocol and the launch, policy lowering, and supervision of NVX microVMs"
+description = "NVX's library of mechanisms and value types for OpenVMM microVMs: launch, snapshots and restores, verified connections, and the guest's side of capture and guest restore"
 license = "MIT"
 repository = "https://github.com/microsoft/nvx"
 readme = "README.md"
 keywords = ["sandbox", "microvm", "openvmm", "virtualization"]
 categories = ["virtualization"]
 publish = ["crates-io"]
-# Lets the build scripts of dependents read the staged bundle as `DEP_NVX_ARTIFACTS_DIR`.
-links = "nvx"
 
-# docs.rs builds without network access, so its documentation leaves out `bundled`, whose build
-# script downloads a release.
 [package.metadata.docs.rs]
 features = ["cli", "testing", "guest"]
 targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
@@ -25,8 +21,8 @@ name = "nvx"
 [features]
 default = ["host"]
 # The host side: artifact discovery, launch, network and filesystem lowering, control sessions,
-# process and platform primitives, the supervision of VM instances, and the sandbox launch
-# profile, whose aggregate child names are SHA-256 digests.
+# process and platform primitives, VMs in private directories that their callers own, and the
+# sandbox launch profile, whose aggregate child names are SHA-256 digests.
 host = [
     "serde",
     "dep:getrandom",
@@ -35,26 +31,22 @@ host = [
     "dep:nix",
     "dep:windows-sys",
 ]
-# Stages the OpenVMM executable, guest kernel, and control initramfs at build time; see
-# `Artifacts::bundled`. The build script downloads the release pinned in `artifacts.json`, or
-# copies the release directory named by `NVX_BUNDLE_DIR`.
-bundled = ["host", "dep:sha2"]
 # NVX's own `nvx-fake-openvmm` binary, a fake OpenVMM for tests. It adds no API.
 testing = ["dep:getrandom", "dep:serde", "dep:serde_json", "dep:nix", "dep:windows-sys"]
 # NVX's own `nvx-rs` binary, the command-line interface that runs NVX's microVMs and sandboxes,
 # compiles egress policies, looks up artifacts, and downloads releases. It adds no API.
-cli = ["host"]
-# The serde form of `Hypervisor`. The `host` feature enables it.
+cli = ["host", "dep:crossterm"]
+# The serde form of `net::Ipv4Cidr`. The `host` feature enables it.
 serde = ["dep:serde"]
 # The programs that run in Linux guests: the `guest` module and the `nvx-*` guest binaries. Build
 # them with `--no-default-features --features guest` and the `guest` profile; see README.md.
 guest = ["dep:nix", "dep:getrandom"]
 
 [dependencies]
+crossterm = { version = "0.29", default-features = false, features = ["windows"], optional = true }
 getrandom = { version = "0.4", optional = true }
 serde = { version = "1.0.200", features = ["derive"], optional = true }
 serde_json = { version = "1.0.120", optional = true }
-# The same release as the build script's: `host` enables both.
 sha2 = { version = "0.10", optional = true }
 
 [target.'cfg(windows)'.dependencies]
@@ -94,12 +86,6 @@ nix = { version = "0.31.3", default-features = false, optional = true, features 
     "user",
 ] }
 
-[build-dependencies]
-# Only the `bundled` build script reads JSON and computes digests; `host`, which `bundled`
-# enables, enables both here too.
-serde_json = { version = "1.0.120", optional = true }
-sha2 = { version = "0.10", optional = true }
-
 [dev-dependencies]
 # The property tests of the protocol's codecs, which need none of the forking and timeouts of its
 # default features.
@@ -132,6 +118,22 @@ name = "nvx-rs"
 path = "src/bin/nvx-rs.rs"
 required-features = ["cli"]
 doc = false
+
+[[example]]
+name = "external-launch"
+path = "examples/external-launch.rs"
+required-features = ["host"]
+
+# Compile-only examples of the documented host and guest workflows, which nothing runs.
+[[example]]
+name = "host-workflows"
+path = "examples/host-workflows.rs"
+required-features = ["host"]
+
+[[example]]
+name = "guest-workflows"
+path = "examples/guest-workflows.rs"
+required-features = ["guest"]
 
 # The guest binaries. Their unit tests live in the library, so the binaries have no test harness.
 [[bin]]

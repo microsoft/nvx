@@ -1,5 +1,8 @@
 //! Tests of the NVXS session: records against OpenVMM's vectors and cases and every payload rule,
-//! the parser across partial reads and record boundaries, and the state machines of both roles.
+//! the parser across partial reads and record boundaries, the state machines of both roles, and
+//! both roles together through a broker that relays records as OpenVMM's does, which the tests of
+//! the session's drivers share, as they share the accessors with which the tests observe a
+//! session's state and a record's flow control.
 
 use super::*;
 use crate::protocol::{
@@ -8,9 +11,59 @@ use crate::protocol::{
 };
 use crate::tests::{OPENVMM_VECTORS, hex};
 
+pub(crate) use super::host::HostState;
+
+pub(crate) mod broker;
 mod guest;
 mod host;
 mod record;
+mod session;
+
+impl HostSession {
+    /// Returns the state of the session.
+    pub(crate) fn state(&self) -> HostState {
+        self.state
+    }
+
+    /// Returns the identity that the broker attached the host to, once it did.
+    pub(crate) fn identity(&self) -> Option<Identity> {
+        self.identity
+    }
+}
+
+impl GuestSession {
+    /// Returns the receive window that the guest acknowledged the current epoch with, while the
+    /// epoch is active.
+    pub(crate) fn window(&self) -> Option<u32> {
+        (self.state() == GuestState::Active).then_some(self.window)
+    }
+
+    /// Returns the DATA bytes of the current epoch that the guest received and has not credited.
+    pub(crate) fn outstanding(&self) -> u32 {
+        self.outstanding
+    }
+}
+
+impl Record {
+    /// Returns the initial receive window of an ACK record, or `None` for another type.
+    pub(crate) fn window(&self) -> Option<u32> {
+        (self.record_type() == RecordType::Ack).then(|| count(self.payload()))
+    }
+
+    /// Returns the number of bytes that a CREDIT record returns, or `None` for another type.
+    pub(crate) fn credit(&self) -> Option<u32> {
+        (self.record_type() == RecordType::Credit).then(|| count(self.payload()))
+    }
+}
+
+/// Reads the little-endian count that the four-byte payload of an ACK or a CREDIT holds.
+fn count(payload: &[u8]) -> u32 {
+    u32::from_le_bytes(
+        payload
+            .try_into()
+            .expect("the parser checked the payload's length"),
+    )
+}
 
 /// Instance ID of the sessions in these tests.
 const INSTANCE: [u8; 16] = [0x22; 16];
@@ -54,7 +107,12 @@ fn openvmm_vector(name: &str) -> Vec<u8> {
 }
 
 /// Encodes a valid record.
-fn record(record_type: RecordType, identity: Identity, sequence: u64, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn record(
+    record_type: RecordType,
+    identity: Identity,
+    sequence: u64,
+    payload: &[u8],
+) -> Vec<u8> {
     let mut output = Vec::new();
     encode_record(
         record_type,
@@ -158,20 +216,20 @@ fn host_stream() -> Vec<u8> {
 
 /// Application framing of the tests: each message is a little-endian `u32` length, then the
 /// message, and messages may span DATA records.
-fn framed(message: &[u8]) -> Vec<u8> {
+pub(crate) fn framed(message: &[u8]) -> Vec<u8> {
     [&(message.len() as u32).to_le_bytes(), message].concat()
 }
 
 /// Receiver of the tests' application framing, which reassembles messages across DATA records.
 #[derive(Default)]
-struct Reassembler {
+pub(crate) struct Reassembler {
     /// Bytes of the message in progress.
     pending: Vec<u8>,
 }
 
 impl Reassembler {
     /// Appends the payload of a DATA record, and returns the messages that it completes.
-    fn push(&mut self, payload: &[u8]) -> Vec<Vec<u8>> {
+    pub(crate) fn push(&mut self, payload: &[u8]) -> Vec<Vec<u8>> {
         self.pending.extend_from_slice(payload);
         let mut messages = Vec::new();
         while self.pending.len() >= 4 {
@@ -184,4 +242,29 @@ impl Reassembler {
         }
         messages
     }
+
+    /// Returns whether a message is in progress.
+    pub(crate) fn is_partial(&self) -> bool {
+        !self.pending.is_empty()
+    }
+}
+
+/// Messages of 10 bytes, of the largest frame that fits one record, of one more byte, and of
+/// about 300 KB, which spans five records.
+pub(crate) fn messages() -> Vec<Vec<u8>> {
+    let largest_in_one_record = OUTER_MAX_PAYLOAD - 4;
+    [
+        10,
+        largest_in_one_record,
+        largest_in_one_record + 1,
+        300_000,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, length)| {
+        (0..length)
+            .map(|byte| (byte as u8).wrapping_mul(31).wrapping_add(index as u8))
+            .collect()
+    })
+    .collect()
 }

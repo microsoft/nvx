@@ -1,21 +1,24 @@
 //! The Windows seal, from the file information of the open handle, and the opens of sealed files.
 
-use std::ffi::{OsString, c_void};
-use std::fs::{File, OpenOptions};
+use std::ffi::c_void;
+use std::fs::File;
+#[cfg(feature = "cli")]
+use std::fs::OpenOptions;
 use std::io;
 use std::mem;
-use std::os::windows::ffi::OsStringExt;
+#[cfg(feature = "cli")]
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use windows_sys::Win32::Foundation::{FILETIME, GetLastError, HANDLE};
+use windows_sys::Win32::Foundation::{FILETIME, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_INFO,
-    FILE_SHARE_READ, FILE_TYPE_DISK, FILE_TYPE_UNKNOWN, FileIdInfo, GETFINALPATHNAMEBYHANDLE_FLAGS,
-    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType,
-    GetFinalPathNameByHandleW, VOLUME_NAME_DOS, VOLUME_NAME_GUID,
+    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ID_INFO, FILE_TYPE_DISK,
+    FILE_TYPE_UNKNOWN, FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    GetFileType,
 };
+#[cfg(feature = "cli")]
+use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ};
 
 use super::{FileId, FileKind, FileSeal, SEAL_VERSION, SealScheme, SealTime};
 
@@ -30,8 +33,7 @@ pub(super) fn seal(file: &File) -> io::Result<FileSeal> {
     // SAFETY: the handle is open for as long as `file` is borrowed.
     let file_type = unsafe { GetFileType(handle) };
     if file_type != FILE_TYPE_DISK {
-        // SAFETY: GetLastError has no preconditions.
-        if file_type == FILE_TYPE_UNKNOWN && unsafe { GetLastError() } != 0 {
+        if file_type == FILE_TYPE_UNKNOWN && io::Error::last_os_error().raw_os_error() != Some(0) {
             return Err(io::Error::last_os_error());
         }
         return Err(io::Error::new(
@@ -39,14 +41,12 @@ pub(super) fn seal(file: &File) -> io::Result<FileSeal> {
             "only a file of a disk volume has a seal",
         ));
     }
-    // SAFETY: BY_HANDLE_FILE_INFORMATION is plain data, for which all-zero bytes are valid.
-    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: the handle is open and the output pointer is valid.
     if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: FILE_ID_INFO is plain data, for which all-zero bytes are valid.
-    let mut id: FILE_ID_INFO = unsafe { mem::zeroed() };
+    let mut id = FILE_ID_INFO::default();
     // SAFETY: the handle is open, and the buffer is a FILE_ID_INFO of the size that is passed.
     let has_id = unsafe {
         GetFileInformationByHandleEx(
@@ -96,6 +96,7 @@ fn time(time: FILETIME) -> SealTime {
 }
 
 /// See [`super::open_guarded`].
+#[cfg(feature = "cli")]
 pub(super) fn open_guarded(path: &Path) -> io::Result<File> {
     OpenOptions::new()
         .read(true)
@@ -107,39 +108,6 @@ pub(super) fn open_guarded(path: &Path) -> io::Result<File> {
 /// See [`super::open_read`].
 pub(super) fn open_read(path: &Path) -> io::Result<File> {
     File::open(path)
-}
-
-/// See [`super::final_path`].
-pub(super) fn final_path(file: &File) -> io::Result<PathBuf> {
-    final_path_by(file, VOLUME_NAME_DOS)
-}
-
-/// See [`super::final_volume_path`].
-pub(super) fn final_volume_path(file: &File) -> io::Result<PathBuf> {
-    final_path_by(file, VOLUME_NAME_GUID)
-}
-
-/// Returns the final path of the open `file`, which names its volume as `volume` asks.
-fn final_path_by(file: &File, volume: GETFINALPATHNAMEBYHANDLE_FLAGS) -> io::Result<PathBuf> {
-    let handle = file.as_raw_handle() as HANDLE;
-    let mut buffer = vec![0u16; 260];
-    loop {
-        // SAFETY: the handle is open for as long as `file` is borrowed, and the buffer holds
-        // `buffer.len()` units.
-        let length = unsafe {
-            GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, volume)
-        } as usize;
-        if length == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // The path fits, and the length leaves out the NUL that follows it; or the buffer is too
-        // small, and the length is what the path needs, with its NUL.
-        if length < buffer.len() {
-            buffer.truncate(length);
-            return Ok(PathBuf::from(OsString::from_wide(&buffer)));
-        }
-        buffer.resize(length, 0);
-    }
 }
 
 #[cfg(test)]

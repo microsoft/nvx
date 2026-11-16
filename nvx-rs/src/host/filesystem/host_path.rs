@@ -3,24 +3,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "cli")]
 use super::FileIdentity;
+#[cfg(feature = "cli")]
 use crate::error::{Error, Result};
+#[cfg(feature = "cli")]
 use crate::host::platform;
-
-#[cfg(windows)]
-/// Returns whether Windows marks `metadata` as a reparse point.
-pub(crate) fn is_reparse_point(metadata: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    metadata.file_attributes() & 0x400 != 0
-}
-
-#[cfg(not(windows))]
-/// Reports no reparse points on hosts whose metadata has no such Windows attribute.
-pub(crate) fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
-    false
-}
+pub(crate) use crate::host::platform::is_reparse_point;
 
 /// Returns the stable device-and-file identity of `path` for rename detection.
+#[cfg(feature = "cli")]
 pub(super) fn identity(path: &Path) -> Result<FileIdentity> {
     platform::file_identity(path)
         .map(|(device, index)| FileIdentity { device, index })
@@ -65,6 +57,7 @@ pub(crate) fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
 
 /// Canonicalizes the deepest existing ancestor and appends the rest. Returns whether the
 /// complete path exists.
+#[cfg(feature = "cli")]
 pub(super) fn canonicalize_lenient(path: &Path) -> std::io::Result<(PathBuf, bool)> {
     let mut existing = path.to_path_buf();
     let mut missing = Vec::new();

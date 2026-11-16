@@ -1,0 +1,176 @@
+//! Tests of what Ready reports about an activation, and of its canonical encoding. The tests build
+//! its bytes from the encoding's definition, never with the encoder that they check.
+
+use proptest::prelude::*;
+
+use super::*;
+use crate::tests::{ACTIVATION_V2, of_kind, vector};
+
+/// The names of the vectors of what Ready reports, in order: those of the records whose
+/// activations they report.
+const READY: [&str; 5] = [
+    "COLD",
+    "CLONE",
+    "SCRATCH_AGGREGATE",
+    "GPT_DIRECTORY",
+    "LARGEST",
+];
+
+/// Returns the transaction ID of the tests: the bytes a0 through af.
+fn transaction() -> TransactionId {
+    TransactionId::from_bytes(std::array::from_fn(|index| {
+        0xa0 + u8::try_from(index).unwrap()
+    }))
+}
+
+#[test]
+fn the_lengths_keep_their_values() {
+    assert_eq!(
+        (GuestRestoreReady::COLD_LEN, GuestRestoreReady::CLONE_LEN),
+        (1, 17)
+    );
+}
+
+#[test]
+fn a_cold_boot_reports_a_zero() {
+    let ready = GuestRestoreReady { transaction: None };
+    assert_eq!(ready.encode(), [0]);
+    assert_eq!(ready.encode().len(), GuestRestoreReady::COLD_LEN);
+    assert_eq!(GuestRestoreReady::decode(&[0]), Ok(ready));
+}
+
+#[test]
+fn a_clone_reports_a_one_then_its_transaction() {
+    let ready = GuestRestoreReady {
+        transaction: Some(transaction()),
+    };
+    let bytes = [&[1][..], transaction().as_bytes()].concat();
+    assert_eq!(ready.encode(), bytes);
+    assert_eq!(bytes.len(), GuestRestoreReady::CLONE_LEN);
+    assert_eq!(GuestRestoreReady::decode(&bytes), Ok(ready));
+}
+
+#[test]
+fn every_other_form_is_refused() {
+    assert_eq!(
+        GuestRestoreReady::decode(&[]),
+        Err(GuestRestoreError::Ready)
+    );
+    for flag in u8::MIN..=u8::MAX {
+        for tail in 0..=TransactionId::LEN + 1 {
+            let bytes = [&[flag][..], &transaction().as_bytes().repeat(2)[..tail]].concat();
+            let decoded = GuestRestoreReady::decode(&bytes);
+            match (flag, tail) {
+                (0, 0) | (1, TransactionId::LEN) => assert!(decoded.is_ok()),
+                _ => assert_eq!(
+                    decoded,
+                    Err(GuestRestoreError::Ready),
+                    "flag {flag}, then {tail} bytes"
+                ),
+            }
+        }
+    }
+}
+
+#[test]
+fn ready_reports_a_clone_s_transaction_and_nothing_more_for_a_cold_boot() {
+    for name in READY {
+        let record = GuestRestoreRecord::decode(&vector(ACTIVATION_V2, "RECORD", name).bytes)
+            .unwrap_or_else(|error| panic!("RECORD {name}: {error}"));
+        let ready = GuestRestoreReady::of(&record);
+        assert_eq!(
+            ready.transaction,
+            record.restore().map(|restore| restore.transaction),
+            "{name}"
+        );
+        assert_eq!(
+            ready.encode(),
+            vector(ACTIVATION_V2, "READY", name).bytes,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn ready_activations_match_their_vectors() {
+    for vector in of_kind(ACTIVATION_V2, "READY", &READY) {
+        let mut values = vector.values();
+        let transaction =
+            values.optional(|values| TransactionId::from_bytes(values.bytes().try_into().unwrap()));
+        drop(values);
+        let ready = GuestRestoreReady { transaction };
+        assert_eq!(ready.encode(), vector.bytes, "{}", vector.name);
+        assert_eq!(
+            GuestRestoreReady::decode(&vector.bytes),
+            Ok(ready),
+            "{}",
+            vector.name
+        );
+    }
+}
+
+#[test]
+fn invalid_ready_activations_are_refused() {
+    let names = [
+        "EMPTY",
+        "FLAG_2",
+        "COLD_WITH_TRANSACTION",
+        "COLD_WITH_TRAILING_BYTE",
+        "CLONE_WITHOUT_TRANSACTION",
+        "SHORT_TRANSACTION",
+        "LONG_TRANSACTION",
+    ];
+    for vector in of_kind(ACTIVATION_V2, "INVALID_READY", &names) {
+        assert_eq!(
+            GuestRestoreReady::decode(&vector.bytes),
+            Err(GuestRestoreError::Ready),
+            "{}",
+            vector.name
+        );
+    }
+}
+
+#[test]
+fn the_refusal_names_the_rule() {
+    assert_eq!(
+        GuestRestoreError::Ready.to_string(),
+        "what Ready reports is neither 0, nor 1 followed by a transaction ID"
+    );
+}
+
+/// Returns bytes that a decoder may meet: arbitrary bytes, and a byte from 0 to 2 followed by up
+/// to 17 more bytes.
+fn inputs() -> impl Strategy<Value = Vec<u8>> {
+    let forms = (0_u8..=2, prop::collection::vec(any::<u8>(), 0..=17))
+        .prop_map(|(flag, tail)| [&[flag][..], &tail].concat());
+    prop_oneof![prop::collection::vec(any::<u8>(), 0..32), forms]
+}
+
+proptest! {
+    /// Every activation encodes to bytes that decode back to it, while every prefix of them, and
+    /// every longer form, is refused.
+    #[test]
+    fn ready_activations_round_trip(
+        transaction in any::<Option<[u8; 16]>>(),
+        cut in any::<prop::sample::Index>(),
+        extra in any::<u8>(),
+    ) {
+        let ready = GuestRestoreReady {
+            transaction: transaction.map(TransactionId::from_bytes),
+        };
+        let mut bytes = ready.encode();
+        prop_assert_eq!(GuestRestoreReady::decode(&bytes), Ok(ready));
+        prop_assert!(GuestRestoreReady::decode(&bytes[..cut.index(bytes.len())]).is_err());
+        bytes.push(extra);
+        prop_assert!(GuestRestoreReady::decode(&bytes).is_err());
+    }
+
+    /// The decoder returns, never panics, on any bytes, and accepts only the one encoding of the
+    /// activation that it returns.
+    #[test]
+    fn the_decoder_accepts_only_canonical_encodings(bytes in inputs()) {
+        if let Ok(ready) = GuestRestoreReady::decode(&bytes) {
+            prop_assert_eq!(ready.encode(), bytes);
+        }
+    }
+}

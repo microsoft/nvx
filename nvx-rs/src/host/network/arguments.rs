@@ -20,8 +20,8 @@ use crate::net::{self, cidr};
 /// proxy at the guest network's gateway (`--network-proxy GATEWAY:PORT`). Otherwise the portable
 /// profile applies the egress posture, the ingress default, the host-loopback access, which
 /// [`HostLoopback::Outbound`] leaves to OpenVMM's default, and the host-loopback forwards. Each
-/// action's rules are lowered as an egress policy file's are ([`policy`]), and fail with its
-/// messages, which name the rules after [`EgressRules::name`].
+/// action's rules are lowered as the CLI's egress policy files are, and fail with their messages,
+/// which name the rules after [`EgressRules::name`].
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when a rule is invalid,
 /// when the rules of one action need more than [`MAX_RULES`] OpenVMM rules, when host-loopback
@@ -31,7 +31,6 @@ use crate::net::{self, cidr};
 /// ([`NetworkPolicy::proxy`]), its proxy's port is one that [`NetworkProxy::port`] excludes, or
 /// its guest network has no gateway.
 ///
-/// [`policy`]: crate::host::network::policy
 /// [`EgressRules::name`]: crate::host::network::EgressRules::name
 /// [`MAX_RULES`]: crate::host::network::MAX_RULES
 pub fn openvmm_arguments(
@@ -147,7 +146,7 @@ pub(crate) fn template_arguments(guest_network: &str) -> Vec<String> {
 /// it. Denied host-loopback access leaves the gateway's DNS service to the egress policy.
 ///
 /// OpenVMM names the server on the kernel command line of a VM that boots with the policy, and a
-/// clone whose restore installs the policy learns it from its activation record instead.
+/// clone whose restore installs the policy learns it from its guest-restore record instead.
 ///
 /// Fails as [`openvmm_arguments`] does for rules that it cannot parse.
 pub(crate) fn dns_server(

@@ -18,10 +18,9 @@
 //!   single shared directory.
 //!
 //! Guests read them with [`HostExport::parse`], which accepts exactly these forms, all four tokens
-//! or none, each once. It applies the checks with which NVX's shell init mounts the export of a
-//! managed sandbox, and refuses `nvx_share=` tokens as that init does: NVX's one-shot lifecycle
-//! binds the children of an aggregate as live shares with them, while a guest that mounts the
-//! export maps host paths from its mapping table alone.
+//! or none, each once, and refuses `nvx_share=` tokens: NVX's one-shot lifecycle binds the
+//! children of an aggregate as live shares with them, while a guest that mounts the export maps
+//! host paths from its mapping table alone.
 //!
 //! Like the rest of [`protocol`](super), it needs nothing outside the standard library, so the
 //! host, the guest, and test doubles share it.

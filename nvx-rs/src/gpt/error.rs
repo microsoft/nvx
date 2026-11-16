@@ -16,7 +16,7 @@ use crate::uuid::Uuid;
 /// for each partition in turn, so a disk fails with the first check that it breaks.
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum GptError {
+pub(crate) enum GptError {
     /// Reading the source failed.
     Io(io::Error),
     /// The logical block size is not a power of two from [`MIN_LOGICAL_BLOCK_SIZE`] through

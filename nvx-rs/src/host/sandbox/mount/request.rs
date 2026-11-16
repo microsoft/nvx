@@ -2,16 +2,25 @@
 //! [`SandboxMount`], one share with its access, owner, kind, and access-policy paths.
 
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "cli")]
+use std::path::{Component, PathBuf};
 
+#[cfg(feature = "cli")]
 use super::{
-    MAX_MOUNT_POLICY_PATHS, MAX_MOUNT_TARGET_BYTES, MOUNT_COMMAND_LINE_FRAGMENT, MOUNT_TAG,
-    MountAccess, MountKind, MountOwner, MountPolicy, POLICY_KINDS, PolicyKind,
+    MAX_MOUNT_POLICY_PATHS, MAX_MOUNT_TARGET_BYTES, MountAccess, MountKind, MountOwner,
+    MountPolicy, POLICY_KINDS, PolicyKind,
 };
-use crate::error::{Error, Result};
+use crate::error::Error;
+#[cfg(feature = "cli")]
+use crate::error::Result;
+#[cfg(feature = "cli")]
 use crate::host::filesystem::within;
+#[cfg(feature = "cli")]
 use crate::host::paths;
+#[cfg(feature = "cli")]
 use crate::host::sandbox::{has_kernel_separator, refused};
+#[cfg(feature = "cli")]
 use crate::protocol::share::{self, RESERVED_TARGET_CHARACTERS, Reservation};
 
 /// Splits a `--mount` value, `GUEST_TARGET,HOST_PATH[,ro|rw]`, into its guest target, host path,
@@ -21,7 +30,8 @@ use crate::protocol::share::{self, RESERVED_TARGET_CHARACTERS, Reservation};
 /// one, so a host path may contain commas when the mode is given. OpenVMM reads its `--mount`
 /// and `--mount-child` values the same way. Fails with
 /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
-pub fn parse_mount_value(value: &str) -> Result<(String, String, MountAccess)> {
+#[cfg(feature = "cli")]
+pub(crate) fn parse_mount_value(value: &str) -> Result<(String, String, MountAccess)> {
     let Some((target, rest)) = value.split_once(',') else {
         return Err(refused("--mount must be GUEST_TARGET,HOST_PATH[,ro|rw]"));
     };
@@ -44,6 +54,7 @@ pub fn parse_mount_value(value: &str) -> Result<(String, String, MountAccess)> {
 
 /// Returns whether `target` cannot stay one kernel token or holds one of the
 /// [`RESERVED_TARGET_CHARACTERS`], NUL, `\`, `=`, `,`, and `"`.
+#[cfg(feature = "cli")]
 pub(crate) fn has_forbidden_character(target: &str) -> bool {
     has_kernel_separator(target)
         || target
@@ -52,6 +63,7 @@ pub(crate) fn has_forbidden_character(target: &str) -> bool {
 }
 
 /// Returns whether a guest target has an empty, `.`, or `..` component after its leading slash.
+#[cfg(feature = "cli")]
 pub(crate) fn has_irregular_component(target: &str) -> bool {
     target
         .split('/')
@@ -67,9 +79,10 @@ pub(crate) fn has_irregular_component(target: &str) -> bool {
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
 ///
-/// [`RESERVED_MOUNT_TARGETS`]: crate::host::sandbox::mount::RESERVED_MOUNT_TARGETS
-/// [`RESERVED_EXACT_MOUNT_TARGETS`]: crate::host::sandbox::mount::RESERVED_EXACT_MOUNT_TARGETS
-pub fn validate_mount_target(target: &str) -> Result<()> {
+/// [`RESERVED_MOUNT_TARGETS`]: crate::protocol::share::RESERVED_MOUNT_TARGETS
+/// [`RESERVED_EXACT_MOUNT_TARGETS`]: crate::protocol::share::RESERVED_EXACT_MOUNT_TARGETS
+#[cfg(feature = "cli")]
+pub(crate) fn validate_mount_target(target: &str) -> Result<()> {
     if !target.starts_with('/')
         || target == "/"
         || target.len() > MAX_MOUNT_TARGET_BYTES
@@ -96,11 +109,13 @@ pub fn validate_mount_target(target: &str) -> Result<()> {
 /// per-request POSIX identity for OpenVMM to switch to.
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
-pub fn require_mount_owner_supported(owner: MountOwner) -> Result<()> {
+#[cfg(feature = "cli")]
+pub(crate) fn require_mount_owner_supported(owner: MountOwner) -> Result<()> {
     require_mount_owner_supported_on(owner, cfg!(windows))
 }
 
 /// Implements [`require_mount_owner_supported`] for a Windows host or another.
+#[cfg(feature = "cli")]
 pub(crate) fn require_mount_owner_supported_on(owner: MountOwner, windows: bool) -> Result<()> {
     if owner == MountOwner::Caller && windows {
         return Err(refused(
@@ -112,13 +127,15 @@ pub(crate) fn require_mount_owner_supported_on(owner: MountOwner, windows: bool)
 }
 
 /// Returns whether two guest targets overlap: whether they are equal, or one contains the other.
+#[cfg(feature = "cli")]
 pub(crate) fn targets_overlap(left: &str, right: &str) -> bool {
     within(left, right) || within(right, left)
 }
 
 /// Returns the kind of share that `host_path` requests: a file for a regular file, and
 /// otherwise a directory, which [`SandboxMount::validated`] then requires.
-pub fn mount_kind(host_path: &Path) -> MountKind {
+#[cfg(feature = "cli")]
+pub(crate) fn mount_kind(host_path: &Path) -> MountKind {
     if host_path.is_file() {
         MountKind::File
     } else {
@@ -140,8 +157,9 @@ pub(crate) fn os_error(error: &io::Error, path: Option<&Path>) -> Error {
 /// again, and its writable paths, when present, are the only paths of a read-write share that
 /// the workload can modify. A share of a file binds one regular host file, whose mode applies to
 /// the whole file, so it has none of them.
+#[cfg(feature = "cli")]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SandboxMount {
+pub(crate) struct SandboxMount {
     /// The guest directory or file at which the share appears.
     pub(super) guest_target: String,
     /// The host directory or file, with its components normalized.
@@ -156,6 +174,7 @@ pub struct SandboxMount {
     pub(super) kind: MountKind,
 }
 
+#[cfg(feature = "cli")]
 impl SandboxMount {
     /// Returns the share of `host_path` at `guest_target`, with `host_path` spelled with its
     /// components alone, as [`Path::components`] reads them.
@@ -165,7 +184,7 @@ impl SandboxMount {
     /// component, policy paths for a file, more than [`MAX_MOUNT_POLICY_PATHS`] policy paths of a
     /// kind, empty or repeated ones, allowed paths without denied paths, and writable paths of a
     /// read-only share.
-    pub fn new(
+    pub(crate) fn new(
         guest_target: &str,
         host_path: &str,
         access: MountAccess,
@@ -188,7 +207,7 @@ impl SandboxMount {
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), as
     /// [`parse_mount_value`] and [`new`](Self::new) do.
-    pub fn parse(
+    pub(crate) fn parse(
         value: &str,
         policy: MountPolicy,
         owner: MountOwner,
@@ -265,41 +284,16 @@ impl SandboxMount {
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a file share
     /// with policy paths.
-    pub fn with_kind(&self, kind: MountKind) -> Result<Self> {
+    pub(crate) fn with_kind(&self, kind: MountKind) -> Result<Self> {
         Self::checked(Self {
             kind,
             ..self.clone()
         })
     }
 
-    /// Returns the guest target.
-    pub fn guest_target(&self) -> &str {
-        &self.guest_target
-    }
-
     /// Returns the host directory or file.
-    pub fn host_path(&self) -> &Path {
+    pub(crate) fn host_path(&self) -> &Path {
         &self.host_path
-    }
-
-    /// Returns the access mode.
-    pub fn access(&self) -> MountAccess {
-        self.access
-    }
-
-    /// Returns the access-policy paths.
-    pub fn policy(&self) -> &MountPolicy {
-        &self.policy
-    }
-
-    /// Returns the identity of the share's file operations.
-    pub fn owner(&self) -> MountOwner {
-        self.owner
-    }
-
-    /// Returns whether the share binds a directory or a file.
-    pub fn kind(&self) -> MountKind {
-        self.kind
     }
 
     /// Checks the share against the host: its owner must be one that the host supports, its
@@ -312,7 +306,7 @@ impl SandboxMount {
     /// file is not shared in its place. Fails with
     /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), or
     /// [`ErrorKind::Io`](crate::ErrorKind::Io) if the host path cannot be examined.
-    pub fn validated(&self) -> Result<()> {
+    pub(crate) fn validated(&self) -> Result<()> {
         require_mount_owner_supported(self.owner)?;
         let host_path = self.host_path.as_path();
         let kind_matches = match self.kind {
@@ -352,18 +346,14 @@ impl SandboxMount {
     }
 
     /// Returns the share with its host path made absolute, as the one function of NVX that makes
-    /// host paths absolute makes it: joined to the current directory if it is relative, without
-    /// resolving it, so OpenVMM still sees, and refuses, every symbolic-link component of the
-    /// path that was requested. On Windows, a path with another drive and no root, such as
-    /// `D:relative`, is below the current directory of its drive.
+    /// host paths absolute makes it, with `cwd` as the current directory: joined to the current
+    /// directory if it is relative, without resolving it, so OpenVMM still sees, and refuses,
+    /// every symbolic-link component of the path that was requested. On Windows, a path with
+    /// another drive and no root, such as `D:relative`, is below the current directory of its
+    /// drive.
     ///
     /// Fails with [`ErrorKind::Io`](crate::ErrorKind::Io) if a relative host path meets an
     /// unreadable current directory, or Windows cannot qualify a drive-relative path.
-    pub fn absolute(&self) -> Result<Self> {
-        self.absolute_with(&paths::current_dir)
-    }
-
-    /// Implements [`absolute`](Self::absolute) with `cwd` as the current directory.
     pub(crate) fn absolute_with(&self, cwd: &dyn Fn() -> io::Result<PathBuf>) -> Result<Self> {
         if self.host_path.is_absolute() {
             return Ok(self.clone());
@@ -376,16 +366,10 @@ impl SandboxMount {
     }
 
     /// Returns each kind of access-policy path with its requested paths, relative paths joined
-    /// to the absolute host path of the share, as OpenVMM attributes them to the children of an
-    /// aggregate.
+    /// to the absolute host path of the share, with `cwd` as the current directory, as OpenVMM
+    /// attributes them to the children of an aggregate.
     ///
-    /// Fails as [`absolute`](Self::absolute) does.
-    pub fn absolute_policy_paths(&self) -> Result<Vec<(PolicyKind, Vec<String>)>> {
-        self.absolute_policy_paths_with(&paths::current_dir)
-    }
-
-    /// Implements [`absolute_policy_paths`](Self::absolute_policy_paths) with `cwd` as the
-    /// current directory.
+    /// Fails as [`absolute_with`](Self::absolute_with) does.
     pub(crate) fn absolute_policy_paths_with(
         &self,
         cwd: &dyn Fn() -> io::Result<PathBuf>,
@@ -417,21 +401,17 @@ impl SandboxMount {
 
 /// Returns `path` joined to `directory` without resolving links, as [`paths::absolute_in`] joins
 /// them.
+#[cfg(feature = "cli")]
 fn absolute_host_path(directory: &Path, path: &Path) -> Result<PathBuf> {
     paths::absolute_in(directory, path).map_err(|error| os_error(&error, Some(path)))
-}
-
-/// Returns the bootstrap tokens of a share at `target` with `access`.
-pub(super) fn command_line_fragment(target: &str, access: MountAccess) -> String {
-    let [directory, tag, mode] = MOUNT_COMMAND_LINE_FRAGMENT;
-    format!("{directory}{target}{tag}{MOUNT_TAG}{mode}{access}")
 }
 
 /// Checks the live shares that one sandbox attaches, in child order: no target may overlap
 /// another, so that no share hides another, and every share has the same owner.
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
-pub fn validate_mounts(mounts: &[SandboxMount]) -> Result<()> {
+#[cfg(feature = "cli")]
+pub(crate) fn validate_mounts(mounts: &[SandboxMount]) -> Result<()> {
     for (index, mount) in mounts.iter().enumerate() {
         for other in &mounts[..index] {
             if targets_overlap(&other.guest_target, &mount.guest_target) {

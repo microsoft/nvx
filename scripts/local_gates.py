@@ -57,7 +57,6 @@ KERNEL_INPUTS = (
 )
 NVX_RS_INPUTS = (
     "nvx-rs/",
-    "tests/runtime-adapter/",
     "rust-toolchain.toml",
     "scripts/public_api.py",
     "scripts/nvx_tools/guest_binaries.py",
@@ -69,7 +68,10 @@ OPENVMM_COMPARISON_INPUTS = (
     "nvx-rs/tests/vectors/",
     "nvx-rs/tests/openvmm_*.rs",
     "nvx-rs/src/host/cli/cpu_generations.json",
-    "nvx-rs/src/contract/",
+    "nvx-rs/src/host/snapshot/manifest.rs",
+    "nvx-rs/src/host/artifacts/compatibility.rs",
+    "nvx-rs/src/guest/time/checks.rs",
+    "nvx-rs/src/guest/time/decoders.rs",
     "scripts/nvx_tools/time_abi.py",
     CI_WORKFLOW,
 )
@@ -276,13 +278,6 @@ GATE_RULES = (
         requirements=RUST_REQUIREMENT,
     ),
     GateRule(
-        "nvx-rs-bundling",
-        CHECK_NVX_RS,
-        "Check artifact bundling",
-        NVX_RS_INPUTS,
-        requirements=RUST_REQUIREMENT,
-    ),
-    GateRule(
         "nvx-rs-doc",
         CHECK_NVX_RS,
         "Build documentation",
@@ -324,28 +319,6 @@ GATE_RULES = (
         "nvx-rs-guest-binaries-build",
         CHECK_NVX_RS,
         "Build and check the guest binaries",
-        NVX_RS_INPUTS,
-        LINUX,
-        requirements=RUST_REQUIREMENT,
-    ),
-    GateRule(
-        "nvx-rs-adapter-protocol",
-        CHECK_NVX_RS,
-        "Check the runtime adapter's protocol-only configuration",
-        NVX_RS_INPUTS,
-        requirements=RUST_REQUIREMENT,
-    ),
-    GateRule(
-        "nvx-rs-adapter-host",
-        CHECK_NVX_RS,
-        "Check the runtime adapter's host-only configuration",
-        NVX_RS_INPUTS,
-        requirements=RUST_REQUIREMENT,
-    ),
-    GateRule(
-        "nvx-rs-adapter-guest",
-        CHECK_NVX_RS,
-        "Check the runtime adapter's guest-only configuration",
         NVX_RS_INPUTS,
         LINUX,
         requirements=RUST_REQUIREMENT,
@@ -519,7 +492,6 @@ class Gate:
     shell: str
     working_directory: str
     environment: dict[str, str]
-    declared_environment: frozenset[str]
     script: str
     requirements: tuple[str, ...]
     state: str = "selected"
@@ -1027,7 +999,6 @@ def _load_gate(
         shell=shell,
         working_directory=working_directory,
         environment=environment,
-        declared_environment=frozenset(loaded.environment),
         script=script,
         requirements=rule.requirements,
     )
@@ -1340,8 +1311,6 @@ def prepare_execution_environment(
             environment["NVX_RS"] = inherited["NVX_RS"]
         else:
             environment.pop("NVX_RS", None)
-    if "NVX_BUNDLE" not in gate.declared_environment:
-        environment.pop("NVX_BUNDLE", None)
     if os.name == "nt" or gate.operating_system == "windows":
         if gate.operating_system == "windows" and gate.gate_id == "nvx-cli":
             environment.pop("XDG_CACHE_HOME", None)

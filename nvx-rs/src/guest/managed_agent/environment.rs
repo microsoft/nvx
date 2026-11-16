@@ -1,4 +1,4 @@
-//! Environments that the agent and its helper build in memory and pass to `execve`.
+//! Environments that the agent builds in memory and passes to `execve`.
 //!
 //! An environment changes as C's own did under musl's environment functions: setting a variable,
 //! as `setenv` and `putenv` do, replaces its first entry in place or appends one.
@@ -32,6 +32,11 @@ pub(super) fn set(environment: &mut Vec<CString>, name: &[u8], value: &[u8]) -> 
         None => environment.push(entry),
     }
     Ok(())
+}
+
+/// Removes every inherited entry for `name`.
+pub(super) fn remove(environment: &mut Vec<CString>, name: &[u8]) {
+    environment.retain(|entry| !names(entry, name));
 }
 
 /// Returns whether `entry` sets the variable `name`.

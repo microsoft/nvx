@@ -203,7 +203,8 @@ so the resolver reads the main worktree's. `nvx_hosts.py show PROFILE` resolves 
 `exec` and `run` run a command or a script in the host's checkout over SSH, and `probe`,
 `worktree`, and `benchmark` run this checkout's `host_probe.py`, `host_worktree.py`, and
 `benchmark_series.py` against that checkout, which can predate them. None of them prompts for
-secrets.
+secrets. `run` turns the CRLF line endings of a script for a Linux host into LF and leaves those of
+a script for a Windows host as they are, whatever the workstation's operating system.
 
 ## Development
 
@@ -225,12 +226,8 @@ Run all lint and formatting checks before submitting a change:
 ```bash
 python3 -m ruff check scripts .github/specula
 shellcheck --shell=sh \
-  guest/common/init guest/alpine/nvx-container-enter \
-  guest/alpine/nvx-container-launch \
+  guest/common/init \
   guest/common/nvx-hostmount guest/common/nvx-identity-probe \
-  guest/common/nvx-init-agent \
-  guest/common/nvx-container-enter-azurelinux \
-  guest/common/nvx-container-launch-azurelinux \
   guest/common/nvx-sandbox-smoke \
   guest/common/nvx-snapshot guest/common/nvx-virtio-restore-probe \
   scripts/setup/setup-linux.sh
@@ -240,12 +237,8 @@ python3 -m pyright --pythonplatform Linux
 python3 -m pyright --pythonplatform Windows
 python3 -m ruff format --check scripts .github/specula
 shfmt -d -ln posix -i 4 -ci \
-  guest/common/init guest/alpine/nvx-container-enter \
-  guest/alpine/nvx-container-launch \
+  guest/common/init \
   guest/common/nvx-hostmount guest/common/nvx-identity-probe \
-  guest/common/nvx-init-agent \
-  guest/common/nvx-container-enter-azurelinux \
-  guest/common/nvx-container-launch-azurelinux \
   guest/common/nvx-sandbox-smoke \
   guest/common/nvx-snapshot guest/common/nvx-virtio-restore-probe \
   scripts/setup/setup-linux.sh
@@ -288,12 +281,8 @@ Apply the configured Python and POSIX shell formatters with:
 ```bash
 python3 -m ruff format scripts .github/specula
 shfmt -w -ln posix -i 4 -ci \
-  guest/common/init guest/alpine/nvx-container-enter \
-  guest/alpine/nvx-container-launch \
+  guest/common/init \
   guest/common/nvx-hostmount guest/common/nvx-identity-probe \
-  guest/common/nvx-init-agent \
-  guest/common/nvx-container-enter-azurelinux \
-  guest/common/nvx-container-launch-azurelinux \
   guest/common/nvx-sandbox-smoke \
   guest/common/nvx-snapshot guest/common/nvx-virtio-restore-probe \
   scripts/setup/setup-linux.sh

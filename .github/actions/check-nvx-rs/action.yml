@@ -1,7 +1,5 @@
 name: Check nvx-rs
-description: >-
-  Format, lint, document, and test the nvx crate, and the runtime adapter that builds on it
-  as an independent adapter
+description: Format, lint, document, and test the nvx crate
 
 inputs:
   toolchain:
@@ -42,9 +40,6 @@ runs:
     - name: Lint
       shell: bash
       working-directory: nvx-rs
-      env:
-        # --all-features enables `bundled`; stage nothing instead of downloading a release.
-        NVX_BUNDLE: skip
       run: |
         set -euo pipefail
         cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --all-targets --all-features \
@@ -53,8 +48,11 @@ runs:
           -- -D warnings
         cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib --no-default-features \
           -- -D warnings
-        # The cli and testing features alone, so that the compiler checks the private code that
-        # each feature set builds, which other features' code may otherwise use.
+        # The serde, cli and testing features alone, so that the compiler checks the code that each
+        # feature set builds, which other features' code may otherwise use. The guest feature
+        # alone is checked with the guest binaries, below, for the guests' target.
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib \
+          --no-default-features --features serde -- -D warnings
         cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib --bins \
           --features cli -- -D warnings
         cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib --bins \
@@ -63,51 +61,18 @@ runs:
     - name: Test
       shell: bash
       working-directory: nvx-rs
-      env:
-        # --all-features enables `bundled`; stage nothing instead of downloading a release.
-        NVX_BUNDLE: skip
       run: |
         set -euo pipefail
         cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --all-features
         cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked
-        # Without features, the library still holds the protocol and the execution engine.
+        # Without features, the library still holds the protocol.
         cargo "+${{ steps.toolchains.outputs.toolchain }}" build --locked --lib --no-default-features
         cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --lib --no-default-features
-
-    # Stages a synthetic release in the current layout, with nvx-rs and its
-    # provenance, which the bundled-artifacts test then requires to find.
-    - name: Check artifact bundling
-      shell: bash
-      working-directory: nvx-rs
-      run: |
-        set -euo pipefail
-        bundle=$(mktemp -d)
-        executable=openvmm
-        cli=nvx-rs
-        bundle_dir="${bundle}"
-        if [[ "${RUNNER_OS}" == Windows ]]; then
-          executable=openvmm.exe
-          cli=nvx-rs.exe
-          bundle_dir=$(cygpath -w "${bundle}")
-        fi
-        mkdir -p "${bundle}/bin" "${bundle}/guest" "${bundle}/provenance"
-        printf openvmm > "${bundle}/bin/${executable}"
-        printf nvx-rs > "${bundle}/bin/${cli}"
-        printf '{}' > "${bundle}/provenance/nvx-rs.provenance.json"
-        printf kernel > "${bundle}/guest/vmlinux"
-        printf initramfs > "${bundle}/guest/initramfs.cpio.gz"
-        cp ../SOURCE-MANIFEST.json "${bundle}/"
-        (cd "${bundle}" && sha256sum "bin/${executable}" "bin/${cli}" guest/vmlinux \
-          guest/initramfs.cpio.gz provenance/nvx-rs.provenance.json \
-          SOURCE-MANIFEST.json > SHA256SUMS)
-        NVX_BUNDLE_DIR="${bundle_dir}" cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --lib \
-          --features bundled artifacts
 
     - name: Build documentation
       shell: bash
       working-directory: nvx-rs
       env:
-        NVX_BUNDLE: skip
         RUSTDOCFLAGS: -D warnings
       run: cargo "+${{ steps.toolchains.outputs.toolchain }}" doc --locked --no-deps --all-features
 
@@ -123,9 +88,6 @@ runs:
     - name: Check the minimum supported Rust version
       shell: bash
       working-directory: nvx-rs
-      env:
-        # --all-features enables `bundled`; stage nothing instead of downloading a release.
-        NVX_BUNDLE: skip
       run: >-
         cargo "+${{ steps.toolchains.outputs.msrv }}" check
         --locked --all-targets --all-features
@@ -134,9 +96,6 @@ runs:
       if: runner.os == 'Linux'
       shell: bash
       working-directory: nvx-rs
-      env:
-        # --all-features enables `bundled`; stage nothing instead of downloading a release.
-        NVX_BUNDLE: skip
       run: |
         set -euo pipefail
         rustup target add --toolchain "${{ steps.toolchains.outputs.toolchain }}" aarch64-apple-darwin
@@ -161,56 +120,3 @@ runs:
         directory="${PWD}/../build/nvx-rs-guest-binaries"
         python3 ../scripts/nvx.py build-guest-binaries --output "${directory}"
         python3 ../scripts/nvx.py test-guest-binaries --binaries "${directory}"
-
-    # The runtime adapter builds on nvx-rs as an independent adapter does: with a lockfile of its
-    # own, default features off, and the public API only. Its tests check that each configuration
-    # builds that way, and each configuration also builds with nvx-rs's minimum Rust version. As
-    # for nvx-rs, each configuration's documentation builds with warnings denied, with
-    # RUSTDOCFLAGS set for that command alone so that it doesn't reach the doctests.
-    - name: Check the runtime adapter's protocol-only configuration
-      shell: bash
-      working-directory: tests/runtime-adapter
-      run: |
-        set -euo pipefail
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" fmt --all --check
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --all-targets \
-          -- -D warnings
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" build --locked
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked
-        RUSTDOCFLAGS="-D warnings" cargo "+${{ steps.toolchains.outputs.toolchain }}" doc \
-          --locked --no-deps
-        cargo "+${{ steps.toolchains.outputs.msrv }}" check --locked --all-targets
-
-    - name: Check the runtime adapter's host-only configuration
-      shell: bash
-      working-directory: tests/runtime-adapter
-      run: |
-        set -euo pipefail
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --all-targets \
-          --features host -- -D warnings
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" build --locked --features host
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --features host
-        RUSTDOCFLAGS="-D warnings" cargo "+${{ steps.toolchains.outputs.toolchain }}" doc \
-          --locked --no-deps --features host
-        cargo "+${{ steps.toolchains.outputs.msrv }}" check --locked --all-targets --features host
-
-    # The guest agent runs in Linux guests, as a static executable that a test checks.
-    - name: Check the runtime adapter's guest-only configuration
-      if: runner.os == 'Linux'
-      shell: bash
-      working-directory: tests/runtime-adapter
-      run: |
-        set -euo pipefail
-        for toolchain in "${{ steps.toolchains.outputs.toolchain }}" "${{ steps.toolchains.outputs.msrv }}"; do
-          rustup target add --toolchain "${toolchain}" x86_64-unknown-linux-musl
-        done
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --all-targets \
-          --features guest --target x86_64-unknown-linux-musl -- -D warnings
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" build --locked \
-          --features guest --target x86_64-unknown-linux-musl
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked \
-          --features guest --target x86_64-unknown-linux-musl
-        RUSTDOCFLAGS="-D warnings" cargo "+${{ steps.toolchains.outputs.toolchain }}" doc \
-          --locked --no-deps --features guest --target x86_64-unknown-linux-musl
-        cargo "+${{ steps.toolchains.outputs.msrv }}" check --locked --all-targets \
-          --features guest --target x86_64-unknown-linux-musl

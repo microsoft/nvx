@@ -9,46 +9,29 @@ use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::{mem, ptr};
 
-use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GENERIC_ALL, GENERIC_WRITE, HANDLE};
+use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GENERIC_ALL, HANDLE};
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION, AclSizeInformation,
     AddAccessAllowedAceEx, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
-    GetAclInformation, GetKernelObjectSecurity, GetLengthSid, GetSecurityDescriptorDacl,
-    GetSecurityDescriptorOwner, GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor,
-    IsWellKnownSid, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-    SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
+    GetAclInformation, GetKernelObjectSecurity, GetLengthSid, GetSecurityDescriptorControl,
+    GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, GetTokenInformation, INHERIT_ONLY_ACE,
+    InitializeAcl, InitializeSecurityDescriptor, IsWellKnownSid, NO_PROPAGATE_INHERIT_ACE,
+    OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+    SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
     SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, TOKEN_QUERY, TOKEN_USER, TokenUser,
     WinBuiltinAdministratorsSid, WinCreatorOwnerRightsSid, WinCreatorOwnerSid, WinLocalSystemSid,
 };
+#[cfg(feature = "cli")]
+use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA,
-    MoveFileExW, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+    CreateDirectoryW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, READ_CONTROL,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use super::identity::handle_information;
 use super::{last_error, owned, raw, refuse_nul, wide_path};
-
-/// Creates `path` if needed. The directory inherits the ACL of its parent, which is private to
-/// the user under the default state root.
-pub fn create_private_dir(path: &Path) -> io::Result<()> {
-    match fs::create_dir(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
-    }
-    if fs::symlink_metadata(path)?.is_dir() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "{} is not a plain directory",
-            path.display()
-        )))
-    }
-}
 
 /// The `AceType` of an entry that allows access, which `winnt.h` defines.
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
@@ -162,8 +145,7 @@ pub(super) fn with_owner_only_attributes<T>(
     let mut acl = vec![0u32; acl_len.div_ceil(mem::size_of::<u32>())];
     let acl_len = (acl.len() * mem::size_of::<u32>()) as u32;
     let acl_ptr = acl.as_mut_ptr().cast::<ACL>();
-    // SAFETY: SECURITY_DESCRIPTOR is plain data for which all-zero bytes are valid.
-    let mut descriptor: SECURITY_DESCRIPTOR = unsafe { mem::zeroed() };
+    let mut descriptor = SECURITY_DESCRIPTOR::default();
     let descriptor_ptr: PSECURITY_DESCRIPTOR = (&raw mut descriptor).cast();
     // SAFETY: the list's buffer holds `acl_len` bytes, aligned for it, and the descriptor and the
     // identifier are valid. The descriptor points at the identifier and the list, which outlive
@@ -193,23 +175,9 @@ pub(super) fn with_owner_only_attributes<T>(
 /// to SYSTEM or the Administrators group, and its access control list must allow no one else, as
 /// that of a directory under the user's profile does. Its list must also pass entries on to the
 /// files created in it, which would otherwise take their creator's default list.
+#[cfg(feature = "cli")]
 pub(crate) fn check_store_dir(path: &Path) -> io::Result<Option<String>> {
     store_dir_problem(path, &CurrentUser::get()?)
-}
-
-/// Creates the directory `path` private to the current user, or checks that an existing one is,
-/// as [`create_store_dir`] does for the directory of a sandbox store.
-pub(crate) fn create_owner_only_dir(path: &Path) -> io::Result<Option<String>> {
-    create_store_dir(path)
-}
-
-/// Returns why the directory `path` is not private to the current user, if it is not, as
-/// [`check_store_dir`] does for the directory of a sandbox store: unless it is a directory, not a
-/// link or any other reparse point, that belongs to the user, or to SYSTEM or the Administrators
-/// group, whose access control list allows no one else, and passes entries on to the files
-/// created in it.
-pub(crate) fn check_owner_only_dir(path: &Path) -> io::Result<Option<String>> {
-    check_store_dir(path)
 }
 
 /// Returns why the directory `path` cannot hold a sandbox store of `user`, if it cannot.
@@ -240,14 +208,127 @@ fn plain_dir_problem(
 /// current user, if it is not: unless it is a directory, not a link or any other reparse point,
 /// that belongs to the user, or to SYSTEM or the Administrators group, whose access control list
 /// is present, holds only entries that allow or deny access, and allows no one but those and the
-/// owner's aliases, as [`check_owner_only_dir`] requires.
+/// owner's aliases, as [`check_store_dir`] requires.
 ///
-/// Unlike [`check_owner_only_dir`], it does not require the directory to pass entries on to the
+/// Unlike [`check_store_dir`], it does not require the directory to pass entries on to the
 /// files created in it: OpenVMM gives the directory, and each file that it publishes in it, a
 /// protected list of their own, which allows SYSTEM and the owner, and the directory's own list
 /// already stops anyone else from creating a file in it.
 pub(crate) fn check_snapshot_dir(path: &Path) -> io::Result<Option<String>> {
     plain_dir_problem(path, &CurrentUser::get()?, Required::Private)
+}
+
+/// Creates an owner-only VM directory, or checks an existing one without changing it.
+pub(crate) fn create_vm_dir(path: &Path) -> io::Result<Option<String>> {
+    create_store_dir(path)?;
+    check_vm_dir(path)
+}
+
+/// Checks a VM directory's ownership, protected DACL and full, inheritable owner-only access.
+/// Unlike a store, a VM directory trusts neither SYSTEM nor the Administrators or owner aliases.
+pub(crate) fn check_vm_dir(path: &Path) -> io::Result<Option<String>> {
+    let directory = OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let handle = directory.as_raw_handle() as HANDLE;
+    let attributes = handle_information(handle)?.dwFileAttributes;
+    if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Ok(Some("is not a plain directory".to_owned()));
+    }
+    let information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let mut len = 0;
+    // SAFETY: an empty buffer asks for the descriptor's length.
+    unsafe { GetKernelObjectSecurity(handle, information, ptr::null_mut(), 0, &mut len) };
+    let mut buffer = vec![0u64; (len as usize).div_ceil(mem::size_of::<u64>())];
+    let descriptor: PSECURITY_DESCRIPTOR = buffer.as_mut_ptr().cast();
+    // SAFETY: the handle has read-control access, and the aligned buffer holds `len` bytes.
+    if unsafe { GetKernelObjectSecurity(handle, information, descriptor, len, &mut len) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    vm_dir_problem(descriptor, &CurrentUser::get()?)
+}
+
+/// Checks a VM directory's security descriptor against its current-user-only contract.
+fn vm_dir_problem(
+    descriptor: PSECURITY_DESCRIPTOR,
+    user: &CurrentUser,
+) -> io::Result<Option<String>> {
+    let mut owner = ptr::null_mut();
+    let mut present = 0;
+    let mut acl = ptr::null_mut();
+    let mut defaulted = 0;
+    let mut control = 0;
+    let mut revision = 0;
+    // SAFETY: the descriptor and output pointers are valid. The returned pointers borrow it.
+    let read = unsafe {
+        GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted) != 0
+            && GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted) != 0
+            && GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) != 0
+    };
+    if !read {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: both identifiers are valid.
+    if owner.is_null() || unsafe { EqualSid(owner, user.sid()) } == 0 {
+        return Ok(Some("belongs to another user".to_owned()));
+    }
+    if present == 0 || acl.is_null() {
+        return Ok(Some("allows every user".to_owned()));
+    }
+    if control & SE_DACL_PROTECTED == 0 {
+        return Ok(Some(
+            "inherits access control entries from its parent".to_owned(),
+        ));
+    }
+    let mut size = ACL_SIZE_INFORMATION::default();
+    // SAFETY: the list is valid, and the output holds an ACL_SIZE_INFORMATION.
+    if unsafe {
+        GetAclInformation(
+            acl,
+            (&raw mut size).cast(),
+            mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let inherited = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+    let mut full_access = false;
+    for index in 0..size.AceCount {
+        let mut ace = ptr::null_mut();
+        // SAFETY: the index is within the list, and the output pointer is valid.
+        if unsafe { GetAce(acl, index, &mut ace) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: each entry starts with an ACE_HEADER.
+        let header = unsafe { *ace.cast::<ACE_HEADER>() };
+        if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+            return Ok(Some(format!(
+                "has an access control entry of type {}, not one that allows access",
+                header.AceType
+            )));
+        }
+        let entry = ace.cast::<ACCESS_ALLOWED_ACE>();
+        // SAFETY: an allowed ACE holds its mask and its SID from SidStart onward.
+        let (mask, sid): (u32, PSID) =
+            unsafe { ((*entry).Mask, (&raw mut (*entry).SidStart).cast()) };
+        // SAFETY: both identifiers are valid.
+        if unsafe { EqualSid(sid, user.sid()) } == 0 {
+            return Ok(Some("allows others than the current user".to_owned()));
+        }
+        let flags = u32::from(header.AceFlags);
+        full_access |= ((mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS || mask & GENERIC_ALL != 0)
+            && flags & inherited == inherited
+            && flags & (INHERIT_ONLY_ACE | NO_PROPAGATE_INHERIT_ACE) == 0;
+    }
+    Ok((!full_access).then(|| {
+        "does not allow the current user full access that the files and directories created \
+         in it inherit"
+            .to_owned()
+    }))
 }
 
 /// Returns why the file that `file` holds open, the lock, a record, or the capability of a
@@ -259,28 +340,6 @@ pub(crate) fn private_file_problem(file: &fs::File) -> io::Result<Option<String>
     privacy_problem(file, &CurrentUser::get()?, Required::Private)
 }
 
-/// Returns why another user than the current one, SYSTEM, or the Administrators group may change
-/// the file that `file` holds open, if one may: unless it belongs to the user, or to SYSTEM or the
-/// Administrators group, and its access control list allows no one else to write or extend it, to
-/// change its attributes, its list, or its owner, or to delete it. Others may read it.
-pub(crate) fn foreign_writer_problem(file: &fs::File) -> io::Result<Option<String>> {
-    privacy_problem(file, &CurrentUser::get()?, Required::Unwritable)
-}
-
-/// The rights of an access control entry that change a file or directory: write or extend it, or
-/// its extended attributes, delete it or its children, change its attributes, its list, or its
-/// owner, and the generic rights that include those.
-const CHANGE_RIGHTS: u32 = FILE_WRITE_DATA
-    | FILE_APPEND_DATA
-    | FILE_WRITE_EA
-    | FILE_DELETE_CHILD
-    | FILE_WRITE_ATTRIBUTES
-    | DELETE
-    | WRITE_DAC
-    | WRITE_OWNER
-    | GENERIC_WRITE
-    | GENERIC_ALL;
-
 /// What [`privacy_problem`] requires of the access control list of a file or directory, whose
 /// owner the user must trust in any case.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -290,8 +349,6 @@ pub(super) enum Required {
     /// That it allow no one else any access, and pass entries on to the files created in it, as
     /// a directory of a store must.
     PrivateDirectory,
-    /// That it allow no one else any of the [`CHANGE_RIGHTS`].
-    Unwritable,
 }
 
 /// Returns why the file, directory, or other object that `object` holds open is not private to
@@ -333,8 +390,7 @@ pub(super) fn privacy_problem(
     if present == 0 || acl.is_null() {
         return Ok(Some("allows every user".to_owned()));
     }
-    // SAFETY: ACL_SIZE_INFORMATION is plain data for which all-zero bytes are valid.
-    let mut size: ACL_SIZE_INFORMATION = unsafe { mem::zeroed() };
+    let mut size = ACL_SIZE_INFORMATION::default();
     // SAFETY: the list is valid, and the output holds an ACL_SIZE_INFORMATION.
     let sized = unsafe {
         GetAclInformation(
@@ -363,11 +419,6 @@ pub(super) fn privacy_problem(
             ACCESS_DENIED_ACE_TYPE => {}
             ACCESS_ALLOWED_ACE_TYPE => {
                 let entry = ace.cast::<ACCESS_ALLOWED_ACE>();
-                // SAFETY: an entry that allows access starts as an ACCESS_ALLOWED_ACE.
-                let mask = unsafe { (*entry).Mask };
-                if required == Required::Unwritable && mask & CHANGE_RIGHTS == 0 {
-                    continue;
-                }
                 // SAFETY: an entry that allows access holds its identifier from `SidStart` on.
                 let sid: PSID = unsafe { (&raw mut (*entry).SidStart).cast() };
                 // The creator owner and the owner rights stand for an owner: the owner, or the
@@ -378,13 +429,7 @@ pub(super) fn privacy_problem(
                         || IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0
                 };
                 if !owner_alias && !user.trusts(sid) {
-                    return Ok(Some(
-                        match required {
-                            Required::Unwritable => "allows other users to change it",
-                            Required::Private | Required::PrivateDirectory => "allows other users",
-                        }
-                        .to_owned(),
-                    ));
+                    return Ok(Some("allows other users".to_owned()));
                 }
             }
             other => {
@@ -432,6 +477,7 @@ pub(crate) fn make_sparse(file: &fs::File) -> io::Result<()> {
 
 /// Renames `from` to `to` unless `to` exists, which it leaves as it is, failing with
 /// [`io::ErrorKind::AlreadyExists`]: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`.
+#[cfg(feature = "cli")]
 pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     let (from, to) = (wide_path(from)?, wide_path(to)?);
     // SAFETY: both names are NUL-terminated.

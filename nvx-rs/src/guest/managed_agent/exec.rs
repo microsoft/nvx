@@ -1,23 +1,19 @@
+use std::os::fd::BorrowedFd;
 use std::os::unix::process::ExitStatusExt;
 use std::time::{Duration, Instant};
 
-use crate::guest::entry;
-use crate::guest::exec::{Event, Execution, KillTarget, Outcome, Pipes, Stream};
-use crate::guest::process::Child;
-use crate::guest::spawn::{Barrier, LaunchFailure, LaunchStage, Spawned};
-use crate::guest::sys::{self, Errno, FileDescriptor, ProcessId, c_string};
+use crate::guest::init::{self, Stream};
+use crate::guest::sys::{self, Errno, c_string};
 use crate::protocol::{
-    self, APP_CANCEL, APP_EXIT, APP_STDERR, APP_STDOUT, BUSY, CWD_FAILED, GuestExecPayload,
-    LAUNCH_FAILED, OUTER_DATA,
+    APP_ACTIVATE, APP_CANCEL, APP_CAPTURE, APP_EXIT, APP_STDERR, APP_STDOUT, APP_STOP, BUSY,
+    CWD_FAILED, GuestExecPayload, LAUNCH_FAILED, OUTER_DATA, v2::STDIN_WINDOW,
 };
 
 use super::AgentConfig;
-use super::cgroup;
 use super::diagnostics::with_description;
-use super::exec_config;
-use super::launch::{self, LaunchRequest};
+use super::launch;
 use super::seam::System;
-use super::session::{DataFailureKind, Event as SessionEvent, ReceiveFailure, Session};
+use super::session::{DataFailureKind, Event as SessionEvent, ReceiveFailure, Request, Session};
 
 /// Maximum bytes read from one output descriptor at a time.
 const OUTPUT_CHUNK_BYTES: usize = 32 * 1024;
@@ -28,36 +24,25 @@ const ENVIRONMENT_DIAGNOSTIC: &[u8] = b"nvx-managed-agent: cannot configure work
 
 /// Executes one validated workload request and streams its terminal outcome.
 ///
-/// The workload runs as an [`Execution`], which reads its output, ends it, and collects its
-/// status, and which the agent drives in the C agent's loop: each turn polls the workload and
-/// the control session, serves a control record, forwards the workload's output, collects the
-/// statuses of the agent's children, and checks the workload's timeout. The agent keeps the C
-/// agent's policy: the output cap, checked for each read of up to 32 KiB, and the precedence of
-/// a cancellation, a timeout, and the cap over the workload's own status.
+/// The agent drives its native plain-process workload in the C agent's loop: each turn polls the
+/// workload and the control session, serves a control record, forwards the workload's output,
+/// collects the statuses of the agent's children, and checks the workload's timeout. The agent
+/// keeps the C agent's precedence of a cancellation and a timeout over the workload's own status.
+///
+/// An execution has no output cap. Its workload reads a pipe, into which each turn writes what
+/// the host sent in `STDIN` frames, under [`STDIN_WINDOW`], and acknowledges what it wrote, and
+/// which it closes after `STDIN_END`. The session streams while it runs: its records go through
+/// the send queue, which never waits for the console, and the agent reads no more output while
+/// the queue is full, so the workload waits on its pipes while the agent serves control requests.
+/// `STOP` cancels it, and once its `EXIT` reports that, `stop` holds the `STOP`'s request ID.
 pub(crate) fn run(
     system: &mut impl System,
     session: &mut Session,
     config: &AgentConfig,
     request_id: u64,
     execution: &GuestExecPayload,
+    stop: &mut Option<u64>,
 ) -> Result<(), Errno> {
-    if config.direct {
-        if let Err(error) = cgroup::prepare(system) {
-            super::diagnostics::error(system, "exec-cgroup", error as i32);
-            return session.send_error(request_id, 125, LAUNCH_FAILED);
-        }
-        match cgroup::verify_empty(system) {
-            Ok(false) => {}
-            Ok(true) => {
-                super::diagnostics::error(system, "exec-cgroup-verify", Errno::EBUSY as i32);
-                return session.send_error(request_id, 125, "containment-failed");
-            }
-            Err(error) => {
-                super::diagnostics::error(system, "exec-cgroup-verify", error as i32);
-                return session.send_error(request_id, 125, "containment-failed");
-            }
-        }
-    }
     if let Err(failure) = validate_launch_environment(system, config, execution) {
         match failure {
             EnvironmentFailure::Child(error, diagnostic) => {
@@ -71,55 +56,24 @@ pub(crate) fn run(
             }
         }
     }
-    let Ok(options) = cgroup::options(system.paths(), config.direct) else {
-        return session.send_error(request_id, 125, LAUNCH_FAILED);
-    };
-    let (mut spawned, pipes) = match launch(system, config, execution) {
+    session.collect(|_, _| {})?;
+    let mut workload = match launch(system, session, config, execution) {
         Ok(launched) => launched,
-        Err(LaunchError::Entry(error)) => {
-            let diagnostic =
-                format!("nvx-managed-agent: cannot prepare the workload's execution: {error}\n");
-            session.send_app(APP_STDERR, request_id, 0, diagnostic.as_bytes())?;
+        Err(LaunchError::Start(failure)) => {
+            settle_start(system, session, &failure)?;
             return session.send_error(request_id, 125, LAUNCH_FAILED);
         }
         Err(LaunchError::Other) => return session.send_error(request_id, 125, LAUNCH_FAILED),
     };
-    let process = spawned.process();
-    // A sandbox workload waits at its barrier until the agent has placed it in its cgroup; a
-    // barrier dropped unreleased cancels its launch.
-    let barrier = spawned.take_barrier();
-    let mut workload = match Execution::new(spawned, pipes, options) {
-        Ok(workload) => workload,
-        Err(error) => {
-            // The execution ended the workload, and its cgroup, before it returned the error.
-            drop(barrier);
-            super::diagnostics::error(system, "exec-launch", sys::errno_of(&error) as i32);
-            if let Err(error) = Child::from_process(process).wait() {
-                report_wait_failure(system, &error);
-            }
-            return session.send_error(request_id, 125, LAUNCH_FAILED);
-        }
-    };
-    if let Some(barrier) = barrier
-        && let Err(error) = place(system, process, barrier)
-    {
-        super::diagnostics::error(system, "exec-launch", error as i32);
-        workload.terminate();
-        if let Err(error) = workload.wait() {
-            report_wait_failure(system, &error);
-        }
-        return session.send_error(request_id, 125, LAUNCH_FAILED);
-    }
-    workload.grant(Stream::Stdout, usize::MAX);
-    workload.grant(Stream::Stderr, usize::MAX);
-
     let started = Instant::now();
     let mut state = RunState::default();
     let mut buffer = [0u8; OUTPUT_CHUNK_BYTES];
-    while state.running(&workload) || workload.has_open_output() {
+    session.stream(true);
+    while state.running(&workload) || (workload.has_open_output() && !state.ending()) {
         let session_ready = match poll(
             &workload,
-            (!state.session_lost).then_some(session.descriptor()),
+            (!state.session_lost).then_some(&*session),
+            !state.input.pending.is_empty(),
         ) {
             Ok(ready) => ready,
             Err(Errno::EINTR) => false,
@@ -129,20 +83,31 @@ pub(crate) fn run(
             }
         };
         if session_ready {
-            match handle_control(system, session, request_id) {
+            match handle_control(system, session, request_id, &mut state.input, stop) {
                 Ok(ExecControl::None) => {}
                 Ok(ExecControl::Cancel) if state.running(&workload) && !state.cancelled => {
                     state.cancelled = true;
                     workload.cancel();
                 }
                 Ok(ExecControl::Cancel) => {}
+                Ok(ExecControl::Capture) => {
+                    workload.terminate();
+                    session.sweep_capture().inspect_err(|error| {
+                        super::diagnostics::error(system, "exec-capture-sweep", *error as i32);
+                    })?;
+                }
                 Ok(ExecControl::SessionLost) => {
                     state.session_lost = true;
                     workload.disconnect();
                 }
                 Err(error) => {
                     workload.terminate();
-                    if let Err(failure) = workload.wait() {
+                    if session.stopping() {
+                        return Err(error);
+                    }
+                    if !state.status_lost
+                        && let Err(failure) = workload.wait(session)
+                    {
                         report_wait_failure(system, &failure);
                     }
                     report_kill_failures(system, &mut workload);
@@ -150,8 +115,19 @@ pub(crate) fn run(
                 }
             }
         }
-        state.forward(system, session, request_id, &mut workload, &mut buffer)?;
-        cgroup::reap(&mut workload);
+        if !state.session_lost {
+            // The space that the console freed takes the input's acknowledgement before more
+            // output, so that output cannot starve it.
+            session.send_queued()?;
+            state.input.write(&mut workload, session, request_id)?;
+        }
+        let output = if state.session_lost {
+            &mut [][..]
+        } else {
+            &mut buffer[..]
+        };
+        state.forward(system, session, request_id, &mut workload, output)?;
+        workload.collect(session)?;
         if state.running(&workload)
             && execution.timeout_ms != 0
             && started.elapsed() >= Duration::from_millis(u64::from(execution.timeout_ms))
@@ -159,54 +135,42 @@ pub(crate) fn run(
             state.timed_out = true;
             workload.terminate();
         }
-        // The outcome is the cause for which the agent ended the workload, so a status that it
-        // cannot collect only ends the loop, once the output has closed.
-        if (state.timed_out || state.output_limited || state.cancelled || state.session_lost)
-            && state.running(&workload)
-            && let Err(error) = workload.wait()
-        {
-            state.lose_status(system, &error);
-        }
     }
-    let outcome = state.finish(system, session, request_id, &mut workload, &mut buffer)?;
+    let outcome = if state.ending() {
+        if !state.session_lost {
+            state.forward(system, session, request_id, &mut workload, &mut buffer)?;
+        }
+        state.forward(system, session, request_id, &mut workload, &mut [])?;
+        report_kill_failures(system, &mut workload);
+        None
+    } else {
+        state.finish(system, session, request_id, &mut workload, &mut buffer)?
+    };
+    session.stream(false);
 
     let launch_report = state.launch.take().unwrap_or(Ok(None));
-    if config.direct
-        && let Err(error) = cgroup::settle(system)
-    {
-        super::diagnostics::error(system, "exec-cgroup-settle", error as i32);
-        return if state.session_lost {
-            Ok(())
-        } else {
-            session.send_error(request_id, 125, "containment-failed")
-        };
-    }
     if state.session_lost {
         return Ok(());
     }
+    // Input that the pipe took while the send queue was full is acknowledged before the end.
+    if state.input.written != 0 {
+        session.send_ack(request_id, state.input.written)?;
+    }
     match launch_report {
-        Ok(Some(failure)) => match failure.stage() {
-            LaunchStage::WorkingDirectory if config.direct => {
+        Ok(Some(failure)) => match failure.kind() {
+            LaunchKind::WorkingDirectory => {
                 return refuse_cwd(session, request_id, execution, failure.raw_os_error());
             }
-            LaunchStage::WorkingDirectory | LaunchStage::Exec if !config.direct => {
-                return refuse_sandbox_workload(session, request_id, execution, &failure);
-            }
-            // The sandbox agent's own stages, its entry's among them, fail its launch, which
-            // names the stage on standard error, as a refused preparation names its reason.
-            _ if !config.direct => {
+            LaunchKind::Credentials => {
                 super::diagnostics::error(system, "exec-launch", failure.raw_os_error());
-                let diagnostic = format!(
-                    "nvx-managed-agent: cannot enter the workload's execution: {failure}\n"
+                return session.send_error(request_id, 125, LAUNCH_FAILED);
+            }
+            LaunchKind::Exec => {
+                let diagnostic = with_description(
+                    b"nvx-managed-agent: cannot execute workload: ",
+                    Errno::from_raw(failure.raw_os_error()),
                 );
-                session.send_app(APP_STDERR, request_id, 0, diagnostic.as_bytes())?;
-                return session.send_error(request_id, 125, LAUNCH_FAILED);
-            }
-            LaunchStage::Credentials
-            | LaunchStage::PhysicalWorkingDirectory
-            | LaunchStage::Cgroup => {
-                super::diagnostics::error(system, "exec-launch", failure.raw_os_error());
-                return session.send_error(request_id, 125, LAUNCH_FAILED);
+                session.send_app(APP_STDERR, request_id, 0, &diagnostic)?;
             }
             // The direct agent's other stages end the child with status 125 before the workload
             // runs, which the agent reports as the workload's exit status, as the C agent did.
@@ -226,10 +190,8 @@ pub(crate) fn run(
         )
     } else if state.timed_out {
         session.send_app(APP_EXIT, request_id, 124, b"timeout")
-    } else if state.output_limited {
-        session.send_app(APP_EXIT, request_id, 125, b"output-limit")
     } else {
-        match outcome.map(|outcome| outcome.status()) {
+        match outcome {
             Some(status) => match (status.code(), status.signal()) {
                 (Some(code), _) => session.send_app(APP_EXIT, request_id, code, b"exit"),
                 (None, Some(signal)) => {
@@ -242,18 +204,288 @@ pub(crate) fn run(
     }
 }
 
+/// The direct core, behind the NVXC outcome policy.
+enum Workload {
+    Direct(init::Exec),
+}
+
+/// Events needed by the unchanged NVXC policy.
+enum Event<'a> {
+    Output(Stream, &'a [u8]),
+    Launch(std::io::Result<Option<LaunchFailure>>),
+    ReadFailed,
+    DirectKillFailed(std::io::Error),
+    Ended(std::process::ExitStatus),
+    Other,
+}
+
+enum LaunchFailure {
+    Direct(init::LaunchFailure),
+}
+
+enum LaunchKind {
+    WorkingDirectory,
+    Exec,
+    Credentials,
+    Other,
+}
+
+impl LaunchFailure {
+    fn kind(&self) -> LaunchKind {
+        let stage = match self {
+            Self::Direct(failure) => failure.stage,
+        };
+        // The syscall boundary's stable child-report stage numbers.
+        match stage {
+            18 => LaunchKind::WorkingDirectory,
+            21 => LaunchKind::Exec,
+            13..=17 | 19 => LaunchKind::Credentials,
+            _ => LaunchKind::Other,
+        }
+    }
+
+    fn raw_os_error(&self) -> i32 {
+        match self {
+            Self::Direct(failure) => failure.error,
+        }
+    }
+}
+
+impl Workload {
+    fn status(&self) -> Option<std::process::ExitStatus> {
+        match self {
+            Self::Direct(workload) => workload.status(),
+        }
+    }
+
+    fn has_open_output(&self) -> bool {
+        match self {
+            Self::Direct(workload) => workload.has_open_output(),
+        }
+    }
+
+    fn descriptors(&self) -> Vec<std::os::fd::BorrowedFd<'_>> {
+        match self {
+            Self::Direct(workload) => workload.descriptors().map(|(_, fd)| fd).collect(),
+        }
+    }
+
+    /// Lends the writer of the workload's standard input while it is open.
+    fn input(&self) -> Option<BorrowedFd<'_>> {
+        match self {
+            Self::Direct(workload) => workload.input(),
+        }
+    }
+
+    /// Writes as much of `bytes` as the workload's standard input takes now.
+    fn write_input(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Direct(workload) => workload.write_input(bytes),
+        }
+    }
+
+    /// Closes the workload's standard input.
+    fn close_input(&mut self) {
+        match self {
+            Self::Direct(workload) => workload.close_input(),
+        }
+    }
+
+    fn next_event<'a>(&mut self, buffer: &'a mut [u8]) -> std::io::Result<Option<Event<'a>>> {
+        match self {
+            Self::Direct(workload) => workload.next_event(buffer).map(|event| {
+                event.map(|event| match event {
+                    init::Event::Output(stream, bytes) => Event::Output(stream, bytes),
+                    init::Event::Launch(report) => {
+                        Event::Launch(report.map(|failure| failure.map(LaunchFailure::Direct)))
+                    }
+                    init::Event::ReadFailed => Event::ReadFailed,
+                    init::Event::KillFailed(init::KillTarget::ProcessGroup, error) => {
+                        Event::DirectKillFailed(error)
+                    }
+                    init::Event::Ended(status) => Event::Ended(status),
+                    _ => Event::Other,
+                })
+            }),
+        }
+    }
+
+    fn observe(&mut self, id: u32, status: std::process::ExitStatus) {
+        match self {
+            Self::Direct(workload) => workload.observe(id, status),
+        };
+    }
+
+    fn collect(&mut self, session: &Session) -> Result<(), Errno> {
+        session.collect(|id, status| self.observe(id, status))
+    }
+
+    fn terminate(&mut self) {
+        match self {
+            Self::Direct(workload) => workload.end(),
+        }
+    }
+
+    fn cancel(&mut self) {
+        match self {
+            Self::Direct(workload) => workload.cancel(),
+        }
+    }
+
+    fn disconnect(&mut self) {
+        match self {
+            Self::Direct(workload) => workload.reset(),
+        }
+    }
+
+    fn wait(&mut self, session: &Session) -> std::io::Result<std::process::ExitStatus> {
+        loop {
+            self.collect(session)?;
+            if let Some(status) = self.status() {
+                return Ok(status);
+            }
+            if let Some(Event::DirectKillFailed(error)) = self.next_event(&mut [])? {
+                return Err(error);
+            }
+            match poll(self, None, false) {
+                Ok(_) | Err(Errno::EINTR) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    fn kill_failure(&mut self) -> Option<Event<'static>> {
+        match self {
+            Self::Direct(workload) => workload.kill_failure().map(|event| match event {
+                init::Event::KillFailed(init::KillTarget::ProcessGroup, error) => {
+                    Event::DirectKillFailed(error)
+                }
+                _ => Event::Other,
+            }),
+        }
+    }
+}
+
+/// Feeds the agent's sole status collector to its active or failed-start owner.
+pub(super) fn collect(mut observe: impl FnMut(u32, std::process::ExitStatus)) {
+    while let Some(reaped) = sys::reap_any_nonblocking() {
+        observe(
+            reaped.process.raw().unsigned_abs(),
+            std::process::ExitStatus::from_raw(reaped.wait_status),
+        );
+    }
+}
+
+/// Keeps a failed native launch owned until its child is collected or explicitly lost.
+fn settle_start(
+    system: &mut impl System,
+    session: &Session,
+    failure: &init::StartFailure,
+) -> Result<(), Errno> {
+    super::diagnostics::error(system, "exec-launch", sys::errno_of(&failure.error) as i32);
+    if let Some(error) = failure.cleanup {
+        super::diagnostics::error(system, "exec-kill", error as i32);
+    }
+    if let Some(process) = failure.process {
+        session.watch(process.raw().unsigned_abs());
+        loop {
+            let mut settled = false;
+            session.collect(|id, status| {
+                settled |= id == process.raw().unsigned_abs()
+                    && (status.code().is_some() || status.signal().is_some());
+            })?;
+            if settled {
+                break;
+            }
+            if !failure.is_pending()? {
+                report_wait_failure(system, &Errno::ECHILD.into());
+                break;
+            }
+            match sys::readable_or_hung_up(&[], POLL_INTERVAL_MS) {
+                Ok(_) | Err(Errno::EINTR) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The standard input of an execution of NVXC version 2: what the host sent and the agent has
+/// yet to write into the workload's pipe, and what it wrote and has yet to acknowledge.
+#[derive(Default)]
+struct Input {
+    /// Bytes that the host sent and the agent has not written.
+    pending: Vec<u8>,
+    /// Bytes written into the pipe and not acknowledged yet.
+    written: u32,
+    /// Bytes that the host sent and the agent has not acknowledged, at most [`STDIN_WINDOW`]:
+    /// those that a closed pipe never took stay unacknowledged.
+    outstanding: u32,
+    /// Whether the host ended the input with `STDIN_END`.
+    ended: bool,
+}
+
+impl Input {
+    /// Takes a `STDIN` frame's bytes, or, for `None`, its `STDIN_END`, refusing bytes beyond the
+    /// window and anything after the end as `EPROTO`.
+    fn receive(&mut self, bytes: Option<&[u8]>) -> Result<(), Errno> {
+        if self.ended {
+            return Err(Errno::EPROTO);
+        }
+        let Some(bytes) = bytes else {
+            self.ended = true;
+            return Ok(());
+        };
+        self.outstanding = u32::try_from(bytes.len())
+            .ok()
+            .and_then(|length| self.outstanding.checked_add(length))
+            .filter(|&outstanding| outstanding <= STDIN_WINDOW)
+            .ok_or(Errno::EPROTO)?;
+        self.pending.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    /// Writes as much as the workload's pipe takes, closes the pipe once the input ended and the
+    /// agent wrote every byte, and, unless the send queue is full, acknowledges what it wrote.
+    fn write(
+        &mut self,
+        workload: &mut Workload,
+        session: &mut Session,
+        request_id: u64,
+    ) -> Result<(), Errno> {
+        if !self.pending.is_empty() {
+            match workload.write_input(&self.pending) {
+                Ok(written) => {
+                    self.pending.drain(..written);
+                    self.written += written as u32;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                // A closed pipe takes nothing more, and the workload reads no more of it.
+                Err(_) => self.pending.clear(),
+            }
+        }
+        if self.ended && self.pending.is_empty() {
+            workload.close_input();
+        }
+        if self.written != 0 && !session.queue_full() {
+            session.send_ack(request_id, self.written)?;
+            self.outstanding -= self.written;
+            self.written = 0;
+        }
+        Ok(())
+    }
+}
+
 /// What the agent learned of one workload while it ran: the C agent's flags, which decide the
 /// outcome that it reports, and the workload's launch report and outcome.
 #[derive(Default)]
 struct RunState {
-    /// Bytes of output forwarded so far, which the 1 MiB cap bounds.
-    output_bytes: usize,
+    /// The workload's standard input, in version 2.
+    input: Input,
     /// Whether the host cancelled the workload while it ran.
     cancelled: bool,
     /// Whether the workload's timeout passed while it ran.
     timed_out: bool,
-    /// Whether the workload's output exceeded the cap.
-    output_limited: bool,
     /// Whether a reset detached the workload's session, after which its output is discarded.
     session_lost: bool,
     /// Whether the agent cannot collect the workload's status, as when another collector took
@@ -262,32 +494,47 @@ struct RunState {
     /// The workload's launch report, once it arrived.
     launch: Option<std::io::Result<Option<LaunchFailure>>>,
     /// The workload's outcome, once its execution ended.
-    outcome: Option<Outcome>,
+    outcome: Option<std::process::ExitStatus>,
 }
 
 impl RunState {
+    /// Whether the agent ended the workload, fixing its outcome or abandoning its session.
+    fn ending(&self) -> bool {
+        self.cancelled || self.timed_out || self.session_lost
+    }
+
     /// Returns whether the workload may still be running: its status is neither known nor lost.
     /// A workload whose status is lost has ended too, so that a cancellation or a timeout after
     /// that, while its output drains, changes its outcome no more than after a known status.
-    fn running(&self, workload: &Execution) -> bool {
+    fn running(&self, workload: &Workload) -> bool {
         workload.status().is_none() && !self.status_lost
     }
 
     /// Takes the workload's events until it has no step to take, forwarding its output as NVXC
-    /// frames, until a read that the agent cannot forward: one beyond the cap, after which it
-    /// reads and drops the rest of the output, or a failure to read or send, which ends the
-    /// workload and the turn, as the C agent's did. A failure to collect the workload's status,
-    /// the execution's only one, ends the turn too.
+    /// frames, until a read that the agent cannot forward: a failure to read or send, which ends
+    /// the workload and the turn, as the C agent's did. A failure to collect the workload's
+    /// status, the execution's only one, ends the turn too.
     fn forward(
         &mut self,
         system: &mut impl System,
         session: &mut Session,
         request_id: u64,
-        workload: &mut Execution,
+        workload: &mut Workload,
         buffer: &mut [u8],
     ) -> Result<(), Errno> {
+        // An execution of version 2, whose output has no cap, reads one chunk of it a turn, so
+        // that its output cannot keep the agent from serving control requests or its timeout.
+        let mut read = false;
         loop {
-            let event = match workload.next_event(buffer) {
+            if let Some((id, status)) = session.take_status() {
+                workload.observe(id, status);
+            }
+            let chunk = if session.queue_full() || read {
+                &mut [][..]
+            } else {
+                &mut *buffer
+            };
+            let event = match workload.next_event(chunk) {
                 Ok(Some(event)) => event,
                 Ok(None) => return Ok(()),
                 Err(error) => {
@@ -297,18 +544,7 @@ impl RunState {
             };
             match event {
                 Event::Output(stream, bytes) => {
-                    if self.output_bytes > protocol::MAX_OUTPUT_BYTES - bytes.len() {
-                        self.output_limited = true;
-                        // The cap ends forwarding: read and drop the rest of both streams,
-                        // as a lost session does, so the client receives a prefix of what the
-                        // workload wrote, not a stream with a silent gap where a later chunk
-                        // fit the leftover room.
-                        workload.discard(Stream::Stdout);
-                        workload.discard(Stream::Stderr);
-                        workload.terminate();
-                        return Ok(());
-                    }
-                    self.output_bytes += bytes.len();
+                    read = true;
                     let kind = match stream {
                         Stream::Stdout => APP_STDOUT,
                         Stream::Stderr => APP_STDERR,
@@ -318,14 +554,17 @@ impl RunState {
                         return Ok(());
                     }
                 }
-                Event::ReadFailed(..) => {
+                Event::ReadFailed => {
                     workload.terminate();
                     return Ok(());
                 }
                 Event::Launch(report) => self.launch = Some(report),
-                Event::KillFailed(target, error) => report_kill_failure(system, target, &error),
+                Event::DirectKillFailed(error) => {
+                    super::diagnostics::error(system, "exec-kill", sys::errno_of(&error) as i32);
+                    return Err(sys::errno_of(&error));
+                }
                 Event::Ended(outcome) => self.outcome = Some(outcome),
-                Event::Discarded(..) | Event::Closed(_) => {}
+                Event::Other => {}
             }
         }
     }
@@ -346,15 +585,15 @@ impl RunState {
         system: &mut impl System,
         session: &mut Session,
         request_id: u64,
-        workload: &mut Execution,
+        workload: &mut Workload,
         buffer: &mut [u8],
-    ) -> Result<Option<Outcome>, Errno> {
+    ) -> Result<Option<std::process::ExitStatus>, Errno> {
         loop {
             self.forward(system, session, request_id, workload, buffer)?;
             if self.outcome.is_some() || self.status_lost {
                 return Ok(self.outcome);
             }
-            match poll(workload, None) {
+            match poll(workload, None, false) {
                 Ok(_) | Err(Errno::EINTR) => {}
                 Err(error) => return Err(error),
             }
@@ -362,32 +601,31 @@ impl RunState {
     }
 }
 
-/// Waits at most one poll interval until one of the workload's descriptors or the session's,
-/// if given, polls ready, and returns whether the session's did.
-fn poll(workload: &Execution, session: Option<&FileDescriptor>) -> Result<bool, Errno> {
-    let mut descriptors = workload
-        .descriptors()
-        .map(|(_, descriptor)| descriptor)
-        .collect::<Vec<_>>();
+/// Waits at most one poll interval until one of the workload's descriptors polls ready, but its
+/// output while the session's send queue is full, its input, if `input`, writable, or the
+/// session's descriptor, if given, readable, or writable while it has queued bytes, and returns
+/// whether the session's descriptor polled readable.
+fn poll(workload: &Workload, session: Option<&Session>, input: bool) -> Result<bool, Errno> {
+    let mut descriptors = Vec::new();
     if let Some(session) = session {
-        descriptors.push(session.borrowed());
+        let descriptor = session.descriptor().borrowed();
+        descriptors.push((descriptor, false));
+        descriptors.extend(session.queued().then_some((descriptor, true)));
     }
-    let ready = sys::readable_or_hung_up(&descriptors, POLL_INTERVAL_MS)?;
-    Ok(session.is_some() && ready.last().copied().unwrap_or(false))
-}
-
-/// Reports a failure to kill the workload's cgroup, as the C agent did; it signalled the
-/// workload's process group without checking the result.
-fn report_kill_failure(system: &mut impl System, target: KillTarget, error: &std::io::Error) {
-    if target == KillTarget::Cgroup {
-        super::diagnostics::error(system, "exec-cgroup-kill", sys::errno_of(error) as i32);
+    if !session.is_some_and(Session::queue_full) {
+        descriptors.extend(workload.descriptors().into_iter().map(|fd| (fd, false)));
     }
+    descriptors.extend(workload.input().filter(|_| input).map(|fd| (fd, true)));
+    let ready = sys::ready(&descriptors, POLL_INTERVAL_MS)?;
+    Ok(session.is_some() && ready[0])
 }
 
 /// Reports the kill failures that the workload's execution has yet to report.
-fn report_kill_failures(system: &mut impl System, workload: &mut Execution) {
-    while let Some(Event::KillFailed(target, error)) = workload.kill_failure() {
-        report_kill_failure(system, target, &error);
+fn report_kill_failures(system: &mut impl System, workload: &mut Workload) {
+    while let Some(event) = workload.kill_failure() {
+        if let Event::DirectKillFailed(error) = event {
+            super::diagnostics::error(system, "exec-kill", sys::errno_of(&error) as i32);
+        }
     }
 }
 
@@ -398,8 +636,8 @@ fn report_wait_failure(system: &mut impl System, error: &std::io::Error) {
 
 /// Why a workload did not launch.
 enum LaunchError {
-    /// The sandbox agent's entry refused to prepare the workload's execution.
-    Entry(entry::Error),
+    /// A native failure that may still own a child until the agent collects it.
+    Start(init::StartFailure),
     /// Any other failure, which the agent reports as a failed launch alone, as the C agent did.
     Other,
 }
@@ -410,42 +648,18 @@ impl From<Errno> for LaunchError {
     }
 }
 
-/// Creates the workload's pipes and, for the direct agent, its sealed configuration, or, for the
-/// sandbox agent, prepares its execution, then spawns it, and returns the spawned workload and
-/// the execution's ends of its pipes.
-///
-/// The launch command takes the workload's ends of the pipes, and the direct agent's
-/// configuration, which the agent closes once the child exists, as the C agent closed them after
-/// `fork`.
+/// Starts a native direct workload.
 fn launch(
     system: &mut impl System,
+    session: &Session,
     config: &AgentConfig,
     execution: &GuestExecPayload,
-) -> Result<(Spawned, Pipes), LaunchError> {
-    let (pipes, ends) = Pipes::new(false).map_err(|error| sys::errno_of(&error))?;
-    let request = LaunchRequest {
-        config,
-        execution,
-        stdout: FileDescriptor::from_owned(ends.stdout),
-        stderr: FileDescriptor::from_owned(ends.stderr),
-    };
-    let command = if config.direct {
-        let config_fd = exec_config::create(execution)?;
-        launch::direct_command(system.paths(), request, config_fd)?
-    } else {
-        let entry = config.entry.as_ref().ok_or(Errno::EINVAL)?;
-        let prepared = system.prepare_entry(entry).map_err(LaunchError::Entry)?;
-        launch::sandbox_command(system.paths(), request, prepared)?
-    };
-    let spawned = system.spawn(command)?;
-    Ok((spawned, pipes))
-}
-
-/// Places a sandbox workload, which waits at its `barrier`, in the `container` cgroup, and then
-/// releases it. A failure drops the barrier unreleased, which cancels the workload's launch.
-fn place(system: &impl System, process: ProcessId, barrier: Barrier) -> Result<(), Errno> {
-    cgroup::write_container_pid(system, process)?;
-    barrier.release().map_err(|error| sys::errno_of(&error))
+) -> Result<Workload, LaunchError> {
+    let mut request = launch::direct_request(config, execution)?;
+    request.input = true;
+    let workload = system.start_direct(request).map_err(LaunchError::Start)?;
+    session.watch(workload.id());
+    Ok(Workload::Direct(workload))
 }
 
 /// Failure discovered before the fork boundary.
@@ -458,8 +672,7 @@ enum EnvironmentFailure {
 }
 
 /// Validates all environment mutations before allocating child resources: the workload's
-/// `HOME`, `USER`, `LOGNAME`, and `PWD`, and, for the sandbox agent, which applies them itself,
-/// the request's entries.
+/// `HOME`, `USER`, `LOGNAME`, and `PWD`, and the request's entries.
 fn validate_launch_environment(
     system: &mut impl System,
     config: &AgentConfig,
@@ -481,9 +694,7 @@ fn validate_launch_environment(
             .validate_environment(c"PWD", &pwd)
             .map_err(EnvironmentFailure::Launch)?;
     }
-    if !config.direct
-        && let Some(entries) = &execution.environment
-    {
+    if let Some(entries) = &execution.environment {
         for entry in entries {
             let equals = entry
                 .iter()
@@ -497,30 +708,6 @@ fn validate_launch_environment(
         }
     }
     Ok(())
-}
-
-/// Reports a sandbox workload that could not enter its working directory, or whose program could
-/// not run, as the sandbox agent's helper did: with its diagnostic on standard error, and with
-/// status 125 as the workload's exit status.
-fn refuse_sandbox_workload(
-    session: &mut Session,
-    request_id: u64,
-    execution: &GuestExecPayload,
-    failure: &LaunchFailure,
-) -> Result<(), Errno> {
-    let prefix = if failure.stage() == LaunchStage::WorkingDirectory {
-        [
-            b"nvx-managed-agent: cannot use working directory ".as_slice(),
-            execution.cwd.as_deref().unwrap_or(b"/"),
-            b": ",
-        ]
-        .concat()
-    } else {
-        b"nvx-managed-agent: cannot execute workload: ".to_vec()
-    };
-    let diagnostic = with_description(&prefix, Errno::from_raw(failure.raw_os_error()));
-    session.send_app(APP_STDERR, request_id, 0, &diagnostic)?;
-    session.send_app(APP_EXIT, request_id, 125, b"exit")
 }
 
 /// Sends the C-compatible stderr and application error for a cwd failure.
@@ -551,24 +738,42 @@ enum ExecControl {
     Cancel,
     /// A reset detached this workload's session.
     SessionLost,
+    /// Init accepted a capture that requires group termination and the repeated sweep.
+    Capture,
 }
 
-/// Processes one control-console record while a workload runs.
+/// Processes one control-console record while a workload runs: the workload's standard input, of
+/// which bytes beyond the window or after its end end the session, and a `STOP`, which cancels
+/// the workload and sets `stop`.
 fn handle_control(
     system: &mut impl System,
     session: &mut Session,
     exec_id: u64,
+    input: &mut Input,
+    stop: &mut Option<u64>,
 ) -> Result<ExecControl, Errno> {
     let payload = match session.next_event() {
         Ok(SessionEvent::Reset) => {
+            // The new epoch's acknowledgement follows what the earlier one queued, and the
+            // earlier epoch's `STOP` is abandoned with its work.
+            session.stream(false);
             session.acknowledge()?;
+            *stop = None;
             return Ok(ExecControl::SessionLost);
         }
         Ok(SessionEvent::Data(payload)) => payload,
+        Err(_) if session.stopping() => return Err(Errno::ECANCELED),
         Err(failure) => return Err(report_control_failure(system, failure)),
     };
     let request = match session.accept_request(&payload) {
-        Ok(request) => request,
+        Ok(Request::App(request)) => request,
+        // The input of an execution that ended takes no more bytes.
+        Ok(Request::Stdin(id, bytes)) => {
+            if id == exec_id {
+                input.receive(bytes)?;
+            }
+            return Ok(ExecControl::None);
+        }
         Err(failure) => {
             if failure.kind != DataFailureKind::Credit {
                 super::diagnostics::error(system, "exec-record", i32::from(OUTER_DATA));
@@ -576,6 +781,10 @@ fn handle_control(
             return Err(failure.into_error());
         }
     };
+    if request.kind == APP_STOP {
+        *stop = Some(request.request_id);
+        return Ok(ExecControl::Cancel);
+    }
     if request.kind == APP_CANCEL {
         return Ok(
             if request.payload.is_empty() && request.request_id == exec_id {
@@ -584,6 +793,21 @@ fn handle_control(
                 ExecControl::None
             },
         );
+    }
+    if request.kind == APP_CAPTURE && session.has_capture() {
+        return session.queue_capture(request, true).map(|accepted| {
+            if accepted {
+                ExecControl::Capture
+            } else {
+                ExecControl::None
+            }
+        });
+    }
+    if request.kind == APP_ACTIVATE && session.has_restored() {
+        // The started activation never applies again: an identical retry gets its cached Ready,
+        // and any other fails it, which ends the workload with the session.
+        session.activate(request)?;
+        return Ok(ExecControl::None);
     }
     session.send_error(request.request_id, Errno::EBUSY as i32, BUSY)?;
     Ok(ExecControl::None)

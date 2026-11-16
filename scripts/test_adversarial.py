@@ -76,7 +76,11 @@ from nvx_tools.adversarial_oracles import (
     run_bounded_process,
     terminate_process_tree,
 )
-from nvx_tools.benchmark import InteractiveProcess, run_guest_script
+from nvx_tools.benchmark import (
+    InteractiveProcess,
+    _wait_for_windows_process,
+    run_guest_script,
+)
 from nvx_tools.build_constants import (
     AlpineBuildConstants,
     InitramfsBuildConstants,
@@ -3262,6 +3266,12 @@ class ExecutorCloseTests(unittest.TestCase):
                             ["taskkill.exe", "/PID", pid, "/T", "/F"],
                             check=False,
                             capture_output=True,
+                        )
+                        self.assertTrue(
+                            _wait_for_windows_process(
+                                int(pid), max(0.0, deadline - time.monotonic())
+                            ),
+                            f"surviving child {pid} did not exit after taskkill",
                         )
                     else:
                         os.kill(int(pid), signal.SIGKILL)

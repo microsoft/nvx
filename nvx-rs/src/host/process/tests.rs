@@ -4,6 +4,8 @@ use super::*;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(any(target_os = "linux", windows))]
+mod orchestrator;
 
 /// The boot of the references in these tests.
 const BOOT: BootId = BootId::from_bytes([0x5a; 16]);
@@ -180,9 +182,127 @@ fn sleeper() -> std::process::Command {
 }
 
 #[cfg(any(target_os = "linux", windows))]
+struct ExitChild(std::process::Child);
+
+#[cfg(any(target_os = "linux", windows))]
+impl ExitChild {
+    fn spawn() -> Self {
+        Self(crate::host::tests::spawn_locked(&mut sleeper()).unwrap())
+    }
+
+    fn reference(&self) -> ProcessRef {
+        ProcessRef {
+            pid: self.0.id(),
+            start_time: platform::process_start_time(self.0.id()).unwrap().unwrap(),
+            boot: BootId::current().unwrap(),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl Drop for ExitChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().unwrap().is_none() {
+            self.0.kill().unwrap();
+            self.0.wait().unwrap();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_exit_handle(handle: ExitHandle, timeout: Duration) -> io::Result<bool> {
+    use std::os::fd::AsFd;
+
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+
+    let mut descriptors = [PollFd::new(handle.as_fd(), PollFlags::POLLIN)];
+    if poll(&mut descriptors, PollTimeout::try_from(timeout).unwrap())? == 0 {
+        return Ok(false);
+    }
+    let events = descriptors[0].revents().unwrap();
+    assert!(
+        events.intersects(PollFlags::POLLIN | PollFlags::POLLHUP),
+        "duplicated pidfd reported {events:?}",
+    );
+    Ok(true)
+}
+
+#[cfg(windows)]
+fn wait_exit_handle(handle: ExitHandle, timeout: Duration) -> io::Result<bool> {
+    platform::tests::wait_exit_handle(handle, Instant::now() + timeout)
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn exit_handles_are_independently_owned_and_exist_only_for_exit_events() {
+    let mut child = ExitChild(crate::host::tests::spawn_locked(&mut sleeper()).unwrap());
+    let reference = ProcessRef {
+        pid: child.0.id(),
+        start_time: platform::process_start_time(child.0.id()).unwrap().unwrap(),
+        boot: BootId::current().unwrap(),
+    };
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the child runs");
+    };
+    let handle = process.exit_handle().unwrap();
+    assert_eq!(handle.is_some(), process.wait_method() == WaitMethod::Event);
+    if handle.is_some() {
+        let probe = process.exit_handle().unwrap().unwrap();
+        assert!(!wait_exit_handle(probe, Duration::ZERO).unwrap());
+    }
+    drop(process);
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    if let Some(handle) = handle {
+        assert!(wait_exit_handle(handle, Duration::from_secs(10)).unwrap());
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn opening_a_recorded_child_returns_running_only_for_its_identity() {
+    let mut child = ExitChild::spawn();
+    let reference = child.reference();
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the recorded child runs");
+    };
+    assert_eq!(process.reference(), &reference);
+    assert!(!process.has_exited().unwrap());
+    let mut other_boot = *reference.boot.as_bytes();
+    other_boot[0] ^= 1;
+    for exited in [
+        ProcessRef {
+            boot: BootId::from_bytes(other_boot),
+            ..reference.clone()
+        },
+        ProcessRef {
+            start_time: reference.start_time + 1,
+            ..reference.clone()
+        },
+    ] {
+        assert!(matches!(Process::open(&exited).unwrap(), Opened::Exited(_)));
+    }
+    assert!(child.0.try_wait().unwrap().is_none());
+    assert!(!process.has_exited().unwrap());
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn opening_a_reaped_recorded_child_proves_exit() {
+    let mut child = ExitChild::spawn();
+    let reference = child.reference();
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    assert!(matches!(
+        Process::open(&reference).unwrap(),
+        Opened::Exited(_)
+    ));
+}
+
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn polling_follows_a_real_process_until_it_exits() {
-    let mut child = platform::inherit::spawn_command(&mut sleeper()).unwrap();
+    let mut child = crate::host::tests::spawn_locked(&mut sleeper()).unwrap();
     let pid = child.id();
     let start_time = platform::process_start_time(pid).unwrap().unwrap();
     let runs = || -> io::Result<bool> { Ok(platform::open_process(pid, start_time)?.is_some()) };
@@ -197,7 +317,7 @@ fn polling_follows_a_real_process_until_it_exits() {
 #[cfg(target_os = "linux")]
 #[test]
 fn hosts_without_pidfds_poll_and_never_signal() {
-    let mut child = platform::inherit::spawn_command(&mut sleeper()).unwrap();
+    let mut child = crate::host::tests::spawn_locked(&mut sleeper()).unwrap();
     let pid = child.id();
     let process = Process {
         reference: ProcessRef {
@@ -208,13 +328,14 @@ fn hosts_without_pidfds_poll_and_never_signal() {
         handle: platform::ProcessHandle::without_pidfd(),
     };
     assert_eq!(process.wait_method(), WaitMethod::Polling);
+    assert!(process.exit_handle().unwrap().is_none());
     let running = process.wait(Instant::now() + Duration::from_millis(80));
     // Nothing holds the process, so it is not signaled.
     let refused = process.kill();
     let still_running = process.has_exited();
     child.kill().unwrap();
     child.wait().unwrap();
-    assert!(!running.unwrap());
+    assert!(running.unwrap().is_none());
     assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::Unsupported);
     assert!(!still_running.unwrap());
     // Once the child is reaped, its ID names no process, or another one.
@@ -222,6 +343,7 @@ fn hosts_without_pidfds_poll_and_never_signal() {
         process
             .wait(Instant::now() + Duration::from_secs(10))
             .unwrap()
+            .is_some()
     );
 }
 
@@ -276,7 +398,7 @@ fn processes_count_the_bytes_that_their_read_calls_read() {
     assert!(own_bytes_read().unwrap() >= before + read.len() as u64);
 
     // Another process counts what it read once it says so, while it runs.
-    let mut child = platform::inherit::spawn_command(&mut reader(&path)).unwrap();
+    let mut child = crate::host::tests::spawn_locked(&mut reader(&path)).unwrap();
     let mut said = String::new();
     let stdout = child.stdout.take().unwrap();
     BufReader::new(stdout).read_line(&mut said).unwrap();
@@ -285,7 +407,9 @@ fn processes_count_the_bytes_that_their_read_calls_read() {
         start_time: platform::process_start_time(child.id()).unwrap().unwrap(),
         boot: BootId::current().unwrap(),
     };
-    let process = Process::open(&reference).unwrap().unwrap();
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the reader runs");
+    };
     let counted = process.bytes_read();
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(b"x\n").unwrap();

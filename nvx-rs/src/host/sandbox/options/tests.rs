@@ -1,18 +1,24 @@
 //! The `nvx.py sandbox` and `nvx.py run` option tests of `scripts/test_nvx_tools.py`, ported.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use proptest::prelude::*;
+#[cfg(feature = "cli")]
 use serde_json::json;
+#[cfg(feature = "cli")]
 use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::ErrorKind;
 use crate::host::paths::{self, resolve};
-use crate::host::sandbox::layer::LayerRole;
-use crate::host::sandbox::mount::{aggregate_child_name, plan_mounts, validate_mounts};
-use crate::host::sandbox::{SandboxLayer, SandboxSettings, SandboxUpper};
+use crate::host::sandbox::DEFAULT_ENTRYPOINT;
+#[cfg(feature = "cli")]
+use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding, DistroFormat};
+#[cfg(feature = "cli")]
+use crate::host::sandbox::layer::{LayerRole, SandboxLayer};
+use crate::host::sandbox::mount::{MountAccess, plan_mounts, validate_mounts};
+use crate::host::sandbox::tests::policy as mount_policy;
 
 fn message<T: std::fmt::Debug>(result: Result<T>) -> String {
     let error = result.unwrap_err();
@@ -20,11 +26,34 @@ fn message<T: std::fmt::Debug>(result: Result<T>) -> String {
     error.to_string()
 }
 
+/// Returns the options of `operation` with the defaults of `nvx-rs sandbox`.
+fn defaults(operation: SandboxOperation) -> SandboxOptions {
+    SandboxOptions {
+        operation,
+        dry_run: false,
+        cwd: None,
+        environment: Vec::new(),
+        environment_file: None,
+        inherit_default_environment: false,
+        network_options: false,
+        net: false,
+        network_profile: false,
+        entrypoint: DEFAULT_ENTRYPOINT.to_owned(),
+        outcome_report: false,
+        mounts: Vec::new(),
+        policy_paths: Vec::new(),
+        mount_owner: None,
+        layers: false,
+        scratch: false,
+        upper: None,
+    }
+}
+
 fn launching(operation: SandboxOperation) -> SandboxOptions {
     SandboxOptions {
         layers: true,
         scratch: true,
-        ..SandboxOptions::new(operation)
+        ..defaults(operation)
     }
 }
 
@@ -47,7 +76,7 @@ fn sandbox_rejects_systemd_entrypoint() {
         }
         let stop = SandboxOptions {
             entrypoint: entrypoint.to_owned(),
-            ..SandboxOptions::new(SandboxOperation::Stop)
+            ..defaults(SandboxOperation::Stop)
         };
         assert_eq!(stop.check().unwrap(), None);
     }
@@ -59,11 +88,13 @@ fn sandbox_rejects_systemd_entrypoint() {
 }
 
 /// A distro layer in a temporary directory.
+#[cfg(feature = "cli")]
 struct Layer {
     /// The temporary directory.
     directory: tempfile::TempDir,
 }
 
+#[cfg(feature = "cli")]
 impl Layer {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -76,20 +107,19 @@ impl Layer {
         path.to_str().unwrap().to_owned()
     }
 
-    fn launch(&self, entrypoint: &str) -> SandboxLaunch {
-        SandboxLaunch::new(
-            vec![SandboxLayer::new(
-                LayerRole::Distro,
-                &self.path("distro.erofs"),
-                "11111111-1111-1111-1111-111111111111",
-            )],
-            SandboxUpper::scratch(&self.path("scratch.ext4")),
-            SandboxSettings {
-                entrypoint: entrypoint.to_owned(),
-                ..SandboxSettings::default()
-            },
+    fn layer(&self) -> SandboxLayer {
+        SandboxLayer::new(
+            LayerRole::Distro,
+            &self.path("distro.erofs"),
+            "11111111-1111-1111-1111-111111111111",
         )
-        .unwrap()
+    }
+
+    /// Refuses a systemd `entrypoint`, and then verifies the layer, as the preflight of
+    /// `nvx-rs sandbox run` and `provision` does.
+    fn preflight(&self, entrypoint: &str) -> Result<DistroBinding> {
+        validate_sandbox_entrypoint(entrypoint)?;
+        DistroBinding::verify(&self.layer())
     }
 
     fn manifest(&self, text: &str) {
@@ -97,6 +127,7 @@ impl Layer {
     }
 }
 
+#[cfg(feature = "cli")]
 fn distro_sha256() -> String {
     Sha256::digest(b"distro")
         .iter()
@@ -193,10 +224,10 @@ fn environment_files_hold_a_json_array_of_strings() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn distro_manifest_binds_the_layer() {
     let layer = Layer::new();
-    let launch = layer.launch("/bin/sh");
     let valid = json!({
         "format": 1,
         "artifact": "distro.erofs",
@@ -204,15 +235,13 @@ fn distro_manifest_binds_the_layer() {
         "packages": [{"name": "bash"}, {"name": "coreutils"}],
     });
     layer.manifest(&valid.to_string());
-    let binding = validate_sandbox_systemd_policy(&launch).unwrap();
-    assert_eq!(binding.identity(), "11111111-1111-1111-1111-111111111111");
-    assert_eq!(binding.format(), super::super::DistroFormat::Erofs);
-    assert!(binding.manifest().is_some());
+    let binding = layer.preflight("/bin/sh").unwrap();
+    let recorded = serde_json::to_value(&binding).unwrap();
+    assert_eq!(recorded["identity"], "11111111-1111-1111-1111-111111111111");
+    assert_eq!(recorded["format"], DistroFormat::Erofs.as_str());
+    assert!(recorded["manifest"].is_object());
     binding
-        .check(
-            launch.distro(),
-            super::super::distro::DISTRO_POLICY_REVISION,
-        )
+        .check(&layer.layer(), DISTRO_POLICY_REVISION)
         .unwrap();
     for (field, value) in [
         ("format", json!(2)),
@@ -229,7 +258,7 @@ fn distro_manifest_binds_the_layer() {
         manifest[field] = value;
         layer.manifest(&manifest.to_string());
         assert_eq!(
-            validate_sandbox_systemd_policy(&launch).unwrap_err().kind(),
+            layer.preflight("/bin/sh").unwrap_err().kind(),
             ErrorKind::Unsupported,
             "{field}: {manifest}",
         );
@@ -239,18 +268,19 @@ fn distro_manifest_binds_the_layer() {
         manifest.as_object_mut().unwrap().remove(field);
         layer.manifest(&manifest.to_string());
         assert_eq!(
-            validate_sandbox_systemd_policy(&launch).unwrap_err().kind(),
+            layer.preflight("/bin/sh").unwrap_err().kind(),
             ErrorKind::Unsupported,
         );
     }
     layer.manifest(&valid.to_string());
     fs::write(layer.path("distro.erofs"), b"changed distro").unwrap();
     assert_eq!(
-        validate_sandbox_systemd_policy(&launch).unwrap_err().kind(),
+        layer.preflight("/bin/sh").unwrap_err().kind(),
         ErrorKind::Unsupported,
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn systemd_entrypoints_and_images_are_refused_independently() {
     let layer = Layer::new();
@@ -266,13 +296,11 @@ fn systemd_entrypoints_and_images_are_refused_independently() {
         );
         for entrypoint in ["/usr/lib/systemd/systemd", "/lib/systemd/systemd"] {
             assert_eq!(
-                validate_sandbox_systemd_policy(&layer.launch(entrypoint))
-                    .unwrap_err()
-                    .kind(),
+                layer.preflight(entrypoint).unwrap_err().kind(),
                 ErrorKind::Unsupported,
             );
         }
-        let result = validate_sandbox_systemd_policy(&layer.launch("/sbin/init"));
+        let result = layer.preflight("/sbin/init");
         assert_eq!(result.is_ok(), packages.as_array().unwrap().is_empty());
     }
 }
@@ -287,7 +315,11 @@ fn policy_paths_need_a_preceding_mount_only_with_several_shares() {
         path: "secret".to_owned(),
     };
     let mounts = sandbox_mounts(std::slice::from_ref(&first), &[option(None)], None).unwrap();
-    assert_eq!(mounts[0].policy().denied, ["secret"]);
+    let denied = mount_policy(&["secret"], &[], &[]);
+    assert_eq!(
+        mounts,
+        [SandboxMount::parse(&first, denied, MountOwner::Vmm, MountKind::Directory).unwrap()]
+    );
     for policy in [option(None), option(Some(2))] {
         assert_eq!(
             sandbox_mounts(&[first.clone(), second.clone()], &[policy], None)
@@ -337,10 +369,11 @@ proptest! {
         let actual = sandbox_mounts(&mounts, &options, None).unwrap();
         prop_assert_eq!(actual.len(), expected.len());
         for (index, (mount, policy)) in actual.iter().zip(expected).enumerate() {
-            prop_assert_eq!(mount.guest_target(), format!("/share-{index}"));
-            prop_assert_eq!(mount.policy(), &policy);
-            prop_assert_eq!(mount.owner(), MountOwner::Vmm);
-            prop_assert_eq!(mount.kind(), MountKind::Directory);
+            let share = SandboxMount::new(
+                &format!("/share-{index}"), &format!("host-{index}"), MountAccess::ReadWrite,
+                policy, MountOwner::Vmm, MountKind::Directory,
+            ).unwrap();
+            prop_assert_eq!(mount, &share);
         }
     }
 
@@ -361,18 +394,18 @@ proptest! {
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn sandbox_allows_non_systemd_sbin_init() {
     let layer = Layer::new();
-    validate_sandbox_systemd_policy(&layer.launch("/sbin/init")).unwrap();
+    layer.preflight("/sbin/init").unwrap();
     assert_eq!(
-        message(validate_sandbox_systemd_policy(
-            &layer.launch("/lib/systemd/systemd")
-        )),
+        message(layer.preflight("/lib/systemd/systemd")),
         "systemd entrypoints are unsupported by the sandbox security profile"
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn the_entrypoint_check_needs_no_manifest_and_precedes_the_distro_verification() {
     let layer = Layer::new();
@@ -385,24 +418,21 @@ fn the_entrypoint_check_needs_no_manifest_and_precedes_the_distro_verification()
     validate_sandbox_entrypoint("/sbin/init").unwrap();
     // A layer without a manifest passes the distro verification unread, and its binding records
     // the manifest's absence, but the entrypoint check still refuses systemd.
-    let binding = validate_sandbox_systemd_policy(&layer.launch("/sbin/init")).unwrap();
-    assert_eq!(binding.manifest(), None);
+    let binding = layer.preflight("/sbin/init").unwrap();
+    assert!(serde_json::to_value(&binding).unwrap()["manifest"].is_null());
     assert_eq!(
-        message(validate_sandbox_systemd_policy(
-            &layer.launch("/usr/lib/systemd/systemd")
-        )),
+        message(layer.preflight("/usr/lib/systemd/systemd")),
         "systemd entrypoints are unsupported by the sandbox security profile"
     );
     // The entrypoint check precedes the manifest, which it never reads.
     layer.manifest("not JSON");
     assert_eq!(
-        message(validate_sandbox_systemd_policy(
-            &layer.launch("/lib/systemd/systemd")
-        )),
+        message(layer.preflight("/lib/systemd/systemd")),
         "systemd entrypoints are unsupported by the sandbox security profile"
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn sandbox_rejects_systemd_from_bound_distro_metadata() {
     let layer = Layer::new();
@@ -412,7 +442,7 @@ fn sandbox_rejects_systemd_from_bound_distro_metadata() {
             "{{\"format\": {format}, \"artifact\": {artifact}, \"artifact_sha256\": {sha256}, \
              \"packages\": {packages}}}"
         ));
-        validate_sandbox_systemd_policy(&layer.launch("/sbin/init"))
+        layer.preflight("/sbin/init")
     };
     let sha256 = format!("\"{digest}\"");
     assert_eq!(
@@ -429,7 +459,10 @@ fn sandbox_rejects_systemd_from_bound_distro_metadata() {
         &fs::File::open(layer.path("distro.erofs.manifest.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(binding.manifest(), Some(&sealed));
+    assert_eq!(
+        serde_json::to_value(&binding).unwrap()["manifest"],
+        serde_json::to_value(&sealed).unwrap()
+    );
     for (format, artifact, sha256) in [
         ("\"1\"", "\"distro.erofs\"", sha256.as_str()),
         ("1.0", "\"distro.erofs\"", &sha256),
@@ -464,24 +497,25 @@ fn sandbox_rejects_systemd_from_bound_distro_metadata() {
     }
     layer.manifest("[]");
     assert_eq!(
-        message(validate_sandbox_systemd_policy(&layer.launch("/sbin/init"))),
+        message(layer.preflight("/sbin/init")),
         "invalid sandbox distro manifest: expected a JSON object"
     );
     layer.manifest("{\r\n\"format\": }");
-    let error = message(validate_sandbox_systemd_policy(&layer.launch("/sbin/init")));
+    let error = message(layer.preflight("/sbin/init"));
     assert!(error.starts_with("invalid sandbox distro manifest: "));
     assert!(error.contains("line 2 column 11"), "{error}");
     fs::write(layer.path("distro.erofs.manifest.json"), b"{\xff}").unwrap();
-    let error = message(validate_sandbox_systemd_policy(&layer.launch("/sbin/init")));
+    let error = message(layer.preflight("/sbin/init"));
     assert!(
         error.starts_with("invalid sandbox distro manifest: "),
         "{error}"
     );
     // A layer without a manifest passes.
     fs::remove_file(layer.path("distro.erofs.manifest.json")).unwrap();
-    validate_sandbox_systemd_policy(&layer.launch("/sbin/init")).unwrap();
+    layer.preflight("/sbin/init").unwrap();
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn distro_manifests_are_strict_json() {
     let layer = Layer::new();
@@ -490,7 +524,7 @@ fn distro_manifests_are_strict_json() {
         layer.manifest(&format!(
             r#"{{"format":1,"artifact":"distro.erofs","artifact_sha256":"{digest}","packages":[],"extra":{extra}}}"#
         ));
-        message(validate_sandbox_systemd_policy(&layer.launch("/bin/sh")))
+        message(layer.preflight("/bin/sh"))
     };
     for extra in [
         "NaN",
@@ -514,7 +548,7 @@ fn distro_manifests_are_strict_json() {
         r#"{{"format":1,"artifact":"distro.erofs","artifact_sha256":"{digest}","packages":[],"extra":{}}}"#,
         nested(crate::host::network::policy::MAX_JSON_DEPTH - 1)
     ));
-    validate_sandbox_systemd_policy(&layer.launch("/bin/sh")).unwrap();
+    layer.preflight("/bin/sh").unwrap();
     let error = with_extra(&nested(crate::host::network::policy::MAX_JSON_DEPTH));
     assert!(
         error.starts_with(
@@ -526,14 +560,14 @@ fn distro_manifests_are_strict_json() {
         r#"{{"format":1,"format":1,"artifact":"distro.erofs","artifact_sha256":"{digest}","packages":[]}}"#
     ));
     assert_eq!(
-        message(validate_sandbox_systemd_policy(&layer.launch("/bin/sh"))),
+        message(layer.preflight("/bin/sh")),
         "invalid sandbox distro manifest: manifest has duplicate field \"format\""
     );
     layer.manifest(&format!(
         r#"{{"format":1,"artifact":"distro.erofs","artifact_sha256":"{digest}","packages":[{{"name":"bash","name":"systemd"}}]}}"#
     ));
     assert_eq!(
-        message(validate_sandbox_systemd_policy(&layer.launch("/bin/sh"))),
+        message(layer.preflight("/bin/sh")),
         "invalid sandbox distro manifest: packages[0] has duplicate field \"name\""
     );
     fs::write(
@@ -541,7 +575,7 @@ fn distro_manifests_are_strict_json() {
         b"{\"format\":\xff}",
     )
     .unwrap();
-    let error = message(validate_sandbox_systemd_policy(&layer.launch("/bin/sh")));
+    let error = message(layer.preflight("/bin/sh"));
     assert!(
         error.starts_with("invalid sandbox distro manifest: not UTF-8: "),
         "{error}"
@@ -559,7 +593,7 @@ fn sandbox_managed_operations_reject_dry_run_before_state_access() {
     ] {
         let options = SandboxOptions {
             dry_run: true,
-            ..SandboxOptions::new(operation)
+            ..defaults(operation)
         };
         assert_eq!(
             message(options.check()),
@@ -581,7 +615,7 @@ fn sandbox_exec_forwards_explicit_empty_environment_and_cwd() {
     let options = SandboxOptions {
         cwd: Some("/work".to_owned()),
         environment_file: Some(file.to_str().unwrap().to_owned()),
-        ..SandboxOptions::new(SandboxOperation::Exec)
+        ..defaults(SandboxOperation::Exec)
     };
     assert_eq!(options.check().unwrap(), Some(Vec::new()));
 }
@@ -597,7 +631,7 @@ fn sandbox_exec_forwards_environment_inheritance() {
         let options = SandboxOptions {
             environment: environment.iter().map(|&entry| entry.to_owned()).collect(),
             inherit_default_environment: true,
-            ..SandboxOptions::new(SandboxOperation::Exec)
+            ..defaults(SandboxOperation::Exec)
         };
         let expected =
             expected.map(|entries| entries.iter().map(|&entry| entry.to_owned()).collect());
@@ -606,31 +640,44 @@ fn sandbox_exec_forwards_environment_inheritance() {
 }
 
 #[test]
-fn sandbox_exec_rejects_ambiguous_or_one_shot_environment() {
+fn sandbox_run_and_exec_alone_take_the_execution_options() {
     let both = SandboxOptions {
         environment: vec!["A=1".to_owned()],
         environment_file: Some("environment.json".to_owned()),
-        ..SandboxOptions::new(SandboxOperation::Exec)
+        ..defaults(SandboxOperation::Exec)
     };
     assert_eq!(
         message(both.check()),
         "--environment and --environment-file are mutually exclusive"
     );
-    let one_shot = SandboxOptions {
+    // A run executes its workload as exec does.
+    let run = SandboxOptions {
         environment: vec!["A=1".to_owned()],
-        ..SandboxOptions::new(SandboxOperation::Run)
+        cwd: Some("/tmp".to_owned()),
+        inherit_default_environment: true,
+        ..launching(SandboxOperation::Run)
     };
-    let exec_only = "managed execution options require the sandbox exec operation";
-    assert_eq!(message(one_shot.check()), exec_only);
-    for operation in [SandboxOperation::Run, SandboxOperation::Start] {
+    assert_eq!(run.check().unwrap(), Some(vec!["A=1".to_owned()]));
+    let exec_only = "managed execution options are only valid for sandbox run or exec";
+    for operation in [
+        SandboxOperation::Provision,
+        SandboxOperation::Start,
+        SandboxOperation::Stop,
+        SandboxOperation::Deprovision,
+    ] {
+        let environment = SandboxOptions {
+            environment: vec!["A=1".to_owned()],
+            ..defaults(operation)
+        };
+        assert_eq!(message(environment.check()), exec_only);
         let inheriting = SandboxOptions {
             inherit_default_environment: true,
-            ..SandboxOptions::new(operation)
+            ..defaults(operation)
         };
         assert_eq!(message(inheriting.check()), exec_only);
         let cwd = SandboxOptions {
             cwd: Some("/".to_owned()),
-            ..SandboxOptions::new(operation)
+            ..defaults(operation)
         };
         assert_eq!(message(cwd.check()), exec_only);
     }
@@ -676,7 +723,7 @@ fn sandbox_environment_is_validated_before_state_access() {
     ] {
         let options = SandboxOptions {
             environment,
-            ..SandboxOptions::new(SandboxOperation::Exec)
+            ..defaults(SandboxOperation::Exec)
         };
         assert_eq!(message(options.check()), expected);
     }
@@ -743,7 +790,7 @@ fn managed_non_launch_operations_reject_network_policy_options() {
     ] {
         let options = SandboxOptions {
             network_options: true,
-            ..SandboxOptions::new(operation)
+            ..defaults(operation)
         };
         assert_eq!(
             message(options.check()),
@@ -780,11 +827,11 @@ fn managed_non_launch_operations_reject_network_policy_options() {
     }
     let report = SandboxOptions {
         outcome_report: true,
-        ..SandboxOptions::new(SandboxOperation::Start)
+        ..defaults(SandboxOperation::Start)
     };
     assert_eq!(
         message(report.check()),
-        "--outcome-report is only valid for one-shot run or managed exec"
+        "--outcome-report is only valid for sandbox run or exec"
     );
 }
 
@@ -842,7 +889,7 @@ fn sandbox_launches_take_the_scratch_image_that_their_upper_needs() {
         for upper in [RootUpper::Scratch, RootUpper::Ram] {
             let options = SandboxOptions {
                 upper: Some(upper),
-                ..SandboxOptions::new(operation)
+                ..defaults(operation)
             };
             assert_eq!(
                 message(options.check()),
@@ -881,7 +928,7 @@ fn sandbox_command_rejects_misplaced_mount_options() {
     ] {
         let options = SandboxOptions {
             mounts: vec!["/workspace,share,rw".to_owned()],
-            ..SandboxOptions::new(operation)
+            ..defaults(operation)
         };
         assert_eq!(
             message(options.check()),
@@ -890,8 +937,7 @@ fn sandbox_command_rejects_misplaced_mount_options() {
     }
 }
 
-/// Host directories for shares in a temporary directory, with a distro layer and a scratch
-/// image.
+/// Host directories for shares in a temporary directory.
 struct Shares {
     /// The temporary directory.
     directory: tempfile::TempDir,
@@ -903,8 +949,6 @@ impl Shares {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = resolve(directory.path()).unwrap();
-        fs::write(root.join("distro.erofs"), b"distro").unwrap();
-        fs::write(root.join("scratch.ext4"), b"scratch").unwrap();
         Self { directory, root }
     }
 
@@ -920,8 +964,9 @@ impl Shares {
         path
     }
 
-    /// Runs the steps of `nvx-rs sandbox --dry-run` that build the OpenVMM arguments and the
-    /// kernel command line of these shares.
+    /// Runs the steps of `nvx-rs sandbox --dry-run` that plan these shares, and returns the
+    /// OpenVMM arguments that export them and the kernel token that counts the mappings that the
+    /// host sends once the guest is ready.
     fn run(
         &self,
         mounts: &[String],
@@ -945,25 +990,12 @@ impl Shares {
             ..launching(SandboxOperation::Run)
         }
         .check()?;
-        let launch = SandboxLaunch::new(
-            vec![SandboxLayer::new(
-                LayerRole::Distro,
-                &self.path("distro.erofs"),
-                "11111111-1111-1111-1111-111111111111",
-            )],
-            SandboxUpper::scratch(&self.path("scratch.ext4")),
-            SandboxSettings::default(),
-        )?;
         let mounts = sandbox_mounts(&mounts, &policy_paths, owner)?;
         validate_mounts(&mounts)?;
-        launch.validated()?;
-        let launch = launch.with_export(plan_mounts(&mounts)?)?;
-        validate_sandbox_systemd_policy(&launch)?;
-        // The command runs one-shot, which renders the shares as boot tokens.
-        Ok((
-            launch.plan().one_shot_openvmm_arguments()?,
-            launch.plan().one_shot_kernel_command_line("")?,
-        ))
+        let export = plan_mounts(&mounts)?
+            .expect("shares have an export plan")
+            .description;
+        Ok((export.openvmm_arguments(), export.kernel_token()))
     }
 }
 
@@ -989,8 +1021,8 @@ fn sandbox_command_forwards_mount_to_openvmm() {
         )
         .unwrap();
     assert_eq!(
-        values(&arguments, "--mount"),
-        [format!("/workspace,{share},rw")]
+        values(&arguments, "--mount-child"),
+        [format!("0,{share},rw")]
     );
     // The plan resolves each policy path, which must exist.
     assert_eq!(values(&arguments, "--mount-deny"), [secrets]);
@@ -1016,22 +1048,21 @@ fn sandbox_command_shares_a_file() {
     let shares = Shares::new();
     let settings = shares.path("settings.json");
     fs::write(&settings, b"{}").unwrap();
-    let (arguments, command_line) = shares
+    let (arguments, token) = shares
         .run(
             &[format!("/etc/app/settings.json,{settings},ro")],
             &[],
             None,
         )
         .unwrap();
-    let name = aggregate_child_name(0, "/etc/app/settings.json");
     // The regular file is a child of its own, without its directory, which OpenVMM must find to
-    // be a regular file.
+    // be a regular file, and the guest maps it from the table that the kernel token counts.
     assert!(!arguments.contains(&"--mount".to_owned()));
     assert_eq!(
         values(&arguments, "--mount-child"),
-        [format!("{name},{settings},ro,file")]
+        [format!("0,{settings},ro,file")]
     );
-    assert!(command_line.contains(&format!("nvx_share={name},/etc/app/settings.json,ro,file")));
+    assert_eq!(token, "nvx_maps=1");
     let error = shares
         .run(
             &[format!("/etc/app/settings.json,{settings},rw")],
@@ -1056,7 +1087,10 @@ fn sandbox_command_shares_host_paths_with_commas() {
             None,
         )
         .unwrap();
-    assert_eq!(values(&arguments, "--mount"), [format!("/work,{alpha},rw")]);
+    assert_eq!(
+        values(&arguments, "--mount-child"),
+        [format!("0,{alpha},rw")]
+    );
     assert_eq!(
         values(&arguments, "--mount-deny"),
         [shares.path("alpha,beta/secret")]
@@ -1074,11 +1108,8 @@ fn sandbox_command_shares_host_paths_with_commas() {
             None,
         )
         .unwrap();
-    // The children follow their resolved host paths.
-    let (report, work) = (
-        aggregate_child_name(0, "/reports"),
-        aggregate_child_name(1, "/work"),
-    );
+    // The children follow their resolved host paths, and are named by their positions.
+    let (report, work) = ("0", "1");
     let pairs: Vec<(String, String)> = arguments
         .windows(2)
         .filter(|pair| pair[0] == "--mount-child" || pair[0] == "--mount-deny")
@@ -1125,7 +1156,7 @@ fn sandbox_command_forwards_mount_owner() {
         let (arguments, _) = result.unwrap();
         assert_eq!(values(&arguments, "--mount-owner"), ["caller"]);
         let position = |option: &str| arguments.iter().position(|argument| argument == option);
-        assert!(position("--mount") < position("--mount-owner"));
+        assert!(position("--mount-aggregate") < position("--mount-owner"));
     }
 }
 
@@ -1156,11 +1187,19 @@ fn sandbox_command_attributes_policy_paths_to_the_preceding_mount() {
         })
         .collect();
     let parsed = sandbox_mounts(&mounts, &options, None).unwrap();
-    assert_eq!(parsed[0].policy().denied, ["logs"]);
-    assert_eq!(parsed[0].policy().allowed, ["logs/payloads"]);
-    assert_eq!(parsed[0].policy().writable, ["out"]);
-    assert_eq!(parsed[1].policy().denied, ["credentials"]);
-    assert!(parsed[1].policy().allowed.is_empty() && parsed[1].policy().writable.is_empty());
+    let share = |value: &str, requested: MountPolicy| {
+        SandboxMount::parse(value, requested, MountOwner::Vmm, MountKind::Directory).unwrap()
+    };
+    assert_eq!(
+        parsed,
+        [
+            share(
+                &mounts[0],
+                mount_policy(&["logs"], &["logs/payloads"], &["out"])
+            ),
+            share(&mounts[1], mount_policy(&["credentials"], &[], &[])),
+        ]
+    );
     let (arguments, _) = shares.run(&mounts, &policy, None).unwrap();
     // With several shares, OpenVMM attributes absolute paths.
     assert_eq!(
@@ -1252,10 +1291,7 @@ fn sandbox_command_hides_a_share_root_behind_its_allowed_paths() {
         )
         .unwrap();
     // OpenVMM hides the workspace's root behind its one allowed path.
-    let (toolcache, workspace) = (
-        aggregate_child_name(0, "/opt/hostedtoolcache"),
-        aggregate_child_name(1, "/workspace"),
-    );
+    let (toolcache, workspace) = ("0", "1");
     assert_eq!(
         values(&arguments, "--mount-child"),
         [
@@ -1284,14 +1320,15 @@ fn sandbox_command_attributes_mount_deny_to_the_preceding_mount() {
         (PolicyKind::Denied, Some(1), "credentials"),
         (PolicyKind::Denied, Some(1), "logs"),
     ];
-    let (arguments, command_line) = shares.run(&mounts, &policy, None).unwrap();
-    // The children follow their resolved host paths, each with its own denied paths.
-    let (toolcache, workspace) = (
-        aggregate_child_name(0, "/opt/hostedtoolcache"),
-        aggregate_child_name(1, "/workspace"),
-    );
+    let (arguments, token) = shares.run(&mounts, &policy, None).unwrap();
+    // The children follow their resolved host paths, each with its own denied paths, and the
+    // kernel token counts their mappings rather than naming their targets.
+    let (toolcache, workspace) = ("0", "1");
     assert!(!arguments.contains(&"--mount".to_owned()));
-    assert_eq!(values(&arguments, "--mount-aggregate"), ["/run/nvx/shares"]);
+    assert_eq!(
+        values(&arguments, "--mount-aggregate"),
+        [crate::host::filesystem::GUEST_EXPORT]
+    );
     assert_eq!(
         values(&arguments, "--mount-child"),
         [
@@ -1307,9 +1344,7 @@ fn sandbox_command_attributes_mount_deny_to_the_preceding_mount() {
             shares.path("work/secrets"),
         ]
     );
-    assert!(command_line.contains(&format!(
-        "nvx_share={toolcache},/opt/hostedtoolcache,ro nvx_share={workspace},/workspace,rw"
-    )));
+    assert_eq!(token, "nvx_maps=2");
 
     // With one share, a --mount-deny may come first; with several, it must follow the share
     // whose directory it hides.
@@ -1323,7 +1358,16 @@ fn sandbox_command_attributes_mount_deny_to_the_preceding_mount() {
         None,
     )
     .unwrap();
-    assert_eq!(single[0].policy().denied, ["secrets"]);
+    assert_eq!(
+        single,
+        [SandboxMount::parse(
+            &format!("/w,{work},rw"),
+            mount_policy(&["secrets"], &[], &[]),
+            MountOwner::Vmm,
+            MountKind::Directory,
+        )
+        .unwrap()]
+    );
     let error = shares
         .run(
             &[
@@ -1359,17 +1403,31 @@ fn sandbox_command_attributes_mount_deny_to_the_preceding_mount() {
 fn sandbox_mounts_take_the_kind_of_each_host_path() {
     let mounts = ["/a,a".to_owned(), "/b,b.json,rw".to_owned()];
     let kind_of = |mount: &SandboxMount| {
-        if mount.guest_target() == "/b" {
+        if mount.host_path() == Path::new("b.json") {
             MountKind::File
         } else {
             MountKind::Directory
         }
     };
     let parsed = sandbox_mounts_with(&mounts, &[], Some(MountOwner::Caller), &kind_of).unwrap();
-    assert_eq!(parsed[0].kind(), MountKind::Directory);
-    assert_eq!(parsed[1].kind(), MountKind::File);
-    assert_eq!(parsed[0].owner(), MountOwner::Caller);
-    assert_eq!(parsed[1].owner(), MountOwner::Caller);
+    let share = |target, host_path, access, kind| {
+        SandboxMount::new(
+            target,
+            host_path,
+            access,
+            MountPolicy::default(),
+            MountOwner::Caller,
+            kind,
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        parsed,
+        [
+            share("/a", "a", MountAccess::ReadOnly, MountKind::Directory),
+            share("/b", "b.json", MountAccess::ReadWrite, MountKind::File),
+        ]
+    );
 }
 
 #[test]

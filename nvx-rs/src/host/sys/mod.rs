@@ -10,7 +10,7 @@
 //! through libc's `prctl` too, since `nix` does not wrap seccomp. The Windows platform module
 //! still calls `windows-sys` directly.
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "cli", target_os = "linux"))]
 mod fs;
 #[cfg(feature = "cli")]
 mod interrupt;
@@ -21,27 +21,19 @@ mod socket;
 
 #[cfg(target_os = "linux")]
 pub(crate) use nix::errno::Errno;
-use nix::unistd::{getegid, geteuid};
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "cli", target_os = "linux"))]
 pub(crate) use fs::rename_no_replace;
 #[cfg(feature = "cli")]
 pub(crate) use interrupt::{interrupted, watch_interrupts, write_interruptibly};
 #[cfg(all(feature = "cli", target_os = "linux"))]
 pub(crate) use process::inherit_only;
 #[cfg(target_os = "linux")]
-pub(crate) use process::{
-    LAST_STANDARD_STREAM, PidFd, detach, move_above_standard_streams, process_exists,
-};
+pub(crate) use process::{LAST_STANDARD_STREAM, PidFd, detach, process_exists};
 #[cfg(target_os = "linux")]
 pub(crate) use socket::{
-    connect_nonblocking, peer_pid, send_nonblocking, unread_by_peer, wait_readable, wait_writable,
+    connect_nonblocking, peer_pid, send_nonblocking, wait_readable, wait_writable,
 };
-
-/// Returns the effective user and group IDs of this process.
-pub(crate) fn effective_ids() -> (u32, u32) {
-    (geteuid().as_raw(), getegid().as_raw())
-}
 
 #[cfg(test)]
 pub(crate) mod tests;

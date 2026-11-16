@@ -1,6 +1,5 @@
-//! Tests of the root operations with the fake kernel, and with the kernel's interfaces, a cgroup
-//! hierarchy, and the runtime directory in a temporary directory, and of the kernel's own check
-//! for a mount point.
+//! Tests of the root operations with the fake kernel, and with the kernel's interfaces and the
+//! runtime directory in a temporary directory, and of the kernel's own check for a mount point.
 
 use std::fs;
 use std::io;
@@ -13,9 +12,13 @@ pub(crate) use super::kernel::tests::{Call, FakeKernel, Operation, attach_calls}
 use super::kernel::{Paths, super_options};
 use super::*;
 use crate::gpt::ExpectedPartition;
-use crate::guest::cgroup::Layout;
 use crate::guest::mappings::{Access, Mapping, SourceRoot};
 use crate::guest::sys::MountAttributes;
+
+mod privileged;
+mod runtime;
+mod switch;
+mod view;
 
 /// The base address of the distro device's MMIO window.
 const DISTRO: u64 = 0xd000_0000;
@@ -37,6 +40,12 @@ const BLOCK: usize = 512;
 const LAYER_BLOCKS: usize = 4;
 /// The tests' bound for the first partition, in bytes.
 const FIRST_PARTITION_BOUND: usize = 64 * 1024;
+
+/// Returns why the assembly of `error` failed, for the tests of a clone's application, whose
+/// module can't read the field.
+pub(crate) fn assembly_failure(error: &AssemblyError) -> &Error {
+    &error.error
+}
 
 /// A guest in a temporary directory, and the fake kernel that the operations get clones of.
 struct Guest {
@@ -220,6 +229,11 @@ fn upper_point(kind: UpperKind) -> &'static str {
         UpperKind::Tmpfs => "tmpfs",
     }
 }
+
+/// The tmpfs upper without a cap, at the kernel's default size.
+const TMPFS: Upper = Upper::Tmpfs {
+    max_memory_percent: None,
+};
 
 /// Returns the upper on the guest's scratch device, with `journal`.
 fn scratch_upper(journal: Journal) -> Upper {
@@ -502,16 +516,16 @@ fn assembly_mounts_the_image_and_the_scratch_under_the_overlay() {
     assert_eq!(root.path(), guest.path("run/nvx/rootfs"));
     assert_eq!(root.runtime(), guest.path("run/nvx"));
     // The root reports what it mounted: the image's one layer, the scratch, and the mode.
-    assert_eq!(root.first_partition(), None);
-    let [lower] = root.lowers() else {
-        panic!("{:?}", root.lowers());
+    assert_eq!(root.first_partition.as_deref(), None);
+    let [lower] = root.lowers.as_slice() else {
+        panic!("{:?}", root.lowers);
     };
-    assert_eq!(lower.mount(), &Mount::Distro);
-    assert_eq!(lower.device(), guest.path("dev/vda"));
-    assert_eq!(lower.path(), guest.path("run/nvx/layers/distro"));
-    assert_eq!(lower.partition(), None);
-    assert_eq!(root.upper(), UpperKind::Scratch);
-    assert_eq!(root.overlay(), OverlayMode::TrustedLowers);
+    assert_eq!(lower.mount, Mount::Distro);
+    assert_eq!(lower.device, guest.path("dev/vda"));
+    assert_eq!(lower.path, guest.path("run/nvx/layers/distro"));
+    assert_eq!(lower.partition, None);
+    assert_eq!(root.upper_kind, UpperKind::Scratch);
+    assert_eq!(root.overlay_mode, OverlayMode::TrustedLowers);
     root.teardown().unwrap();
 }
 
@@ -537,7 +551,7 @@ fn devices_are_found_when_they_appear_and_missing_ones_time_out() {
     let error = guest.assemble(&guest.assembly()).unwrap_err();
     assert!(
         matches!(
-            error.error(),
+            &error.error,
             Error::Missing {
                 role: Role::Scratch,
                 mmio: SCRATCH,
@@ -545,7 +559,7 @@ fn devices_are_found_when_they_appear_and_missing_ones_time_out() {
         ),
         "{error:?}"
     );
-    assert!(error.cleanup().is_none());
+    assert!(error.cleanup.is_none());
     assert_eq!(guest.kernel.sleeps(), 2);
     assert_eq!(
         error.to_string(),
@@ -567,7 +581,7 @@ fn an_assembly_waits_for_its_devices_until_its_deadline_at_the_latest() {
     let error = guest.assemble_until(&assembly, Instant::now()).unwrap_err();
     assert!(
         matches!(
-            error.error(),
+            &error.error,
             Error::Missing {
                 role: Role::Scratch,
                 mmio: SCRATCH,
@@ -586,7 +600,7 @@ fn an_assembly_waits_for_its_devices_until_its_deadline_at_the_latest() {
     let error = guest.assemble_until(&assembly, deadline).unwrap_err();
     assert!(
         matches!(
-            error.error(),
+            &error.error,
             Error::Missing {
                 role: Role::Scratch,
                 ..
@@ -608,7 +622,7 @@ fn an_assembly_waits_for_its_devices_until_its_deadline_at_the_latest() {
     let error = guest.assemble_until(&assembly, deadline).unwrap_err();
     assert!(
         matches!(
-            error.error(),
+            &error.error,
             Error::Missing {
                 role: Role::Scratch,
                 ..
@@ -661,7 +675,7 @@ fn a_device_of_another_size_is_refused_before_it_is_flushed() {
     let guest = Guest::new();
     let mut assembly = guest.assembly();
     assembly.distro.sectors = Some(2048);
-    let error = guest.assemble(&assembly).unwrap_err().into_parts().0;
+    let error = guest.assemble(&assembly).unwrap_err().error;
     assert!(
         matches!(
             &error,
@@ -707,7 +721,7 @@ fn the_expected_uuid_is_checked_in_the_superblock_before_the_mount() {
     };
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
-        matches!(error.error(), Error::Uuid { expected: e, actual: UUID } if *e == expected),
+        matches!(&error.error, Error::Uuid { expected: e, actual: UUID } if *e == expected),
         "{error:?}"
     );
     assert_eq!(
@@ -723,7 +737,7 @@ fn the_expected_uuid_is_checked_in_the_superblock_before_the_mount() {
     fs::write(guest.path("dev/vda"), vec![0; 4096]).unwrap();
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
-        matches!(error.error(), Error::NotErofs { device } if *device == guest.path("dev/vda")),
+        matches!(&error.error, Error::NotErofs { device } if *device == guest.path("dev/vda")),
         "{error:?}"
     );
     assert!(guest.kernel.mounts().is_empty());
@@ -740,12 +754,12 @@ fn a_failed_assembly_unmounts_what_it_mounted_and_reports_what_stays() {
     let error = guest.assemble(&guest.assembly()).unwrap_err();
     assert!(
         matches!(
-            error.error(),
+            &error.error,
             Error::Mount { mount: Mount::Overlay, error } if error.raw_os_error() == Some(Errno::EINVAL as i32)
         ),
         "{error:?}"
     );
-    assert!(error.cleanup().is_none());
+    assert!(error.cleanup.is_none());
     assert_eq!(
         guest.kernel.unmounts(),
         [
@@ -775,14 +789,12 @@ fn a_failed_assembly_unmounts_what_it_mounted_and_reports_what_stays() {
             os_error(Errno::EBUSY)
         )
     );
-    let (_, cleanup) = error.into_parts();
-    let failures = cleanup.unwrap();
-    let [failure] = failures.failures() else {
+    let failures = error.cleanup.unwrap();
+    let [failure] = failures.failures.as_slice() else {
         panic!("{failures:?}");
     };
-    assert_eq!(failure.mount(), &Mount::Distro);
-    assert_eq!(failure.path(), guest.path("run/nvx/layers/distro"));
-    assert_eq!(failure.error().raw_os_error(), Some(Errno::EBUSY as i32));
+    assert_eq!(failure.mount, Mount::Distro);
+    assert_eq!(failure.error.raw_os_error(), Some(Errno::EBUSY as i32));
     assert_eq!(
         guest.kernel.unmounts(),
         [
@@ -800,7 +812,7 @@ fn a_runtime_directory_that_the_overlay_options_reserve_is_refused() {
         assembly.runtime = runtime.into();
         let error = guest.assemble(&assembly).unwrap_err();
         assert!(
-            matches!(error.error(), Error::Runtime { path } if *path == Path::new(runtime)),
+            matches!(&error.error, Error::Runtime { path } if *path == Path::new(runtime)),
             "{runtime}: {error:?}"
         );
     }
@@ -827,10 +839,10 @@ fn a_runtime_directory_whose_path_is_not_canonical_is_refused() {
         assembly.runtime = runtime.into();
         let error = guest.assemble(&assembly).unwrap_err();
         assert!(
-            matches!(error.error(), Error::Runtime { path } if path.as_os_str() == runtime),
+            matches!(&error.error, Error::Runtime { path } if path.as_os_str() == runtime),
             "{runtime}: {error:?}"
         );
-        assert!(error.cleanup().is_none());
+        assert!(error.cleanup.is_none());
     }
     assert!(guest.kernel.calls().is_empty());
     assert!(!guest.path("run/nvx/layers").exists());
@@ -859,7 +871,7 @@ fn a_root_mounts_nothing_through_a_symbolic_link() {
         assembly.runtime = runtime.clone();
         let error = guest.assemble(&assembly).unwrap_err();
         assert!(
-            matches!(error.error(), Error::Runtime { path } if *path == runtime),
+            matches!(&error.error, Error::Runtime { path } if *path == runtime),
             "{}: {error:?}",
             runtime.display()
         );
@@ -876,7 +888,7 @@ fn a_root_mounts_nothing_through_a_symbolic_link() {
         std::os::unix::fs::symlink(guest.path("elsewhere"), &link).unwrap();
         let error = guest.assemble(&guest.assembly()).unwrap_err();
         assert!(
-            matches!(error.error(), Error::MountPoint { path, error: cause }
+            matches!(&error.error, Error::MountPoint { path, error: cause }
                 if *path == link && cause.raw_os_error() == Some(Errno::ENOTDIR as i32)),
             "{name}: {error:?}"
         );
@@ -907,7 +919,7 @@ fn a_root_mounts_nothing_through_a_symbolic_link() {
 #[test]
 fn new_upper_and_work_directories_have_mode_0755_whatever_the_umask() {
     // The umask is the process's, so the test runs alone in a process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_ROOT_UMASK_TEST_CHILD",
         "guest::root::tests::new_upper_and_work_directories_have_mode_0755_whatever_the_umask",
     ) {
@@ -942,7 +954,7 @@ fn new_upper_and_work_directories_have_mode_0755_whatever_the_umask() {
     // So are a tmpfs upper's, which are always new.
     let guest = Guest::new();
     let assembly = Assembly {
-        upper: Upper::Tmpfs,
+        upper: TMPFS,
         ..guest.assembly()
     };
     guest.assemble(&assembly).unwrap().teardown().unwrap();
@@ -955,7 +967,7 @@ fn a_fresh_upper_s_directories_must_be_missing_or_empty() {
     let mode = |path: &Path| fs::metadata(path).unwrap().mode() & 0o7777;
     // A scratch or a tmpfs without the directories gets them, as any root's upper does, with no
     // other call than a cold root's.
-    for upper in [scratch_upper(Journal::Allowed), Upper::Tmpfs] {
+    for upper in [scratch_upper(Journal::Allowed), TMPFS] {
         let guest = Guest::new();
         let assembly = Assembly {
             upper,
@@ -998,10 +1010,10 @@ fn a_fresh_upper_s_directories_must_be_missing_or_empty() {
         fs::create_dir_all(path.join(entry)).unwrap();
         let error = guest.assemble_fresh(&guest.assembly()).unwrap_err();
         assert!(
-            matches!(error.error(), Error::NotFresh { path: refused } if *refused == path),
+            matches!(&error.error, Error::NotFresh { path: refused } if *refused == path),
             "{error:?}"
         );
-        assert!(error.cleanup().is_none());
+        assert!(error.cleanup.is_none());
         assert_eq!(
             error.to_string(),
             format!(
@@ -1030,7 +1042,7 @@ fn a_fresh_upper_s_directories_must_be_missing_or_empty() {
         }
         let error = guest.assemble_fresh(&guest.assembly()).unwrap_err();
         assert!(
-            matches!(error.error(), Error::MountPoint { path, error }
+            matches!(&error.error, Error::MountPoint { path, error }
                 if *path == upper && error.raw_os_error() == Some(Errno::ENOTDIR as i32)),
             "{error:?}"
         );
@@ -1064,7 +1076,7 @@ fn the_freshness_check_takes_one_entry_of_a_directory_and_opens_none() {
     sys::tests::create_fifo(&fifo, sys::Mode::from_bits_truncate(0o600)).unwrap();
     let error = guest.assemble_fresh(&guest.assembly()).unwrap_err();
     assert!(
-        matches!(error.error(), Error::NotFresh { path } if *path == upper),
+        matches!(&error.error, Error::NotFresh { path } if *path == upper),
         "{error:?}"
     );
 
@@ -1088,10 +1100,10 @@ fn a_runtime_directory_that_another_root_holds_is_refused() {
     let calls = guest.kernel.calls();
     let error = guest.assemble(&guest.assembly()).unwrap_err();
     assert!(
-        matches!(error.error(), Error::Reserved { path } if *path == guest.path("run/nvx")),
+        matches!(&error.error, Error::Reserved { path } if *path == guest.path("run/nvx")),
         "{error:?}"
     );
-    assert!(error.cleanup().is_none());
+    assert!(error.cleanup.is_none());
     assert_eq!(
         error.to_string(),
         format!(
@@ -1145,10 +1157,10 @@ fn a_runtime_directory_that_another_root_holds_is_refused() {
     let (result, calls) = refused.lock().unwrap().take().unwrap();
     let error = result.unwrap_err();
     assert!(
-        matches!(error.error(), Error::Reserved { path } if *path == guest.path("run/nvx")),
+        matches!(&error.error, Error::Reserved { path } if *path == guest.path("run/nvx")),
         "{error:?}"
     );
-    assert!(error.cleanup().is_none());
+    assert!(error.cleanup.is_none());
     assert_eq!(calls, 0);
     assert_eq!(
         guest.kernel.mounts(),
@@ -1180,10 +1192,10 @@ fn a_runtime_directory_where_a_file_system_is_mounted_is_refused() {
     let calls = guest.kernel.calls();
     let error = guest.assemble(&guest.assembly()).unwrap_err();
     assert!(
-        matches!(error.error(), Error::Occupied { path } if *path == distro),
+        matches!(&error.error, Error::Occupied { path } if *path == distro),
         "{error:?}"
     );
-    assert!(error.cleanup().is_none());
+    assert!(error.cleanup.is_none());
     assert_eq!(
         error.to_string(),
         format!("a file system is mounted at {} already", distro.display())
@@ -1205,7 +1217,7 @@ fn a_runtime_directory_where_a_file_system_is_mounted_is_refused() {
     let mounts = guest.kernel.mounts().len();
     let error = guest.assemble(&guest.assembly()).unwrap_err();
     assert!(
-        matches!(error.error(), Error::Occupied { path } if *path == guest.path("run/nvx/rootfs")),
+        matches!(&error.error, Error::Occupied { path } if *path == guest.path("run/nvx/rootfs")),
         "{error:?}"
     );
     assert_eq!(guest.kernel.mounts().len(), mounts);
@@ -1223,12 +1235,17 @@ fn a_runtime_directory_where_a_file_system_is_mounted_is_refused() {
         .kernel
         .fail(Operation::Unmount, shares.clone(), Errno::EBUSY);
     let error = root.teardown().unwrap_err();
-    let failed: Vec<&Path> = error.failures().iter().map(Unmount::path).collect();
-    assert_eq!(failed, [shares.as_path()]);
+    let failed: Vec<&Mount> = error
+        .failures
+        .iter()
+        .map(|failure| &failure.mount)
+        .collect();
+    let aggregate = Mount::Aggregate { tag: "all".into() };
+    assert_eq!(failed, [&aggregate]);
     let mounts = guest.kernel.mounts().len();
     let error = guest.assemble(&guest.assembly()).unwrap_err();
     assert!(
-        matches!(error.error(), Error::Occupied { path } if *path == shares),
+        matches!(&error.error, Error::Occupied { path } if *path == shares),
         "{error:?}"
     );
     assert_eq!(guest.kernel.mounts().len(), mounts);
@@ -1242,15 +1259,15 @@ fn a_runtime_directory_where_a_file_system_is_mounted_is_refused() {
         .kernel
         .fail(Operation::Unmount, mount_point.clone(), Errno::EBUSY);
     let error = root.teardown().unwrap_err();
-    let failed: Vec<(&Mount, &Path)> = error
-        .failures()
+    let failed: Vec<&Mount> = error
+        .failures
         .iter()
-        .map(|failure| (failure.mount(), failure.path()))
+        .map(|failure| &failure.mount)
         .collect();
     let mount = Mount::Export {
         tag: "microvm".into(),
     };
-    assert_eq!(failed, [(&mount, mount_point.as_path())]);
+    assert_eq!(failed, [&mount]);
     assert_eq!(
         error.to_string(),
         format!(
@@ -1261,15 +1278,15 @@ fn a_runtime_directory_where_a_file_system_is_mounted_is_refused() {
     let mounts = guest.kernel.mounts().len();
     let error = guest.assemble(&guest.assembly()).unwrap_err();
     assert!(
-        matches!(error.error(), Error::Occupied { path } if *path == mount_point),
+        matches!(&error.error, Error::Occupied { path } if *path == mount_point),
         "{error:?}"
     );
     assert_eq!(guest.kernel.mounts().len(), mounts);
 
     // So does an upper that a failed unmount left, whichever upper the next root mounts.
     for (first, second) in [
-        (scratch_upper(Journal::Allowed), Upper::Tmpfs),
-        (Upper::Tmpfs, scratch_upper(Journal::Allowed)),
+        (scratch_upper(Journal::Allowed), TMPFS),
+        (TMPFS, scratch_upper(Journal::Allowed)),
     ] {
         let guest = Guest::new();
         let left = guest.path(&format!("run/nvx/{}", upper_point(first.kind())));
@@ -1289,7 +1306,7 @@ fn a_runtime_directory_where_a_file_system_is_mounted_is_refused() {
         };
         let error = guest.assemble(&assembly).unwrap_err();
         assert!(
-            matches!(error.error(), Error::Occupied { path } if *path == left),
+            matches!(&error.error, Error::Occupied { path } if *path == left),
             "{error:?}"
         );
         assert_eq!(guest.kernel.mounts().len(), mounts);
@@ -1401,10 +1418,10 @@ fn a_runtime_directory_where_a_directory_is_bound_is_refused() {
         )
         .unwrap_err();
         assert!(
-            matches!(error.error(), Error::Occupied { path } if *path == distro),
+            matches!(&error.error, Error::Occupied { path } if *path == distro),
             "{error:?}"
         );
-        assert!(error.cleanup().is_none());
+        assert!(error.cleanup.is_none());
         return;
     }
     let directory = tempfile::tempdir().unwrap();
@@ -1521,28 +1538,25 @@ fn a_gpt_disk_s_layers_are_mounted_under_the_overlay_top_first() {
     // The first partition comes back as its bytes, without the padding after them, and is never
     // mounted.
     assert_eq!(
-        root.first_partition(),
+        root.first_partition.as_deref(),
         Some(&b"{\"configuration\": true}"[..])
     );
     let numbers: Vec<u8> = root
-        .lowers()
+        .lowers
         .iter()
-        .map(|lower| lower.partition().unwrap().number())
+        .map(|lower| lower.partition.unwrap().number())
         .collect();
     assert_eq!(numbers, [2, 3, 4]);
-    for lower in root.lowers() {
-        let partition = lower.partition().unwrap();
+    for lower in &root.lowers {
+        let partition = lower.partition.unwrap();
         let number = partition.number();
-        assert_eq!(lower.mount(), &Mount::Layer { number });
-        assert_eq!(lower.device(), guest.path(&format!("dev/vda{number}")));
-        assert_eq!(
-            lower.path(),
-            guest.path(&format!("run/nvx/layers/p{number}"))
-        );
+        assert_eq!(lower.mount, Mount::Layer { number });
+        assert_eq!(lower.device, guest.path(&format!("dev/vda{number}")));
+        assert_eq!(lower.path, guest.path(&format!("run/nvx/layers/p{number}")));
         assert_eq!(partition.unique_guid(), GptDisk::guid(number));
     }
-    assert_eq!(root.upper(), UpperKind::Scratch);
-    assert_eq!(root.overlay(), OverlayMode::TrustedLowers);
+    assert_eq!(root.upper_kind, UpperKind::Scratch);
+    assert_eq!(root.overlay_mode, OverlayMode::TrustedLowers);
     root.teardown().unwrap();
     assert_eq!(
         guest.kernel.unmounts(),
@@ -1573,7 +1587,7 @@ fn a_gpt_disk_s_layers_are_mounted_under_the_overlay_top_first() {
     let assembly = guest.gpt_assembly(scratch_upper(Journal::Allowed), OverlayMode::TrustedLowers);
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
-        matches!(error.error(), Error::Occupied { path } if *path == third),
+        matches!(&error.error, Error::Occupied { path } if *path == third),
         "{error:?}"
     );
     assert_eq!(guest.kernel.mounts(), mounts);
@@ -1582,8 +1596,25 @@ fn a_gpt_disk_s_layers_are_mounted_under_the_overlay_top_first() {
 #[test]
 fn both_overlay_modes_assemble_on_both_uppers_with_their_own_option_sets() {
     let modes = [OverlayMode::TrustedLowers, OverlayMode::UntrustedLowers];
+    // Each upper with the options of its tmpfs, if it is one: a tmpfs with a cap takes its size.
+    let uppers = [
+        (scratch_upper(Journal::Allowed), None),
+        (TMPFS, Some("mode=0755")),
+        (
+            Upper::Tmpfs {
+                max_memory_percent: Some(1),
+            },
+            Some("mode=0755,size=1%"),
+        ),
+        (
+            Upper::Tmpfs {
+                max_memory_percent: Some(90),
+            },
+            Some("mode=0755,size=90%"),
+        ),
+    ];
     for gpt in [false, true] {
-        for upper in [scratch_upper(Journal::Allowed), Upper::Tmpfs] {
+        for (upper, tmpfs_options) in uppers {
             for mode in modes {
                 let case = format!("GPT {gpt}, {upper:?}, {mode:?}");
                 let guest = Guest::new();
@@ -1623,7 +1654,7 @@ fn both_overlay_modes_assemble_on_both_uppers_with_their_own_option_sets() {
                             &format!("{runtime}/tmpfs"),
                             Some("tmpfs"),
                             flags,
-                            Some("mode=0755"),
+                            tmpfs_options,
                         ),
                     ),
                 };
@@ -1645,9 +1676,9 @@ fn both_overlay_modes_assemble_on_both_uppers_with_their_own_option_sets() {
                     upper.kind() == UpperKind::Scratch,
                     "{case}"
                 );
-                assert_eq!(root.upper(), upper.kind(), "{case}");
-                assert_eq!(root.overlay(), mode, "{case}");
-                assert_eq!(root.first_partition().is_some(), gpt, "{case}");
+                assert_eq!(root.upper_kind, upper.kind(), "{case}");
+                assert_eq!(root.overlay_mode, mode, "{case}");
+                assert_eq!(root.first_partition.as_deref().is_some(), gpt, "{case}");
                 for directory in ["upper", "work"] {
                     let path = guest.path(&format!("run/nvx/{point}/{directory}"));
                     assert!(path.is_dir(), "{case}: {directory}");
@@ -1673,13 +1704,24 @@ fn a_tmpfs_upper_needs_no_scratch_device() {
     let guest = Guest::bare();
     attach(&guest.base, 0, "vda", 4096);
     let assembly = Assembly {
-        upper: Upper::Tmpfs,
+        upper: Upper::Tmpfs {
+            max_memory_percent: Some(50),
+        },
         ..guest.assembly()
     };
     let root = guest.assemble(&assembly).unwrap();
     // The assembly waited for no other device, and made no mount point for a scratch.
     assert_eq!(guest.kernel.sleeps(), 0);
     assert!(!guest.path("run/nvx/scratch").exists());
+    // It mounted the tmpfs with its cap.
+    let tmpfs = mount_call(
+        Some("tmpfs"),
+        &guest.text("run/nvx/tmpfs"),
+        Some("tmpfs"),
+        MountFlags::MS_NOSUID | MountFlags::MS_NODEV,
+        Some("mode=0755,size=50%"),
+    );
+    assert!(guest.kernel.calls().contains(&tmpfs));
     root.teardown().unwrap();
     assert_eq!(
         guest.kernel.unmounts(),
@@ -1691,9 +1733,36 @@ fn a_tmpfs_upper_needs_no_scratch_device() {
 }
 
 #[test]
+fn a_tmpfs_upper_refuses_a_cap_that_is_not_1_to_90_percent() {
+    // The kernel reads a cap of 0 as none, and the boot tokens carry caps from 1 to 90 percent.
+    let guest = Guest::new();
+    for percent in [0, 91, u8::MAX] {
+        let assembly = Assembly {
+            upper: Upper::Tmpfs {
+                max_memory_percent: Some(percent),
+            },
+            ..guest.assembly()
+        };
+        let error = guest.assemble(&assembly).unwrap_err();
+        assert!(
+            matches!(&error.error, Error::TmpfsCap { percent: cap } if *cap == percent),
+            "{percent}: {error:?}"
+        );
+        assert!(error.cleanup.is_none());
+        assert_eq!(
+            error.to_string(),
+            format!("the tmpfs upper's cap of {percent}% of the guest's memory is not 1 to 90%")
+        );
+    }
+    // It refused them before it changed anything.
+    assert!(guest.kernel.calls().is_empty());
+    assert!(!guest.path("run/nvx/layers").exists());
+}
+
+#[test]
 fn a_refused_option_set_fails_without_a_fallback() {
     for mode in [OverlayMode::TrustedLowers, OverlayMode::UntrustedLowers] {
-        for upper in [scratch_upper(Journal::Allowed), Upper::Tmpfs] {
+        for upper in [scratch_upper(Journal::Allowed), TMPFS] {
             let guest = Guest::new();
             guest.kernel.fail(
                 Operation::Mount,
@@ -1708,13 +1777,13 @@ fn a_refused_option_set_fails_without_a_fallback() {
             let error = guest.assemble(&assembly).unwrap_err();
             assert!(
                 matches!(
-                    error.error(),
+                    &error.error,
                     Error::Mount { mount: Mount::Overlay, error }
                         if error.raw_os_error() == Some(Errno::EINVAL as i32)
                 ),
                 "{error:?}"
             );
-            assert!(error.cleanup().is_none());
+            assert!(error.cleanup.is_none());
             // The overlay was mounted once, with the mode's own option set.
             let overlays: Vec<Call> = guest
                 .kernel
@@ -1749,7 +1818,7 @@ fn an_overlay_that_the_kernel_mounts_without_its_mode_in_effect_is_refused_and_u
     // Without failing the mount, the kernel drops `metacopy=on` for an upper that can't hold the
     // overlay's extended attributes. Its mount table then shows no `metacopy`, which is off by
     // default.
-    for upper in [scratch_upper(Journal::Allowed), Upper::Tmpfs] {
+    for upper in [scratch_upper(Journal::Allowed), TMPFS] {
         let guest = Guest::new();
         guest.show_overlay("rw", upper.kind(), "xino=on");
         let assembly = Assembly {
@@ -1758,15 +1827,15 @@ fn an_overlay_that_the_kernel_mounts_without_its_mode_in_effect_is_refused_and_u
         };
         let error = guest.assemble(&assembly).unwrap_err();
         assert!(
-            matches!(error.error(), Error::OverlayFallback { requested, effective }
+            matches!(&error.error, Error::OverlayFallback { requested, effective }
                 if requested == "metacopy=on" && effective == "metacopy=off"),
             "{error:?}"
         );
         assert_eq!(
-            error.error().to_string(),
+            error.error.to_string(),
             "the kernel mounted the overlay with metacopy=off in place of metacopy=on"
         );
-        assert!(error.cleanup().is_none());
+        assert!(error.cleanup.is_none());
         assert_eq!(
             guest.kernel.unmounts(),
             below(
@@ -1787,7 +1856,7 @@ fn an_overlay_that_the_kernel_mounts_without_its_mode_in_effect_is_refused_and_u
         };
         let error = guest.assemble(&assembly).unwrap_err();
         assert!(
-            matches!(error.error(), Error::OverlayFallback { requested, effective }
+            matches!(&error.error, Error::OverlayFallback { requested, effective }
                 if requested == "rw" && effective == "ro"),
             "{error:?}"
         );
@@ -1806,14 +1875,14 @@ fn options_that_the_kernel_does_not_show_have_their_defaults() {
     // The kernel's mount table shows no option at its default, as for each option of the
     // untrusted lowers under the guest's kernel, whose defaults are off.
     let untrusted = |guest: &Guest| Assembly {
-        upper: Upper::Tmpfs,
+        upper: TMPFS,
         overlay: OverlayMode::UntrustedLowers,
         ..guest.assembly()
     };
     let guest = Guest::new();
     guest.show_overlay("rw", UpperKind::Tmpfs, "");
     let root = guest.assemble(&untrusted(&guest)).unwrap();
-    assert_eq!(root.overlay(), OverlayMode::UntrustedLowers);
+    assert_eq!(root.overlay_mode, OverlayMode::UntrustedLowers);
     root.teardown().unwrap();
 
     // Under a kernel that copies up metadata alone by default, the table shows the trusted
@@ -1831,7 +1900,7 @@ fn options_that_the_kernel_does_not_show_have_their_defaults() {
     guest.show_overlay("rw", UpperKind::Tmpfs, "");
     let error = guest.assemble(&untrusted(&guest)).unwrap_err();
     assert!(
-        matches!(error.error(), Error::OverlayFallback { requested, effective }
+        matches!(&error.error, Error::OverlayFallback { requested, effective }
             if requested == "metacopy=off" && effective == "metacopy=on"),
         "{error:?}"
     );
@@ -1844,7 +1913,7 @@ fn options_that_the_kernel_does_not_show_have_their_defaults() {
         guest.show_overlay("rw", UpperKind::Tmpfs, "");
         let error = guest.assemble(&untrusted(&guest)).unwrap_err();
         assert!(
-            matches!(error.error(), Error::OverlayFallback { requested, effective: actual }
+            matches!(&error.error, Error::OverlayFallback { requested, effective: actual }
                 if requested == "redirect_dir=nofollow"
                     && *actual == format!("redirect_dir={effective}")),
             "{parameter}: {error:?}"
@@ -1870,19 +1939,19 @@ fn effective_options_that_cannot_be_read_fail_the_assembly() {
         .fail(Operation::Options, rootfs.clone(), Errno::EIO);
     let error = guest.assemble(&guest.assembly()).unwrap_err();
     assert!(
-        matches!(error.error(), Error::OverlayCheck { path, error }
+        matches!(&error.error, Error::OverlayCheck { path, error }
             if *path == rootfs && error.raw_os_error() == Some(Errno::EIO as i32)),
         "{error:?}"
     );
     assert_eq!(
-        error.error().to_string(),
+        error.error.to_string(),
         format!(
             "failed to read the overlay's effective options at {}: {}",
             rootfs.display(),
             os_error(Errno::EIO)
         )
     );
-    assert!(error.cleanup().is_none());
+    assert!(error.cleanup.is_none());
     assert_eq!(
         guest.kernel.unmounts(),
         below(
@@ -1901,7 +1970,7 @@ fn effective_options_that_cannot_be_read_fail_the_assembly() {
         }
         guest.show_overlay("rw", UpperKind::Tmpfs, "");
         let assembly = Assembly {
-            upper: Upper::Tmpfs,
+            upper: TMPFS,
             overlay: OverlayMode::UntrustedLowers,
             ..guest.assembly()
         };
@@ -1911,7 +1980,7 @@ fn effective_options_that_cannot_be_read_fail_the_assembly() {
             None => Some(Errno::ENOENT as i32),
         };
         assert!(
-            matches!(error.error(), Error::OverlayCheck { path, error }
+            matches!(&error.error, Error::OverlayCheck { path, error }
                 if *path == parameter && error.raw_os_error() == expected),
             "{error:?}"
         );
@@ -1949,7 +2018,7 @@ fn overlay_options_that_a_mount_cannot_pass_are_refused_before_any_mount() {
     let runtime = guest.path(&format!("run/{}/nvx", [component.as_str(); 6].join("/")));
     let assembly = Assembly {
         runtime: runtime.clone(),
-        upper: Upper::Tmpfs,
+        upper: TMPFS,
         ..guest.assembly()
     };
     let error = guest.assemble(&assembly).unwrap_err();
@@ -1958,7 +2027,7 @@ fn overlay_options_that_a_mount_cannot_pass_are_refused_before_any_mount() {
     let length = overlay_data(&runtime, &["layers/distro"], "tmpfs", mode).len();
     assert!(length > MOUNT_OPTIONS_LIMIT, "{length}");
     assert!(
-        matches!(error.error(), Error::OverlayOptions { length: actual } if *actual == length),
+        matches!(&error.error, Error::OverlayOptions { length: actual } if *actual == length),
         "{error:?}"
     );
     assert_eq!(
@@ -2002,7 +2071,7 @@ fn up_to_195_layers_fit_in_the_overlay_s_options_below_run_nvx() {
     guest.insert(&GptDisk::new(b"configuration", 254));
     let mode = OverlayMode::UntrustedLowers;
     let error = guest
-        .assemble(&guest.gpt_assembly(Upper::Tmpfs, mode))
+        .assemble(&guest.gpt_assembly(TMPFS, mode))
         .unwrap_err();
     let layers: Vec<String> = (2..=255)
         .rev()
@@ -2011,7 +2080,7 @@ fn up_to_195_layers_fit_in_the_overlay_s_options_below_run_nvx() {
     let layers: Vec<&str> = layers.iter().map(String::as_str).collect();
     let length = overlay_data(&guest.text("run/nvx"), &layers, "tmpfs", mode).len();
     assert!(
-        matches!(error.error(), Error::OverlayOptions { length: actual } if *actual == length),
+        matches!(&error.error, Error::OverlayOptions { length: actual } if *actual == length),
         "{error:?}"
     );
     assert_eq!(
@@ -2047,7 +2116,7 @@ fn the_journal_policy_is_checked_in_the_scratch_s_superblock_before_any_mount() 
         }
         let error = result.unwrap_err();
         assert!(
-            matches!(error.error(), Error::Journal { device } if *device == guest.path("dev/vdb")),
+            matches!(&error.error, Error::Journal { device } if *device == guest.path("dev/vdb")),
             "{error:?}"
         );
         assert_eq!(
@@ -2069,7 +2138,7 @@ fn the_journal_policy_is_checked_in_the_scratch_s_superblock_before_any_mount() 
     };
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
-        matches!(error.error(), Error::NotExt4 { device } if *device == guest.path("dev/vdb")),
+        matches!(&error.error, Error::NotExt4 { device } if *device == guest.path("dev/vdb")),
         "{error:?}"
     );
     assert_eq!(
@@ -2087,11 +2156,7 @@ fn a_device_whose_access_mode_is_not_its_role_s_is_refused_before_it_is_flushed(
     // A writable distro device.
     let guest = Guest::new();
     set_read_only(&guest.base, "vda", false);
-    let error = guest
-        .assemble(&guest.assembly())
-        .unwrap_err()
-        .into_parts()
-        .0;
+    let error = guest.assemble(&guest.assembly()).unwrap_err().error;
     assert!(
         matches!(&error, Error::Access { role: Role::Distro, device, read_only: false }
             if *device == guest.path("dev/vda")),
@@ -2109,11 +2174,7 @@ fn a_device_whose_access_mode_is_not_its_role_s_is_refused_before_it_is_flushed(
     // A read-only scratch device, checked after the distro device.
     let guest = Guest::new();
     set_read_only(&guest.base, "vdb", true);
-    let error = guest
-        .assemble(&guest.assembly())
-        .unwrap_err()
-        .into_parts()
-        .0;
+    let error = guest.assemble(&guest.assembly()).unwrap_err().error;
     assert!(
         matches!(&error, Error::Access { role: Role::Scratch, device, read_only: true }
             if *device == guest.path("dev/vdb")),
@@ -2133,7 +2194,7 @@ fn a_device_whose_access_mode_is_not_its_role_s_is_refused_before_it_is_flushed(
     let mut assembly = guest.assembly();
     assembly.distro.mmio = SCRATCH;
     scratch(&mut assembly).mmio = DISTRO;
-    let error = guest.assemble(&assembly).unwrap_err().into_parts().0;
+    let error = guest.assemble(&assembly).unwrap_err().error;
     assert!(
         matches!(&error, Error::Access { role: Role::Distro, device, read_only: false }
             if *device == guest.path("dev/vdb")),
@@ -2144,11 +2205,7 @@ fn a_device_whose_access_mode_is_not_its_role_s_is_refused_before_it_is_flushed(
     // An access mode in another form than the kernel's.
     let guest = Guest::new();
     write(&guest.path("sys/class/block/vda/ro"), "2\n");
-    let error = guest
-        .assemble(&guest.assembly())
-        .unwrap_err()
-        .into_parts()
-        .0;
+    let error = guest.assemble(&guest.assembly()).unwrap_err().error;
     assert!(
         matches!(&error, Error::Device { role: Role::Distro, step: DeviceStep::Access, error, .. }
             if error.raw_os_error() == Some(Errno::EPROTO as i32)),
@@ -2161,7 +2218,7 @@ fn a_device_whose_access_mode_is_not_its_role_s_is_refused_before_it_is_flushed(
 fn a_tmpfs_upper_is_unmounted_last_and_every_failure_reported() {
     let guest = Guest::new();
     let assembly = Assembly {
-        upper: Upper::Tmpfs,
+        upper: TMPFS,
         overlay: OverlayMode::UntrustedLowers,
         ..guest.assembly()
     };
@@ -2179,20 +2236,12 @@ fn a_tmpfs_upper_is_unmounted_last_and_every_failure_reported() {
             &["rootfs", "layers/distro", "tmpfs"]
         )
     );
-    let failed: Vec<(&Mount, &Path)> = error
-        .failures()
+    let failed: Vec<&Mount> = error
+        .failures
         .iter()
-        .map(|failure| (failure.mount(), failure.path()))
+        .map(|failure| &failure.mount)
         .collect();
-    let distro = guest.path("run/nvx/layers/distro");
-    let tmpfs = guest.path("run/nvx/tmpfs");
-    assert_eq!(
-        failed,
-        [
-            (&Mount::Distro, distro.as_path()),
-            (&Mount::Tmpfs, tmpfs.as_path())
-        ]
-    );
+    assert_eq!(failed, [&Mount::Distro, &Mount::Tmpfs]);
     assert_eq!(
         error.to_string(),
         format!(
@@ -2222,7 +2271,7 @@ fn a_scratch_s_file_system_is_synced_right_before_its_unmount() {
     // A tmpfs upper has no device to sync to.
     let guest = Guest::new();
     let assembly = Assembly {
-        upper: Upper::Tmpfs,
+        upper: TMPFS,
         ..guest.assembly()
     };
     let root = guest.assemble(&assembly).unwrap();
@@ -2254,14 +2303,14 @@ fn a_scratch_whose_sync_fails_stays_mounted_and_the_failure_is_reported() {
         below(&guest.text("run/nvx"), &["rootfs", "layers/distro"])
     );
     assert!(guest.kernel.mount_at(&scratch).is_some());
-    let failed: Vec<(&Mount, &Path)> = error
-        .failures()
+    let failed: Vec<&Mount> = error
+        .failures
         .iter()
-        .map(|failure| (failure.mount(), failure.path()))
+        .map(|failure| &failure.mount)
         .collect();
-    assert_eq!(failed, [(&Mount::Scratch, scratch.as_path())]);
+    assert_eq!(failed, [&Mount::Scratch]);
     assert_eq!(
-        error.failures()[0].error().raw_os_error(),
+        error.failures[0].error.raw_os_error(),
         Some(Errno::EIO as i32)
     );
     assert_eq!(
@@ -2281,7 +2330,7 @@ fn a_gpt_disk_that_differs_from_the_expected_identities_is_refused_before_any_mo
     // The disk meets every expectation that the caller may set.
     let guest = Guest::new();
     guest.insert(&disk);
-    let mut assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::UntrustedLowers);
+    let mut assembly = guest.gpt_assembly(TMPFS, OverlayMode::UntrustedLowers);
     assembly.image = Image::Gpt {
         expected: Expected::new()
             .disk_guid(DISK_GUID)
@@ -2334,14 +2383,14 @@ fn a_gpt_disk_that_differs_from_the_expected_identities_is_refused_before_any_mo
     for (expected, failure) in cases {
         let guest = Guest::new();
         guest.insert(&disk);
-        let mut assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::UntrustedLowers);
+        let mut assembly = guest.gpt_assembly(TMPFS, OverlayMode::UntrustedLowers);
         assembly.image = Image::Gpt {
             expected,
             first_partition_bound: FIRST_PARTITION_BOUND,
         };
         let error = guest.assemble(&assembly).unwrap_err();
         assert!(
-            matches!(error.error(), Error::Disk { device, error: DeviceError::Table(_) }
+            matches!(&error.error, Error::Disk { device, error: DeviceError::Table(_) }
                 if *device == guest.path("dev/vda")),
             "{error:?}"
         );
@@ -2361,11 +2410,11 @@ fn a_gpt_disk_that_differs_from_the_expected_identities_is_refused_before_any_mo
 fn a_gpt_disk_without_a_layer_is_refused_before_any_mount() {
     let guest = Guest::new();
     guest.insert(&GptDisk::new(b"configuration", 0));
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
         matches!(
-            error.error(),
+            &error.error,
             Error::Disk {
                 error: DeviceError::Table(GptError::PartitionCount(1)),
                 ..
@@ -2392,7 +2441,7 @@ fn a_layer_that_is_not_ext4_or_whose_journal_needs_a_recovery_is_refused_before_
     disk.layer_mut(2)[1024 + 0x5C] |= 0x04;
     let guest = Guest::new();
     guest.insert(&disk);
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     guest.assemble(&assembly).unwrap().teardown().unwrap();
 
     // But not one that needs recovery, despite our `noload` or the superblock's own defaults.
@@ -2401,10 +2450,10 @@ fn a_layer_that_is_not_ext4_or_whose_journal_needs_a_recovery_is_refused_before_
     layer[1024 + 0x200..][..10].copy_from_slice(b"norecovery");
     let guest = Guest::new();
     guest.insert(&disk);
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
-        matches!(error.error(), Error::Recovery { number: 3, device }
+        matches!(&error.error, Error::Recovery { number: 3, device }
             if *device == guest.path("dev/vda3")),
         "{error:?}"
     );
@@ -2423,10 +2472,10 @@ fn a_layer_that_is_not_ext4_or_whose_journal_needs_a_recovery_is_refused_before_
     disk.layer_mut(2)[1024 + 0x38] ^= 1;
     let guest = Guest::new();
     guest.insert(&disk);
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
-        matches!(error.error(), Error::NotExt4Layer { number: 2, device }
+        matches!(&error.error, Error::NotExt4Layer { number: 2, device }
             if *device == guest.path("dev/vda2")),
         "{error:?}"
     );
@@ -2444,11 +2493,11 @@ fn a_layer_that_is_not_ext4_or_whose_journal_needs_a_recovery_is_refused_before_
     let guest = Guest::new();
     fs::write(guest.path("dev/vda"), disk.image()).unwrap();
     fs::create_dir(guest.path("dev/vda2")).unwrap();
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
         matches!(
-            error.error(),
+            &error.error,
             Error::Device {
                 role: Role::Distro,
                 step: DeviceStep::Superblock,
@@ -2470,10 +2519,10 @@ fn a_missing_partition_fails_at_once_before_any_mount() {
     let guest = Guest::new();
     fs::write(guest.path("dev/vda"), disk.image()).unwrap();
     write(&guest.path("dev/vda2"), disk.layer(2));
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
-        matches!(error.error(), Error::Partition { number: 3, node }
+        matches!(&error.error, Error::Partition { number: 3, node }
             if *node == guest.path("dev/vda3")),
         "{error:?}"
     );
@@ -2744,14 +2793,14 @@ fn the_first_partition_is_returned_as_opaque_bytes_within_its_bound() {
         let guest = Guest::new();
         let disk = GptDisk::new(bytes, 1);
         guest.insert(&disk);
-        let mut assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+        let mut assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
         // The first partition may be as large as the bound.
         assembly.image = Image::Gpt {
             expected: Expected::new(),
             first_partition_bound: disk.first_partition_blocks() * BLOCK,
         };
         let root = guest.assemble(&assembly).unwrap();
-        assert_eq!(root.first_partition(), Some(expected));
+        assert_eq!(root.first_partition.as_deref(), Some(expected));
         assert_eq!(
             guest.kernel.mounts(),
             below(&guest.text("run/nvx"), &["layers/p2", "tmpfs", "rootfs"])
@@ -2762,7 +2811,7 @@ fn the_first_partition_is_returned_as_opaque_bytes_within_its_bound() {
     // A first partition larger than the bound is refused before any mount.
     let guest = Guest::new();
     guest.insert(&GptDisk::new(&sector, 1));
-    let mut assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let mut assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     assembly.image = Image::Gpt {
         expected: Expected::new(),
         first_partition_bound: BLOCK - 1,
@@ -2770,7 +2819,7 @@ fn the_first_partition_is_returned_as_opaque_bytes_within_its_bound() {
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
         matches!(
-            error.error(),
+            &error.error,
             Error::FirstPartition {
                 device,
                 error: GptError::FirstPartitionTooLarge {
@@ -2796,7 +2845,7 @@ fn the_first_partition_is_returned_as_opaque_bytes_within_its_bound() {
 fn a_teardown_unmounts_the_layers_top_first_and_reports_every_failure() {
     let guest = Guest::new();
     guest.insert(&GptDisk::new(b"configuration", 3));
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::UntrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::UntrustedLowers);
     let root = guest.assemble(&assembly).unwrap();
     for name in ["run/nvx/layers/p3", "run/nvx/tmpfs"] {
         guest
@@ -2812,19 +2861,12 @@ fn a_teardown_unmounts_the_layers_top_first_and_reports_every_failure() {
             &["rootfs", "layers/p4", "layers/p3", "layers/p2", "tmpfs"]
         )
     );
-    let failed: Vec<(&Mount, &Path)> = error
-        .failures()
+    let failed: Vec<&Mount> = error
+        .failures
         .iter()
-        .map(|failure| (failure.mount(), failure.path()))
+        .map(|failure| &failure.mount)
         .collect();
-    let (third, tmpfs) = (guest.path("run/nvx/layers/p3"), guest.path("run/nvx/tmpfs"));
-    assert_eq!(
-        failed,
-        [
-            (&Mount::Layer { number: 3 }, third.as_path()),
-            (&Mount::Tmpfs, tmpfs.as_path())
-        ]
-    );
+    assert_eq!(failed, [&Mount::Layer { number: 3 }, &Mount::Tmpfs]);
     assert_eq!(
         error.to_string(),
         format!(
@@ -2842,11 +2884,11 @@ fn a_teardown_unmounts_the_layers_top_first_and_reports_every_failure() {
         guest.path("run/nvx/layers/p3"),
         Errno::EINVAL,
     );
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::UntrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::UntrustedLowers);
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
         matches!(
-            error.error(),
+            &error.error,
             Error::Mount {
                 mount: Mount::Layer { number: 3 },
                 ..
@@ -2854,7 +2896,7 @@ fn a_teardown_unmounts_the_layers_top_first_and_reports_every_failure() {
         ),
         "{error:?}"
     );
-    assert!(error.cleanup().is_none());
+    assert!(error.cleanup.is_none());
     assert_eq!(guest.kernel.unmounts(), [guest.text("run/nvx/layers/p2")]);
 }
 
@@ -2868,18 +2910,18 @@ fn a_layer_that_a_failed_unmount_left_keeps_the_runtime_directory_occupied() {
     guest
         .kernel
         .fail(Operation::Unmount, top.clone(), Errno::EBUSY);
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     guest.assemble(&assembly).unwrap().teardown().unwrap_err();
     guest.insert(&GptDisk::new(b"configuration", 1));
     let (mounts, calls) = (guest.kernel.mounts().len(), guest.kernel.calls());
     let erofs = Assembly {
-        upper: Upper::Tmpfs,
+        upper: TMPFS,
         ..guest.assembly()
     };
     for assembly in [erofs, assembly] {
         let error = guest.assemble(&assembly).unwrap_err();
         assert!(
-            matches!(error.error(), Error::Occupied { path } if *path == top),
+            matches!(&error.error, Error::Occupied { path } if *path == top),
             "{error:?}"
         );
         assert_eq!(guest.kernel.mounts().len(), mounts);
@@ -2893,16 +2935,16 @@ fn a_layer_that_a_failed_unmount_left_keeps_the_runtime_directory_occupied() {
         .kernel
         .fail(Operation::Unmount, distro.clone(), Errno::EBUSY);
     let assembly = Assembly {
-        upper: Upper::Tmpfs,
+        upper: TMPFS,
         ..guest.assembly()
     };
     guest.assemble(&assembly).unwrap().teardown().unwrap_err();
     guest.insert(&GptDisk::new(b"configuration", 1));
     let (mounts, calls) = (guest.kernel.mounts().len(), guest.kernel.calls());
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
-        matches!(error.error(), Error::Occupied { path } if *path == distro),
+        matches!(&error.error, Error::Occupied { path } if *path == distro),
         "{error:?}"
     );
     assert_eq!(guest.kernel.mounts().len(), mounts);
@@ -3052,7 +3094,7 @@ fn shares_are_mounted_restricted_and_torn_down_first_in_reverse_order() {
     assert_eq!(mode("run/nvx/rootfs/etc/app"), 0o755);
     assert_eq!(mode("run/nvx/rootfs/etc/app/config"), 0o644);
     assert_eq!(guest.kernel.mount_at(&guest.path("run/nvx/staging")), None);
-    assert!(!root.is_latched());
+    assert!(!root.latched);
 
     root.teardown().unwrap();
     assert_eq!(
@@ -3140,7 +3182,7 @@ fn refused_shares_mount_nothing() {
     );
     assert_eq!(guest.kernel.mounts().len(), mounts);
     // The refusals of requests latch nothing.
-    assert!(!root.is_latched());
+    assert!(!root.latched);
 
     // A share that fails to mount claims no target, and latches the root.
     guest.kernel.fail(
@@ -3157,7 +3199,7 @@ fn refused_shares_mount_nothing() {
         )
     );
     assert_eq!(targets(&root), ["/srv"]);
-    assert!(root.is_latched());
+    assert!(root.latched);
     let error = root.mount_share("t", Path::new("/t"), rw).unwrap_err();
     assert!(
         matches!(
@@ -3198,7 +3240,7 @@ fn a_root_has_one_aggregate_and_one_that_failed_part_of_the_way_latches_it() {
             ],
         );
         assert_eq!(first.is_ok(), bound.len() == 2, "{first:?}");
-        assert_eq!(root.is_latched(), bound.len() == 1);
+        assert_eq!(root.latched, bound.len() == 1);
         let mounts = guest.kernel.mounts().len();
         let error = root
             .mount_aggregate("more", rw, &[child("c", "/c", rw, directory)])
@@ -3368,24 +3410,16 @@ fn a_failed_unmount_is_reported_and_the_later_ones_still_attempted() {
         Errno::EBUSY,
     );
     let error = root.teardown().unwrap_err();
-    let failures: Vec<_> = error
-        .failures()
+    let failures: Vec<&Mount> = error
+        .failures
         .iter()
-        .map(|failure| (failure.mount().clone(), failure.path().to_owned()))
+        .map(|failure| &failure.mount)
         .collect();
-    assert_eq!(
-        failures,
-        [
-            (
-                Mount::Share {
-                    tag: "srv".into(),
-                    target: "/srv".into()
-                },
-                guest.path("run/nvx/rootfs/srv")
-            ),
-            (Mount::Overlay, guest.path("run/nvx/rootfs")),
-        ]
-    );
+    let share = Mount::Share {
+        tag: "srv".into(),
+        target: "/srv".into(),
+    };
+    assert_eq!(failures, [&share, &Mount::Overlay]);
     assert_eq!(
         error.to_string(),
         format!(
@@ -3431,7 +3465,7 @@ fn a_share_through_a_link_or_onto_another_mount_is_refused_and_latches_the_root(
     );
     assert_eq!(guest.kernel.unmounts(), [guest.text("run/nvx/staging")]);
     assert!(!guest.path("elsewhere/new").exists());
-    assert!(root.is_latched());
+    assert!(root.latched);
     root.teardown().unwrap();
 
     // Another mount in the root, where nothing is created.
@@ -3464,21 +3498,17 @@ fn a_share_through_a_link_or_onto_another_mount_is_refused_and_latches_the_root(
     root.mount_share("t", Path::new("/link/new"), rw)
         .unwrap_err();
     let error = root.teardown().unwrap_err();
-    let failed: Vec<_> = error
-        .failures()
+    let failed: Vec<&Mount> = error
+        .failures
         .iter()
-        .map(|failure| (failure.mount().clone(), failure.path().to_owned()))
+        .map(|failure| &failure.mount)
         .collect();
-    assert_eq!(
-        failed,
-        [(
-            Mount::Share {
-                tag: "t".into(),
-                target: "/link/new".into()
-            },
-            staging.clone()
-        )]
-    );
+    let share = Mount::Share {
+        tag: "t".into(),
+        target: "/link/new".into(),
+    };
+    assert_eq!(failed, [&share]);
+    assert!(guest.kernel.mount_at(&staging).is_some());
 
     // A `staging` where a file system is mounted already is refused before the device mounts.
     let guest = Guest::new();
@@ -3506,9 +3536,6 @@ fn a_share_or_a_mapping_that_a_rename_moved_and_that_stays_is_the_teardown_s() {
         let mut root = guest.assemble(&guest.assembly()).unwrap();
         let rootfs = guest.path("run/nvx/rootfs");
         fs::create_dir_all(rootfs.join("data/x")).unwrap();
-        let export = guest.path("hostfs/root");
-        fs::create_dir_all(export.join("0/src")).unwrap();
-        guest.kernel.add_mount(&export);
         // A rename between the walk and the attach moves the target's directory, and the detach
         // of what went there fails.
         let renamed = rootfs.clone();
@@ -3519,21 +3546,21 @@ fn a_share_or_a_mapping_that_a_rename_moved_and_that_stays_is_the_teardown_s() {
         guest
             .kernel
             .fail(Operation::Detach, moved.clone(), Errno::EBUSY);
+        let rw = Access::ReadWrite;
         let (error, mount) = if share {
-            let error = root
-                .mount_share("t", Path::new("/data/x"), Access::ReadWrite)
-                .unwrap_err();
+            let error = root.mount_share("t", Path::new("/data/x"), rw).unwrap_err();
             let mount = Mount::Share {
                 tag: "t".into(),
                 target: "/data/x".into(),
             };
             (error, mount)
         } else {
-            let source = SourceRoot::open(&export).unwrap();
-            let mapping =
-                crate::guest::mappings::Mapping::new("0/src", "/data/x", Access::ReadOnly).unwrap();
-            let error = root.map(&source, &[mapping]).unwrap_err();
-            let mount = Mount::Mapping {
+            // A child of an aggregate is a mapping of the root's mapper.
+            export(&guest, &[("x", ShareKind::Directory)]);
+            let children = [child("x", "/data/x", rw, ShareKind::Directory)];
+            let error = root.mount_aggregate("all", rw, &children).unwrap_err();
+            let mount = Mount::Child {
+                name: "x".into(),
                 target: "/data/x".into(),
             };
             (error, mount)
@@ -3548,7 +3575,7 @@ fn a_share_or_a_mapping_that_a_rename_moved_and_that_stays_is_the_teardown_s() {
             ),
             "{error:?}"
         );
-        assert!(root.is_latched());
+        assert!(root.latched);
         assert!(guest.kernel.mount_at(&moved).is_some());
         assert_eq!(guest.kernel.mount_at(&guest.path("run/nvx/staging")), None);
         // The teardown detaches it first, wherever it is, or reports it.
@@ -3566,108 +3593,16 @@ fn a_share_or_a_mapping_that_a_rename_moved_and_that_stays_is_the_teardown_s() {
             Ok(()) => torn.unwrap(),
             Err(busy) => {
                 let error = torn.unwrap_err();
-                let failures: Vec<_> = error
-                    .failures()
+                let failures: Vec<&Mount> = error
+                    .failures
                     .iter()
-                    .map(|failure| (failure.mount().clone(), failure.path().to_owned()))
+                    .map(|failure| &failure.mount)
                     .collect();
-                assert_eq!(failures, [(mount, rootfs.join("data/x"))]);
-                assert_eq!(
-                    error.failures()[0].error().raw_os_error(),
-                    Some(busy as i32)
-                );
+                assert_eq!(failures, [&mount]);
+                assert_eq!(error.failures[0].error.raw_os_error(), Some(busy as i32));
             }
         }
     }
-}
-
-#[test]
-fn mappings_apply_beneath_the_overlay_in_order_and_go_first_at_the_teardown() {
-    let guest = Guest::new();
-    let mut root = guest.assemble(&guest.assembly()).unwrap();
-    let export = guest.path("hostfs/root");
-    fs::create_dir_all(export.join("0/src")).unwrap();
-    fs::write(export.join("0/notes.txt"), b"notes").unwrap();
-    guest.kernel.add_mount(&export);
-    let source = SourceRoot::open(&export).unwrap();
-    let calls = guest.kernel.calls().len();
-    // Zero mappings do no work.
-    root.map(&source, &[]).unwrap();
-    assert_eq!(guest.kernel.calls().len(), calls);
-    let mapping = |source: &str, target: &str, access| {
-        crate::guest::mappings::Mapping::new(source, target, access).unwrap()
-    };
-    root.map(
-        &source,
-        &[
-            mapping("0/src", "/workspace", Access::ReadWrite),
-            mapping("0/notes.txt", "/home/user/notes", Access::ReadOnly),
-        ],
-    )
-    .unwrap();
-    let mut expected = attach_calls(
-        &export.join("0/src"),
-        &guest.path("run/nvx/rootfs/workspace"),
-        Access::ReadWrite,
-    );
-    expected.extend(attach_calls(
-        &export.join("0/notes.txt"),
-        &guest.path("run/nvx/rootfs/home/user/notes"),
-        Access::ReadOnly,
-    ));
-    assert_eq!(guest.kernel.calls()[calls..], expected);
-    assert_eq!(targets(&root), ["/workspace", "/home/user/notes"]);
-    // A share may not shadow a mapping, nor be inside one.
-    let error = root
-        .mount_share("t", Path::new("/workspace/inner"), Access::ReadWrite)
-        .unwrap_err();
-    assert!(
-        matches!(&error, Error::Share(ShareRefusal::Overlap { claimed, .. })
-            if *claimed == Path::new("/workspace")),
-        "{error:?}"
-    );
-    // NVX's container root reserves its runtime's targets; the refusal latches the root.
-    let error = root
-        .map(&source, &[mapping("0/src", "/etc", Access::ReadOnly)])
-        .unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            Error::Mapping { mount: Mount::Mapping { target }, error: MappingError::Reserved }
-                if *target == Path::new("/etc")
-        ),
-        "{error:?}"
-    );
-    assert_eq!(
-        error.to_string(),
-        "failed to mount the mapping at /etc: the runtime reserves the target"
-    );
-    let error = root
-        .map(&source, &[mapping("0/src", "/srv", Access::ReadOnly)])
-        .unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            Error::Mapping {
-                error: MappingError::Latched,
-                ..
-            }
-        ),
-        "{error:?}"
-    );
-    root.map(&source, &[]).unwrap();
-    assert!(!guest.path("run/nvx/rootfs/srv").exists());
-    root.teardown().unwrap();
-    assert_eq!(
-        guest.kernel.unmounts(),
-        [
-            guest.text("run/nvx/rootfs/home/user/notes"),
-            guest.text("run/nvx/rootfs/workspace"),
-            guest.text("run/nvx/rootfs"),
-            guest.text("run/nvx/layers/distro"),
-            guest.text("run/nvx/scratch"),
-        ]
-    );
 }
 
 #[test]
@@ -3683,7 +3618,7 @@ fn a_root_in_run_nvx_mounts_the_host_export_where_its_boot_token_names_it() {
 }
 
 #[test]
-fn the_host_export_is_mounted_out_of_the_root_and_unmounted_after_its_mappings() {
+fn the_host_export_is_mounted_out_of_the_root_and_unmounted_after_the_live_shares() {
     let restricted = MountFlags::MS_NOSUID | MountFlags::MS_NODEV;
     for (access, flags) in [
         (Access::ReadOnly, restricted | MountFlags::MS_RDONLY),
@@ -3713,33 +3648,7 @@ fn the_host_export_is_mounted_out_of_the_root_and_unmounted_after_its_mappings()
             fs::read_dir(guest.path("run/nvx/rootfs")).unwrap().count(),
             0
         );
-        assert!(!root.is_latched());
-
-        // Its root is the source of the caller's mappings: a directory child, `0`, and a file
-        // child, `1`, of the aggregate.
-        fs::create_dir_all(mount_point.join("0/src")).unwrap();
-        fs::write(mount_point.join("1"), b"notes").unwrap();
-        let mapped = guest.kernel.calls().len();
-        root.map(
-            &source,
-            &[
-                Mapping::new("0/src", "/workspace", Access::ReadWrite).unwrap(),
-                Mapping::new("1", "/home/user/notes", Access::ReadOnly).unwrap(),
-            ],
-        )
-        .unwrap();
-        let mut expected = attach_calls(
-            &mount_point.join("0/src"),
-            &guest.path("run/nvx/rootfs/workspace"),
-            Access::ReadWrite,
-        );
-        expected.extend(attach_calls(
-            &mount_point.join("1"),
-            &guest.path("run/nvx/rootfs/home/user/notes"),
-            Access::ReadOnly,
-        ));
-        assert_eq!(guest.kernel.calls()[mapped..], expected);
-        assert_eq!(targets(&root), ["/workspace", "/home/user/notes"]);
+        assert!(!root.latched);
 
         // A root mounts one export, since every export is mounted at the same place; refusing
         // another latches nothing.
@@ -3751,7 +3660,7 @@ fn the_host_export_is_mounted_out_of_the_root_and_unmounted_after_its_mappings()
         );
         assert_eq!(error.to_string(), "the root has a host export already");
         assert_eq!(guest.kernel.mounts().len(), mounts);
-        assert!(!root.is_latched());
+        assert!(!root.latched);
 
         // An aggregate live share, mounted later, is unmounted before the export.
         export(&guest, &[("a", ShareKind::Directory)]);
@@ -3763,16 +3672,14 @@ fn the_host_export_is_mounted_out_of_the_root_and_unmounted_after_its_mappings()
         )
         .unwrap();
 
-        // The teardown unmounts the live shares and mappings, those from the export included,
-        // then the aggregate and the export, the later first, then the assembly's mounts.
+        // The teardown unmounts the live shares, then the aggregate and the export, the later
+        // first, then the assembly's mounts, once the export's root is closed.
         drop(source);
         root.teardown().unwrap();
         assert_eq!(
             guest.kernel.unmounts(),
             [
                 guest.text("run/nvx/rootfs/data/a"),
-                guest.text("run/nvx/rootfs/home/user/notes"),
-                guest.text("run/nvx/rootfs/workspace"),
                 guest.text("run/nvx/shares"),
                 guest.text("run/nvx/hostfs/root"),
                 guest.text("run/nvx/rootfs"),
@@ -3802,7 +3709,7 @@ fn a_refused_tag_creates_and_mounts_nothing_and_a_failed_export_latches_the_root
     assert_eq!(guest.kernel.calls(), calls);
     assert!(!guest.path("run/nvx/hostfs").exists());
     // The refusals of requests latch nothing.
-    assert!(!root.is_latched());
+    assert!(!root.latched);
 
     // A device that fails to mount latches the root, and leaves nothing to unmount.
     let mount_point = guest.path("run/nvx/hostfs/root");
@@ -3825,7 +3732,7 @@ fn a_refused_tag_creates_and_mounts_nothing_and_a_failed_export_latches_the_root
             os_error(Errno::ENODEV)
         )
     );
-    assert!(root.is_latched());
+    assert!(root.latched);
 
     // A latched root refuses the export, as it refuses every share and mapping.
     guest.kernel.restore(Operation::Mount, &mount_point);
@@ -3885,7 +3792,7 @@ fn the_host_export_is_mounted_through_no_symbolic_link() {
             0,
             "{link}"
         );
-        assert!(root.is_latched(), "{link}");
+        assert!(root.latched, "{link}");
         root.teardown().unwrap();
     }
 }
@@ -3921,7 +3828,7 @@ fn a_hostfs_directory_that_is_there_already_must_be_private() {
         assert_eq!(guest.kernel.mounts().len(), mounts, "{mode:o}");
         assert!(!guest.path("run/nvx/hostfs/root").exists(), "{mode:o}");
         assert_eq!(fs::metadata(&hostfs).unwrap().mode() & 0o7777, mode);
-        assert!(root.is_latched(), "{mode:o}");
+        assert!(root.latched, "{mode:o}");
         root.teardown().unwrap();
     }
 
@@ -3935,7 +3842,7 @@ fn a_hostfs_directory_that_is_there_already_must_be_private() {
     drop(root.mount_export("microvm", Access::ReadWrite).unwrap());
     let mode = fs::metadata(guest.path("run/nvx/hostfs")).unwrap().mode() & 0o7777;
     assert_eq!(mode, 0o700);
-    assert!(!root.is_latched());
+    assert!(!root.latched);
     root.teardown().unwrap();
     let unmounts = [
         guest.text("run/nvx/hostfs/root"),
@@ -3976,294 +3883,42 @@ fn a_dropped_root_is_torn_down_once() {
     assert_eq!(guest.kernel.unmounts().len(), 3);
 }
 
-/// A process of the bootstrap's parent cgroup.
-enum Process {
-    /// A process, which the bootstrap moves.
-    User(u32),
-    /// A kernel thread, which stays.
-    Kernel(u32),
-    /// A process that ended after the cgroup listed it, which has no `/proc` entry.
-    Ended(u32),
-}
+/// Compiles a layered root's steps, as the module's example showed them, without assembling
+/// anything: a GPT root over a tmpfs upper, a live share, the host export that the kernel command
+/// line names, if any, and the teardown.
+#[test]
+fn a_layered_root_s_steps_compile() {
+    use crate::protocol::export::HostExport;
+    use crate::protocol::root::DISTRO_MMIO_BASE;
 
-/// Prepares a cgroup hierarchy at `cgroup` in `guest`, whose root, already a cgroup if
-/// `mounted`, holds `processes`, and returns the layout of its `agent` and `container` cgroups.
-fn hierarchy(guest: &Guest, mounted: bool, processes: &[Process]) -> Layout {
-    let cgroup = guest.path("cgroup");
-    write(
-        &guest.paths.proc.join("sys/user/max_user_namespaces"),
-        "15019\n",
-    );
-    if mounted {
-        write(&cgroup.join("cgroup.controllers"), "cpu io memory pids\n");
-    }
-    write(&cgroup.join("cgroup.subtree_control"), "");
-    let mut members = String::new();
-    for process in processes {
-        let (id, flags) = match *process {
-            Process::User(id) => (id, Some(0x0040_0100)),
-            Process::Kernel(id) => (id, Some(0x0020_8040)),
-            Process::Ended(id) => (id, None),
-        };
-        members.push_str(&format!("{id}\n"));
-        if let Some(flags) = flags {
-            let stat = format!("{id} (p {id}) S 0 {id} {id} 0 -1 {flags} 0 0 0 0 0 0 0 0 20 0 1\n");
-            write(&guest.paths.proc.join(id.to_string()).join("stat"), stat);
+    let _steps = || -> Result<(), Box<dyn std::error::Error>> {
+        let mut root = assemble(&Assembly {
+            runtime: "/run/nvx".into(),
+            distro: Device {
+                mmio: DISTRO_MMIO_BASE,
+                sectors: None,
+            },
+            image: Image::Gpt {
+                expected: Expected::new()
+                    .disk_guid("8d2f3a4e-1c5b-4e7a-9f60-2b3c4d5e6f70".parse()?),
+                first_partition_bound: 64 * 1024,
+            },
+            upper: Upper::Tmpfs {
+                max_memory_percent: Some(50),
+            },
+            overlay: OverlayMode::UntrustedLowers,
+            timeout: Duration::from_secs(30),
+        })?;
+        root.mount_share("workspace", Path::new("/workspace"), Access::ReadWrite)?;
+        // The host export that the kernel command line names, if any, is the source of the
+        // caller's mappings, which the caller's own mapper applies.
+        if let Some(export) = HostExport::parse(&fs::read("/proc/cmdline")?)? {
+            let source = root.mount_export(&export.tag, export.mode.into())?;
+            // Dropping the export's root lets the teardown unmount the export.
+            drop(source);
         }
-    }
-    write(&cgroup.join("cgroup.procs"), members);
-    Layout::new(cgroup.join("agent"), cgroup.join("container")).unwrap()
-}
-
-/// Bootstraps `layout` with `resources` and a clone of `guest`'s kernel.
-fn bootstrap_in(guest: &Guest, layout: &Layout, resources: &Resources) -> Result<Bootstrap, Error> {
-    bootstrap::bootstrap_with(&mut guest.kernel.clone(), &guest.paths, layout, resources)
-}
-
-/// Creates the interface files `files` of the workload cgroup, `cgroup/container`, in `guest`,
-/// as the kernel shows them once its parent enables their controllers, which a hierarchy of
-/// regular files does not.
-fn interface_files(guest: &Guest, files: &[&str]) {
-    for file in files {
-        write(&guest.path("cgroup/container").join(file), "");
-    }
-}
-
-#[test]
-fn bootstrap_moves_every_process_but_kernel_threads_and_applies_the_resources() {
-    let guest = Guest::bare();
-    let processes = [
-        Process::User(1),
-        Process::Kernel(2),
-        Process::User(45),
-        Process::Ended(99),
-    ];
-    let layout = hierarchy(&guest, true, &processes);
-    interface_files(&guest, &["pids.current", "memory.max", "pids.max"]);
-    let resources = Resources {
-        agent_memory_low: Some(16 << 20),
-        workload_memory_max: Some(512 << 20),
-        workload_pids_max: Some(65),
+        // Run the workload in the root at `root.path()`; then:
+        root.teardown()?;
+        Ok(())
     };
-    let bootstrap = bootstrap_in(&guest, &layout, &resources).unwrap();
-    assert_eq!(bootstrap.moved(), [1, 45]);
-    assert_eq!(bootstrap.layout(), &layout);
-    assert_eq!(bootstrap.workload().path(), layout.workload());
-    let writes: Vec<(String, String)> = [
-        ("proc/sys/user/max_user_namespaces", "0"),
-        ("cgroup/agent/cgroup.procs", "1"),
-        ("cgroup/agent/cgroup.procs", "45"),
-        ("cgroup/agent/memory.low", "16777216"),
-    ]
-    .into_iter()
-    .map(|(path, value)| (guest.text(path), value.to_owned()))
-    .collect();
-    assert_eq!(guest.kernel.writes(), writes);
-    assert!(guest.kernel.mounts().is_empty());
-    // The agent's `memory.low` enabled the `memory` controller. The workload cgroup has every
-    // file already, so its preparation enabled nothing, and wrote its values.
-    assert_eq!(
-        fs::read_to_string(guest.path("cgroup/cgroup.subtree_control")).unwrap(),
-        "+memory"
-    );
-    for (file, value) in [("memory.max", "536870912"), ("pids.max", "65")] {
-        assert_eq!(
-            fs::read_to_string(guest.path("cgroup/container").join(file)).unwrap(),
-            value,
-            "{file}"
-        );
-    }
-    assert_eq!(
-        fs::read_to_string(guest.path("cgroup/cgroup.procs")).unwrap(),
-        "2\n99\n"
-    );
-    assert_eq!(
-        fs::read_to_string(guest.path("cgroup/agent/cgroup.procs")).unwrap(),
-        "1\n45\n"
-    );
-}
-
-#[test]
-fn bootstrap_mounts_the_hierarchy_unless_the_parent_is_a_cgroup() {
-    let guest = Guest::bare();
-    let layout = hierarchy(&guest, false, &[Process::User(1)]);
-    bootstrap_in(&guest, &layout, &Resources::default()).unwrap();
-    assert_eq!(
-        guest.kernel.calls()[1],
-        mount_call(
-            Some("cgroup2"),
-            &guest.text("cgroup"),
-            Some("cgroup2"),
-            MountFlags::MS_NOSUID | MountFlags::MS_NODEV | MountFlags::MS_NOEXEC,
-            None,
-        )
-    );
-    // Without a value, the bootstrap writes only the placement, and the preparation of the new
-    // workload cgroup enables only the `pids` controller.
-    assert_eq!(guest.kernel.writes().len(), 2);
-    assert_eq!(
-        fs::read_to_string(guest.path("cgroup/cgroup.subtree_control")).unwrap(),
-        "+pids"
-    );
-    assert!(guest.path("cgroup/container").is_dir());
-}
-
-#[test]
-fn bootstrap_names_the_failed_step_and_keeps_the_earlier_changes() {
-    // The workload cgroup's `memory.max` cannot be written: a directory takes its place.
-    let guest = Guest::bare();
-    let layout = hierarchy(&guest, true, &[Process::User(1)]);
-    interface_files(&guest, &["pids.current", "pids.max"]);
-    fs::create_dir(guest.path("cgroup/container/memory.max")).unwrap();
-    let resources = Resources {
-        agent_memory_low: Some(1 << 20),
-        workload_memory_max: Some(1),
-        workload_pids_max: Some(8),
-    };
-    let error = bootstrap_in(&guest, &layout, &resources).unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            Error::Bootstrap { step: BootstrapStep::WorkloadCgroup, error }
-                if error.raw_os_error() == Some(Errno::EISDIR as i32)
-        ),
-        "{error:?}"
-    );
-    assert_eq!(
-        error.to_string(),
-        format!(
-            "failed to prepare the workload cgroup: {}",
-            os_error(Errno::EISDIR)
-        )
-    );
-    assert_eq!(
-        fs::read_to_string(guest.path("cgroup/agent/memory.low")).unwrap(),
-        "1048576"
-    );
-
-    // The agent's value is refused before the workload cgroup is prepared.
-    let guest = Guest::bare();
-    let layout = hierarchy(&guest, true, &[Process::User(1)]);
-    guest.kernel.fail(
-        Operation::Write,
-        guest.path("cgroup/agent/memory.low"),
-        Errno::EINVAL,
-    );
-    let error = bootstrap_in(&guest, &layout, &resources).unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            Error::Bootstrap { step: BootstrapStep::AgentMemoryLow, error }
-                if error.raw_os_error() == Some(Errno::EINVAL as i32)
-        ),
-        "{error:?}"
-    );
-    assert_eq!(
-        error.to_string(),
-        format!(
-            "failed to set the agent's memory reservation: {}",
-            os_error(Errno::EINVAL)
-        )
-    );
-    assert_eq!(
-        fs::read_to_string(guest.path("cgroup/agent/cgroup.procs")).unwrap(),
-        "1\n"
-    );
-    assert!(!guest.path("cgroup/container").exists());
-
-    // Cgroups that are not siblings are refused before anything changes.
-    let guest = Guest::bare();
-    hierarchy(&guest, true, &[Process::User(1)]);
-    let cgroup = guest.path("cgroup");
-    let layout = Layout::new(cgroup.join("agent"), cgroup.join("workloads/container")).unwrap();
-    let error = bootstrap_in(&guest, &layout, &Resources::default()).unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            Error::Bootstrap { step: BootstrapStep::Layout, error }
-                if error.raw_os_error() == Some(Errno::EINVAL as i32)
-        ),
-        "{error:?}"
-    );
-    assert!(guest.kernel.calls().is_empty());
-}
-
-#[test]
-fn bootstrap_accepts_a_missing_sysctl_only_without_user_namespaces() {
-    // A kernel without sysctls lacks the limit, which one without user namespaces needs no more.
-    let guest = Guest::bare();
-    let layout = hierarchy(&guest, true, &[Process::User(1)]);
-    guest.kernel.fail(
-        Operation::Write,
-        guest.path("proc/sys/user/max_user_namespaces"),
-        Errno::ENOENT,
-    );
-    bootstrap_in(&guest, &layout, &Resources::default()).unwrap();
-    assert_eq!(
-        fs::read_to_string(guest.path("cgroup/agent/cgroup.procs")).unwrap(),
-        "1\n"
-    );
-
-    // One with user namespaces cannot be limited, so nothing else changes.
-    let guest = Guest::bare();
-    let layout = hierarchy(&guest, true, &[Process::User(1)]);
-    guest.kernel.fail(
-        Operation::Write,
-        guest.path("proc/sys/user/max_user_namespaces"),
-        Errno::ENOENT,
-    );
-    write(&guest.paths.proc.join("self/ns/user"), "");
-    let error = bootstrap_in(&guest, &layout, &Resources::default()).unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            Error::Bootstrap { step: BootstrapStep::UserNamespaces, error }
-                if error.raw_os_error() == Some(Errno::ENOENT as i32)
-        ),
-        "{error:?}"
-    );
-    assert_eq!(guest.kernel.calls().len(), 1);
-    assert!(!guest.path("cgroup/agent").exists());
-}
-
-#[test]
-fn bootstrap_fails_while_a_process_keeps_returning_to_the_parent() {
-    let guest = Guest::bare();
-    let layout = hierarchy(&guest, true, &[Process::User(1), Process::User(7)]);
-    guest.kernel.pin(7, usize::MAX);
-    let error = bootstrap_in(&guest, &layout, &Resources::default()).unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            Error::Bootstrap { step: BootstrapStep::Placement, error }
-                if error.raw_os_error() == Some(Errno::EBUSY as i32)
-        ),
-        "{error:?}"
-    );
-    let attempts = guest
-        .kernel
-        .writes()
-        .into_iter()
-        .filter(|(path, value)| path.ends_with("agent/cgroup.procs") && value == "7")
-        .count();
-    assert_eq!(attempts, 16);
-}
-
-#[test]
-fn bootstrap_succeeds_when_the_last_pass_empties_the_parent() {
-    let guest = Guest::bare();
-    let layout = hierarchy(&guest, true, &[Process::User(1), Process::User(7)]);
-    // The sixteenth pass is the first that moves the process.
-    guest.kernel.pin(7, 15);
-    let bootstrap = bootstrap_in(&guest, &layout, &Resources::default()).unwrap();
-    assert_eq!(bootstrap.moved()[0], 1);
-    assert_eq!(bootstrap.moved()[1..], [7; 16]);
-    assert_eq!(
-        fs::read_to_string(guest.path("cgroup/cgroup.procs")).unwrap(),
-        ""
-    );
-    assert_eq!(
-        fs::read_to_string(guest.path("cgroup/agent/cgroup.procs")).unwrap(),
-        "1\n7\n"
-    );
 }

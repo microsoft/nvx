@@ -20,7 +20,6 @@ import json
 import os
 import shutil
 import signal
-import struct
 import subprocess
 import sys
 import tempfile
@@ -52,12 +51,9 @@ HOSTNAME = "nvx-lifecycle"
 MEMORY_MIB = 256
 # An identity that the Ubuntu layer's user database lacks.
 UNAVAILABLE_IDENTITY = "4242:4242"
-# The guest agent forwards at most this much output for one exec request, and
-# reads it in chunks of at most OUTPUT_CHUNK_BYTES. It drops the chunk that
-# would exceed the bound, so more than OUTPUT_LIMIT_BYTES - OUTPUT_CHUNK_BYTES
-# bytes reach the host.
-OUTPUT_LIMIT_BYTES = 1024 * 1024
-OUTPUT_CHUNK_BYTES = 32 * 1024
+# More output than the 1 MiB that version 1 of NVXC forwarded for one exec
+# request, which version 2 streams whole.
+STREAMED_OUTPUT_BYTES = 2 * 1024 * 1024
 STATE_PATH = "/tmp/nvx lifecycle state"
 STATE_ARGUMENTS = ("  leading and trailing  ", "tab\tseparated", "line one\nline two")
 STATE_CONTENT = "".join(f"{argument}\n" for argument in STATE_ARGUMENTS).encode()
@@ -66,14 +62,14 @@ FOREIGN_NAME = "operator-note.txt"
 FOREIGN_CONTENT = "operator data\n"
 EVIDENCE_PREFIX = "sandbox-lifecycle-"
 EVIDENCE_LIMIT = 64 * 1024
-# ext4 sets this incompatible feature while its journal needs recovery.
-EXT4_INCOMPAT_RECOVER = 0x4
-MANAGED_SUCCESS = {"operation": "managed", "category": "success", "status_code": 0}
+# A sandbox's VM starts without an OpenVMM lifecycle option, since nvx-init
+# owns its lifecycle, so OpenVMM reports its operation as a run.
+MANAGED_SUCCESS = {"operation": "run", "category": "success", "status_code": 0}
 # The guest powers off with status 125 when it refuses the workload identity,
 # and a managed start reports the status from OpenVMM's outcome report.
 REFUSAL_CATEGORY = "guest-exit"
 MANAGED_REFUSAL = {
-    "operation": "managed",
+    "operation": "run",
     "category": REFUSAL_CATEGORY,
     "status_code": 125,
 }
@@ -101,7 +97,7 @@ class Refusal:
         return f"error {self.code!r}{named}"
 
 
-# A start that OpenVMM ended names the category of its outcome report.
+# A start or a run that OpenVMM ended names the category of its outcome report.
 REFUSED_START = Refusal("exited", (REFUSAL_CATEGORY,))
 
 # The files of a state directory, as nvx-rs sandbox documents them.
@@ -112,8 +108,11 @@ LOG = "openvmm.log"
 SOCKET = "control.sock"
 OUTCOME = "outcome.json"
 LOCK = "sandbox.lock"
+# The first exec of a provisioned sandbox creates its exec lock, even an exec
+# that finds no VM, and the lock stays until deprovision removes the sandbox.
+EXEC_LOCK = "exec.lock"
 # The fields of the store's runtime record.
-RUNTIME_FIELDS = frozenset({"format", "launch", "process", "endpoint", "runtime"})
+RUNTIME_FIELDS = frozenset({"capability", "endpoint", "process", "runtime", "vmDir"})
 PROVISIONED_ENTRIES = frozenset({CONFIG, LOCK})
 # Windows hosts serve the control endpoint as a named pipe outside the state.
 RUNNING_ENTRIES = frozenset(
@@ -285,15 +284,6 @@ def kill_openvmm(runtime: dict[str, Any], timeout: float, marker: str) -> None:
         time.sleep(0.05)
 
 
-def scratch_journal_clean(path: Path) -> bool:
-    with path.open("rb") as image:
-        image.seek(1024 + 0x60)
-        incompatible = image.read(4)
-    if len(incompatible) != 4:
-        raise RuntimeError(f"scratch superblock is truncated: {path}")
-    return not struct.unpack("<I", incompatible)[0] & EXT4_INCOMPAT_RECOVER
-
-
 def state_entries(state: Path) -> list[str] | None:
     if not state.is_dir():
         return None
@@ -322,9 +312,10 @@ def check_managed_report(
     """Checks the report of a managed sandbox that stopped cleanly.
 
     These are the report checks of the direct-mode managed lifecycle
-    (nvx-rs/tests/managed_lifecycle.rs) that hold for the layered root too: the
-    report names the backend, reports `network_policy`, or that no network
-    policy was requested when that is None, and every teardown step completed.
+    (nvx-rs/src/host/session/tests/managed_lifecycle.rs) that hold for the
+    layered root too: the report names the backend, reports `network_policy`,
+    or that no network policy was requested when that is None, and every
+    teardown step completed.
     """
     outcome = report.get("outcome")
     if outcome != MANAGED_SUCCESS:
@@ -384,6 +375,33 @@ def read_runtime(state: Path) -> dict[str, Any]:
     runtime = cast(dict[str, Any], value)
     if frozenset(runtime) != RUNTIME_FIELDS:
         raise RuntimeError(f"sandbox runtime record has unexpected fields: {path}")
+    vm_dir = runtime["vmDir"]
+    capability = runtime["capability"]
+    if not isinstance(capability, list):
+        raise RuntimeError(f"sandbox runtime record has an invalid capability: {path}")
+    values = cast(list[object], capability)
+    if len(values) != 32 or any(
+        type(byte) is not int or not 0 <= byte <= 255 for byte in values
+    ):
+        raise RuntimeError(f"sandbox runtime record has an invalid capability: {path}")
+    try:
+        if (
+            not isinstance(vm_dir, str)
+            or not Path(vm_dir).is_absolute()
+            or not Path(vm_dir).samefile(state)
+        ):
+            raise RuntimeError(
+                f"sandbox runtime record names another VM directory: {path}"
+            )
+        installed = (state / CAPABILITY).read_bytes()
+    except OSError as error:
+        raise RuntimeError(
+            f"sandbox runtime record ownership cannot be checked: {path}"
+        ) from error
+    if bytes(cast(list[int], values)) != installed:
+        raise RuntimeError(
+            f"sandbox runtime record capability differs from its owned file: {path}"
+        )
     return runtime
 
 
@@ -411,6 +429,8 @@ class LifecycleAcceptance:
         # An artifact root whose runtime identity differs in the initramfs.
         self.other_root = root / "other-runtime"
         self.checks: list[dict[str, object]] = []
+        # The state directories that hold the exec lock of an earlier exec.
+        self.exec_locks: set[Path] = set()
 
     def launch_options(self, scratch: Path) -> list[str]:
         return [
@@ -481,7 +501,14 @@ class LifecycleAcceptance:
         `refusal` on standard error when given. With `root`, the operation runs
         under that artifact root.
         """
+        provisioned = state is not None and (state / CONFIG).is_file()
         result = self.run_cli(operation, *arguments, state=state, root=root)
+        if state is not None:
+            if operation == "exec" and provisioned:
+                self.exec_locks.add(state)
+            elif not (state / CONFIG).exists():
+                # Deprovision removes the exec lock with the configuration.
+                self.exec_locks.discard(state)
         self.record(operation, result, state=state, expected=expected)
         if (expected is not None and result.returncode != expected) or (
             refusal is not None and not refusal.matches(result.stderr)
@@ -514,6 +541,8 @@ class LifecycleAcceptance:
     def require_entries(
         self, state: Path, expected: frozenset[str], description: str
     ) -> None:
+        if state in self.exec_locks:
+            expected |= {EXEC_LOCK}
         entries = state_entries(state)
         if entries is None or frozenset(entries) != expected:
             raise RuntimeError(
@@ -597,8 +626,9 @@ class LifecycleAcceptance:
         if self.state.exists():
             raise RuntimeError("a rejected root identity created sandbox state")
 
-        # The guest refuses an identity that the image lacks before it starts
-        # the workload.
+        # The guest refuses an identity that the image lacks before it runs any
+        # workload, so a run fails as a managed start does, below, with the
+        # guest's status from the outcome report that OpenVMM publishes.
         run_scratch = self.root / "run-scratch.ext4"
         shutil.copyfile(self.artifacts.scratch_template, run_scratch)
         result = self.invoke(
@@ -608,16 +638,15 @@ class LifecycleAcceptance:
             UNAVAILABLE_IDENTITY,
             "--entrypoint",
             PROBE,
+            "--arg=init",
             state=None,
-            expected=125,
+            expected=1,
+            refusal=REFUSED_START,
         )
         console = result.stdout + result.stderr
         self.save_evidence("identity-run.log", console)
-        if (
-            b"configured workload UID is unavailable" not in console
-            or b"NVX-UBUNTU-SANDBOX-PROFILE-OK" in console
-        ):
-            raise RuntimeError("an unavailable one-shot identity was not refused")
+        if b"NVX-UBUNTU-SANDBOX-PROFILE-OK" in console:
+            raise RuntimeError("a run of an unavailable identity ran its workload")
 
         # A managed start with that identity fails closed. OpenVMM exits on its
         # own and publishes the guest's status, which the start reports, and
@@ -730,8 +759,14 @@ class LifecycleAcceptance:
     def require_started(self, description: str) -> dict[str, Any]:
         self.require_entries(self.state, RUNNING_ENTRIES, f"after the {description}")
         runtime = read_runtime(self.state)
+        evidence = {
+            name: value for name, value in runtime.items() if name != "capability"
+        }
+        evidence["capabilitySha256"] = hashlib.sha256(
+            bytes(runtime["capability"])
+        ).hexdigest()
         self.save_evidence(
-            "runtime.json", (json.dumps(runtime, indent=2) + "\n").encode()
+            "runtime.json", (json.dumps(evidence, indent=2) + "\n").encode()
         )
         if not openvmm_running(runtime, self.root.name):
             raise RuntimeError(f"OpenVMM is not running after the {description}")
@@ -777,10 +812,10 @@ class LifecycleAcceptance:
         self.require_output(result, STATE_CONTENT, "the state-reading request")
 
     def check_security_profile(self) -> None:
-        # The earlier requests already entered their own namespaces, so the
-        # probe's check that each container mount appears once also shows
-        # that they did not mount into the agent's namespace.
-        result = self.exec(PROBE, "--arg=entry")
+        # nvx-init runs each request as a plain process in the VM's root, so
+        # the probe's check that each mount appears once also shows that the
+        # earlier requests mounted nothing there.
+        result = self.exec(PROBE, "--arg=init", "--arg=entry")
         self.save_evidence("probe.log", result.stdout + result.stderr)
         for marker in (
             b"NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534",
@@ -793,31 +828,28 @@ class LifecycleAcceptance:
                 )
 
     def check_bounded_results(self) -> None:
-        # The agent stops forwarding output at its bound, and the outcome
+        # The host receives all of the workload's output, and the outcome
         # report carries only the operation, category, and status.
-        report = self.root / "output-limit-outcome.json"
+        report = self.root / "streamed-output-outcome.json"
         result = self.exec(
             "/usr/bin/head",
             "--arg=-c",
-            f"--arg={2 * OUTPUT_LIMIT_BYTES}",
+            f"--arg={STREAMED_OUTPUT_BYTES}",
             "--arg=/dev/zero",
             "--outcome-report",
             str(report),
-            expected=125,
         )
         if (
-            not OUTPUT_LIMIT_BYTES - OUTPUT_CHUNK_BYTES
-            < len(result.stdout)
-            <= OUTPUT_LIMIT_BYTES
+            len(result.stdout) != STREAMED_OUTPUT_BYTES
             or result.stdout.strip(b"\0")
             or result.stderr
         ):
             raise RuntimeError(
-                "the output limit forwarded "
+                "the streamed output forwarded "
                 f"{len(result.stdout)} stdout and {len(result.stderr)} stderr bytes"
             )
-        read_exec_outcome(report, category="output-limit", status_code=125)
-        self.copy_evidence(report, "output-limit-outcome.json")
+        read_exec_outcome(report, category="exit", status_code=0)
+        self.copy_evidence(report, "streamed-output-outcome.json")
 
         # An existing report path fails the request before the workload runs.
         existing = self.root / "existing-outcome.json"
@@ -855,6 +887,8 @@ class LifecycleAcceptance:
         )
 
     def stop(self, runtime: dict[str, Any], layer_digest: str) -> None:
+        # nvx-init syncs the file systems and powers the VM off with them
+        # mounted, so the restart that reads the state back checks the stop.
         self.invoke("stop", state=self.state)
         self.require_entries(self.state, STOPPED_ENTRIES, "after stop")
         if openvmm_running(runtime, self.root.name):
@@ -864,10 +898,6 @@ class LifecycleAcceptance:
         self.require_processes((), "after stop")
         self.copy_evidence(self.state / OUTCOME, "outcome.json")
         check_managed_report(managed_report(self.state), self.backend)
-        # A clean journal shows that stop unmounted the overlay and scratch
-        # before the VM powered off.
-        if not scratch_journal_clean(self.scratch):
-            raise RuntimeError("stop left the scratch file system mounted")
         if sha256_file(self.artifacts.distro) != layer_digest:
             raise RuntimeError("the running sandbox modified the EROFS layer")
         for operation in ("exec", "stop"):
