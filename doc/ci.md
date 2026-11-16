@@ -2140,6 +2140,14 @@ match several labels; an unmatched title gets the configured `fallback_label`
 if the issue has no existing labels. The labels are initial sorting hints,
 not verified impact, and Windows or Linux alone does not imply a backend.
 
+The required **Area** dropdown of the
+[Bug report](../.github/ISSUE_TEMPLATE/bug-report.yml) issue form offers the
+`area:` labels of these rules, in their order, and
+[`test_label_issues.py`](../scripts/test_label_issues.py) fails when the two
+differ, so a change to the area labels updates the form too. The answer only
+records the area in the issue's body: the workflow labels from the title
+alone. The form sets GitHub's Bug issue type instead of a label.
+
 For the one-time backfill, authenticate `gh` with access to the repository
 or set `GH_TOKEN` or `GITHUB_TOKEN`, and preview the labels for all open
 issues. An environment token takes precedence over the local `gh` login.

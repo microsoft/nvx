@@ -1,0 +1,77 @@
+name: Bug report
+description: >-
+  Report an NVX bug: what goes wrong, why it matters, and how to reproduce it.
+type: Bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you report a bug, search the [existing issues](https://github.com/microsoft/nvx/issues?q=is%3Aissue) for a duplicate. Redact credentials, tokens, host names, and other sensitive content from the commands and logs that you paste. Never report a security vulnerability in a public issue; report it privately, as [SECURITY.md](https://github.com/microsoft/nvx/blob/dev/SECURITY.md) requires.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: The part of NVX where the bug shows; pick the closest one.
+      options:
+        - "area: openvmm"
+        - "area: guest"
+        - "area: kernel"
+        - "area: nvx-rs"
+        - "area: userland"
+        - "area: networking"
+        - "area: snapshot"
+        - "area: ci"
+        - "area: docs"
+        - "area: security"
+    validations:
+      required: true
+  - type: textarea
+    id: about
+    attributes:
+      label: What is this bug about?
+      description: >-
+        What you observed, what you expected instead, and the error messages
+        that you saw, as text.
+      placeholder: |
+        Observed:
+        Expected:
+        Errors:
+    validations:
+      required: true
+  - type: textarea
+    id: relevance
+    attributes:
+      label: Why is this bug relevant?
+      description: >-
+        The use case that the bug affects and its practical impact, any
+        workaround, and whether it is a regression, with the last version that
+        worked when you know it.
+      placeholder: |
+        Impact:
+        Workaround:
+        Regression:
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How is this bug reproducible?
+      description: >-
+        Minimal numbered steps or commands that others can copy, the conditions
+        under which the bug occurs and how often, and the relevant logs, as text
+        rather than screenshots. Where they apply, give the NVX revision or
+        release, the host OS, the backend (KVM, MSHV, or WHP), the host type
+        (bare metal or virtual machine), and the guest. If you know no reliable
+        reproducer, describe what you tried and what you observed.
+      placeholder: |
+        1.
+        2.
+
+        Frequency:
+        NVX revision or release:
+        Host OS:
+        Backend:
+        Host type:
+        Guest:
+    validations:
+      required: true
