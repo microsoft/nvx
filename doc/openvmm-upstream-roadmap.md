@@ -11,10 +11,11 @@
   summary, and commit mapping below cover positions 001-124, the PR09 fixups at positions
   234-236, the PR13 fixup at position 240, the PR18 fixup at position 241, the PR20 fixup at
   position 242, the PR19 fixup at position 243, and the PR10 fixups at positions 271 and 273.
-- NVX's pinned OpenVMM revision: `364ca3625dd3f57fdeab664b90e5c5d90943a590`, position 307, the
-  head of microsoft/openvmm#5122, whose two commits follow position 305, `66d1cfaca`, the head of
-  `feature/microvm/dev`, to which microsoft/openvmm#5121 added positions 304-305 after position
-  303, `0f1317d82`, microsoft/openvmm#5120 added position 303 after position 302,
+- NVX's pinned OpenVMM revision: `9ecb41f001fee6dab83ae97d7587a48ad52314f1`, position 309, the
+  head of microsoft/openvmm#5123, whose two commits follow position 307, `364ca3625`, the head of
+  `feature/microvm/dev`, to which microsoft/openvmm#5122 added positions 306-307 after position
+  305, `66d1cfaca`, microsoft/openvmm#5121 added positions 304-305 after position 303,
+  `0f1317d82`, microsoft/openvmm#5120 added position 303 after position 302,
   `f9cc4163b`, microsoft/openvmm#5119 added position 302 after position 301, `23fb67887`,
   microsoft/openvmm#5118 added position 301 after position 300, `85b93bbd2`,
   microsoft/openvmm#5117 added position 300 after position 299, `2b0a7ed46`,
@@ -42,9 +43,9 @@
   changes upstream had landed, and added eight fixups at its tip, positions 262-269. A commit's
   position is its v6.0 position less the number of dropped commits before it: v6.0 positions
   003-007 are positions 002-006, 010-013 are 007-010, 015-050 are 011-046, and 054-268 are
-  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 183
+  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 185
   commits past the mapped tip on the same first-parent chain. Positions 125-233, 237-239,
-  244-270, 272, and 274-307 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
+  244-270, 272, and 274-309 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
   position 240 is a PR13 fixup, position 241 is a PR18 fixup, position 242 is a PR20 fixup,
   position 243 is a PR19 fixup, and positions 271 and 273 are PR10 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1213,7 +1214,9 @@ The physical branch is one first-parent chain:
   -> vCPU taken out of SMM when its activity is set [305]
   -> two pending NMIs saved and restored on KVM [306]
   -> backends that hold one pending NMI refuse a count of them [307]
-  -> 364ca3625 (NVX pin)
+  -> queued exception saved once and a pending one that KVM would drop refused on KVM [308]
+  -> restore check that accepts what KVM documents it keeps [309]
+  -> 9ecb41f00 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1264,7 +1267,7 @@ restore and time advance set in the RTC's clock source, which overflowed near ei
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 124 without merges. Of the 183 later commits,
+The NVX pin extends the chain past position 124 without merges. Of the 185 later commits,
 positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position 241 is a PR18 fixup,
 position 242 is a PR20 fixup, position 243 is a PR19 fixup, positions 262-269 are the fixups of
 the v6.1 rebase, positions 271 and 273 are PR10 fixups, and the others are not yet classified or
@@ -1274,7 +1277,7 @@ and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that s
 commits. Positions 180-184 followed the v3.0 reorganization, positions 185-198 are the ABI restart
 of the v4.0 reorganization, positions 199-204 followed it, positions 205-211 followed the v5.0
 reorganization, positions 212 and 213 followed the v5.1 rebase, positions 214-261 followed the
-v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-307
+v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-309
 followed the v6.1 rebase, so they combine none, apart from position 213, which combines v5.1
 positions 222 and 223. Each commit's position is its v6.0 position less seven, the number of
 commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position
@@ -1470,10 +1473,12 @@ through 147 and one less from v5.1 position 149 on; see
 | 305 | `66d1cfaca` | - | - | - | - | - | virt_kvm: take a vCPU out of SMM when its activity is set (microsoft/openvmm#5121) |
 | 306 | `4841f0e71` | - | - | - | - | - | virt_kvm: save and restore two pending NMIs (microsoft/openvmm#5122) |
 | 307 | `364ca3625` | - | - | - | - | - | virt: refuse a pending NMI count that a backend cannot hold (microsoft/openvmm#5122) |
+| 308 | `d58cafb8e` | - | - | - | - | - | virt_kvm: save a queued exception once and refuse one KVM would drop (microsoft/openvmm#5123) |
+| 309 | `9ecb41f00` | - | - | - | - | - | virt: let a restore's check accept what a hypervisor documents it keeps (microsoft/openvmm#5123) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
-that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-307, for later
+that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-309, for later
 commits. They name the positions that the commits have now, but the v6.1 rebase did not check the
 earlier ones again on `7d90c4104`.
 
@@ -2884,6 +2889,75 @@ native;` and the `mod registers;` that position 279 adds, among the `mod` lines 
 282, 285-287, 292, 296, 302, and 303 add. Its changes to `x64.rs`, to the `vp_state.rs` of
 `virt_mshv`, and to `apic.rs` apply without conflicts, and `nmi.rs` is a new file. So it follows
 positions 296 and 306 upstream.
+
+Position 308 makes the KVM backend save an exception that it has queued but not injected yet once,
+and refuse a pending exception that KVM would drop, where a save recorded it twice and a restore
+lost an exception that it was given alone. OpenVMM does not enable `KVM_CAP_EXCEPTION_PAYLOAD`, so
+`KVM_GET_VCPU_EVENTS` reports such an exception as pending and injected both, and
+`KVM_SET_VCPU_EVENTS` restores an exception only as injected and drops one that it is given as
+pending, as two ignored tests that need `/dev/kvm` observe on Linux 6.18.57, and as the sources of
+Linux 6.18 say. `activity` now records an exception, queued or injected, as the pending interruption
+alone, with no pending event, and `set_activity` restores as injected the pending exception that an
+earlier save recorded beside the same injected one, with no payload, and refuses any other pending
+exception, with the other refusals, before it changes any activity state and so before the
+`smm::leave` that position 305 adds, which a refused activity must not run. No element, field, or
+version of the saved state changes: a saved state of an earlier build restores as before, and an
+earlier build restores a later state's pending interruption as the injected exception, as it
+restored the pair. The commit adds unit tests of the new functions, the two ignored tests, two
+KVM-only contract tests in `activity.rs`, a paragraph of the Guide's snapshots page, and a passage
+of its snapshot format's "Fields of an element". It changes files that PR10's positions 022 and 271,
+PR11's positions 027 and 028, PR12's positions 031-033, PR13's positions 039, 044, and 240, PR17's
+positions 069 and 072, PR18's positions 075, 077, and 081-083, PR19's positions 085 and 086, PR20's
+positions 087, 088, 090, and 092, PR21's position 099, PR23's positions 106 and 111, PR24's position
+116, and 71 positions that no PR has yet also change, and it changes no line that a mapped PR adds:
+it rewrites two lines of a comment in `set_activity` that position 286 adds and lines that upstream
+main has and no commit of the chain changes, and adds the rest. Replaying it on upstream main
+conflicts in four files, where it edits or adds beside what upstream main lacks: in the Guide's
+snapshot format, its paragraph follows the subsection that position 306 adds, and the text that
+position 307 adds to it, in the section that position 291 adds and position 298 extends; in its
+snapshots page, its paragraph follows the paragraph that position 306 adds and position 307 extends,
+and precedes text that position 174 writes, in a block that positions 207 and 211 also write; in
+`vp_state.rs`, its refusal sits beside the calls that positions 286, 306, and 305 add, its functions
+precede the `check_restorable_interruption` that position 286 adds, and its change to `activity`
+sits beside the `nmi_pending_count` that position 306 adds; and `activity.rs` does not exist there,
+since position 286 adds it. Its contract tests also need the `kvm_only` form of `backend_test!` that
+position 279 adds. So it follows positions 174, 207, 211, 279, 286, 291, 298, 305, 306, and 307, and
+the positions that they follow, upstream.
+
+Position 309 makes the debug check of `restore_all` accept what a hypervisor documents that it keeps
+differently from how it is given, where it asserted equality and so panicked after a restore that
+had succeeded. KVM drops the reserved bits 8-11 of a segment's attributes, sets the accessed bit of
+the segment registers but the LDTR as it writes them on a CPU with VMX that runs the guest
+unrestricted, and reads it set of the data segments that are present on an SVM CPU, while the
+backend clears it of a segment that is not present, so a state that an earlier save, another host,
+or a crafted snapshot holds reads back differently; it makes SYSENTER_EIP and SYSENTER_ESP canonical
+at the width of the host's virtual addresses, or keeps their low 32 bits on SVM for a guest CPU that
+is not Intel-compatible, keeps SYSENTER_CS in 32 bits on VMX, and keeps the low 32 bits of TSC_AUX
+for a guest CPU that is not Intel-compatible, all by the sources of Linux 6.18; and it restores the
+exception that position 308 describes as the injected one alone. `StateElement` gains `restore_eq`,
+whose default is equality, `restore_all` asserts it in a debug build and prints both states, and
+`Registers`, `Activity`, `VirtualMsrs`, and `TscAux` override it, each only when the new
+`X86PartitionCapabilities::normalizes_restored_state`, an in-memory field that only the KVM backend
+sets, says that the hypervisor normalizes, so MSHV, WHP, and OpenHCL compare as before; everything
+else of those elements, the count of pending NMIs of position 306 included, is compared exactly. No
+production VP saved-state element, serialized field, saved-state type, or version changes. The
+commit adds unit tests of each override and of the macro, whose test backend keeps less than it is
+given, and two KVM-only contract tests, in the new `restore.rs`, that restore a crafted VP state
+with `restore_all`. It changes files that PR05's positions 007-009, PR10's positions 019-023, PR17's
+position 070, PR20's position 090, and 36 positions that no PR has yet also change, and it changes
+no line that a mapped PR adds: it rewrites two lines of `state.rs` that upstream main has and no
+commit of the chain changes, the declaration of `StateElement` and the assertion of `restore_all`,
+and adds the rest. Replaying it on upstream main conflicts in four files, where it adds beside what
+upstream main lacks: its tests of `state.rs` and `vp.rs` follow the test modules that positions 283
+and 132 add; in `virt_kvm`'s `mod.rs`, its line follows the `caps.nested_virt` that position 022
+adds, in the `build` that position 278 also changes; and in `main.rs`, `mod restore;` sits between
+the `mod registers;` that position 279 adds and the `mod save;` that position 285 adds, among the
+`mod` lines that positions 279, 282, 285-287, 292, 296, 302, 303, and 307 add. The rest of its
+changes to `state.rs` and `vp.rs`, and its changes to `x86/mod.rs` and to the `mod.rs` of
+`virt_mshv`, apply without conflicts, and `restore.rs` is a new file. Its contract tests also need
+the `kvm_only` form of `backend_test!` that position 279 adds, and its `Activity` override names the
+`nmi_pending_count` that position 306 adds. So it follows positions 022, 132, 278, 279, 283, 285,
+and 306, and the positions that they follow, upstream.
 
 ## PR summary
 
