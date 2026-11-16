@@ -11,10 +11,11 @@
   summary, and commit mapping below cover positions 001-124, the PR09 fixups at positions
   234-236, the PR13 fixup at position 240, the PR18 fixup at position 241, the PR20 fixup at
   position 242, the PR19 fixup at position 243, and the PR10 fixups at positions 271 and 273.
-- NVX's pinned OpenVMM revision: `0f1317d82e7e959bc058108dfd519f1603e4125d`, position 303, the
-  head of microsoft/openvmm#5120, whose commit follows position 302, `f9cc4163b`, the head of
-  `feature/microvm/dev`, to which microsoft/openvmm#5119 added position 302 after position 301,
-  `23fb67887`, microsoft/openvmm#5118 added position 301 after position 300, `85b93bbd2`,
+- NVX's pinned OpenVMM revision: `66d1cfaca2eee9a7fcccdd343bbbe72fb550bbcc`, position 305, the
+  head of microsoft/openvmm#5121, whose two commits follow position 303, `0f1317d82`, the head of
+  `feature/microvm/dev`, to which microsoft/openvmm#5120 added position 303 after position 302,
+  `f9cc4163b`, microsoft/openvmm#5119 added position 302 after position 301, `23fb67887`,
+  microsoft/openvmm#5118 added position 301 after position 300, `85b93bbd2`,
   microsoft/openvmm#5117 added position 300 after position 299, `2b0a7ed46`,
   microsoft/openvmm#5115 added position 299 after position 298,
   `f32ab2d90`, microsoft/openvmm#5114 added positions 295-298 after position
@@ -40,9 +41,9 @@
   changes upstream had landed, and added eight fixups at its tip, positions 262-269. A commit's
   position is its v6.0 position less the number of dropped commits before it: v6.0 positions
   003-007 are positions 002-006, 010-013 are 007-010, 015-050 are 011-046, and 054-268 are
-  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 179
+  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 181
   commits past the mapped tip on the same first-parent chain. Positions 125-233, 237-239,
-  244-270, 272, and 274-303 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
+  244-270, 272, and 274-305 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
   position 240 is a PR13 fixup, position 241 is a PR18 fixup, position 242 is a PR20 fixup,
   position 243 is a PR19 fixup, and positions 271 and 273 are PR10 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1207,7 +1208,9 @@ The physical branch is one first-parent chain:
   -> XSAVE area's init components restored as init [301]
   -> short or malformed XSAVE area refused on restore [302]
   -> reserved remote-read MSI delivery mode dropped before KVM [303]
-  -> 0f1317d82 (NVX pin)
+  -> KVM save refused for a vCPU in SMM or with an SMI pending [304]
+  -> vCPU taken out of SMM when its activity is set [305]
+  -> 66d1cfaca (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1258,7 +1261,7 @@ restore and time advance set in the RTC's clock source, which overflowed near ei
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 124 without merges. Of the 179 later commits,
+The NVX pin extends the chain past position 124 without merges. Of the 181 later commits,
 positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position 241 is a PR18 fixup,
 position 242 is a PR20 fixup, position 243 is a PR19 fixup, positions 262-269 are the fixups of
 the v6.1 rebase, positions 271 and 273 are PR10 fixups, and the others are not yet classified or
@@ -1268,7 +1271,7 @@ and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that s
 commits. Positions 180-184 followed the v3.0 reorganization, positions 185-198 are the ABI restart
 of the v4.0 reorganization, positions 199-204 followed it, positions 205-211 followed the v5.0
 reorganization, positions 212 and 213 followed the v5.1 rebase, positions 214-261 followed the
-v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-303
+v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-305
 followed the v6.1 rebase, so they combine none, apart from position 213, which combines v5.1
 positions 222 and 223. Each commit's position is its v6.0 position less seven, the number of
 commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position
@@ -1460,10 +1463,12 @@ through 147 and one less from v5.1 position 149 on; see
 | 301 | `23fb67887` | - | - | - | - | - | virt_kvm: restore the init components of an XSAVE area as init (microsoft/openvmm#5118) |
 | 302 | `f9cc4163b` | - | - | - | - | - | virt_kvm: refuse to restore a short or malformed XSAVE area (microsoft/openvmm#5119) |
 | 303 | `0f1317d82` | - | - | - | - | - | virt_kvm: drop interrupts in the reserved remote-read delivery mode (microsoft/openvmm#5120) |
+| 304 | `23b262c2c` | - | - | - | - | - | virt_kvm: refuse to save a vCPU in SMM or with an SMI pending (microsoft/openvmm#5121) |
+| 305 | `66d1cfaca` | - | - | - | - | - | virt_kvm: take a vCPU out of SMM when its activity is set (microsoft/openvmm#5121) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
-that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-303, for later
+that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-305, for later
 commits. They name the positions that the commits have now, but the v6.1 rebase did not check the
 earlier ones again on `7d90c4104`.
 
@@ -2746,6 +2751,67 @@ conflicts: in `mod.rs`, the imports of its tests sit among those that position 2
 adds, which moves the `GuestRam` that upstream main keeps in the tests of `extint.rs`, and its
 irqfd twin needs the `kvm_only` form of `backend_test!` that position 279 adds. So it follows
 positions 249, 278, 279, 287, and 296, and the positions that they follow, upstream.
+
+Position 304 has the KVM backend refuse to save a vCPU that is in system management mode (SMM) or
+has a system management interrupt (SMI) pending, where a save succeeded. A guest can send an SMI as
+an interrupt in the SMI delivery mode, and KVM holds one that reaches a stopped vCPU as a pending
+SMI until the vCPU runs; it reports both states in the `smi` field of `KVM_GET_VCPU_EVENTS`, which
+no element of the saved state reads, so a restore lost the SMI, or ran the registers of the SMM
+handler outside SMM. The `check_saveable` that position 284 overrides, and that `save_all` calls
+before it reads any element, now also reads the events, after the GIF check, and refuses such a
+vCPU with a new `KvmError::SmmState`, which names it. The read leaves the SMI with the vCPU, so a
+capture that rolls back keeps it, and a latched INIT stays with the capture's check of positions
+287 and 288. The commit adds a `virt_kvm` module, `smm`, with the check, two unit tests, and two
+ignored tests that need `/dev/kvm`; a KVM-only contract test,
+`save::kvm::refuses_a_vp_with_an_smi_pending`; and two paragraphs to the Guide's snapshots page. It
+rewrites a sentence of `init_sipi.rs`'s module documentation that said that nothing else notices an
+INIT that SMM blocks. The Guide and the module's documentation also say that, with RAM mapped only
+in KVM's normal address space as OpenVMM maps it, an SMI that a vCPU takes ends its VM, as observed
+on Linux 6.18.57, and that a change that maps memory for SMM must revisit the refusal; the
+observation was of a minimal VM with that layout, not of the OpenVMM process. No element, field, or
+version of the saved state changes. It changes files that PR10's positions 019, 022, and 271,
+PR11's position 028, PR12's positions 031-033, PR13's positions 039, 044, and 240, PR17's positions
+069, 070, and 072, PR18's positions 075, 077, 082, and 083, PR19's positions 085 and 086, PR20's
+positions 087, 088, 090, and 092, PR23's positions 106 and 111, PR24's position 116, and 72
+positions that no PR has yet also change, and it changes no line that a mapped PR adds: it rewrites
+lines of `check_saveable` that position 284 adds and the sentence that position 287 adds, and adds
+the rest. Replaying it on upstream main conflicts in five of its files, where it adds beside what
+upstream main lacks: `init_sipi.rs` and `save.rs` do not exist there, since positions 287 and 285
+add them; in `vp_state.rs`, `check_saveable` does not exist there, since position 284 adds it; in
+`lib.rs`, `SmmState` follows the `Xsave` of position 302 and the `GifClear` of position 284, which
+follow the time ABI's variants of position 126; and in the Guide's snapshots page, its paragraphs
+sit after the INIT and SIPI paragraph of position 288, in the block that positions 069 and 233
+write. Its `mod smm;` applies in `mod.rs` without conflicts. Its contract test also needs the
+`kvm_only` form of `backend_test!` that position 279 adds, and the `check_saveable` hook that
+position 283 adds. So it follows positions 069, 126, 233, 279, 283, 284, 285, 287, 288, and 302, and
+the positions that they follow, upstream.
+
+Position 305 makes setting the activity of a KVM vCPU take the vCPU out of SMM, where it left a
+vCPU that had run as it was. A restore and a reset set the state of a vCPU outside SMM, with no SMI
+pending and no INIT latched, as a saved state describes it, but KVM changes a vCPU's SMM state,
+its pending SMI, and its latched INIT only when the events that are set mark them valid
+(`KVM_VCPUEVENT_VALID_SMM`), and `set_activity` never did. So the reset of a guest that reboots, or
+a restore onto a vCPU that had run, left it in SMM, with its SMI pending, or with its INIT latched,
+and the next read of its MP state accepted the INIT, which reset the registers that the restore
+had just set. `set_activity` now calls the new `smm::leave` before it sets the MP state. It gets
+the vCPU's events first, because KVM replaces an SMI that is pending but not one that it has been
+asked to inject, which getting the events makes pending, and sets them with
+`KVM_VCPUEVENT_VALID_SMM` and no SMM state, so the other events are as they were. It runs before
+the MP state is set, because a vCPU in SMM cannot wait for a SIPI: `KVM_SET_MP_STATE` refuses it,
+and a vCPU with an SMI pending, until Linux 6.16, and `KVM_RUN` since Linux 6.17, by the kernel's
+source and not by a run on a host before 6.17. A restore into a new vCPU, as every microVM restore
+is, changes nothing. No element, field, or version of the saved state changes. The commit adds two
+ignored tests that need `/dev/kvm` to the `smm` module of position 304, and four KVM-only contract
+tests to `activity.rs`: `activity::kvm::setting_the_activity_drops_an_smi`,
+`setting_the_activity_drops_a_latched_init`, `refusing_an_activity_keeps_an_smi`, and
+`reset_drops_an_smi`. It changes files that PR10's position 022 and 13 positions that no PR has yet
+also change, and it changes no line that a mapped PR adds: it rewrites a line of `smm.rs`'s module
+documentation, which position 304 adds, and adds the rest. Replaying it on upstream main conflicts
+in `smm.rs` and `activity.rs`, which do not exist there, since positions 304 and 286 add them; its
+call in `set_activity` applies in `vp_state.rs` without conflicts, but calls the `smm` module of
+position 304. Its contract tests need the `kvm_only` form of `backend_test!` that position 279
+adds and the `check_saveable` hook of position 283, which position 284 overrides. So it follows
+positions 279, 283, 284, 286, and 304 upstream.
 
 ## PR summary
 
