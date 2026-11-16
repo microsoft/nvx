@@ -18488,6 +18488,9 @@ class GuestInitRoutingTests(unittest.TestCase):
         (self.root / "net" / "eth0").mkdir(parents=True)
         (self.root / "os-release").write_text("ID=alpine\n", encoding="utf-8")
         (self.root / "alpine-release").write_text("test\n", encoding="utf-8")
+        # The kernel's default, so that the init opens the ICMP echo sockets
+        # here rather than in the host's own setting.
+        (self.root / "ping_group_range").write_text("1\t0\n", encoding="utf-8")
         self.helpers: dict[str, Path] = {}
         for name, script in {
             "nvx-time": f"printf '4242\\n' >{shlex.quote(self.pid.as_posix())}\n",
@@ -18514,6 +18517,7 @@ class GuestInitRoutingTests(unittest.TestCase):
             "/sbin/nvx-hostmount": self.helpers["nvx-hostmount"],
             "/proc/cmdline": command_line,
             "/proc/sys/kernel/modules_disabled": self.root / "modules_disabled",
+            "/proc/sys/net/ipv4/ping_group_range": self.root / "ping_group_range",
             "/sys/class/net": self.root / "net",
             "/run/nvx/time/daemon.pid": self.pid,
             "/etc/os-release": self.root / "os-release",
