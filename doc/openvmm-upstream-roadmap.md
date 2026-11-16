@@ -11,9 +11,10 @@
   summary, and commit mapping below cover positions 001-124, the PR09 fixups at positions
   234-236, the PR13 fixup at position 240, the PR18 fixup at position 241, the PR20 fixup at
   position 242, the PR19 fixup at position 243, and the PR10 fixups at positions 271 and 273.
-- NVX's pinned OpenVMM revision: `9ecb41f001fee6dab83ae97d7587a48ad52314f1`, position 309, the
-  head of microsoft/openvmm#5123, whose two commits follow position 307, `364ca3625`, the head of
-  `feature/microvm/dev`, to which microsoft/openvmm#5122 added positions 306-307 after position
+- NVX's pinned OpenVMM revision: `359169f1e6f113a22b9a840208aa42a47ef639bf`, position 313, the
+  head of microsoft/openvmm#5125, whose four commits follow position 309, `9ecb41f00`, the head
+  of `feature/microvm/dev`, to which microsoft/openvmm#5123 added positions 308-309 after position
+  307, `364ca3625`, microsoft/openvmm#5122 added positions 306-307 after position
   305, `66d1cfaca`, microsoft/openvmm#5121 added positions 304-305 after position 303,
   `0f1317d82`, microsoft/openvmm#5120 added position 303 after position 302,
   `f9cc4163b`, microsoft/openvmm#5119 added position 302 after position 301, `23fb67887`,
@@ -43,9 +44,9 @@
   changes upstream had landed, and added eight fixups at its tip, positions 262-269. A commit's
   position is its v6.0 position less the number of dropped commits before it: v6.0 positions
   003-007 are positions 002-006, 010-013 are 007-010, 015-050 are 011-046, and 054-268 are
-  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 185
+  047-261; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase). The pin is 189
   commits past the mapped tip on the same first-parent chain. Positions 125-233, 237-239,
-  244-270, 272, and 274-309 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
+  244-270, 272, and 274-313 are not yet assigned to PRs, positions 234-236 are PR09 fixups,
   position 240 is a PR13 fixup, position 241 is a PR18 fixup, position 242 is a PR20 fixup,
   position 243 is a PR19 fixup, and positions 271 and 273 are PR10 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1216,7 +1217,11 @@ The physical branch is one first-parent chain:
   -> backends that hold one pending NMI refuse a count of them [307]
   -> queued exception saved once and a pending one that KVM would drop refused on KVM [308]
   -> restore check that accepts what KVM documents it keeps [309]
-  -> 9ecb41f00 (NVX pin)
+  -> saved activity that holds the kind of its interrupt shadow [310]
+  -> kind of an interrupt shadow saved and restored on KVM [311]
+  -> backends that cannot hold the kind of an interrupt shadow refuse it [312]
+  -> comments and Guide that say what an STI shadow restored as a MOV SS shadow loses [313]
+  -> 359169f1e (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1267,7 +1272,7 @@ restore and time advance set in the RTC's clock source, which overflowed near ei
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 124 without merges. Of the 185 later commits,
+The NVX pin extends the chain past position 124 without merges. Of the 189 later commits,
 positions 234-236 are PR09 fixups, position 240 is a PR13 fixup, position 241 is a PR18 fixup,
 position 242 is a PR20 fixup, position 243 is a PR19 fixup, positions 262-269 are the fixups of
 the v6.1 rebase, positions 271 and 273 are PR10 fixups, and the others are not yet classified or
@@ -1277,7 +1282,7 @@ and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that s
 commits. Positions 180-184 followed the v3.0 reorganization, positions 185-198 are the ABI restart
 of the v4.0 reorganization, positions 199-204 followed it, positions 205-211 followed the v5.0
 reorganization, positions 212 and 213 followed the v5.1 rebase, positions 214-261 followed the
-v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-309
+v6.0 reorganization, positions 262-269 are the v6.1 rebase's fixups, and positions 270-313
 followed the v6.1 rebase, so they combine none, apart from position 213, which combines v5.1
 positions 222 and 223. Each commit's position is its v6.0 position less seven, the number of
 commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position
@@ -1475,10 +1480,14 @@ through 147 and one less from v5.1 position 149 on; see
 | 307 | `364ca3625` | - | - | - | - | - | virt: refuse a pending NMI count that a backend cannot hold (microsoft/openvmm#5122) |
 | 308 | `d58cafb8e` | - | - | - | - | - | virt_kvm: save a queued exception once and refuse one KVM would drop (microsoft/openvmm#5123) |
 | 309 | `9ecb41f00` | - | - | - | - | - | virt: let a restore's check accept what a hypervisor documents it keeps (microsoft/openvmm#5123) |
+| 310 | `cb18bd4d7` | - | - | - | - | - | virt: let a saved activity hold the kind of its interrupt shadow (microsoft/openvmm#5125) |
+| 311 | `8c1bc6481` | - | - | - | - | - | virt_kvm: keep the kind of an interrupt shadow across a save and restore (microsoft/openvmm#5125) |
+| 312 | `e95dce866` | - | - | - | - | - | virt: refuse an interrupt shadow kind that a backend cannot hold (microsoft/openvmm#5125) |
+| 313 | `359169f1e` | - | - | - | - | - | virt: say what an STI shadow restored as a MOV SS shadow loses (microsoft/openvmm#5125) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
-that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-309, for later
+that it regrouped, and later fork bases, up to `7d90c4104` for positions 270-313, for later
 commits. They name the positions that the commits have now, but the v6.1 rebase did not check the
 earlier ones again on `7d90c4104`.
 
@@ -2958,6 +2967,142 @@ changes to `state.rs` and `vp.rs`, and its changes to `x86/mod.rs` and to the `m
 the `kvm_only` form of `backend_test!` that position 279 adds, and its `Activity` override names the
 `nmi_pending_count` that position 306 adds. So it follows positions 022, 132, 278, 279, 283, 285,
 and 306, and the positions that they follow, upstream.
+
+Position 310 lets a VP's saved activity hold the kind of its interrupt shadow, where it held only
+whether the VP had one, so that no backend could save the kind or restore it and KVM restored every
+shadow as a MOV SS shadow. The shadow that an `STI` leaves when it sets `IF` and the one that a
+`MOV SS` or `POP SS` leaves differ at the next instruction boundary: the MOV SS shadow also blocks
+NMIs and suppresses certain debug exceptions, and the STI shadow does not. `Activity` gains the
+optional field `interrupt_shadow_kind`, number 8, of the new `InterruptShadowKind`, whose one
+variant, `Sti`, names the only kind that restoring `None` does not set, since that sets the MOV SS
+shadow, the safe one. A backend reports `Some(Sti)` for an STI shadow and `None` for every other
+shadow, a MOV SS shadow, AMD's one kind of shadow, and the one bit that Hyper-V's interrupt state
+register has for both kinds included, as position 306's `nmi_pending_count` is reported only when
+it is 2, so every state that an earlier build can save encodes as it did and reads back from its
+restore as it was saved. The field needs no version: a saved state of an earlier build has none and
+restores as before, and an earlier build ignores it in a later state. The commit changes no backend
+behavior: `Activity`'s conversion from and to Hyper-V's registers writes no kind and reads `None`,
+WHP's literals say `None`, and KVM and OpenHCL's SNP and TDX backends report `None` and ignore the
+field for now. It adds a wire test that mirrors the activity of the build before the field, shows
+that each build reads the other's states, and pins the field's bytes, a test that the registers
+hold no kind, and the kind in the test of the `restore_eq` that position 309 adds, which compares
+it exactly. It changes files that PR10's positions 020 and 022, and 23 positions that no PR has
+yet, also change, and it changes no line that a mapped PR adds: it rewrites three lines of the
+comment of `restore_eq` that position 309 adds, and adds the rest. Replaying it on upstream main
+conflicts in five files, where it adds or edits beside what upstream main lacks: in `vp.rs`, its
+field follows the `nmi_pending_count` that position 306 adds, with its documentation, its lines of
+`set_values` and `at_reset` follow the `nmi_pending_count` lines that position 306 adds to them,
+its edits of `restore_eq` sit in the code and the comment that position 309 adds, and its tests
+follow the test module that position 132 adds and the tests that position 309 adds; in
+`virt_kvm`'s `vp_state.rs`, its line in `activity` follows the `nmi_pending_count` line that
+position 306 adds, in the activity that position 308 changes, and its binding in `set_activity`
+follows the one that position 306 adds; in `virt_whp`'s `apic.rs`, its two lines follow the
+`nmi_pending_count` lines that position 306 adds; and in OpenHCL's SNP and TDX backends, its lines
+follow the `nmi_pending_count` lines that positions 306 and 307 add. So it follows positions 132,
+306, 307, 308, and 309, and the positions that they follow, upstream.
+
+Position 311 makes the KVM backend save the kind of an interrupt shadow and restore it, where
+`activity` turned KVM's `interrupt.shadow` into a Boolean and `set_activity` wrote it back as 1, a
+MOV SS shadow, while VMX reports the shadow that an `STI` leaves as 2, so that a VP that KVM had
+stopped in an STI shadow restored in a MOV SS shadow, as two ignored tests that need `/dev/kvm`
+observe on Linux 6.18.57, and as the sources of Linux 6.18 say. A new `shadow` module converts
+between KVM's value and the activity's `interrupt_shadow` and `interrupt_shadow_kind`: the shadow
+that VMX reports as the STI bit alone is saved as `Some(Sti)` and restores as an STI shadow, and
+every other shadow, a MOV SS shadow and SVM's one shadow, which KVM reports as both bits and sets
+for any value but 0, is saved without a kind and restores as a MOV SS shadow, as every restore did.
+So every state that an earlier build can save is saved as before and reads back as saved, and the
+check of the `restore_eq` that position 309 adds needs no allowance for it. `set_activity` also
+refuses a kind without a shadow, with its other refusals, in a function of its own, before it
+changes any activity state and so before the `smm::leave` that position 305 adds, and it accepts
+the kind on SVM, where it reads back with none, since an AMD capture holds no kind and a snapshot
+restore refuses the snapshot of another vendor's CPU generation. No element, field, or version of
+the saved state changes beyond the optional field of position 310. The commit adds unit tests of the
+module and of the refusal, two ignored tests that need `/dev/kvm`, which run a real-mode guest that
+stops with each kind of shadow, two KVM-only contract tests, one in `activity.rs` and one in
+`restore.rs` that restores with `restore_all`, a case of the `refusing_an_activity_keeps_an_smi`
+that position 305 adds, a paragraph of the Guide's snapshots page, and a passage of its snapshot
+format's "Fields of an element", whose introduction it extends. It changes files that PR10's
+positions 019, 022, and 271, PR11's positions 027 and 028, PR12's positions 031-033, PR13's
+positions 039, 044, and 240, PR17's positions 069, 070, and 072, PR18's positions 075, 077, and
+081-083, PR19's positions 085 and 086, PR20's positions 087, 088, 090, and 092, PR21's position 099,
+PR23's positions 106 and 111, PR24's position 116, and 82 positions that no PR has yet also change,
+and it changes no line that a mapped PR adds: it rewrites three lines of the Guide's introduction
+that position 306 adds, three lines of `activity` and `set_activity` that position 310 adds, and two
+lines of them that upstream main has and no commit of the chain changes, and adds the rest.
+Replaying it on upstream main conflicts in six files, where it edits or adds beside what upstream
+main lacks, and two of them, `activity.rs` and `restore.rs`, do not exist there, since positions 286
+and 309 add them: in the Guide's snapshot format, its paragraph follows the paragraph that position
+308 adds, and it rewrites lines of the subsection that position 306 adds, in the section that
+position 291 adds and position 298 extends; in its snapshots page, its paragraph follows the
+paragraph that position 308 adds and precedes text that position 174 writes, in a block that
+positions 031, 032, 069, 088, 111, 207, 211, 220, 222, 227, 233, 284, 288, 304, 306, and 307 also
+write; in `virt_kvm`'s `mod.rs`, its `mod shadow;` precedes the `mod smm;` that position 304 adds;
+and in `vp_state.rs`, its import precedes the `use super::xsave;` that position 281 adds, its
+changes to `activity` and `set_activity` replace lines that position 310 adds and sit beside the
+`nmi_pending_count` lines that position 306 adds, in the activity that position 308 changes, and
+its function follows the functions that positions 286, 306, and 308 add. Its contract tests also
+need the `kvm_only` form of `backend_test!` that position 279 adds, and its case of
+`refusing_an_activity_keeps_an_smi` needs the test that position 305 adds. So it follows positions
+174, 207, 211, 279, 281, 286, 291, 298, 304, 305, 306, 308, 309, and 310, and the positions that
+they follow, upstream.
+
+Position 312 makes the backends that cannot hold the kind of an interrupt shadow refuse it, where a
+restore that ignored it would give the VP a shadow that differs from the saved one without a word.
+MSHV, WHP, and OpenHCL's mshv backend keep the shadow in the one bit that Hyper-V's interrupt state
+register has for both kinds, OpenHCL's TDX backend reads both kinds of its VMCS as one Boolean and
+restores a MOV SS shadow, and its SNP backend does not hold the shadow yet. `set_activity` of MSHV
+and WHP now returns the `UnsupportedState` error that they have, naming `interrupt_shadow_kind`,
+beside the refusal of `nmi_pending_count` that position 307 adds, and OpenHCL's mshv, SNP, and TDX
+backends return `Unimplemented("interrupt_shadow_kind")`, before any state changes, and the SNP and
+TDX backends bind the kind, which they ignored. Only a damaged or crafted saved state reaches the
+refusal, since a restore requires the backend that captured the snapshot and only KVM on an Intel
+CPU saves a kind. KVM on an AMD CPU sets its one shadow for the kind, which reads back with none, as
+position 311's comment says. That the VMCS of TDX holds the kind, so that its backend could save and
+restore it, is not in this change. No element, field, or version of the saved state changes. The
+commit adds one contract test, which runs on KVM, MSHV, and WHP, in the new `shadow.rs`, which
+builds on Windows too, and adds a sentence to the Guide's snapshots page and extends a paragraph of
+its snapshot format. It changes files that PR05's position 008, PR10's position 271, PR11's
+positions 027 and 028, PR12's positions 031-033, PR13's positions 039, 044, and 240, PR17's
+positions 069 and 072, PR18's positions 075, 077, and 081-083, PR19's positions 085 and 086, PR20's
+positions 087, 088, 090, and 092, PR21's position 099, PR23's positions 106 and 111, PR24's position
+116, and 77 positions that no PR has yet also change, and it changes no line that a mapped PR adds:
+it rewrites two lines of the snapshot format and one of the snapshots page that position 311 adds,
+and two lines each of the SNP and TDX backends that position 310 adds, and adds the rest. Replaying
+it on upstream main conflicts in eight files, where it adds beside what upstream main lacks: in the
+Guide's snapshot format and its snapshots page, its text follows the paragraphs that position 311
+adds, in the section and the block that position 311's paragraphs sit in; in `virt_mshv`'s
+`vp_state.rs`, `virt_whp`'s `apic.rs`, and OpenHCL's `mshv/x64.rs`, `snp/mod.rs`, and `tdx/mod.rs`,
+its refusal follows the refusal of `nmi_pending_count` that position 307 adds; and in `main.rs`,
+`mod shadow;` sits between the `mod save;` that position 285 adds and the `mod speculation;` that
+position 292 adds, among the `mod` lines that positions 279, 282, 285-287, 292, 296, 302, 303, 307,
+and 309 add. `shadow.rs` is a new file. So it follows positions 285, 292, 307, and 311, and the
+positions that they follow, upstream.
+
+Position 313 corrects what the comments and the Guide of positions 310 and 311 say about the shadow
+that a restore sets, and changes no code. An `STI` shadow that restores as a MOV SS shadow, as a
+build that predates the kind restores a later snapshot's, holds an NMI off for one more instruction
+and also loses an instruction breakpoint there, because an Intel CPU suppresses that breakpoint
+under a MOV SS shadow, as KVM models in `kvm_is_code_breakpoint_inhibited`, where those said that it
+only delays an NMI or a debug exception by an instruction; and a restore sets a MOV SS shadow only
+for a state that has a shadow, where those said that a restore that is given no kind sets one. It
+changes the doc comments of `InterruptShadowKind`, `Activity::interrupt_shadow_kind`, and
+`shadow::to_kvm`, a comment of each of two KVM-only contract tests, and a paragraph of each of the
+Guide's snapshot format and snapshots pages. It changes files that PR10's positions 020, 022, and
+271, PR11's positions 027 and 028, PR12's positions 031-033, PR13's positions 039, 044, and 240,
+PR17's positions 069 and 072, PR18's positions 075, 077, and 081-083, PR19's positions 085 and 086,
+PR20's positions 087, 088, 090, and 092, PR21's position 099, PR23's positions 106 and 111, PR24's
+position 116, and 74 positions that no PR has yet also change, and it changes no line that a mapped
+PR adds: it rewrites 20 lines of `vp.rs` that position 310 adds, and 26 lines of the other five
+files that position 311 adds. Replaying it on upstream main conflicts in six files, where it edits
+beside what upstream main lacks, and `shadow.rs`, `activity.rs`, and `restore.rs`, which positions
+311, 286, and 309 add, do not exist there: in `vp.rs`, its edits sit in the field and the enum that
+position 310 adds, after the `nmi_pending_count` that position 306 adds; in the Guide's snapshot
+format, they sit in the paragraph that position 311 adds and position 312 extends, in the section
+that position 291 adds and position 298 extends; and in its snapshots page, in the paragraph that
+position 311 adds and position 312 extends, in a block that positions 031, 032, 069, 088, 111, 174,
+207, 211, 220, 222, 227, 233, 284, 288, 304, 306, 307, and 308 also write. So it follows positions
+174, 207, 211, 286, 291, 298, 306, 309, 310, 311, and 312, and the positions that they follow,
+upstream.
 
 ## PR summary
 
