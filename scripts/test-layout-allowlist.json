@@ -2,18 +2,18 @@
   "schema": "nvx-test-layout-allowlist",
   "schema_version": 2,
   "seams": {
-    "nvx-rs/src/guest/init.rs": 2,
-    "nvx-rs/src/guest/reseed.rs": 1,
-    "nvx-rs/src/guest/sys/process.rs": 1,
-    "nvx-rs/src/guest/sys/spawn.rs": 5,
-    "nvx-rs/src/guest/time/system.rs": 3,
-    "nvx-rs/src/host/network/address.rs": 2,
-    "nvx-rs/src/host/platform/linux/mod.rs": 3,
-    "nvx-rs/src/host/platform/other.rs": 1,
-    "nvx-rs/src/host/platform/windows/identity.rs": 7,
-    "nvx-rs/src/host/platform/windows/mod.rs": 2,
-    "nvx-rs/src/host/platform/windows/process.rs": 2,
-    "nvx-rs/src/host/platform/windows/spawn.rs": 1,
-    "nvx-rs/src/lib.rs": 1
+    "nvx/src/guest/init.rs": 2,
+    "nvx/src/guest/reseed.rs": 1,
+    "nvx/src/guest/sys/process.rs": 1,
+    "nvx/src/guest/sys/spawn.rs": 5,
+    "nvx/src/guest/time/system.rs": 3,
+    "nvx/src/host/network/address.rs": 2,
+    "nvx/src/host/platform/linux/mod.rs": 3,
+    "nvx/src/host/platform/other.rs": 1,
+    "nvx/src/host/platform/windows/identity.rs": 7,
+    "nvx/src/host/platform/windows/mod.rs": 2,
+    "nvx/src/host/platform/windows/process.rs": 2,
+    "nvx/src/host/platform/windows/spawn.rs": 1,
+    "nvx/src/lib.rs": 1
   }
 }

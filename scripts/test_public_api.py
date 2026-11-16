@@ -445,7 +445,7 @@ class EntryPointTests(unittest.TestCase):
 
     def test_hides_only_one_entry_point_per_binary(self) -> None:
         points = {
-            "nvx-rs": "nvx::host::cli::main",
+            "nvx": "nvx::host::cli::main",
             "nvx-tool": "nvx::guest::tool::main",
             "nvx-time": "nvx::guest::time::main",
         }
@@ -507,12 +507,10 @@ class EntryPointTests(unittest.TestCase):
             "windows": ["mod nvx::host::cli", "fn nvx::host::cli::main"],
         }
         self.assertEqual(
-            public_api.entry_point_problems(
-                listings, {"nvx-rs": "nvx::host::cli::main"}
-            ),
+            public_api.entry_point_problems(listings, {"nvx": "nvx::host::cli::main"}),
             [
                 "the public API on windows lists nvx::host::cli::main, the entry "
-                "point of nvx-rs, without hiding it",
+                "point of nvx, without hiding it",
             ],
         )
 

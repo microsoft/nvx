@@ -7,7 +7,7 @@
 /.venv/
 /.ruff_cache/
 /.nvx-hosts.json
-/nvx-rs/target/
+/nvx/target/
 __pycache__/
 *.py[cod]
 *.log

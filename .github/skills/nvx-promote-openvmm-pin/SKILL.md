@@ -49,28 +49,28 @@ lists.
 1. On a fresh branch from the refreshed target, with both repositories clean,
    run `git -C openvmm switch --detach REVISION`, and inspect
    `git diff --submodule=log -- openvmm`.
-2. Compare what `nvx-rs` copies from OpenVMM, which only the NVX CLI jobs check:
+2. Compare what `nvx` copies from OpenVMM, which only the NVX CLI jobs check:
 
    ```console
-   cargo test --locked --manifest-path nvx-rs/Cargo.toml --no-default-features --test openvmm_vectors -- --ignored
-   cargo test --locked --manifest-path nvx-rs/Cargo.toml --no-default-features --test openvmm_cpu_profiles -- --ignored
+   cargo test --locked --manifest-path nvx/Cargo.toml --no-default-features --test openvmm_vectors -- --ignored
+   cargo test --locked --manifest-path nvx/Cargo.toml --no-default-features --test openvmm_cpu_profiles -- --ignored
    ```
 
    Each stops at its first failure. Fix it and rerun until both pass:
    - a vector file differs: copy it unchanged into
-     `nvx-rs/tests/vectors/openvmm/`, and record the revision in
-     [the vectors' README](../../../nvx-rs/tests/vectors/README.md#openvmms-vectors);
+     `nvx/tests/vectors/openvmm/`, and record the revision in
+     [the vectors' README](../../../nvx/tests/vectors/README.md#openvmms-vectors);
    - an excerpt is no longer a run of whole lines of its file: copy the new
      lines unchanged into it, and record the revision the same way;
    - a version differs: change it where the test names it, in
-     `nvx-rs/src/host/snapshot/manifest.rs`,
-     `nvx-rs/src/host/artifacts/compatibility.rs`, or `nvx-rs/src/guest/time/`,
+     `nvx/src/host/snapshot/manifest.rs`,
+     `nvx/src/host/artifacts/compatibility.rs`, or `nvx/src/guest/time/`,
      with the code that reads what it versions;
    - a CPU profile was added, revised, or removed: update
-     `nvx-rs/src/host/cli/cpu_generations.json` and the copy in
+     `nvx/src/host/cli/cpu_generations.json` and the copy in
      `scripts/nvx_tools/time_abi.py`.
 3. `python3 scripts/local_gates.py --run` runs the gates that these changes
-   select, such as `nvx-rs`'s.
+   select, such as `nvx`'s.
 4. Stage only the gitlink and the coordinated changes, and commit, signed,
    when the user asked for commits or a pull request, with a subject such as
    `openvmm: pin <topic>`. Stop rather than commit unsigned, and never amend or

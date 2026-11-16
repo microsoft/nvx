@@ -31,9 +31,9 @@ from .common import (
 OPENVMM_TEST_BACKENDS = ("kvm", "mshv", "whp")
 REQUIRED_CI_RESULT_ENVIRONMENTS = {
     "quality": "QUALITY_RESULT",
-    "nvx-rs": "NVX_RS_RESULT",
-    "build-nvx-rs-linux-musl": "BUILD_NVX_RS_LINUX_MUSL_RESULT",
-    "build-nvx-rs-windows-msvc": "BUILD_NVX_RS_WINDOWS_MSVC_RESULT",
+    "nvx": "NVX_RESULT",
+    "build-nvx-linux-musl": "BUILD_NVX_LINUX_MUSL_RESULT",
+    "build-nvx-windows-msvc": "BUILD_NVX_WINDOWS_MSVC_RESULT",
     "nvx-cli-linux": "NVX_CLI_LINUX_RESULT",
     "nvx-cli-windows": "NVX_CLI_WINDOWS_RESULT",
     "openvmm-changes": "CHANGES_RESULT",
@@ -67,13 +67,13 @@ REQUIRED_CI_BUILD_JOBS = (
     "build-openvmm-linux-musl",
     "build-openvmm-windows-msvc",
 )
-# GitHub-hosted, once per OS: each builds the nvx-rs that the microVM jobs of
+# GitHub-hosted, once per OS: each builds the nvx that the microVM jobs of
 # its OS run, and that they wait for, and the NVX CLI job of its OS tests with.
-REQUIRED_CI_NVX_RS_BUILD_JOBS = (
-    "build-nvx-rs-linux-musl",
-    "build-nvx-rs-windows-msvc",
+REQUIRED_CI_NVX_BUILD_JOBS = (
+    "build-nvx-linux-musl",
+    "build-nvx-windows-msvc",
 )
-# GitHub-hosted, once per OS, after the nvx-rs build of its OS; no hypervisor
+# GitHub-hosted, once per OS, after the nvx build of its OS; no hypervisor
 # job waits for it.
 REQUIRED_CI_CLI_JOBS = ("nvx-cli-linux", "nvx-cli-windows")
 # GitHub-hosted; checks that OpenVMM's own CI passed the pinned revision
@@ -157,14 +157,14 @@ CI_CHANGE_OUTPUTS = (
 )
 CI_DOCUMENTATION_PATHS = re.compile(r"^(doc/|.*\.md$)", re.IGNORECASE)
 # Inputs of the NVX microVM tests: the OpenVMM pin, the guests and every input
-# of their cache keys, the nvx-rs executable that their scenarios run, the
+# of their cache keys, the nvx executable that their scenarios run, the
 # workflows, actions, and CLI modules that their jobs and the jobs that build
 # their artifacts run, the runners, and the attributes that check out their
 # scripts on Windows. Every module of the CLI is an input but those that none
 # of these jobs runs.
 MICROVM_TEST_INPUT_PATHS = re.compile(
     r"^(openvmm($|/)|rust-toolchain\.toml$|scripts/setup/|\.gitattributes$|"
-    r"nvx-rs/|"
+    r"nvx/|"
     r"kernel/|guest/|ubuntu/|azurelinux/|"
     r"docker/|\.dockerignore$|SOURCE-MANIFEST\.json$|"
     r"\.github/workflows/(ci|build-openvmm-binary|run-nvx-microvm-tests)\.yml$|"
@@ -178,14 +178,14 @@ MICROVM_TEST_INPUT_PATHS = re.compile(
 # Inputs of the platform jobs, which benchmark each backend, of the package
 # jobs, which package its release, and of the regression gate that reads the
 # benchmark results: the OpenVMM pin, the guests and every input of their cache
-# keys, the nvx-rs executable that the packages ship, the performance history
+# keys, the nvx executable that the packages ship, the performance history
 # and expected hosts, the release version and license, the workflows, actions,
 # and CLI modules that these jobs and the jobs that build their artifacts run,
 # the runners, and the attributes that check out their inputs on Windows. Every
 # module of the CLI is an input but those that none of these jobs runs.
 BENCHMARK_INPUT_PATHS = re.compile(
     r"^(openvmm($|/)|rust-toolchain\.toml$|scripts/setup/|\.gitattributes$|"
-    r"nvx-rs/|kernel/|guest/|ubuntu/|azurelinux/|"
+    r"nvx/|kernel/|guest/|ubuntu/|azurelinux/|"
     r"docker/|\.dockerignore$|SOURCE-MANIFEST\.json$|"
     r"data/|VERSION$|LICENSE$|"
     r"\.github/workflows/(ci|build-openvmm-binary|package-platform|run-platform)\.yml$|"
@@ -427,7 +427,7 @@ def required_ci_expected_results(
     repository_jobs_enabled = event_name != "pull_request" or same_repository
     expected = {
         "quality": "success",
-        "nvx-rs": "success",
+        "nvx": "success",
         "openvmm-changes": "success",
         REQUIRED_CI_ARTIFACT_JOB: "success" if run_guest_artifacts else "skipped",
         REQUIRED_CI_DISTRO_ARTIFACT_JOB: (
@@ -455,7 +455,7 @@ def required_ci_expected_results(
     expected.update(
         {
             job: "success" if repository_jobs_enabled else "skipped"
-            for job in (*REQUIRED_CI_NVX_RS_BUILD_JOBS, *REQUIRED_CI_CLI_JOBS)
+            for job in (*REQUIRED_CI_NVX_BUILD_JOBS, *REQUIRED_CI_CLI_JOBS)
         }
     )
     expected.update(

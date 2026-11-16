@@ -1,12 +1,12 @@
 # Run
 
-Build [`nvx-rs`](usage.md#nvx-rs), which runs the microVMs and sandboxes on
+Build [`nvx`](usage.md#nvx), which runs the microVMs and sandboxes on
 this page, with Cargo, and run it:
 
 ```bash
 cargo build --release --locked --features cli \
-  --manifest-path nvx-rs/Cargo.toml --target-dir nvx-rs/target
-nvx-rs/target/release/nvx-rs run
+  --manifest-path nvx/Cargo.toml --target-dir nvx/target
+nvx/target/release/nvx run
 ```
 
 The first run of a Git checkout that holds no artifacts downloads and
@@ -14,17 +14,17 @@ installs the host platform's package from the release for `HEAD`, or from its
 nearest released first-parent ancestor when `HEAD` has no such package: the
 packaged kernel and initramfs under `build/` and OpenVMM under
 `openvmm/target/release/`, so neither needs a local build.
-[`nvx-rs download`](usage.md#download) installs it explicitly, replacing the
+[`nvx download`](usage.md#download) installs it explicitly, replacing the
 artifacts of the checkout, as after you pull newer commits. Set `GH_TOKEN` to
 a token with contents read access when downloading from a private repository.
 On Linux, pass `--hypervisor mshv` to use the MSHV package. The examples on
 this page use the POSIX spelling; on Windows, run
-`nvx-rs\target\release\nvx-rs.exe` instead.
+`nvx\target\release\nvx.exe` instead.
 
 The CLI chooses WHP on Windows and KVM on Linux:
 
 ```bash
-nvx-rs/target/release/nvx-rs run
+nvx/target/release/nvx run
 ```
 
 A successful Alpine boot prints both `ALPINE-MICROVM-BOOT-OK` and
@@ -36,7 +36,7 @@ before the time service and boot-completion banner.
 Boot Ubuntu userland with the same NVX kernel:
 
 ```bash
-nvx-rs/target/release/nvx-rs run --guest ubuntu
+nvx/target/release/nvx run --guest ubuntu
 ```
 
 Ubuntu defaults to 512 MiB and prints `NVX-GUEST-BOOT-OK: ubuntu`. It is
@@ -53,7 +53,7 @@ Exit cleanly from the guest with:
 Pass extra guest options without changing the generated device ABI:
 
 ```bash
-nvx-rs/target/release/nvx-rs run \
+nvx/target/release/nvx run \
   --memory-mib 256 \
   --net 10.0.0.2/24 \
   --network-profile portable \
@@ -70,7 +70,7 @@ instead, and installs a network policy of its own on it; see
 Select an explicit processor count after building the matching specialized guest kernel:
 
 ```bash
-nvx-rs/target/release/nvx-rs run --machine microvm --processors 8
+nvx/target/release/nvx run --machine microvm --processors 8
 ```
 
 The microVM uses fixed device topology, reserves a shared interrupt-status page, and uses
@@ -78,7 +78,7 @@ shared-status edge-triggered virtio interrupts with 1, 2, 4, or 8 vCPUs.
 
 ## Run OpenVMM directly
 
-The platform release archives are self-contained: their `bin/nvx-rs` runs the
+The platform release archives are self-contained: their `bin/nvx` runs the
 commands on this page on the archive's artifacts, and neither it nor
 `scripts/nvx.py` is required to run OpenVMM. Extract the archive that matches
 the host and run the following command from its `nvx-VERSION-PLATFORM`
@@ -111,7 +111,7 @@ For Windows/WHP in PowerShell:
 ```
 
 `--virtio-console console` attaches the guest's console, the boot console
-`hvc1`, to the terminal, as `nvx-rs run` does.
+`hvc1`, to the terminal, as `nvx run` does.
 For Linux/MSHV, use the `linux-mshv` archive and replace `kvm` with `mshv`.
 If the artifacts are already installed in the repository layout, use
 `openvmm/target/release/openvmm[.exe]`, `build/vmlinux`, and
@@ -372,12 +372,12 @@ one: give `--virtio-console` a Unix socket or, on Windows, a named pipe in the
 `//./pipe/openvmm-microvm-NAME` namespace, as in `listen=PATH`; see
 [Boot Console](design/3.3-consoles.md#331-boot-console).
 
-Most options of a cold boot of `nvx-rs run` pass through unchanged:
+Most options of a cold boot of `nvx run` pass through unchanged:
 `--machine`, `--processors`, `--cpu-profile`, `--net`, and
-`--network-profile`. The `nvx-rs run` performs these translations and
+`--network-profile`. The `nvx run` performs these translations and
 additions:
 
-| `nvx-rs run` | Direct OpenVMM option |
+| `nvx run` | Direct OpenVMM option |
 | --- | --- |
 | `--guest alpine` | `--initrd .../initramfs.cpio.gz` |
 | `--guest ubuntu` | `--initrd .../initramfs-ubuntu.cpio.gz` and a 512 MiB default |
@@ -387,12 +387,12 @@ additions:
 | `--memory-capacity-mib N` | `--memory-capacity NM` |
 | `--mount` | `--mount-aggregate /run/nvx/hostfs/root`, with one `--mount-child` for each outermost mapped directory and each mapped file outside them, and `--mount-write` for a read-write `--mount` inside a read-only one; see [virtio-fs host mapping](#virtio-fs-host-mapping) |
 | `--cmdline TEXT` | `--cmdline` with `TEXT` among the tokens of the guest's view, mode, and shares, which NVX renders |
-| Every cold boot | `--virtio-console listen=ENDPOINT`, whose client, `nvx-rs run`, connects the guest's console, the boot console `hvc1`, to the terminal, and the `--microvm-control-console`, `--microvm-control-auth-stdin`, `--microvm-report`, and `--guest-shutdown-action exit` that every launch of NVX passes |
+| Every cold boot | `--virtio-console listen=ENDPOINT`, whose client, `nvx run`, connects the guest's console, the boot console `hvc1`, to the terminal, and the `--microvm-control-console`, `--microvm-control-auth-stdin`, `--microvm-report`, and `--guest-shutdown-action exit` that every launch of NVX passes |
 | `--dry-run` | No equivalent; this only prints the generated command |
 
-`nvx-rs run --restore-snapshot NAME --store-dir PATH --state-dir PATH` restores
-only a named snapshot that `nvx-rs snapshot capture` published, once, as
-`nvx-rs snapshot restore` does, and refuses a raw OpenVMM snapshot directory;
+`nvx run --restore-snapshot NAME --store-dir PATH --state-dir PATH` restores
+only a named snapshot that `nvx snapshot capture` published, once, as
+`nvx snapshot restore` does, and refuses a raw OpenVMM snapshot directory;
 see [`run`](usage.md#run). OpenVMM itself restores a raw snapshot, as below.
 
 Always include `--single-process`. Include `--virtio-console console` to type
@@ -593,7 +593,7 @@ every host address admit the host instead.
 Explicit `--host-loopback allow` needs a guest network of `/29` or larger.
 OpenVMM presents host peers at addresses inside the guest's network, and a
 `/30` holds only the gateway and the guest, so OpenVMM rejects explicit
-`allow` on a `/30` before it starts, as the NVX Rust API and `nvx-rs sandbox`
+`allow` on a `/30` before it starts, as the NVX Rust API and `nvx sandbox`
 do, and also at a restore that installs a new policy on a
 [NIC template](#networked-snapshots) captured on one.
 
@@ -684,8 +684,8 @@ boot, for a snapshot without a NIC or whose NIC was captured with any other
 policy, and for a `workload-start` or `instance-checkpoint` snapshot. A
 [platform NIC template](#platform-nic-templates) takes the option too, and so
 does each restore of a named snapshot, a platform snapshot whose NIC
-`nvx-rs snapshot capture --net` captured under the complete deny-all policy,
-through `nvx-rs run --restore-snapshot` or `nvx-rs snapshot restore`, which
+`nvx snapshot capture --net` captured under the complete deny-all policy,
+through `nvx run --restore-snapshot` or `nvx snapshot restore`, which
 install the policy of their network options, and whose guest learns its DNS
 server and whether to announce its listeners from its activation, as
 [`snapshot restore`](usage.md#snapshot-restore) describes.
@@ -793,8 +793,8 @@ host-readiness endpoint:
   --restore-ready-path /run/nvx/restore-ready.sock
 ```
 
-`nvx-rs run --restore-snapshot`, `nvx-rs snapshot restore`, and each
-`nvx-rs sandbox start` of a restored sandbox own the endpoint of their
+`nvx run --restore-snapshot`, `nvx snapshot restore`, and each
+`nvx sandbox start` of a restored sandbox own the endpoint of their
 restore, whose event they accept only from the VM's own OpenVMM process, and
 restore the processors that their snapshot had online.
 
@@ -829,13 +829,13 @@ The microVM has one virtio-fs slot, with the fixed tag `microvm`. On a cold
 boot with `--mount`, the initramfs mounts the mapping automatically:
 
 ```bash
-nvx-rs/target/release/nvx-rs run --mount "/mnt/host,/absolute/host/share,rw"
+nvx/target/release/nvx run --mount "/mnt/host,/absolute/host/share,rw"
 ```
 
 PowerShell example:
 
 ```powershell
-nvx-rs\target\release\nvx-rs.exe run `
+nvx\target\release\nvx.exe run `
   --mount "/mnt/host,C:\Users\me\microvm-share,rw"
 ```
 
@@ -850,7 +850,7 @@ first comma, and the mode follows the last comma, so a host path may contain
 commas when the mode is given, which it then requires:
 
 ```powershell
-nvx-rs\target\release\nvx-rs.exe run `
+nvx\target\release\nvx.exe run `
   --mount "/mnt/alpha,C:\projects\alpha,beta,rw" `
   --mount "/mnt/reports,C:\reports\2026, final,ro" `
   --mount-deny "C:\projects\alpha,beta\secrets" `
@@ -862,7 +862,7 @@ access mode, for example a read-write workspace next to a read-only tool
 cache:
 
 ```bash
-nvx-rs/target/release/nvx-rs run \
+nvx/target/release/nvx run \
   --mount "/workspace,/srv/checkout,rw" \
   --mount "/opt/hostedtoolcache,/opt/hostedtoolcache,ro"
 ```
@@ -872,7 +872,7 @@ file at its target, but neither its directory nor its siblings, for example a
 read-only settings file next to a read-write results file:
 
 ```bash
-nvx-rs/target/release/nvx-rs run \
+nvx/target/release/nvx run \
   --mount "/config/settings.json,/srv/app/config/settings.json,ro" \
   --mount "/results/output.txt,/srv/app/results/output.txt,rw"
 ```
@@ -948,7 +948,7 @@ guest caller's UID and GID and squashes guest root to the owner of the shared
 host directory or file, so files that guest root creates are owned by that
 owner rather than by root or OpenVMM; see [File ownership](#file-ownership).
 
-`nvx-rs` snapshots no VM with mappings: `snapshot capture` captures a VM
+`nvx` snapshots no VM with mappings: `snapshot capture` captures a VM
 without them, and `run --restore-snapshot` refuses the share options. A
 restored sandbox maps the shares of its own `--mount` options, which
 [`snapshot restore`](usage.md#snapshot-restore) takes, once its guest is
@@ -956,7 +956,7 @@ ready, as [Live host shares](#live-host-shares) describes.
 
 ## Experimental single-workload sandbox
 
-The `sandbox` command of [`nvx-rs`](usage.md#nvx-rs) launches the microVM
+The `sandbox` command of [`nvx`](usage.md#nvx) launches the microVM
 with one distro layer, a compressed EROFS image or a GPT disk, under a writable
 upper: by default one preformatted ext4 scratch image, or a tmpfs in guest
 memory with `--upper ram`, as [Overlay upper](#overlay-upper) describes. Build
@@ -977,7 +977,7 @@ control initramfs boots and nvx-init manages:
 
 ```bash
 python3 scripts/nvx.py build-scratch-template --output /var/lib/nvx/scratch.ext4
-nvx-rs/target/release/nvx-rs sandbox \
+nvx/target/release/nvx sandbox \
   --layer distro,build/ubuntu-distro.erofs,11111111-1111-1111-1111-111111111111 \
   --scratch /var/lib/nvx/scratch.ext4 \
   --entrypoint /bin/sh --arg=-c --arg='cat /etc/os-release' \
@@ -1047,7 +1047,7 @@ agent's execution entry and nvx-init's root make them. With
 those limits, it also requires the memory controller to kill an allocation of
 twice `MEMORY_MAX` with `SIGKILL` while a 1 MiB allocation succeeds, and the
 pids controller to stop the workload at `PIDS_MAX` processes, itself included;
-keep twice `MEMORY_MAX` within the guest's free memory. `nvx-rs sandbox` sets no
+keep twice `MEMORY_MAX` within the guest's free memory. `nvx sandbox` sets no
 such limit: the VM is the limit of its workload. With
 `--arg TARGET --arg ro|rw`, it also checks a live share at
 `TARGET` as described below, including symbolic links in an `rw` share; the
@@ -1136,7 +1136,7 @@ for `sandbox run` and `sandbox provision`:
   managed sandbox begins with an empty upper.
 
 ```bash
-nvx-rs/target/release/nvx-rs sandbox \
+nvx/target/release/nvx sandbox \
   --layer distro,build/ubuntu-distro.erofs,11111111-1111-1111-1111-111111111111 \
   --upper ram \
   --entrypoint /bin/sh \
@@ -1159,8 +1159,8 @@ either upper, the overlay keeps `metacopy=on` and `xino=on`, which
 
 The `sandbox-ram-upper` scenario of `test-microvm --backend BACKEND` is the
 acceptance for the RAM upper. Like the
-[managed lifecycle](#managed-lifecycle) scenarios, it runs `nvx-rs sandbox` as
-subprocesses with the Ubuntu layer that `nvx-rs download` installs, but it
+[managed lifecycle](#managed-lifecycle) scenarios, it runs `nvx sandbox` as
+subprocesses with the Ubuntu layer that `nvx download` installs, but it
 attaches no scratch image. It checks that `provision`
 refuses `--upper ram` beside `--scratch`, and `start` refuses `--upper`, before
 either creates any state. A run of `/sbin/nvx-sandbox-smoke`, which keeps no
@@ -1209,16 +1209,16 @@ cells, which the [case matrix](acceptance-case-matrix.md#cold-boots) lists.
 
 ### Named snapshots
 
-`nvx-rs snapshot capture` captures a VM that nvx-init runs, before any
+`nvx snapshot capture` captures a VM that nvx-init runs, before any
 workload, with a placeholder image, a dormant scratch, and a NIC only if
 `--net` gives it one, into a named snapshot of a store, which
-`nvx-rs snapshot restore` and `nvx-rs run --restore-snapshot` restore under the
+`nvx snapshot restore` and `nvx run --restore-snapshot` restore under the
 snapshot's lock, with an image, an upper, and a network policy of their own;
 see [`snapshot capture`](usage.md#snapshot-capture) and
 [`snapshot restore`](usage.md#snapshot-restore). The public `snapshot-core` and
 `snapshot-tiers` scenarios of `test-microvm --backend BACKEND` are their
 acceptance, with the Ubuntu layer and the scratch template that
-`nvx-rs download` installs, and `untiered-network-policy` that of a restore's
+`nvx download` installs, and `untiered-network-policy` that of a restore's
 network policy. The workload of each restore of the first two is a probe, a
 script that `/bin/sh -c` runs, which reports the guest's clock and uptime,
 fresh random values, its machine ID, host name, and identity, the lower and
@@ -1321,7 +1321,7 @@ and policy on the host side, so edits are visible in both directions without
 staging or copy-back:
 
 ```bash
-nvx-rs/target/release/nvx-rs sandbox \
+nvx/target/release/nvx sandbox \
   --layer distro,build/ubuntu-distro.erofs,11111111-1111-1111-1111-111111111111 \
   --scratch /var/lib/nvx/scratch.ext4 \
   --mount /workspace,/srv/checkout,rw \
@@ -1473,7 +1473,7 @@ that it spills below them, which stay readable, and lets the workload write
 only to `agent` and `cache`:
 
 ```bash
-nvx-rs/target/release/nvx-rs sandbox \
+nvx/target/release/nvx sandbox \
   --layer distro,build/ubuntu-distro.erofs,11111111-1111-1111-1111-111111111111 \
   --scratch /var/lib/nvx/scratch.ext4 \
   --mount /tmp/mcp-runtime,/tmp/mcp-runtime,rw \
@@ -1522,7 +1522,7 @@ directory that has a default POSIX ACL, Linux narrows them by that ACL instead
 of the umask, so the ACL decides every permission, the owner's included.
 
 ```bash
-nvx-rs/target/release/nvx-rs sandbox \
+nvx/target/release/nvx sandbox \
   --layer distro,/var/lib/nvx/distro.erofs,11111111-1111-1111-1111-111111111111 \
   --scratch /var/lib/nvx/scratch.ext4 \
   --mount /workspace,/srv/checkout,rw \
@@ -1546,7 +1546,7 @@ so the example passes the user's own back:
 ```bash
 sudo setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups \
   --inh-caps=+setuid,+setgid --ambient-caps=+setuid,+setgid -- \
-  env HOME="$HOME" nvx-rs/target/release/nvx-rs sandbox ... --mount-owner caller
+  env HOME="$HOME" nvx/target/release/nvx sandbox ... --mount-owner caller
 ```
 
 A service manager can grant the same set, such as systemd's
@@ -1604,7 +1604,7 @@ gateway. Every other destination is denied, the proxy's port over UDP and the
 host's other loopback services included:
 
 ```bash
-nvx-rs/target/release/nvx-rs sandbox \
+nvx/target/release/nvx sandbox \
   --layer distro,build/ubuntu-distro.erofs,11111111-1111-1111-1111-111111111111 \
   --scratch /var/lib/nvx/scratch.ext4 \
   --net 10.0.0.2/24 \
@@ -1635,9 +1635,9 @@ NVX Rust API reports the URL as the guest sees it, `SCHEME://GATEWAY:PORT`, or
 
 The `sandbox-proxy-only` scenario of `test-microvm --backend BACKEND` is the
 acceptance for proxy-only networking. Like the
-[managed lifecycle](#managed-lifecycle) scenarios, it runs `nvx-rs sandbox` as
+[managed lifecycle](#managed-lifecycle) scenarios, it runs `nvx sandbox` as
 subprocesses with the Ubuntu layer and the sandbox scratch template that
-`nvx-rs download` installs. It checks that `provision` refuses
+`nvx download` installs. It checks that `provision` refuses
 a proxy beside `--network-egress allow`, and one at an address other than the
 gateway, before it creates any state. It then runs the same probes in two
 sandboxes, whose proxy is a test proxy on host loopback: a managed `exec`
@@ -1663,23 +1663,23 @@ start it once, run multiple workloads in the same warm guest, stop it while
 retaining configuration, and finally deprovision it:
 
 ```bash
-nvx-rs/target/release/nvx-rs sandbox provision \
+nvx/target/release/nvx sandbox provision \
   --state-dir /run/user/1000/nvx-example \
   --layer distro,/var/lib/nvx/distro.erofs,11111111-1111-1111-1111-111111111111 \
   --scratch /var/lib/nvx/scratch.ext4
-nvx-rs/target/release/nvx-rs sandbox start \
+nvx/target/release/nvx sandbox start \
   --state-dir /run/user/1000/nvx-example
-nvx-rs/target/release/nvx-rs sandbox exec \
+nvx/target/release/nvx sandbox exec \
   --state-dir /run/user/1000/nvx-example \
   --entrypoint /usr/bin/python3 --arg=/work/agent.py --cwd /work \
   --environment-file /run/user/1000/nvx-example-environment.json \
   --outcome-report /run/user/1000/nvx-example-exec.json
-nvx-rs/target/release/nvx-rs sandbox exec \
+nvx/target/release/nvx sandbox exec \
   --state-dir /run/user/1000/nvx-example \
   --entrypoint /bin/sh --arg=-c --arg='cat /tmp/previous-result'
-nvx-rs/target/release/nvx-rs sandbox stop \
+nvx/target/release/nvx sandbox stop \
   --state-dir /run/user/1000/nvx-example
-nvx-rs/target/release/nvx-rs sandbox deprovision \
+nvx/target/release/nvx sandbox deprovision \
   --state-dir /run/user/1000/nvx-example
 ```
 
@@ -1740,7 +1740,7 @@ digests of OpenVMM, the kernel, and the Alpine initramfs, as the install
 metadata lists them, without hashing an artifact, and the versions of the
 CLI's contracts with its guests. A release lists the digests in its
 `SHA256SUMS`, and a checkout in the build provenance that `nvx.py` writes to
-`build/` with each artifact that it builds, and that `nvx-rs download`
+`build/` with each artifact that it builds, and that `nvx download`
 installs. The transitions drive only a VM that artifacts of the same identity
 started. One that other artifacts started, as before they were rebuilt or
 replaced, may speak other contracts, so `start` and `exec` refuse it, naming
@@ -1835,7 +1835,7 @@ status 130 without waiting for it, while the sandbox runs on.
 
 The `managed-exec-config` scenario of `test-microvm --backend BACKEND` is the
 authoritative acceptance for these public options. It invokes
-`nvx-rs sandbox provision`, `start`, `exec`, `stop`, and `deprovision`
+`nvx sandbox provision`, `start`, `exec`, `stop`, and `deprovision`
 as subprocesses with an Alpine control guest and an Ubuntu workload layer. It
 checks sequential distinct CWD and exact-environment requests, an environment
 layered over the defaults, and then omitted defaults. It resolves the selected
@@ -1850,7 +1850,7 @@ rejection of relative CWD and out-of-range `uint32`
 timeouts, timeout recovery, stdout/stderr forwarding, and typed exec outcome
 reports. It requires `build/ubuntu-distro.erofs`, its manifest, and the
 sandbox scratch template, `build/ubuntu-smoke-scratch.ext4`, which
-`nvx-rs download` installs and the guest-artifact build makes, and
+`nvx download` installs and the guest-artifact build makes, and
 `test-microvm` fails before its first scenario when one of them is missing. A
 default run includes it, and CI runs it on every backend in the guest and
 sandbox job, which takes those Ubuntu artifacts.
@@ -1896,7 +1896,7 @@ template, so it has the same artifact requirements. It checks that:
 - two overlapping `start` calls then launch a single OpenVMM process: one
   succeeds, and the other fails with `sandbox is already running or has stale
   runtime state`;
-- the `nvx-rs` CLI of an artifact root whose build provenance names another
+- the `nvx` CLI of an artifact root whose build provenance names another
   initramfs, as after an upgrade, drives no VM that the checkout's artifacts
   started: its `exec` and `start` fail, naming the initramfs and OpenVMM's
   process ID, and its `deprovision` fails because the sandbox runs, without
@@ -1928,7 +1928,7 @@ and no evidence holds the control capability.
 
 Decoder, helper, and direct control-session tests remain useful supplemental
 coverage for protocol boundaries and guest implementation details. They do not
-replace or establish support through the public `nvx-rs sandbox` interface.
+replace or establish support through the public `nvx sandbox` interface.
 
 `run --outcome-report PATH` and `sandbox run --outcome-report PATH` forward
 OpenVMM's bounded local JSON report, with the permissions that OpenVMM gave it:
@@ -1957,7 +1957,7 @@ an upgrade has installed new artifacts. To upgrade:
 
 1. With the version that you leave, stop and deprovision each sandbox, which
    also ends the VM of a start that was interrupted.
-2. Switch to the new version of `nvx-rs` and its artifacts.
+2. Switch to the new version of `nvx` and its artifacts.
 3. Capture the snapshots again, into new stores, since a store never replaces
    a snapshot's name, and provision or restore the sandboxes again. No command
    removes a snapshot: remove an old store once no sandbox restores from it.

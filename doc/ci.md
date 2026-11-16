@@ -24,7 +24,7 @@ that they passed the jobs that cover NVX's use of OpenVMM; see
 Two jobs per backend exercise Linux, SMP, virtio, sandbox, and snapshot
 behavior through the public OpenVMM CLI, on the NVX Linux kernel plus the
 selected Alpine, Ubuntu, or Azure Linux initramfs. Both run on the backend's
-`general` runners, with the same OpenVMM and `nvx-rs` builds. The
+`general` runners, with the same OpenVMM and `nvx` builds. The
 `nvx-microvm-tests-{kvm,mshv,whp}` jobs run the default suite on the Alpine
 initramfs, each in shards of about equal duration that run in parallel, one
 runner each (see [MicroVM test shards](#microvm-test-shards)). Beside them,
@@ -324,14 +324,14 @@ captured with plain deny-all egress, which leaves host loopback allowed, and
 the option on a cold boot, and no restore may change the template.
 The `untiered-network-policy` scenario, one of the public sandbox scenarios
 that the guest and sandbox jobs run (see below), covers a NIC template without
-a tier: a named snapshot that `nvx-rs snapshot capture --net` captures, of a
+a tier: a named snapshot that `nvx snapshot capture --net` captures, of a
 blockless VM whose NIC has the complete deny-all policy. It restores the
 template four times, with the network options of a sandbox of the Ubuntu
 layer over a RAM upper, at the NIC's captured address, as the restore's own
 policy, and runs the scenario's checks as the restored workload: through
-`nvx-rs snapshot restore`, under the template's own deny-all and with
+`nvx snapshot restore`, under the template's own deny-all and with
 private-network ingress and allowed egress, and through
-`nvx-rs run --restore-snapshot`, under egress rules that admit DNS over IPv4
+`nvx run --restore-snapshot`, under egress rules that admit DNS over IPv4
 and one host service, and with explicit host loopback and a forward under
 egress rules that admit DNS over IPv6 alone. The template's guest learned no
 DNS server and runs no announcer of its listeners, so each restore's
@@ -570,18 +570,18 @@ modules, the Dockerfile, and `.dockerignore`; the Rust builder image itself is
 pinned by digest. Every guest image key also ends with the path-aware digest
 of the Rust guest binaries' inputs that the guest package manifests record,
 which `nvx.py guest-binary-source-identity` prints, because the images carry
-only those binaries of `nvx-rs` and `hashFiles` hashes contents only. The
+only those binaries of `nvx` and `hashFiles` hashes contents only. The
 inputs are the files that the guest binaries' build reads:
 `rust-toolchain.toml`; the crate's manifest, lockfile, and Cargo
-configuration; every file under `nvx-rs/src/` but the host side, which is the
-`host` and `testing` modules and the `nvx-rs` and `nvx-fake-openvmm` binaries,
+configuration; every file under `nvx/src/` but the host side, which is the
+`host` and `testing` modules and the `nvx` and `nvx-fake-openvmm` binaries,
 and the test modules, which are the `tests.rs` files and the `tests`
 directories; and the two Python modules that
 define the build. `GuestRustBuildConstants` in
 [`build_constants.py`](../scripts/nvx_tools/build_constants.py) selects them,
 and every guest build fails when Cargo's dep-info for the ten executables
 lists another file, such as a host module that guest code starts to compile.
-A change to the host side or a test of `nvx-rs` therefore rebuilds no guest
+A change to the host side or a test of `nvx` therefore rebuilds no guest
 image, and a change to any file that a guest binary compiles rebuilds them
 all. Ubuntu keys also include the Canonical archive pin, supplemental
 package lock, common guest sources, shared download and guest descriptor
@@ -590,7 +590,7 @@ that read it as a workflow artifact of its own, under its build filenames (see
 [Guest artifact handoff](#guest-artifact-handoff)). Each
 backend also boots the Ubuntu initramfs and runs
 `/sbin/nvx-sandbox-smoke` from the Ubuntu EROFS layer as UID/GID 65534 over a
-fresh ext4 scratch copy, as the one workload of an `nvx-rs sandbox run`, which
+fresh ext4 scratch copy, as the one workload of an `nvx sandbox run`, which
 nvx-init executes. The probe verifies the
 [sandbox security profile](run.md#experimental-single-workload-sandbox) of
 such an execution: the fixed identity, empty capability sets and
@@ -599,7 +599,7 @@ overlay root over read-only image layers with its upper directory on scratch.
 The live-share runs below repeat the profile checks. Each
 backend also runs the public `managed-exec-config`, `sandbox-lifecycle`,
 `sandbox-proxy-only`, `sandbox-ram-upper`, and `sandbox-gpt-layer` scenarios
-of `test-microvm`, which drive `nvx-rs sandbox run`, `provision`, `start`,
+of `test-microvm`, which drive `nvx sandbox run`, `provision`, `start`,
 `exec`, `stop`, and `deprovision` as subprocesses (see
 [Run](run.md#managed-lifecycle)): request-scoped working directories and
 environments, timeouts, nonzero exits, stdout and stderr, output that `exec`
@@ -616,7 +616,7 @@ cold cells (see the [case matrix](acceptance-case-matrix.md#cold-boots)). The
 public `vm-lifecycle` scenario then creates, spawns, connects to, attaches to
 again, and stops a VM through the public API of `nvx`. The public
 `snapshot-core` and `snapshot-tiers` scenarios capture a named snapshot with
-`nvx-rs snapshot capture`, with nvx-init as the guest, and restore it with
+`nvx snapshot capture`, with nvx-init as the guest, and restore it with
 `snapshot restore` and `run --restore-snapshot` (see
 [Run](run.md#named-snapshots)): restores of each image format over each upper,
 repeated restores with fresh entropy and machine IDs, clocks that follow the
@@ -731,32 +731,32 @@ consumer downloads both the normalized executable and its build provenance,
 then restores executable permissions on Linux.
 
 The microVM test jobs run their sandboxes and microVMs with
-[`nvx-rs`](../nvx-rs/README.md#the-nvx-rs-cli), and compile their egress
-policies with it, so they take `nvx-rs` the same way, and every release
+[`nvx`](../nvx/README.md#the-nvx-cli), and compile their egress
+policies with it, so they take `nvx` the same way, and every release
 package ships it. One GitHub-hosted job per operating system builds it with
-`--release --locked --features cli` and puts it at `nvx-rs/target/release/`,
-where the microVM tests look for it: `build-nvx-rs-linux-musl` builds a static
+`--release --locked --features cli` and puts it at `nvx/target/release/`,
+where the microVM tests look for it: `build-nvx-linux-musl` builds a static
 `x86_64-unknown-linux-musl` executable, which runs on every self-hosted Linux
-runner, and `build-nvx-rs-windows-msvc` an `x86_64-pc-windows-msvc` executable
+runner, and `build-nvx-windows-msvc` an `x86_64-pc-windows-msvc` executable
 with a static C runtime, which needs no Visual C++ redistributable. Each job
 records the build's provenance with
-[`record-nvx-rs-provenance`](usage.md#record-nvx-rs-provenance) and uploads
+[`record-nvx-provenance`](usage.md#record-nvx-provenance) and uploads
 the executable and the provenance as the one-day
-`nvx-rs-linux-musl-executable` and `nvx-rs-linux-musl-provenance` artifacts, or
-the `nvx-rs-windows-msvc-*` pair. The workflows that take them name the pair by
-its base name, `nvx-rs-linux-musl` or `nvx-rs-windows-msvc`, as they name the
+`nvx-linux-musl-executable` and `nvx-linux-musl-provenance` artifacts, or
+the `nvx-windows-msvc-*` pair. The workflows that take them name the pair by
+its base name, `nvx-linux-musl` or `nvx-windows-msvc`, as they name the
 OpenVMM artifacts. The NVX CLI job of each operating system downloads both, the
 executable where the build put it and the provenance into `build/`, and runs
-the CLI tests with that executable, with `NVX_RS` naming it for the tests that
+the CLI tests with that executable, with `NVX` naming it for the tests that
 run it directly. Each microVM test job of that operating system downloads
-the executable into `nvx-rs/target/release/` and restores its executable
+the executable into `nvx/target/release/` and restores its executable
 permission on Linux, where the scenarios and the sandbox steps run it. The
 platform jobs don't take it, but the package job of each platform downloads
 both through the
 [`package-release`](../.github/actions/package-release/action.yml) action,
-the provenance into `build/`, so that each package ships the `nvx-rs` of its
+the provenance into `build/`, so that each package ships the `nvx` of its
 operating system. The `managed-lifecycle` and `vm-lifecycle` scenarios also
-build and run the ignored `nvx-rs` tests
+build and run the ignored `nvx` tests
 `src/host/session/tests/managed_lifecycle.rs`, a unit test of the library with
 the `cli` feature, and `tests/vm_lifecycle.rs` with Cargo on the runner.
 
@@ -808,14 +808,14 @@ from, so queueing a fork's pull request runs its code on the fleet, as the
 
 A push, a pull request that is ready for review, a merge group, or a
 scheduled or manually dispatched full run starts these jobs at once: `quality`,
-`nvx-rs`, `build-nvx-rs-linux-musl`, and `build-nvx-rs-windows-msvc` on
+`nvx`, `build-nvx-linux-musl`, and `build-nvx-windows-msvc` on
 GitHub-hosted runners, and `openvmm-changes`, which classifies a push, pull
 request, or merge group and selects every suite for a full run (see
 [Change classification](#change-classification)). A merge group also starts
 `cancel-superseded-merge-groups` on a GitHub-hosted runner, which nothing waits
 for (see [Superseded merge groups](#superseded-merge-groups)). Each NVX CLI
 job, `nvx-cli-linux` or `nvx-cli-windows`, starts on a GitHub-hosted runner
-when the `nvx-rs` build of its operating system ends. When
+when the `nvx` build of its operating system ends. When
 `openvmm-changes` finishes, the jobs that it selects start: `artifacts`,
 `distro-artifacts`, and `debug-kernel` restore or build the guest artifacts on
 GitHub-hosted runners (see
@@ -823,12 +823,12 @@ GitHub-hosted runners (see
 producers restore or build OpenVMM on a KVM, an MSHV, and a WHP runner, and
 `openvmm-ci` checks OpenVMM's own CI of the pinned revision on a GitHub-hosted
 runner (see [OpenVMM CI](#openvmm-ci)). Each microVM test job waits for
-`artifacts`, its OpenVMM producer, and the `nvx-rs` build of its operating
+`artifacts`, its OpenVMM producer, and the `nvx` build of its operating
 system, and each platform job for `artifacts` and its OpenVMM producer alone.
 Beside each platform job, a package job on a GitHub-hosted runner of the
 platform's operating system, `package-kvm`, `package-mshv`, or `package-whp`,
 packages the platform's release once `artifacts`, `distro-artifacts`, the
-platform's OpenVMM producer, and the `nvx-rs` build of its operating system
+platform's OpenVMM producer, and the `nvx` build of its operating system
 end (see [Release packages](#release-packages)). The microVM guest and sandbox
 jobs also wait for `distro-artifacts`, and the debug-kernel jobs for
 `debug-kernel`. `Performance regression gate`,
@@ -862,42 +862,42 @@ queries the host's event logs for up to 120 s each, gives its launches 300 s.
 A launch that outlasts its limit fails its test with what PowerShell printed
 until the test killed it, which the test also writes to stderr at once:
 unittest reports failures only once the run ends, which a job that reaches its
-own time limit never does. Each job tests the `nvx-rs` executable that the
-microVM tests of its operating system run, which the `nvx-rs` build job of that
+own time limit never does. Each job tests the `nvx` executable that the
+microVM tests of its operating system run, which the `nvx` build job of that
 operating system hands it, as described above.
-Each also runs the ignored `nvx-rs` test `tests/openvmm_vectors.rs`, which
+Each also runs the ignored `nvx` test `tests/openvmm_vectors.rs`, which
 compares the submodule's control-session protocol vectors, and the lines of its
 platform allowlist of kernel command-line tokens, with the copies that the
-tests of the crate's NVXS session and of `nvx::host::config` read in the `nvx-rs`
+tests of the crate's NVXS session and of `nvx::host::config` read in the `nvx`
 job, which cannot check out
 OpenVMM, the versions of OpenVMM's snapshot format, time ABI, and restore
-packet with those that the sources of `nvx-rs` define, and the bound of
+packet with those that the sources of `nvx` define, and the bound of
 the restore packet's guest-restore record with that of `nvx::guest_restore`;
-see [OpenVMM's vectors](../nvx-rs/tests/vectors/README.md#openvmms-vectors).
+see [OpenVMM's vectors](../nvx/tests/vectors/README.md#openvmms-vectors).
 The ignored test `tests/openvmm_cpu_profiles.rs` likewise compares the
 submodule's built-in CPU profiles with the copy of their identities from which
-`nvx-rs run` guides a failed cold boot on a CPU that none serves.
+`nvx run` guides a failed cold boot on a CPU that none serves.
 Fork pull requests lack the OpenVMM deploy key, so the CLI jobs run, like the
 hypervisor jobs, only for pushes, merge groups, full runs, and same-repository
-pull requests, and so do the `nvx-rs` builds, which only those jobs use.
+pull requests, and so do the `nvx` builds, which only those jobs use.
 `Required status check`, the development release, and the recording of the
-performance results require both `nvx-rs` builds and both CLI jobs.
+performance results require both `nvx` builds and both CLI jobs.
 
 No hypervisor job waits for the CLI tests (#982): the microVM jobs of each
-operating system wait for its `nvx-rs` build, and the platform jobs, as the
+operating system wait for its `nvx` build, and the platform jobs, as the
 next paragraph describes, for neither. In the successful first-attempt runs
 from October 23 to 28, 2026, when they still waited for the whole CLI job,
 `nvx-cli-windows` took a median 5.8 minutes, of which the CLI tests took 4.0,
-while its `nvx-rs` was built 1.4 minutes in, and `nvx-cli-linux` took 2.9
+while its `nvx` was built 1.4 minutes in, and `nvx-cli-linux` took 2.9
 minutes, its CLI tests 2.0. In the 67 runs that skipped both OpenVMM suites
 and ran the benchmarks, `Platform / Windows / WHP / Virtual machine` waited for
 the Windows CLI job in all but one and finished last in all but one, and
-starting it once `nvx-rs` was built would have ended those runs about 4 minutes
+starting it once `nvx` was built would have ended those runs about 4 minutes
 earlier. A broken CLI no longer keeps the hypervisor jobs of a run off their
 runners, but only 4 of the 304 runs of that window failed a CLI job.
 
 Before the package jobs, the platform jobs read the Ubuntu and Azure Linux
-images and `nvx-rs` only to package the release after they measured. The package
+images and `nvx` only to package the release after they measured. The package
 jobs now package it beside them on GitHub-hosted runners, and the platform jobs
 wait only for the kernel and the Alpine initramfs, which they boot, and their
 OpenVMM producer (#982). In the 89 successful first-attempt runs of the same
@@ -968,7 +968,7 @@ from October 23 to 28, 2026, leaving out an outage on October 28, 195 waited
 of 3.4 and a p90 of 11.1 minutes, against 110 runs and 0.4 and 4.6 minutes on
 MSHV's four general runners and 34 runs and 0.1 and 2.8 on the nine that WHP
 then had. The waits fell mostly on the jobs that start once OpenVMM and
-`nvx-rs` are ready: the two shards, the guest and sandbox job, and the
+`nvx` are ready: the two shards, the guest and sandbox job, and the
 debug-kernel job each waited 2 minutes or more in 86 to 125 of about 275 runs,
 with a p90 of 6.0 to 8.8 minutes, while the OpenVMM and VMM-test builds and the
 VMM-test leg, which start first, did in 41 to 59 runs, with a p90 of 3.3 to
@@ -976,7 +976,7 @@ VMM-test leg, which start first, did in 41 to 59 runs, with a p90 of 3.3 to
 pools of those sizes reproduces the KVM waits, 196 runs, a median of 3.1, and
 a p90 of 8.4 minutes; with the six general WHP runners of today, it makes 101
 runs wait 2 minutes or more on WHP, at a p90 of 9.1 minutes. The earlier
-`nvx-rs` handoff and the package jobs alone leave KVM's waits at 192 runs,
+`nvx` handoff and the package jobs alone leave KVM's waits at 192 runs,
 2.9, and 7.6 minutes, and MSHV's and WHP's at 97 and 108 runs, and moving the
 pull requests' debug-kernel jobs, 181 in the window, from KVM to MSHV lowers
 KVM's waits to 135 runs, a median of 1.5, and a p90 of 6.6 minutes, while
@@ -991,7 +991,7 @@ CI stopped running OpenVMM's tests (see [OpenVMM CI](#openvmm-ci)), the Linux
 VMM-test build and the KVM and MSHV VMM-test legs no longer take those pools'
 general runners either.
 
-With the `nvx-rs` handoff, the package jobs, and the pull requests' debug
+With the `nvx` handoff, the package jobs, and the pull requests' debug
 kernel on MSHV, the replay, with the six general WHP runners of today,
 estimates that the runs of that window that skipped both OpenVMM suites and
 ran the benchmarks would have taken a median of 12.3 minutes, or 11.0 without
@@ -1145,7 +1145,7 @@ the layer. The platform jobs boot the kernel and the Alpine initramfs to
 qualify their runner and to benchmark, and the package jobs package every guest
 image and the scratch template into the release. A missing artifact fails its
 download step, so no job runs without a component that it reads. The microVM
-test jobs also set `NVX_AUTO_DOWNLOAD=0`, so that `nvx-rs` never replaces a
+test jobs also set `NVX_AUTO_DOWNLOAD=0`, so that `nvx` never replaces a
 missing artifact with a release's, as it does in a checkout without artifacts;
 see [`download`](usage.md#download). A test in `scripts/test_nvx_tools.py` maps
 each step of these jobs, and of that unsharded default run, to the guest files
@@ -1375,7 +1375,7 @@ can break `dev` together. That happened on October 25, 2026:
 [#825](https://github.com/microsoft/nvx/pull/825) added CLI tests that
 expected the old egress error messages, and
 [#828](https://github.com/microsoft/nvx/pull/828), merged 22 minutes later,
-changed them; each passed CI without the other, and the `nvx-rs` jobs failed
+changed them; each passed CI without the other, and the `nvx` jobs failed
 in every `dev` run for about nine hours, until
 [#830](https://github.com/microsoft/nvx/pull/830) updated the tests
 ([#895](https://github.com/microsoft/nvx/issues/895)). Since October 30, 2026,
@@ -1406,10 +1406,10 @@ checks, but the rehearsal of the [guest artifact reuse](#guest-artifact-reuse),
 which the pull request's run made, and with the debug kernel on KVM instead of
 MSHV, so that each change runs it on both before it merges: each suite runs
 only when one of its inputs changed, the platform and package jobs and the
-performance regression gate after them included. The two `nvx-rs` build jobs
+performance regression gate after them included. The two `nvx` build jobs
 run too: each hands its executable to the microVM and package jobs of its
 operating system and to the CLI job that tests it. No hypervisor job waits for
-the CLI tests, and the platform jobs wait for neither `nvx-rs` nor the distro
+the CLI tests, and the platform jobs wait for neither `nvx` nor the distro
 artifacts that only the packages ship. A group publishes no development
 release and persists no performance results,
 which the `dev` push of the merged commit does, and saves no cache: GitHub
@@ -1656,14 +1656,14 @@ the command in its foreground ends, so a harness that a Linux step ran in the
 foreground never learned of the cancellation: it ran on until the orphan cleanup
 killed it, which left the scratch directories of its scenario behind. The Linux
 steps that run `test-microvm` therefore `exec` it, so that it is the step's
-process. The measure step of [nvx-rs scenario
-coverage](#nvx-rs-scenario-coverage) `exec`s its script, which passes the SIGINT
+process. The measure step of [nvx scenario
+coverage](#nvx-scenario-coverage) `exec`s its script, which passes the SIGINT
 and the SIGTERM on to `nvx.py test-microvm`, and ends once it ends. It ends its
 other commands at once, with every process that they started, since a signal
 that reached Cargo alone would leave Cargo's tests running. It then ends each
 process whose environment gives `NVX_SCENARIO_COVERAGE_RUN` the value that it
 gives its runs, as the orphan cleanup ends a job's processes, such as the VMs
-that `nvx-rs` starts in sessions of their own. The Linux steps of
+that `nvx` starts in sessions of their own. The Linux steps of
 `run-benchmark`, which run the harness among other commands, `exec` it as their
 last command or source `.github/actions/run-benchmark/forward-signals.sh`, whose
 `run_harness` runs the harness in the background, with the SIGINT that Bash
@@ -1680,7 +1680,7 @@ util-linux's `setpriv`, as the runners do, `nvx.py` starts OpenVMM through
 `setpriv --pdeathsig KILL`, so that the kernel kills OpenVMM when `nvx.py`
 exits, and through a shell that starts OpenVMM only if `nvx.py` is still its
 parent, since an `nvx.py` that died before `setpriv` armed the signal sent
-none. A contained process tree, such as `nvx-rs run` and the
+none. A contained process tree, such as `nvx run` and the
 OpenVMM that it starts, runs under a supervisor that the kernel sends SIGTERM
 when `nvx.py` exits, and which then kills the whole tree. The supervisor runs
 without the job's `RUNNER_TRACKING_ID`, which it gives back to the command,
@@ -1837,7 +1837,7 @@ of job run, such as `benchmark.py`, which `microvm_tests.py` imports,
 
 A push, pull request, or merge group that changes neither the OpenVMM pin nor
 the check, such as one that changes only the microVM tests, the benchmarks,
-the guests, or `nvx-rs`, therefore skips the OpenVMM CI check. A pull
+the guests, or `nvx`, therefore skips the OpenVMM CI check. A pull
 request or merge group that changes only the microVM tests, such as their
 scenarios, also skips the platform and package jobs.
 The platform jobs wait for their pool's single benchmark runner. A change only
@@ -1884,8 +1884,8 @@ artifacts: the reusable workflows and actions that these reach,
 the files that the cache keys there hash and the source identity's, the CLI
 modules of the `nvx.py` commands that they run, which the tests map from
 `nvx.py`'s parser, with every module that those import and every file that
-those read beside them, and the `nvx` crate, from which the `nvx-rs` build
-jobs build the executable. The tests also check that no file of `nvx-rs` but
+those read beside them, and the `nvx` crate, from which the `nvx` build
+jobs build the executable. The tests also check that no file of `nvx` but
 the inputs of the guest binaries changes a guest image key, while every one
 selects the NVX microVM tests and the platform and package jobs.
 
@@ -1897,7 +1897,7 @@ history. `Publish development release` and `Record performance results` require
 all three platform jobs and their package jobs to succeed, so a push that
 skipped them would publish nothing partial or stale: it would publish no
 release and record no results. Its commit would have no release of its own,
-though, and [`nvx-rs download`](usage.md#download) would install an ancestor's,
+though, and [`nvx download`](usage.md#download) would install an ancestor's,
 which is older still when that ancestor's release failed. A push therefore runs
 the platform and package jobs, and the jobs that build their artifacts, for
 every change but documentation, as every push did before the classifier
@@ -1959,7 +1959,7 @@ reusable [`package-platform.yml`](../.github/workflows/package-platform.yml)
 workflow, which packages one platform's release on the runner that the job
 names, `ubuntu-latest` or `windows-latest`. The job passes it the platform's
 suffix, `linux-kvm`, `linux-mshv`, or `windows-whp`, the base name of the
-platform's OpenVMM artifacts, and that of the `nvx-rs` artifacts of its
+platform's OpenVMM artifacts, and that of the `nvx` artifacts of its
 operating system, and, like the other jobs that need the OpenVMM deploy key,
 runs only for pushes, merge groups, full runs, and same-repository pull
 requests. The workflow checks out NVX and OpenVMM, whose license the package
@@ -1968,7 +1968,7 @@ the guest kernel, every guest image, the sandbox scratch template, and the
 OpenVMM executable and its provenance (see
 [Guest artifact handoff](#guest-artifact-handoff)). Its
 [`package-release`](../.github/actions/package-release/action.yml) action then
-downloads `nvx-rs` and its provenance, stages the binary package with
+downloads `nvx` and its provenance, stages the binary package with
 [`package --binary-only`](usage.md#package), on Windows after it recreates the
 kernel's provenance inputs with
 [`materialize-kernel-provenance-inputs`](usage.md#materialize-kernel-provenance-inputs),
@@ -2218,7 +2218,7 @@ flagging script shares to read Rust.
 ## crates.io releases
 
 A scheduled or manually dispatched full run of `dev` publishes the
-[`nvx` crate](../nvx-rs/README.md) to crates.io once every job of the run but
+[`nvx` crate](../nvx/README.md) to crates.io once every job of the run but
 `Persist performance baselines`, which runs apart, has passed, which
 `Required status check` confirms. Two jobs on GitHub-hosted
 Ubuntu runners, whose checkouts have the LF line endings of the commit, run
@@ -2228,9 +2228,9 @@ Ubuntu runners, whose checkouts have the LF line endings of the commit, run
 merge groups never publish the crate; a `dev` push publishes its development
 release instead (see
 [Development release publication](#development-release-publication)). `nvx` is
-the only crate that NVX publishes: NVX's own programs, such as the `nvx-rs`
+the only crate that NVX publishes: NVX's own programs, such as the `nvx`
 CLI, nvx-init, and the other guest binaries, are binaries of that package, not
-crates of their own. A run publishes a new version only when `nvx-rs/`
+crates of their own. A run publishes a new version only when `nvx/`
 changed since the commit from which the newest version on crates.io was
 packed, which that version's `.cargo_vcs_info.json` records. A night without
 changes to the crate publishes nothing, and neither does a run of a commit
@@ -2241,26 +2241,26 @@ The versions are pre-releases of the `0.2.0-alpha` series, such as
 `0.2.0-alpha.2`, since the breaking release `0.2.0-alpha.1` that the
 [changelog](../CHANGELOG.md) records, and of the `0.1.0-alpha` series before
 it. A run takes the number after the highest that crates.io has in the series
-that `nvx-rs/Cargo.toml` declares, yanked versions included, since crates.io
+that `nvx/Cargo.toml` declares, yanked versions included, since crates.io
 never reuses a version, and at least the declared number, so the declared
 version is the floor: a pull request changes it only to start another series,
 as [The nvx crate](distribution.md#the-nvx-crate) describes. `Package nvx crate`
 fails rather than publish a version that would sort below the newest one on
 crates.io. When the number differs from the declared one, each job gives only
-its own checkout the new version, in `nvx-rs/Cargo.toml` and in `nvx`'s entry
-in `nvx-rs/Cargo.lock`. The package's `.cargo_vcs_info.json` then records the
+its own checkout the new version, in `nvx/Cargo.toml` and in `nvx`'s entry
+in `nvx/Cargo.lock`. The package's `.cargo_vcs_info.json` then records the
 run's commit as dirty, and its `Cargo.toml.orig` and `Cargo.lock` differ from
 the commit's files in the version alone.
 
 `Package nvx crate` checks the package that `cargo package --locked` packs:
 
-- Its `.cargo_vcs_info.json` records the run's commit, `nvx-rs` as the path,
+- Its `.cargo_vcs_info.json` records the run's commit, `nvx` as the path,
   and a dirty checkout exactly when the job rewrote the version.
 - Every file is the commit's byte for byte, which rules out CRLF line endings,
   but for the rewritten version and the files that Cargo generates,
   `Cargo.toml` and `.cargo_vcs_info.json`, which must hold no CR either.
 - It holds the license, the readme, and the snapshots of the public API, with
-  which its users check the API that it promises. The `nvx-rs` job, which
+  which its users check the API that it promises. The `nvx` job, which
   `Required status check` requires, checked them against the API of the run's
   commit, and that its hidden items are one `main` per binary (see
   [Rust crates](#rust-crates)).
@@ -2335,7 +2335,7 @@ fields, such as the microcode and the invariant-TSC flags, may read `unknown`.
 | H1 | `/dev/kvm` or `/dev/mshv` is readable and writable, and a KVM host has no `/dev/mshv`; on Windows, `WHvGetCapability` reports a hypervisor |
 | H2 | Vendor, family, model, stepping, microcode, and OS build from `/proc/cpuinfo` or the Windows registry. Then `openvmm --hypervisor <backend> --cpu-fingerprint <path>` writes the host's CPU fingerprint (by default `nvx-cpu-fingerprint-<backend>.json` in the probe directory; `--cpu-fingerprint` overrides it), checks it against the pinned profile that `auto` selects from OpenVMM's catalog, the latest revision of the generation's profile, which every backend shares, and prints one `NVX-CPU-PROFILE:` line. The check never falls back to a host profile, so a CPU on which `auto` falls back fails H2. H2 reports the generation and the profile from that line, so a profile that an OpenVMM pin adds qualifies its hosts without an NVX change. H2 requires exit status 0, `status=pass`, the same backend, and a catalog profile of the reported generation, reports the profile and surface digests, and otherwise fails with OpenVMM's code, for example `[E_PROFILE_HOST_UNKNOWN]` on a CPU that no profile serves or `[E_PROFILE_UNSUPPORTED]` naming every unsupported CPUID bit. On MSHV and WHP, OpenVMM checks the entries outside the profile on a probe partition configured from the profile, as a cold boot does. With `--no-openvmm`, H2 maps the host with NVX's copy of the catalog instead: `skylake-sp` (6/85, steppings 0 to 4, `intel.skylake-sp.v1`), `icelake-sp` (6/106, `intel.icelake-sp.v1`), `emeraldrapids` (6/207, `intel.emeraldrapids.v1`), `graniterapids` (6/173, `intel.graniterapids.v1`), `alderlake` (6/151 and 6/154, `intel.alderlake.v1`), `milan` (AMD 25/1, `amd.milan.v1`), `genoa` (AMD 25/17, `amd.genoa.v2`), or `turin` (AMD 26/2, `amd.turin.v2`). Any other CPU, including Cascade Lake and Cooper Lake, fails with `E_PROFILE_HOST_UNKNOWN`. A unit test keeps the copy, which records the latest revision of each generation's profile, equal to the profiles of the OpenVMM submodule's pinned revision, which it reads from the gitlink's commit, so the NVX CLI jobs validate the CLI after they check out OpenVMM. The host OS's invariant-TSC flags (`constant_tsc nonstop_tsc`, or the CPUID bit on Windows) are recorded as evidence and never fail the check, because they don't decide what a guest observes: Azure WHP hosts show the CPUID bit but cannot offer invariant TSC to partitions, and their guests measure tens of nanoseconds of skew |
 | H3 | `openvmm --x-time-abi-verify` builds the partition and runs the time ABI preflight without running the guest. Its `NVX-TIME-ABI-VERIFY:` line must report `status=ok` for the backend, plausible declared and native TSC rates, the backend's LAPIC rate, and a `cpu_profile` that is a catalog profile, `<vendor>.<generation>.v<revision>` of any generation but a host profile's `host`, which rejects the host profile that `auto` falls back to on a CPU that no built-in profile serves, and, when H2 runs too, a revision of the profile H2 names. A failed preflight reports OpenVMM's code, for example `[E_TSC_SYNC_UNSUPPORTED]` |
-| H4 | Samples of the TSC against the host's monotonic clocks, with sleeps between them so the host's CPUs idle: 13 samples 10 s apart, or 3 samples 1 s apart with `--ci-schedule`. Each sample reads the TSC between two reads of a clock, keeping the tightest of 64 brackets; its uncertainty is half the bracket plus half the clock's resolution. A clock that returns the same value to consecutive reads is coarser than one read, so the probe takes its smallest step as its resolution: Hyper-V's reference TSC page advances the Linux clocks in 100 ns steps although `clock_getres` reports 1 ns. The interval stability is judged against a clock that time synchronization never steers, `CLOCK_MONOTONIC_RAW` on Linux and `QueryPerformanceCounter` on Windows: every interval between consecutive samples must be conclusive within 0.25 ppm, and the interval rates must agree within 1 ppm. chrony's frequency updates move `CLOCK_MONOTONIC`'s rate by up to several ppm between seconds on the Azure runners, which says nothing about the TSC. The rate over the whole window must lie within 250 ppm of the rate H3 reports when H3 runs in the same invocation, and H4 reports their deviation to 0.001 ppm. The limit is the guest's budget for the host's clock correction: the guest's [wall-clock discipline](design/3.2-clock-and-time.md#3210-guest-obligations) follows host UTC, so it applies the host's correction on top of a restore's rate deviation, which the time ABI's restore tolerance bounds at 250 ppm, within Linux's frequency limit of ±500 ppm. Beyond the budget the guest doesn't fail: its offset grows to 128 ms, and the discipline steps its clock and counts a discontinuity. A unit test keeps the limit equal to the difference of nvx-rs's frequency limit and its restore deviation limit, and the latter equal to the restore tolerance of the OpenVMM gitlink's commit. The limit doesn't bound the TSC's error alone, as the time ABI v1's 100 ppm did, because no run can tell that error from the wander of the host's reference clock: on `azure-mshv-1`, chronyd's estimate ranged from +2.5 to +189.3 ppm within a day while the TSC held its rate (#1008). Above that old bound, H4 passes with a warning that says how much of the budget the host's correction uses, and that one run can't tell the TSC's error from the reference's wander. H4 also requires the host to publish a synchronized clock correction, read as OpenVMM reads it for every [time sample](design/3.2-clock-and-time.md#329-time-samples): on Linux, `adjtimex` reports neither `STA_UNSYNC` nor `STA_CLOCKERR`; on Windows, `GetSystemTimeAdjustmentPrecise` reports that a time service adjusts the clock. H4 records the status, correction, and host UTC's maximum error; the correction's direct reading is evidence, while the independent rate-budget gate above qualifies the combined rate that the guest must follow. On Linux with a synchronized chronyd, that rate is the rate against `CLOCK_MONOTONIC_RAW` corrected by the frequency that chronyd estimates from its whole sample history, as `chronyc -c tracking` reports it, and every rate within chronyd's skew of that estimate must lie within the limit. The reference's wander can move the estimate and its skew within seconds, so when that range straddles the limit, H4 re-reads the estimate every 2 s for up to 60 s and uses the first whose range lies wholly within or wholly beyond the limit, with the same samples, since only the estimate changes; a range that straddles the limit throughout fails as inconclusive. The rate against `CLOCK_MONOTONIC` is evidence only, because it also carries the slew with which chronyd removes its current offset, which reaches hundreds of ppm for seconds after the host's clock jumps (#768). Without chronyd's estimate, on a Linux host whose kernel PLL another time service drives, such as systemd-timesyncd or ntpd, and which `adjtimex` reports synchronized, the rate is the rate against `CLOCK_MONOTONIC_RAW` corrected by the PLL's frequency, `adjtimex`'s frequency with its tick's, which the PLL keeps apart from the offsets that it slews; H4 never reads it with chronyd, which keeps the PLL off and slews through that frequency. Otherwise the rate is measured against `CLOCK_MONOTONIC` on Linux, and the detail says why neither estimate is available, or against `QueryPerformanceCounter` on Windows. On Linux, H4 also reports as evidence the average correction since boot, the rate of `CLOCK_MONOTONIC_RAW` against `CLOCK_MONOTONIC` over the uptime, and the deviation from the backend's rate that it gives: both clocks exclude suspend, and after a small offset at boot only the time service's gradual adjustments separate them, so the average smooths the reference's wander out without saved state, but slews just after boot or a live migration bias it, so H4 doesn't gate on it. A Linux host's clocksource is recorded as evidence |
+| H4 | Samples of the TSC against the host's monotonic clocks, with sleeps between them so the host's CPUs idle: 13 samples 10 s apart, or 3 samples 1 s apart with `--ci-schedule`. Each sample reads the TSC between two reads of a clock, keeping the tightest of 64 brackets; its uncertainty is half the bracket plus half the clock's resolution. A clock that returns the same value to consecutive reads is coarser than one read, so the probe takes its smallest step as its resolution: Hyper-V's reference TSC page advances the Linux clocks in 100 ns steps although `clock_getres` reports 1 ns. The interval stability is judged against a clock that time synchronization never steers, `CLOCK_MONOTONIC_RAW` on Linux and `QueryPerformanceCounter` on Windows: every interval between consecutive samples must be conclusive within 0.25 ppm, and the interval rates must agree within 1 ppm. chrony's frequency updates move `CLOCK_MONOTONIC`'s rate by up to several ppm between seconds on the Azure runners, which says nothing about the TSC. The rate over the whole window must lie within 250 ppm of the rate H3 reports when H3 runs in the same invocation, and H4 reports their deviation to 0.001 ppm. The limit is the guest's budget for the host's clock correction: the guest's [wall-clock discipline](design/3.2-clock-and-time.md#3210-guest-obligations) follows host UTC, so it applies the host's correction on top of a restore's rate deviation, which the time ABI's restore tolerance bounds at 250 ppm, within Linux's frequency limit of ±500 ppm. Beyond the budget the guest doesn't fail: its offset grows to 128 ms, and the discipline steps its clock and counts a discontinuity. A unit test keeps the limit equal to the difference of nvx's frequency limit and its restore deviation limit, and the latter equal to the restore tolerance of the OpenVMM gitlink's commit. The limit doesn't bound the TSC's error alone, as the time ABI v1's 100 ppm did, because no run can tell that error from the wander of the host's reference clock: on `azure-mshv-1`, chronyd's estimate ranged from +2.5 to +189.3 ppm within a day while the TSC held its rate (#1008). Above that old bound, H4 passes with a warning that says how much of the budget the host's correction uses, and that one run can't tell the TSC's error from the reference's wander. H4 also requires the host to publish a synchronized clock correction, read as OpenVMM reads it for every [time sample](design/3.2-clock-and-time.md#329-time-samples): on Linux, `adjtimex` reports neither `STA_UNSYNC` nor `STA_CLOCKERR`; on Windows, `GetSystemTimeAdjustmentPrecise` reports that a time service adjusts the clock. H4 records the status, correction, and host UTC's maximum error; the correction's direct reading is evidence, while the independent rate-budget gate above qualifies the combined rate that the guest must follow. On Linux with a synchronized chronyd, that rate is the rate against `CLOCK_MONOTONIC_RAW` corrected by the frequency that chronyd estimates from its whole sample history, as `chronyc -c tracking` reports it, and every rate within chronyd's skew of that estimate must lie within the limit. The reference's wander can move the estimate and its skew within seconds, so when that range straddles the limit, H4 re-reads the estimate every 2 s for up to 60 s and uses the first whose range lies wholly within or wholly beyond the limit, with the same samples, since only the estimate changes; a range that straddles the limit throughout fails as inconclusive. The rate against `CLOCK_MONOTONIC` is evidence only, because it also carries the slew with which chronyd removes its current offset, which reaches hundreds of ppm for seconds after the host's clock jumps (#768). Without chronyd's estimate, on a Linux host whose kernel PLL another time service drives, such as systemd-timesyncd or ntpd, and which `adjtimex` reports synchronized, the rate is the rate against `CLOCK_MONOTONIC_RAW` corrected by the PLL's frequency, `adjtimex`'s frequency with its tick's, which the PLL keeps apart from the offsets that it slews; H4 never reads it with chronyd, which keeps the PLL off and slews through that frequency. Otherwise the rate is measured against `CLOCK_MONOTONIC` on Linux, and the detail says why neither estimate is available, or against `QueryPerformanceCounter` on Windows. On Linux, H4 also reports as evidence the average correction since boot, the rate of `CLOCK_MONOTONIC_RAW` against `CLOCK_MONOTONIC` over the uptime, and the deviation from the backend's rate that it gives: both clocks exclude suspend, and after a small offset at boot only the time service's gradual adjustments separate them, so the average smooths the reference's wander out without saved state, but slews just after boot or a live migration bias it, so H4 doesn't gate on it. A Linux host's clocksource is recorded as evidence |
 | H5 | Pinned-thread ping-pong rounds over every pair of host CPUs; `max_abs_offset_ns` is at most 1,000, the measurement is conclusive, and no pair stalls |
 | H6 | A microVM with the largest supported vCPU count up to 8 reports a valid `NVX-TIME-ABI` boot line through `nvx-time status` and runs `nvx-time-probe warp` over every CPU pair five times, with all vCPUs halted for 0.1, 1, 5, and 1 s between the runs, so that a host without an invariant TSC corrects the guest TSC as idle host CPUs wake (#265); then a 1-vCPU microVM runs it once. Every run stays within 1,000 ns. `--ci-schedule` runs CI's schedule instead: two runs 1 s apart |
 | H7 | `adjtimex` reports no `STA_UNSYNC` and no `TIME_ERROR` on Linux; `w32tm /query /status` names a synchronized source on Windows. When H7 can't read either, its detail starts with `cannot verify host UTC synchronization`: `adjtimex` fails or reports a clock state Linux doesn't define, or `w32tm` fails or prints no English `Source` and `Leap Indicator` lines, as in a Windows display language other than English |
@@ -2367,7 +2367,7 @@ qualification.
 ## Rust toolchain
 
 [`rust-toolchain.toml`](../rust-toolchain.toml) pins the exact Rust release
-that builds OpenVMM, its test guests, the `nvx-rs` crate, and the
+that builds OpenVMM, its test guests, the `nvx` crate, and the
 host tools that NVX compiles, such as the doctor's time probe and the Windows
 curl shim. Rustup applies the file to every `cargo` and `rustc` run in the
 checkout, including in the `openvmm` submodule, and `test-openvmm` also exports
@@ -2473,9 +2473,9 @@ derive both from the image's contents.
 
 ## Rust crates
 
-The required `nvx-rs` job checks the [`nvx` crate](../nvx-rs/README.md),
+The required `nvx` job checks the [`nvx` crate](../nvx/README.md),
 which holds the NVX mechanics, on GitHub-hosted Ubuntu and Windows runners
-through the [`check-nvx-rs`](../.github/actions/check-nvx-rs/action.yml)
+through the [`check-nvx`](../.github/actions/check-nvx/action.yml)
 action, on the Rust release that `rust-toolchain.toml` pins. It runs rustfmt,
 Clippy with warnings denied for all targets and features, for the library with
 and without default features, and for the `serde`, `cli` and `testing`
@@ -2484,16 +2484,16 @@ features, and the library's without default features, rustdoc with warnings
 denied, the minimum Rust version check, and the macOS cross-check. The tests
 are the unit tests of each module, among them the protocol's conformance-vector
 and property tests and the process tests of `nvx::host::process`, and the
-integration tests of `nvx-rs/tests/`: the CLI's scenario tests, which run
-`nvx-rs` with the fake OpenVMM; the fake OpenVMM's own behavior; on Linux, the
+integration tests of `nvx/tests/`: the CLI's scenario tests, which run
+`nvx` with the fake OpenVMM; the fake OpenVMM's own behavior; on Linux, the
 command lines, exit statuses, and output of the guest binaries; the NVXS
 session, whose host and guest roles exchange messages through a broker that
 relays records as OpenVMM's does; the
-[security checklist](../nvx-rs/tests/security_checklist.rs), which checks
+[security checklist](../nvx/tests/security_checklist.rs), which checks
 through the public API alone the security requirements that the host's
 documentation states for a VM's directory and outputs and for a snapshot's
 directory; and a test that the direct children of `nvx::host` depend on one
-another without cycles. The crate's [Testing](../nvx-rs/README.md#testing)
+another without cycles. The crate's [Testing](../nvx/README.md#testing)
 section describes them, and the ignored tests that other jobs run.
 Clippy checks `serde`, `cli` and `testing` alone so that the compiler checks the
 code that each of them builds, which the code of other features may
@@ -2502,9 +2502,9 @@ Clippy's checks of all targets compile the crate's examples, among them the
 compile-only `host-workflows` and, in the musl check, `guest-workflows`, so
 that the documented workflows keep compiling against the public API.
 
-On Linux, the `nvx-rs` job also checks the public API of `nvx` against its
-snapshots, [`nvx-rs/public-api/linux.txt`](../nvx-rs/public-api/linux.txt) and
-[`windows.txt`](../nvx-rs/public-api/windows.txt), with
+On Linux, the `nvx` job also checks the public API of `nvx` against its
+snapshots, [`nvx/public-api/linux.txt`](../nvx/public-api/linux.txt) and
+[`windows.txt`](../nvx/public-api/windows.txt), with
 [`public_api.py`](../scripts/public_api.py). The script builds the library's
 rustdoc JSON with every feature, on the pinned Rust release, for
 `x86_64-unknown-linux-musl`, the guests' target, and for
@@ -2520,14 +2520,14 @@ changes the public API runs `python3 scripts/public_api.py --update` and
 commits the snapshots, so that its diff shows the change. The check also fails
 unless the API's hidden items are the entry points of NVX's programs alone, one
 per binary: the function `main` that the binary's code calls, outside its
-comments and literals, such as `nvx::host::cli::main` for `nvx-rs`, which a
+comments and literals, such as `nvx::host::cli::main` for `nvx`, which a
 snapshot lists as hidden and none lists without hiding it, and the modules that
 hold it. rustdoc's JSON is
 unstable, so the script reads only the format version of the pinned release,
 and a new pin may need a change to the script.
 
-On Linux, the `nvx-rs` job also lints and tests the
-[guest binaries](../nvx-rs/README.md#guest-binaries) for
+On Linux, the `nvx` job also lints and tests the
+[guest binaries](../nvx/README.md#guest-binaries) for
 `x86_64-unknown-linux-musl`, the target that guests run, and builds them with
 the `guest` profile. The action delegates the musl lint and tests to
 [`nvx.py check-guest-binaries`](usage.md#check-guest-binaries), the fresh,
@@ -2538,26 +2538,26 @@ and the prebuilt-binary integration run to
 and Docker guest build, and Alpine, Ubuntu, and Azure Linux ship its ten
 executables.
 
-The development release job depends on `nvx-rs` and requires its combined
+The development release job depends on `nvx` and requires its combined
 Linux/Windows results to be successful; failed,
 cancelled, or skipped crate checks cannot publish a release. Before it uploads
 anything, it checks that each platform's package ships `bin/openvmm`, which
-`nvx-rs download` installs, and `bin/nvx-rs`, or their `.exe` forms on Windows.
+`nvx download` installs, and `bin/nvx`, or their `.exe` forms on Windows.
 
-## nvx-rs coverage
+## nvx coverage
 
-[`nvx-rs-coverage.yml`](../.github/workflows/nvx-rs-coverage.yml) measures which
+[`nvx-coverage.yml`](../.github/workflows/nvx-coverage.yml) measures which
 lines, functions, and regions of the production code of the `nvx` crate its own
 tests reach, on GitHub-hosted Ubuntu and Windows runners. It runs for every push
-to `dev`, and every ready pull request to any branch, that changes `nvx-rs/`,
+to `dev`, and every ready pull request to any branch, that changes `nvx/`,
 `rust-toolchain.toml`, the setup tool manifest, the workflow, or its script, and
 on a manual dispatch. Draft pull requests skip it, as they skip CI's other
 jobs, and merge groups never run it. No required check depends on it:
 `Required status check`, the only check that `dev` requires, is a job of
 `ci.yml`. A push cancels the measurement of an earlier push to the same branch
 or pull request that still runs. Coverage tells which code the tests run;
-[mutation testing](#nvx-rs-mutation-testing) tells whether they check what it
-does, and [scenario coverage](#nvx-rs-scenario-coverage) adds what the KVM
+[mutation testing](#nvx-mutation-testing) tells whether they check what it
+does, and [scenario coverage](#nvx-scenario-coverage) adds what the KVM
 microVM scenarios reach. Each job installs the Rust release that
 `rust-toolchain.toml` pins with its `llvm-tools` component, and
 [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) at the release that
@@ -2565,13 +2565,13 @@ the [setup tool manifest](../scripts/setup/README.md#tool-versions) pins, which
 the setup scripts install on development hosts and self-hosted runners too.
 Branches go unmeasured: their coverage still needs a nightly compiler.
 
-[`nvx_rs_coverage.py`](../scripts/nvx_rs_coverage.py) runs the crate's tests
+[`nvx_coverage.py`](../scripts/nvx_coverage.py) runs the crate's tests
 with `--all-features` under cargo-llvm-cov, with the crate's paths remapped to
 paths relative to it. The tests that fail run once more, by name, or with the
 rest of their target when its harness named none, as when it crashed, and the
 summary names those that passed only then. Tests that fail again, a profile in
 the crate's directory, which a process that a test starts there without
-`LLVM_PROFILE_FILE` writes, and a run in which no process of `nvx-rs`, or none
+`LLVM_PROFILE_FILE` writes, and a run in which no process of `nvx`, or none
 of `nvx-fake-openvmm`, wrote a profile all fail the job, after it writes the
 reports, whose summary names what each misses.
 
@@ -2586,13 +2586,13 @@ that waits for a process that may already have exited, so the counts can differ
 slightly between runs of one commit.
 
 The reports include the profiles of the processes that the tests start:
-`nvx-rs`, `nvx-fake-openvmm`, and, on Linux, the guest binaries that
+`nvx`, `nvx-fake-openvmm`, and, on Linux, the guest binaries that
 `tests/guest_tools.rs` runs, Cargo's instrumented builds of them, since the
 script leaves `NVX_GUEST_BINARIES` out of the tests' environment.
 A process writes its profile only when it exits, so what a process that a test
 kills reaches is missing. On Windows, `std::process::exit` also ends a process
 without its profile, because it skips the C runtime's exit handlers, so
-`nvx-rs` and `nvx-fake-openvmm` return their statuses from `main` instead, but
+`nvx` and `nvx-fake-openvmm` return their statuses from `main` instead, but
 for statuses outside 0 to 255, which `ExitCode` can't hold. A process writes its
 profile under its umask too, so before the reports, the script lets the owner
 read and write every profile: the store tests run processes whose umasks clear
@@ -2602,7 +2602,7 @@ Each job uploads `lcov.info` and `html/`, the LCOV and HTML reports of the
 production code, `coverage.json`, llvm-cov's summary of each file of production
 code and of the test doubles, `measurement.json`, which records the commit, the
 tools, and the tests that ran again, `tests.log`, and `summary.md` as the 30-day
-artifact `nvx-rs-coverage-<os>-<run-id>`, which a rerun of the job replaces.
+artifact `nvx-coverage-<os>-<run-id>`, which a rerun of the job replaces.
 The job also writes `summary.md` to the run's summary: the totals of the
 production code and of the test doubles, the binaries whose processes wrote
 profiles, the tests that ran again, and a table with a row for each top-level
@@ -2612,7 +2612,7 @@ the [changed lines that no test reaches](#changed-lines-that-no-test-reaches).
 
 To measure on a development host, add the `llvm-tools` component to the pinned
 release and install the pinned cargo-llvm-cov, as the setup scripts do, then
-run the script, which writes the reports to `build/nvx-rs-coverage`. With
+run the script, which writes the reports to `build/nvx-coverage`. With
 `--base`, as below, its summary also lists the changed lines that no test
 reaches, as a pull request's does, of the changes that the working tree holds
 since the merge base of the named branch and `HEAD`: those that no commit
@@ -2623,7 +2623,7 @@ toolchain=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
 rustup component add --toolchain "$toolchain" llvm-tools
 cargo "+$toolchain" install --locked cargo-llvm-cov --version \
   "$(sed -n 's/^cargo_llvm_cov\.version=//p' scripts/setup/tool-versions.conf)"
-python3 scripts/nvx_rs_coverage.py --base origin/dev
+python3 scripts/nvx_coverage.py --base origin/dev
 ```
 
 ### Changed lines that no test reaches
@@ -2646,9 +2646,9 @@ release doesn't, the summary also lists the branches on the changed lines that
 no test takes. A pull request whose changes add or change no instrumented line
 of production code, such as one that changes only the workflow, lists none.
 
-## nvx-rs scenario coverage
+## nvx scenario coverage
 
-[`nvx-rs-scenario-coverage.yml`](../.github/workflows/nvx-rs-scenario-coverage.yml)
+[`nvx-scenario-coverage.yml`](../.github/workflows/nvx-scenario-coverage.yml)
 measures which host code of the `nvx` crate the KVM microVM scenarios reach,
 alone and together with the crate's own tests, so that the code that only a real
 VM reaches is measured too. It runs in `microsoft/nvx` every Sunday at 07:41 UTC
@@ -2663,39 +2663,39 @@ GNU` job does, downloads the guest artifacts, qualifies the runner as the
 microVM jobs do, checks that the runner has the cargo-llvm-cov release that the
 [setup tool manifest](../scripts/setup/README.md#tool-versions) pins and the
 `llvm-tools` component of the pinned Rust release, and runs
-[`nvx_rs_scenario_coverage.py`](../scripts/nvx_rs_scenario_coverage.py), which
+[`nvx_scenario_coverage.py`](../scripts/nvx_scenario_coverage.py), which
 it `exec`s, as [Cancellation](#cancellation) describes. `setup-linux.sh
 --runner-only` installs both tools in the runner's root-owned toolchain, which
 the job can't change, so a runner whose setup predates them fails the check
 until its setup runs again.
 
-The script builds an instrumented `nvx-rs`, in release mode with the `cli`
+The script builds an instrumented `nvx`, in release mode with the `cli`
 feature, as CI's build jobs build the one that the scenarios run, in the
 environment that `cargo llvm-cov show-env --no-rustc-wrapper
 --remap-path-prefix` prints: `-C instrument-coverage` for every crate that Cargo
-builds, with the crate's paths relative to it, as [nvx-rs
-coverage](#nvx-rs-coverage)'s reports have them, and every other path absolute,
+builds, with the crate's paths relative to it, as [nvx
+coverage](#nvx-coverage)'s reports have them, and every other path absolute,
 which the reports leave out. The script keeps `--no-rustc-wrapper` so those
 flags instrument every Cargo build that the scenarios start, rather than only
 the builds that cargo-llvm-cov's wrapper selects. With that environment, a
-target directory beneath `nvx-rs/target/scenario-coverage`, and an
+target directory beneath `nvx/target/scenario-coverage`, and an
 `LLVM_PROFILE_FILE` of `%p-%m.profraw`, which gives each process a profile of
 its own in the scenarios' directory, the script runs `nvx.py test-microvm
 --backend kvm`, whose default suite, unsharded, includes the public sandbox
-scenarios. Its `NVX_RS` names a wrapper that appends a record of each `nvx-rs`
+scenarios. Its `NVX` names a wrapper that appends a record of each `nvx`
 process's start, its time and its arguments, and then executes the instrumented
-`nvx-rs` in its place, with the same process ID, and with an `LLVM_PROFILE_FILE`
-in a directory of the `nvx-rs` processes' own, even when the process's caller
+`nvx` in its place, with the same process ID, and with an `LLVM_PROFILE_FILE`
+in a directory of the `nvx` processes' own, even when the process's caller
 left it out of its environment. A profile's name holds the process's ID and the
 digits of its start's time, so that it names the start that wrote it even when
 processes reuse an ID. The test of the `managed-lifecycle` scenario, which Cargo
 builds, uses the same instrumentation. The script then runs the crate's own
-tests as nvx-rs coverage does, and merges the profiles of the scenarios, of the
+tests as nvx coverage does, and merges the profiles of the scenarios, of the
 crate's tests, and of both, with `llvm-profdata`. Its reports with `llvm-cov`
 read every executable that the runs built.
 
 Production code leaves out test code, test data, and the test doubles, as
-nvx-rs coverage does. A line or a function counts once, as reached once any
+nvx coverage does. A line or a function counts once, as reached once any
 build of the crate ran it. The scenarios and the crate's tests build the
 crate with different features, so each build has its own copy of a function,
 and llvm-cov's summary counts, of the copies of a function, only the one that
@@ -2704,24 +2704,24 @@ function whose regions hold it. The script therefore counts lines by the LCOV
 report's records, which hold each line once, with the hits of every copy,
 functions by llvm-cov's summary, which counts a function as reached once any
 copy of it ran, and leaves regions out. Its counts of what the crate's tests
-reach can thus differ from nvx-rs coverage's.
+reach can thus differ from nvx coverage's.
 
 A process writes its profile only when it exits, so what a process reached is
 missing when a signal ended it, or when it still runs as the measurement ends.
-In a passing run, every `nvx-rs` process of the scenarios exits on its own: the
+In a passing run, every `nvx` process of the scenarios exits on its own: the
 harness kills the processes that it started only when a scenario fails or times
 out, or when the run is interrupted. To show what such kills miss, the summary
 lists, by span of `test-microvm`'s [scenario duration
-report](usage.md#scenario-duration-report) and by command, such as `nvx-rs run`
-or `nvx-rs sandbox start`, each `nvx-rs` process whose start the wrapper
+report](usage.md#scenario-duration-report) and by command, such as `nvx run`
+or `nvx sandbox start`, each `nvx` process whose start the wrapper
 recorded and that wrote no profile, which it marks when the process still runs,
 and `processes.json` holds every start.
 
 The job fails, after it writes the reports, when a run fails, when tests of the
 crate fail again, when a process wrote its profile where the measurement
 doesn't merge it, as a process that starts without `LLVM_PROFILE_FILE` writes
-one into its working directory, when no `nvx-rs` process wrote a profile, or
-when no process of `nvx-rs` or of the crate's tests that the scenarios run
+one into its working directory, when no `nvx` process wrote a profile, or
+when no process of `nvx` or of the crate's tests that the scenarios run
 wrote a profile that reaches the crate's production code. Each of those checks
 reads only the profiles of the executables' own directory, since llvm-cov
 counts what a profile reached of a function for every executable that holds
@@ -2729,52 +2729,52 @@ the function under the same symbol.
 
 The job uploads `summary.md`; `measurement.json`, which records the commit, the
 tools, the instrumentation, and how the runs went; `processes.json`, which
-lists each `nvx-rs` process with its span, arguments, and profile;
+lists each `nvx` process with its span, arguments, and profile;
 `crate-tests/`, `scenarios/`, and `together/`, with the LCOV report of each
 run's production code, `lcov.info`, llvm-cov's summary of each file,
 `coverage.json`, and, for the last two, an HTML report, `html/`; `microvm/`,
 the output directory of `test-microvm`; and the logs of the build and the runs
-as the 30-day artifact `nvx-rs-scenario-coverage-<run-id>`, which a rerun of
+as the 30-day artifact `nvx-scenario-coverage-<run-id>`, which a rerun of
 the job replaces. It also writes `summary.md` to the run's summary: the lines
 and functions that the crate's tests, the scenarios, and both reach; how many
 lines only the scenarios reach; what the scenarios reach of the lines that
 their builds compile, which leave out code that only other builds compile,
-such as the guest code, which runs only in guests; the `nvx-rs` processes
+such as the guest code, which runs only in guests; the `nvx` processes
 without a profile; and a table of the production lines of each module, as
-nvx-rs coverage's rows count them, with the lines that only the scenarios
+nvx coverage's rows count them, with the lines that only the scenarios
 reach.
 
 To measure on a Linux/KVM development host, install the pinned cargo-llvm-cov
 and the `llvm-tools` component as the setup scripts do, and stage the artifacts
-that the scenarios boot, such as with `nvx-rs download --hypervisor kvm`. The
-script writes the reports to `build/nvx-rs-scenario-coverage`. Its repeatable
+that the scenarios boot, such as with `nvx download --hypervisor kvm`. The
+script writes the reports to `build/nvx-scenario-coverage`. Its repeatable
 `--scenario NAME` runs only those scenarios of `test-microvm`:
 
 ```bash
-python3 scripts/nvx_rs_scenario_coverage.py
+python3 scripts/nvx_scenario_coverage.py
 ```
 
-## nvx-rs mutation testing
+## nvx mutation testing
 
 Mutation testing tells whether one selection of the `nvx` crate's tests catches
 every mutant of some files that another catches, as when new tests replace
 others, which is how
 [microsoft/nvx#722](https://github.com/microsoft/nvx/issues/722) retired the
-golden tests that compared `nvx-rs` with behavior recorded from Python.
-[`nvx-rs-mutants.yml`](../.github/workflows/nvx-rs-mutants.yml) runs
+golden tests that compared `nvx` with behavior recorded from Python.
+[`nvx-mutants.yml`](../.github/workflows/nvx-mutants.yml) runs
 [cargo-mutants](https://mutants.rs/), at the release that it pins, on
 GitHub-hosted runners on a manual dispatch. It never runs for pull requests, so
 no required check depends on it. Its inputs name the files to mutate, as globs
-relative to `nvx-rs`, the arguments of the test binaries that select the tests,
+relative to `nvx`, the arguments of the test binaries that select the tests,
 such as a module's filters, the arguments of `cargo test` that select the test
 targets, such as `--lib` or `--test cli`, the runner, and the number of jobs,
 from 1 to 16, that share the mutants. Each job runs cargo-mutants in place, in
 its disposable checkout, because the CLI's tests find the artifacts of the
 repository that holds the crate, which the copy of the crate that cargo-mutants
 makes by default lacks. Each job uploads its outcomes as
-`nvx-rs-mutants-shard-<shard>-<run-id>`, which a rerun of the job replaces, and
+`nvx-mutants-shard-<shard>-<run-id>`, which a rerun of the job replaces, and
 the `summarize` job merges the latest outcomes of every shard, also when an
-earlier attempt of the run reported them, into `nvx-rs-mutants-<run-id>`, whose
+earlier attempt of the run reported them, into `nvx-mutants-<run-id>`, whose
 `caught.txt`, `missed.txt`, `timeout.txt`, and `unviable.txt` list the mutants
 of each outcome, counts them in the run's summary, and fails if a shard
 reported nothing.
@@ -2802,8 +2802,8 @@ that changes `scripts/`, `requirements-dev.txt`, the
 workflow, and on a manual dispatch, but never for pull requests, so no required
 check depends on it, and a push cancels the measurement of an earlier push that
 still runs. Its job prepares the tests as the `NVX CLI / Linux` job prepares
-them: it checks out OpenVMM, sets up Python 3.12, and builds `nvx-rs` as the
-`nvx-rs binary / Linux musl` job does, for the tests that `NVX_RS` enables. It
+them: it checks out OpenVMM, sets up Python 3.12, and builds `nvx` as the
+`nvx binary / Linux musl` job does, for the tests that `NVX` enables. It
 installs the requirements that validate-nvx installs, and
 [coverage.py](https://coverage.readthedocs.io/) at the release that
 `requirements-dev.txt` pins. That release needs Python 3.11, so the pin applies
@@ -2838,19 +2838,19 @@ group's modules.
 
 To measure on a development host, install `requirements-dev.txt` with Python
 3.11 or later, and run the script, which writes the reports to
-`build/scripts-coverage`. As in validate-nvx, the tests that run `nvx-rs` need
-`NVX_RS` to name a build of it, and the tests that read OpenVMM's sources need
+`build/scripts-coverage`. As in validate-nvx, the tests that run `nvx` need
+`NVX` to name a build of it, and the tests that read OpenVMM's sources need
 the `openvmm` submodule:
 
 ```bash
 python3 -m pip install --requirement requirements-dev.txt
-NVX_RS="$PWD/nvx-rs/target/release/nvx-rs" python3 scripts/scripts_coverage.py
+NVX="$PWD/nvx/target/release/nvx" python3 scripts/scripts_coverage.py
 ```
 
 ## Module diagrams
 
 [`doc/modules`](modules/README.md) publishes diagrams of the public modules of
-the [`nvx` crate](../nvx-rs/README.md): its top-level modules, the dependencies
+the [`nvx` crate](../nvx/README.md): its top-level modules, the dependencies
 between them, and the modules that each contains, on Linux and Windows.
 [`module_diagrams.py`](../scripts/module_diagrams.py) draws them. It exports
 the modules of the crate's library, with its `cli`, `testing`, and `guest`
@@ -2875,7 +2875,7 @@ Nobody edits the diagrams by hand:
 again every night, with the nightly full run of CI, and commits them to `dev`
 when they changed, so that `dev` takes at most one push of them a night outside
 the merge queue (see [Pushes outside the queue](#pushes-outside-the-queue)).
-They follow a merge that changes their inputs, `nvx-rs/`, the Rust pin, the
+They follow a merge that changes their inputs, `nvx/`, the Rust pin, the
 script, the build constants that name the crate's targets, or the workflow,
 within a day.
 
@@ -2937,8 +2937,8 @@ Copilot or initiate login.
 The wrapper provisions a distinct disposable KVM, MSHV, or WHP target with no
 production or GitHub credentials and forwards only the typed executor
 protocol. Besides the guest and OpenVMM artifacts, the target needs the Rust
-toolchain and a prebuilt nvx-rs with its provenance for the scenarios that run
-it, as [nvx-rs on the target](adversarial-testing.md#nvx-rs-on-the-target)
+toolchain and a prebuilt nvx with its provenance for the scenarios that run
+it, as [nvx on the target](adversarial-testing.md#nvx-on-the-target)
 explains.
 Existing persistent microVM and performance runners are not valid
 adversarial targets. Loss of the target heartbeat, a policy oracle, or a
@@ -2969,7 +2969,7 @@ through the `restore-only` input of
 [`build-guest-artifacts`](../.github/actions/build-guest-artifacts/action.yml)
 and the KVM OpenVMM binary that `build-openvmm` caches for the pinned revision,
 so agents can run microVM tests without rebuilding either. It doesn't build
-`nvx-rs`: the microVM tests build it with Cargo, and record its provenance,
+`nvx`: the microVM tests build it with Cargo, and record its provenance,
 the first time that they need it. The guest artifact
 restore computes its keys with the same action that saves them. The binary
 restore repeats the key, paths, and gzip compression of the cache entry that
@@ -2990,7 +2990,7 @@ Copilot always runs the version on `dev`, even for sessions based on other
 branches, so changes reach agent sessions only after they merge. Pushes run it
 as a normal workflow for validation when they change the workflow or a file
 that its steps take versions, requirements, metadata, or code from: the
-`build-guest-artifacts` action, all `nvx-rs/**` files, the files that pin its Rust, cargo-nextest,
+`build-guest-artifacts` action, all `nvx/**` files, the files that pin its Rust, cargo-nextest,
 and shell linter versions, `requirements-dev.txt`, `SOURCE-MANIFEST.json`,
 `.gitmodules`, the OpenVMM submodule pin, and the NVX CLI and its modules.
 

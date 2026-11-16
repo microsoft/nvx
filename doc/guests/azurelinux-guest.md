@@ -1,7 +1,7 @@
 # Azure Linux guest support
 
 NVX runs Azure Linux 3.0 userland on its own Linux kernel. It builds one
-artifact, `initramfs-azurelinux.cpio.gz`, which `nvx-rs run --guest azurelinux`
+artifact, `initramfs-azurelinux.cpio.gz`, which `nvx run --guest azurelinux`
 boots for an interactive shell or a workload. The artifact boots no Azure Linux
 kernel, firmware, or systemd, and it does not change the
 [machine and device ABI](../design/2-virtual-machine-architecture.md).
@@ -107,7 +107,7 @@ build: the Dockerfile, package lock, build modules, guest scripts, and the
 Release staging rejects a manifest that does not match the artifact, the base
 image, or the current inputs. Only binary-only packages carry the two Azure
 Linux files; the published platform releases are binary-only, and
-`nvx-rs download` installs them. `collect-sources` does not collect Azure
+`nvx download` installs them. `collect-sources` does not collect Azure
 Linux corresponding source, so `package --include-source` omits the guest; see
 [Package and source delivery](../distribution.md) and the
 [release layout](../build.md#release-packages).

@@ -78,7 +78,7 @@ anything public and ask the user to handle it under
 
 1. Work out what the issue depends on: the backend (`kvm`, `mshv`, or `whp`),
    the host type, the guest, the processor counts, and whether the defect lies
-   in host tooling, `nvx-rs`, the guest, or OpenVMM.
+   in host tooling, `nvx`, the guest, or OpenVMM.
 2. Prepare hosts with [nvx-prepare-host](../nvx-prepare-host/SKILL.md),
    choosing the profiles yourself: every backend whose behavior the change can
    affect, virtual machines for functional checks, and bare metal when the

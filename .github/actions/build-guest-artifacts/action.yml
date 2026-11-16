@@ -144,7 +144,7 @@ runs:
         # hashFiles hashes contents only, so the kernel keys also name each patch
         # path and its order, and the guest image keys the path-aware digest of
         # the Rust guest sources that their package manifests record. Those are
-        # the files that the guest binaries' build reads, the only nvx-rs files
+        # the files that the guest binaries' build reads, the only nvx files
         # that the image keys cover.
         patch_identity=$(python3 scripts/nvx.py kernel-patch-identity)
         rust_source_identity=$(python3 scripts/nvx.py guest-binary-source-identity)

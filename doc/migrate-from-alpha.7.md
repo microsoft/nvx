@@ -15,7 +15,7 @@ that needs alpha.7 stays on it.
 
 This guide says what breaks and where each part of alpha.7 went. The
 [library guide](library.md) gives the release's workflows and what their
-caller owns, the crate's [README](../nvx-rs/README.md) its features and
+caller owns, the crate's [README](../nvx/README.md) its features and
 modules, and its rustdoc the contract of each item.
 
 ## Upgrade
@@ -43,7 +43,7 @@ selects a pre-release only for a requirement that names one, and a caret
 requirement such as `nvx = "0.2.0-alpha.1"` also accepts every later
 pre-release of `0.2.0`, such as `0.2.0-alpha.2`, which `cargo update` takes.
 So require the release exactly, with `=`, as the crate's
-[README](../nvx-rs/README.md) advises. A host program takes the default
+[README](../nvx/README.md) advises. A host program takes the default
 feature, `host`:
 
 ```toml
@@ -88,7 +88,7 @@ alpha.7's, so the runtime that alpha.7 bundled does not match it.
 | --- | --- | --- |
 | `host` (default) | The `host` module: artifact discovery, launch, policy lowering, control sessions, process and platform primitives, the supervision of VM instances, the sandbox launch profile, and the sandbox and template stores. It enables `serde` | The `host` module: VMs that the caller creates, spawns, attaches to, and stops in directories that it owns, one snapshot type, restores that the caller drives, authenticated control connections, and the lowering of network and filesystem policies. It enables `serde` |
 | `bundled` | Staged a release's OpenVMM, kernel, and initramfs at build time for `Artifacts::bundled`, through the crate's build script, `links = "nvx"` with `DEP_NVX_ARTIFACTS_DIR`, `artifacts.json`, and the `NVX_BUNDLE`, `NVX_BUNDLE_DIR`, and `NVX_BUNDLE_HYPERVISOR` variables | Removed, with the build script and `links`: the caller locates the runtime's files, as [Install pins](#install-pins) says |
-| `cli` | `host::cli`, whose public `main` the `nvx-rs` binary ran | The `nvx-rs` binary, which adds only its hidden `main` to the API |
+| `cli` | `host::cli`, whose public `main` the `nvx-rs` binary ran | The `nvx` binary, alpha.7's `nvx-rs`, which adds only its hidden `main` to the API |
 | `testing` | `testing::fake_openvmm`, whose public `main` the `nvx-fake-openvmm` binary ran | The `nvx-fake-openvmm` binary, which adds only its hidden `main` to the API |
 | `serde` | The serde form of `Hypervisor` | The serde form of `net::Ipv4Cidr`. `Hypervisor`, now `host::runtime::Hypervisor`, has its serde form with the `host` feature |
 | `guest` | The `guest` module, with the guest's space, executions, and processes, and nine guest binaries | The `guest` module, without the guest's space and executions, and ten guest binaries: `nvx-init` is new |
@@ -110,7 +110,7 @@ that hold them, which are hidden too but for `guest::reseed` and
 
 | Binary | Feature | Hidden entry point |
 | --- | --- | --- |
-| `nvx-rs` | `cli` | `nvx::host::cli::main` |
+| `nvx` | `cli` | `nvx::host::cli::main` |
 | `nvx-fake-openvmm` | `testing` | `nvx::testing::fake_openvmm::main` |
 | `nvx-console-pending` | `guest` | `nvx::guest::console_pending::main` |
 | `nvx-device-io` | `guest` | `nvx::guest::device_io::main` |
@@ -126,8 +126,8 @@ that hold them, which are hidden too but for `guest::reseed` and
 ## API crosswalk
 
 CI checks the crate's public API against its snapshots,
-[`linux.txt`](../nvx-rs/public-api/linux.txt) and
-[`windows.txt`](../nvx-rs/public-api/windows.txt), which list each item of the
+[`linux.txt`](../nvx/public-api/linux.txt) and
+[`windows.txt`](../nvx/public-api/windows.txt), which list each item of the
 release, hidden items marked. Each row below names alpha.7's items by their
 alpha.7 paths, and their replacement in the release, or what the caller does
 in their place. *No longer public* means that an item left the public API:
@@ -139,7 +139,7 @@ keeps its path and its signature.
 
 | alpha.7 | The release |
 | --- | --- |
-| `nvx::ErrorCode`, `Error::code` | No longer public: act on `Error::kind`, an `ErrorKind`. The codes that `nvx-rs` prints are the CLI's own, as [Error codes](usage.md#error-codes) lists |
+| `nvx::ErrorCode`, `Error::code` | No longer public: act on `Error::kind`, an `ErrorKind`. The codes that `nvx` prints are the CLI's own, as [Error codes](usage.md#error-codes) lists |
 | `Error::new`, `Error::exited`, `Error::io`, `Error::not_found`, `Error::other`, `Error::protocol`, `Error::timed_out`, `Error::unavailable`, `Error::unsupported`, `Error::with_source` | No longer public: only `nvx` makes its errors. A caller reads them with `Error::kind`, `Error::message`, `Error::into_parts`, and their source, and makes errors of its own types |
 | `ErrorKind` | Two new kinds: `RuntimeMismatch`, for a VM that another runtime launched, which alpha.7 reported as `Other`, and `StillRunning`, for a process whose exit a call could not confirm |
 
@@ -147,7 +147,7 @@ keeps its path and its signature.
 
 | alpha.7 | The release |
 | --- | --- |
-| `nvx::Artifacts`, the same type as `host::artifacts::Artifacts`, with `new`, `discover`, `from_dir`, `from_release_dir`, `from_repo_layout`, `artifact_dir`, `ENV_OPENVMM`, `ENV_KERNEL`, `ENV_INITRD`, `ENV_DIR`, and `BESIDE_EXE_DIR` | No longer public: the caller locates OpenVMM, the guest kernel, and the initramfs, and gives their paths in a `host::runtime::Runtime`. NVX's CLI keeps a lookup of its own, which [`nvx-rs artifacts`](../nvx-rs/README.md#artifacts) prints |
+| `nvx::Artifacts`, the same type as `host::artifacts::Artifacts`, with `new`, `discover`, `from_dir`, `from_release_dir`, `from_repo_layout`, `artifact_dir`, `ENV_OPENVMM`, `ENV_KERNEL`, `ENV_INITRD`, `ENV_DIR`, and `BESIDE_EXE_DIR` | No longer public: the caller locates OpenVMM, the guest kernel, and the initramfs, and gives their paths in a `host::runtime::Runtime`. NVX's CLI keeps a lookup of its own, which [`nvx artifacts`](../nvx/README.md#artifacts) prints |
 | `Artifacts::bundled` | Removed, with the `bundled` feature |
 | `Artifacts::runtime_identity`, and `host::store`'s `RuntimeIdentity`, `ArtifactIdentity`, `IdentityPart`, and `MAX_IDENTITY_LEN` | `host::runtime`'s `RuntimeIdentity`, `ArtifactIdentity`, `IdentityPart`, and `MAX_IDENTITY_LEN`: `RuntimeIdentity::new` takes three labels that the caller reads from install metadata, such as `ArtifactIdentity::sha256` of the digests that a release's `SHA256SUMS` lists, and a `CompatibilityIdentity` that names the caller's contracts with its guests |
 | `RuntimeIdentity`'s `boot_contract`, `control_contract`, and `control_session`, `RuntimeIdentity::check`, and `IdentityPart`'s `BootContract`, `ControlContract`, and `ControlSession` | `RuntimeIdentity::compatibility` and `IdentityPart::Compatibility`: a `CompatibilityIdentity`, an opaque token of 1 to `MAX_IDENTITY_LEN` printable ASCII characters without spaces. The caller composes it from the contracts that it drives its guests through, such as the versions of its boot tokens and of its protocol with its guest agent, and `nvx` compares it and never interprets it. `CompatibilityIdentity::new` checks the token, so `check` is gone, and `RuntimeIdentity::differences` reports `Compatibility` when the tokens differ |
@@ -163,7 +163,7 @@ keeps its path and its signature.
 | --- | --- |
 | `host::launch::LaunchSpec`, and `host::sandbox`'s `SandboxPlan`, `SandboxLaunch`, `SandboxSettings`, `SandboxNetwork`, `SandboxUpper`, `SandboxDistro`, and `PreparedLaunch`, with `host::sandbox::plan` and `host::sandbox::prepared` | One `host::config::VmConfig` for cold boots, captures, and restores: a `RootConfig`, blockless or a `LayeredRoot` with an `UpperConfig`, a `protocol::view::View`, a `NetworkConfig`, an `ExportPlan`, a `ConsoleAttachment`, and, for a cold boot, a `Boot`. Every launch also takes a `host::runtime::Runtime`; see [The library](library.md#the-library) |
 | `host::supervisor::launch`, `host::supervisor::spawn` | `host::vm::create(&runtime, &config, from, &dir)`, which checks a launch and starts nothing, then `host::vm::spawn`, in a directory that the caller creates with `vm::create_private_dir` and opens with `vm::VmDir::open` |
-| `host::supervisor::VmmCommand`, `host::supervisor::spawn_command`, `host::supervisor::Inherited` | `vm::Prepared::into_command`, whose `vm::VmmCommand` and `vm::InheritedHandle`s a launcher of the caller's own starts, as `VmmCommand` documents and the [`external-launch`](../nvx-rs/examples/external-launch.rs) example does |
+| `host::supervisor::VmmCommand`, `host::supervisor::spawn_command`, `host::supervisor::Inherited` | `vm::Prepared::into_command`, whose `vm::VmmCommand` and `vm::InheritedHandle`s a launcher of the caller's own starts, as `VmmCommand` documents and the [`external-launch`](../nvx/examples/external-launch.rs) example does |
 | `host::supervisor::Launched`, `host::supervisor::Vmm`, `host::supervisor::Starting` | `host::vm::Launched`: the VM's verified `host::process::Process`, its `VmOutputs`, its `Capability`, and, for a restore, its `ReadyListener` |
 | `host::supervisor::reattach`, `host::supervisor::Reattached` | `host::vm::attach` and `host::vm::verify`, of a `vm::SavedVm` that the caller saved, and `vm::Attached` |
 | `host::supervisor::StopOutcome`, `host::supervisor::Stopped` | `host::vm::stop`, whose callback asks the guest to end the VM in the caller's protocol, and `vm::Stopped` |
@@ -207,11 +207,11 @@ keeps its path and its signature.
 | --- | --- |
 | `host::filesystem::plan`, `host::filesystem::ExportRequest`, `host::filesystem::Mapping`, `host::filesystem::Target`, `host::filesystem::PathList` | No longer public: NVX's CLI keeps the planner. The caller builds a `host::filesystem::ExportPlan` of its own, checks it with `ExportPlan::check`, and gives it in `VmConfig::filesystem` |
 | `nvx::resolve_guest_path`, `host::filesystem::resolve_guest_path` | Removed: the caller resolves the host path, such as with `std::fs::canonicalize`, then calls `nvx::guest_path` |
-| `host::filesystem::FileIdentity`, `Bind::identity`, `ExportChild::denied_identities` | No longer public: a plan holds paths only, and the caller keeps them naming the objects that it means, as [`host::filesystem`](../nvx-rs/src/host/filesystem/mod.rs) details. NVX's CLI keeps the identities that it pins beside its plans |
+| `host::filesystem::FileIdentity`, `Bind::identity`, `ExportChild::denied_identities` | No longer public: a plan holds paths only, and the caller keeps them naming the objects that it means, as [`host::filesystem`](../nvx/src/host/filesystem/mod.rs) details. NVX's CLI keeps the identities that it pins beside its plans |
 | `ExportPlan::verify`, `ExportPlan::kernel_token`, `ExportPlan::openvmm_arguments` | No longer public: `vm::create` lowers the plan of `VmConfig::filesystem`, and `VmConfig::mapping_table` and `ExportPlan::guest_table` give the guest's mapping table |
 | `host::sandbox::mount`, with `SandboxMount`, `MountPolicy`, `MountAccess`, `MountKind`, `MountOwner`, `PolicyKind`, `BootShares`, `plan_mounts`, `parse_mount_value`, and its other items, and its re-exports in `host::sandbox` | No longer public: NVX's CLI parses its own `--mount` syntax. The guest targets that a share may not take are `protocol::share`'s `RESERVED_MOUNT_TARGETS`, `RESERVED_EXACT_MOUNT_TARGETS`, and `reservation`, and `host::filesystem::ReservedTargets` |
 | `host::sandbox::options`, `host::sandbox::layer`, `host::sandbox::distro`, `host::sandbox::scratch`, `host::seal`, and `host::sandbox`'s `LayerRole`, `LAYER_ROLES`, `BlockRole`, `PLAN_VERSION`, `require_file`, and `SandboxLayer` | No longer public: the caller checks its own options and images |
-| `host::network::policy`, with `compile_policy`, `compile_policy_bytes`, `compile_policy_file`, `CompiledEgressPolicy`, `MAX_JSON_DEPTH`, `MAX_POLICY_FILE_SIZE`, and `MAX_RULES_PER_ACTION` | No longer public: NVX's CLI still reads [policy files](../nvx-rs/README.md#egress-policy-files). The caller builds a `host::network::NetworkPolicy` of `EgressRule`s, `Destination`s, and `PortSelector`s, which `NetworkPolicy::native_egress_rules` lowers |
+| `host::network::policy`, with `compile_policy`, `compile_policy_bytes`, `compile_policy_file`, `CompiledEgressPolicy`, `MAX_JSON_DEPTH`, `MAX_POLICY_FILE_SIZE`, and `MAX_RULES_PER_ACTION` | No longer public: NVX's CLI still reads [policy files](../nvx/README.md#egress-policy-files). The caller builds a `host::network::NetworkPolicy` of `EgressRule`s, `Destination`s, and `PortSelector`s, which `NetworkPolicy::native_egress_rules` lowers |
 
 ### Transport and protocols
 
@@ -315,7 +315,7 @@ starts from fresh state.
 - **NVXC.** NVXC v1 and its FEATURES exchange are gone, and NVX's hosts and
   guests speak NVXC v2 alone, which keeps no compatibility with v1: run NVX's
   guest images and guest programs of the same release as its host.
-- **The CLI's sandboxes.** The release's `nvx-rs` reads only the sandbox
+- **The CLI's sandboxes.** The release's `nvx` reads only the sandbox
   configuration of format 10, with the pins of its export, `export_pins`. It
   refuses alpha.7's, of formats 1, 7, and 8, with `format-unsupported` and the
   advice to deprovision the sandbox and provision it again, and fails on the
@@ -323,8 +323,8 @@ starts from fresh state.
   deprovision each sandbox with alpha.7 before the upgrade, as
   [Upgrades](run.md#upgrades) describes, and provision it again with the
   release.
-- **Restored sandboxes of earlier builds.** `nvx-rs sandbox deprovision`
-  refuses a restored sandbox, which `nvx-rs snapshot restore` creates, that a
+- **Restored sandboxes of earlier builds.** `nvx sandbox deprovision`
+  refuses a restored sandbox, which `nvx snapshot restore` creates, that a
   build before the release provisioned, since it reads the sandbox's
   configuration to find the snapshot whose view the sandbox holds. Stop such a
   sandbox, then remove its state directory while no restore of its snapshot
@@ -356,12 +356,20 @@ starts from fresh state.
   which leaves off what no NVX path needs, such as `/dev/kvm` in the guest; see
   [What the inventory removed](build.md#what-the-inventory-removed).
 
-## The nvx-rs CLI
+## The nvx CLI
 
-[Command-line usage](usage.md#nvx-rs) is the reference of the release's
+[Command-line usage](usage.md#nvx) is the reference of the release's
 commands, and [Run](run.md) describes their workflows. What changes for a
 script that ran alpha.7's:
 
+- The CLI, alpha.7's `nvx-rs`, is `nvx`, the name that its usage and usage
+  errors give, such as `nvx run: error[CODE]: MESSAGE`. A release package
+  holds it as `bin/nvx`, or `bin/nvx.exe`, with its provenance,
+  `provenance/nvx.provenance.json`. In a checkout, the crate's directory is
+  `nvx/`, which builds it at `nvx/target/release/nvx`, `nvx.py` runs the one
+  that the `NVX` environment variable names, in place of `NVX_RS`, and
+  [`record-nvx-provenance`](usage.md#record-nvx-provenance) replaces
+  `record-nvx-rs-provenance`.
 - `run --restore-snapshot` takes the name of a snapshot of the store that
   `--store-dir` names, which [`snapshot capture`](usage.md#snapshot-capture)
   published, and refuses a raw OpenVMM snapshot directory.

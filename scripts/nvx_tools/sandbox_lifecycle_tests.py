@@ -1,6 +1,6 @@
 """Public CLI acceptance for the managed sandbox lifecycle and security profile.
 
-The scenario runs `nvx-rs sandbox` as subprocesses against the real kernel, the
+The scenario runs `nvx sandbox` as subprocesses against the real kernel, the
 Alpine control initramfs, the Ubuntu EROFS layer, and ext4 scratch copies. It
 checks identity admission, fail-closed lifecycle transitions, that overlapping
 starts launch one VM, warm-guest state across exec requests and restarts, the
@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from . import nvx_rs
+from . import nvx_cli
 from .build_constants import (
     BuildConstants,
     InitramfsBuildConstants,
@@ -78,14 +78,14 @@ MANAGED_REFUSAL = {
 @dataclass(frozen=True)
 class Refusal:
     """An error that a public operation must report: the stable code of
-    nvx-rs's error, and stable fragments of its message, such as the names of
+    nvx's error, and stable fragments of its message, such as the names of
     options, files, and parts, which the wording around them may change."""
 
     code: str
     fragments: tuple[str, ...] = ()
 
     def matches(self, stderr: bytes) -> bool:
-        reported = nvx_rs.reported_error(stderr)
+        reported = nvx_cli.reported_error(stderr)
         return (
             reported is not None
             and reported.code == self.code
@@ -100,7 +100,7 @@ class Refusal:
 # A start or a run that OpenVMM ended names the category of its outcome report.
 REFUSED_START = Refusal("exited", (REFUSAL_CATEGORY,))
 
-# The files of a state directory, as nvx-rs sandbox documents them.
+# The files of a state directory, as nvx sandbox documents them.
 CONFIG = "config.json"
 RUNTIME = "runtime.json"
 CAPABILITY = "control.capability"
@@ -128,7 +128,7 @@ ALREADY_RUNNING = Refusal("sandbox-running")
 STALE = Refusal("sandbox-exited")
 NOT_RUNNING = Refusal("sandbox-not-running")
 NOT_PROVISIONED = Refusal("sandbox-not-provisioned")
-# nvx-rs reads the runtime identity of a checkout from the build provenance of
+# nvx reads the runtime identity of a checkout from the build provenance of
 # its OpenVMM, kernel, and initramfs alone, without hashing an artifact.
 PROVENANCE_NAMES = (
     OpenVMMBuildConstants.PROVENANCE_NAME,
@@ -159,7 +159,7 @@ def is_other_runtime_termination(stderr: bytes, pid: int) -> bool:
 
 
 def read_build_provenance() -> dict[str, dict[str, Any]]:
-    """Returns the build provenance from which nvx-rs reads the runtime identity
+    """Returns the build provenance from which nvx reads the runtime identity
     of the checkout, by file name."""
     provenance: dict[str, dict[str, Any]] = {}
     for name in PROVENANCE_NAMES:
@@ -240,7 +240,7 @@ def terminate_process(pid: int) -> None:
 
 def openvmm_threads_remain(runtime: dict[str, Any]) -> bool:
     """Returns whether a thread of the OpenVMM process of a runtime record
-    remains on Linux, where nvx-rs counts a process as running until its last
+    remains on Linux, where nvx counts a process as running until its last
     thread exits: a killed process's main thread can be a zombie, whose command
     line is empty, while its other threads still exit."""
     if sys.platform == "win32":
@@ -266,7 +266,7 @@ def openvmm_threads_remain(runtime: dict[str, Any]) -> bool:
 
 def kill_openvmm(runtime: dict[str, Any], timeout: float, marker: str) -> None:
     """Ends the OpenVMM process of a runtime record, as a crash would, and waits
-    until it has exited as nvx-rs tells; marker names the fixture, as for
+    until it has exited as nvx tells; marker names the fixture, as for
     openvmm_running."""
     if openvmm_running(runtime, marker):
         try:
@@ -312,7 +312,7 @@ def check_managed_report(
     """Checks the report of a managed sandbox that stopped cleanly.
 
     These are the report checks of the direct-mode managed lifecycle
-    (nvx-rs/src/host/session/tests/managed_lifecycle.rs) that hold for the
+    (nvx/src/host/session/tests/managed_lifecycle.rs) that hold for the
     layered root too: the report names the backend, reports `network_policy`,
     or that no network policy was requested when that is None, and every
     teardown step completed.
@@ -451,9 +451,9 @@ class LifecycleAcceptance:
         state: Path | None,
         root: Path | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
-        """Runs one public operation with `nvx-rs sandbox`, under the artifact
+        """Runs one public operation with `nvx sandbox`, under the artifact
         root `root`, or else under this checkout."""
-        command = nvx_rs.command_line(("sandbox", operation), root=root)
+        command = nvx_cli.command_line(("sandbox", operation), root=root)
         if state is not None:
             command.extend(("--state-dir", str(state)))
         command.extend(("--timeout", str(self.timeout), *arguments))
@@ -472,7 +472,7 @@ class LifecycleAcceptance:
         state: Path | None,
         expected: int | None,
     ) -> None:
-        reported = nvx_rs.reported_error(result.stderr)
+        reported = nvx_cli.reported_error(result.stderr)
         self.checks.append(
             {
                 "operation": operation,
@@ -913,7 +913,7 @@ class LifecycleAcceptance:
 
     def write_other_runtime(self) -> None:
         """Writes the checkout's build provenance into the other artifact root,
-        with another initramfs digest, so that nvx-rs reads a runtime identity
+        with another initramfs digest, so that nvx reads a runtime identity
         there that differs from the checkout's in the initramfs."""
         build = self.other_root / BuildConstants.BUILD_DIRECTORY_NAME
         build.mkdir(parents=True)

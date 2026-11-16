@@ -1,24 +1,24 @@
 # Package and source delivery
 
 `package` stages a release directory, `dist/<version>` by default, from the
-built OpenVMM binary, `nvx-rs` executable, and guest artifacts.
+built OpenVMM binary, `nvx` executable, and guest artifacts.
 [Release packages](build.md#release-packages) lists the artifacts and
 provenance it requires, the executables of each platform's package, and the
 binary release layout. Every package is either binary-only or
 source-inclusive, and you must choose one.
 
-Every package ships the release build of `nvx-rs`, the Rust command-line
-interface that runs NVX's microVMs and sandboxes ([Usage](usage.md#nvx-rs)):
-`bin/nvx-rs`, a
+Every package ships the release build of `nvx`, the Rust command-line
+interface that runs NVX's microVMs and sandboxes ([Usage](usage.md#nvx)):
+`bin/nvx`, a
 static `x86_64-unknown-linux-musl` executable, in the Linux packages, and
-`bin/nvx-rs.exe`, an `x86_64-pc-windows-msvc` executable with a static C
-runtime, in the Windows package. `provenance/nvx-rs.provenance.json` binds it
-to the digest of the `nvx-rs` sources that built it, the Rust release, the
+`bin/nvx.exe`, an `x86_64-pc-windows-msvc` executable with a static C
+runtime, in the Windows package. `provenance/nvx.provenance.json` binds it
+to the digest of the `nvx` sources that built it, the Rust release, the
 target, and the `cli` feature, and the packaged `SOURCE-MANIFEST.json` records
-the same in its `nvx_rs` section with the executable's SHA-256. `package`
-requires `nvx-rs/target/release/nvx-rs[.exe]` and its provenance in `build/`,
+the same in its `nvx` section with the executable's SHA-256. `package`
+requires `nvx/target/release/nvx[.exe]` and its provenance in `build/`,
 which must describe it as such a build of the checkout's sources; see
-[`record-nvx-rs-provenance`](usage.md#record-nvx-rs-provenance).
+[`record-nvx-provenance`](usage.md#record-nvx-provenance).
 
 ## Binary-only packages
 
@@ -95,11 +95,11 @@ OpenVMM is MIT licensed: retain its notice, but its source does not have to be
 published merely because it is aggregated with Linux. See
 `THIRD_PARTY_NOTICES.md`.
 
-The `nvx-rs` executables and the guest binaries are MIT licensed NVX code,
+The `nvx` executables and the guest binaries are MIT licensed NVX code,
 built from the `nvx` package, that statically links the Rust standard library
 and permissively licensed crates, with musl and LLVM's `libunwind` on Linux and
 the Microsoft C runtime on Windows. `THIRD_PARTY_NOTICES.md` lists each with
-its license; `nvx-rs/Cargo.lock` pins every crate by checksum. See
+its license; `nvx/Cargo.lock` pins every crate by checksum. See
 [The nvx package](build.md#the-nvx-package) for the license inputs and the
 tests that keep the notices in step with the lockfile.
 
@@ -116,29 +116,29 @@ python3 scripts/nvx.py archive-release \
 `archive-release` checks the staged files against their `SHA256SUMS` before
 it writes a `.tar.gz` or `.zip` archive outside the staged directory; see
 [`archive-release`](usage.md#archive-release). `SHA256SUMS` lists every
-packaged file, `bin/nvx-rs[.exe]` and its provenance included, and every
+packaged file, `bin/nvx[.exe]` and its provenance included, and every
 archive marks the executables in `bin/` executable.
 
-[`download`](usage.md#download) of `nvx-rs` verifies the package against its
+[`download`](usage.md#download) of `nvx` verifies the package against its
 `SHA256SUMS` and installs OpenVMM, the guest artifacts, including the sandbox
 scratch template when the package declares it, and their provenance into the
-checkout, everything or nothing. It leaves the checkout's `nvx-rs`,
+checkout, everything or nothing. It leaves the checkout's `nvx`,
 which Cargo builds, alone, and so installs releases from before packages
-shipped `nvx-rs` too. It warns when a release, such as that of an ancestor,
-declares other OpenVMM contracts than the `nvx-rs` that installs it speaks,
+shipped `nvx` too. It warns when a release, such as that of an ancestor,
+declares other OpenVMM contracts than the `nvx` that installs it speaks,
 such as another microVM ABI, time ABI, restore packet, or control contract,
 and names each field of its manifest that differs.
 
 CI follows the binary-only path. A package job for each of the `linux-kvm`,
 `linux-mshv`, and `windows-whp` platforms stages
-`dist/nvx-<version>-<platform>` with `--binary-only`, with the `nvx-rs` and
-provenance that the `nvx-rs` build job of the platform's operating system built
+`dist/nvx-<version>-<platform>` with `--binary-only`, with the `nvx` and
+provenance that the `nvx` build job of the platform's operating system built
 and its NVX CLI job tested, and archives it as `.tar.gz` on Linux and `.zip` on
 Windows; [Release packages](ci.md#release-packages) describes the jobs and
 when they run. Only `dev` pushes upload the archives, so pull requests, merge
 groups, and full runs prove that their packages build without publishing them.
 The development release job checks that each package ships OpenVMM and
-`nvx-rs` before it publishes them.
+`nvx` before it publishes them.
 [Continuous integration](ci.md) describes the jobs that gate and publish the
 resulting development release.
 
@@ -146,12 +146,12 @@ A documentation-only push, in which every changed path is under `doc/` or ends
 in `.md`, skips the platform and package jobs, as
 [Change classification](ci.md#change-classification) describes. Such a commit
 gets no packages and no development release, so
-[`nvx-rs download`](usage.md#download) installs the package of its nearest
+[`nvx download`](usage.md#download) installs the package of its nearest
 released first-parent ancestor.
 
 ## The nvx crate
 
-[`nvx-rs/`](../nvx-rs/README.md) is also published on crates.io as the `nvx`
+[`nvx/`](../nvx/README.md) is also published on crates.io as the `nvx`
 crate, a preview whose versions are pre-releases, which Cargo selects only for
 a requirement that names a pre-release: `0.2.0-alpha.N` since the breaking
 release that the [changelog](../CHANGELOG.md) records, and `0.1.0-alpha.N`
@@ -159,14 +159,14 @@ before it. The nightly CI run publishes a new version from `dev` whenever the
 crate changed, with the next number, as
 [crates.io releases](ci.md#cratesio-releases) describes, so a change reaches
 crates.io within a day of its merge. The crate holds the files that Git tracks
-in `nvx-rs/`, among them the package's license, `LICENSE`, its README, and its
+in `nvx/`, among them the package's license, `LICENSE`, its README, and its
 lockfile, `Cargo.lock`; its features, profiles, and binaries are those that
 [The nvx package](build.md#the-nvx-package) lists.
 
-The version that `nvx-rs/Cargo.toml` declares is the lowest that CI
+The version that `nvx/Cargo.toml` declares is the lowest that CI
 publishes. A pull request changes it to start another series, as the breaking
 release started `0.2.0-alpha.1`. Only `nvx`'s version changes in
-`nvx-rs/Cargo.lock`.
+`nvx/Cargo.lock`.
 
 When CI cannot publish, as when the newest version on crates.io records no
 commit that `dev` holds, a pull request declares the next version as above,
@@ -175,7 +175,7 @@ and once it merges, a crate owner publishes that version from a fresh clone of
 
 ```bash
 git clone --branch dev https://github.com/microsoft/nvx.git nvx-crate
-cd nvx-crate/nvx-rs
+cd nvx-crate/nvx
 git ls-files --eol . | grep -E 'w/(crlf|mixed)'  # prints nothing
 cargo publish --locked --dry-run
 cargo publish --locked
@@ -183,7 +183,7 @@ cargo publish --locked
 
 `cargo publish` packs the files of the working tree, refuses uncommitted
 changes, and records the commit in the package's `.cargo_vcs_info.json`, but
-Git does not count line endings as changes. `.gitattributes` checks `nvx-rs/`
+Git does not count line endings as changes. `.gitattributes` checks `nvx/`
 out with LF line endings on every platform, whatever `core.autocrlf` says,
 since [microsoft/nvx#764](https://github.com/microsoft/nvx/pull/764). A clone
 that checked its files out with CRLF line endings before then keeps them until
@@ -228,4 +228,4 @@ Repeat `--bin` for each program, or pass `--bins` for all ten. Cargo installs
 them in its own `bin` directory, or in `DIRECTORY/bin` with
 `--root DIRECTORY`. Each program's command line, exit statuses, and output are
 compatibility contracts, which
-[Guest binaries](../nvx-rs/README.md#guest-binaries) lists.
+[Guest binaries](../nvx/README.md#guest-binaries) lists.

@@ -16,11 +16,11 @@ on:
     paths:
       - .github/workflows/copilot-setup-steps.yml
       - .github/actions/build-guest-artifacts/action.yml
-      - .github/actions/check-nvx-rs/action.yml
+      - .github/actions/check-nvx/action.yml
       - .github/actions/check-quality/action.yml
       - .gitmodules
       - SOURCE-MANIFEST.json
-      - nvx-rs/**
+      - nvx/**
       - openvmm
       - requirements-dev.txt
       - rust-toolchain.toml
@@ -105,8 +105,8 @@ jobs:
           set -euo pipefail
           rust_toolchain=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
           # The minimum supported Rust version of the nvx crate, which
-          # check-nvx-rs checks.
-          crate_msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' nvx-rs/Cargo.toml)
+          # check-nvx checks.
+          crate_msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' nvx/Cargo.toml)
           nextest=$(sed -n 's/^cargo_nextest\.version=//p' scripts/setup/tool-versions.conf)
           {
             echo "rust-toolchain=${rust_toolchain}"
@@ -116,7 +116,7 @@ jobs:
           test -n "${rust_toolchain}" && test -n "${crate_msrv}" && test -n "${nextest}"
 
       # The toolchain that rust-toolchain.toml pins builds OpenVMM with its
-      # guest, UEFI, and musl targets and runs the nvx-rs checks, which also
+      # guest, UEFI, and musl targets and runs the nvx checks, which also
       # need a macOS target and the crate's MSRV. OpenVMM
       # keeps full debug info in release builds, so the session limits debug
       # info and disables incremental artifacts to save disk space and link time.

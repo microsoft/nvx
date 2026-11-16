@@ -803,14 +803,14 @@ class PinCommandTests(unittest.TestCase):
 
     def test_check_branch_accepts_a_signed_two_commit_promotion(self) -> None:
         _, roadmap_commit = self.fixture.promote(
-            coordinated={"nvx-rs/allowed.txt": "allowed\n"}
+            coordinated={"nvx/allowed.txt": "allowed\n"}
         )
         result = _invoke([*self.common("check-branch"), "--target", "target", "--json"])
         self.assertEqual(result.code, 0, result.stderr)
         report = result.json()
         self.assertEqual(report["head"], roadmap_commit)
         self.assertEqual(report["mode"], "standalone")
-        self.assertEqual(report["coordinated_files"], ["nvx-rs/allowed.txt"])
+        self.assertEqual(report["coordinated_files"], ["nvx/allowed.txt"])
 
     def test_check_branch_allows_signed_but_unverified_commits(self) -> None:
         self.fixture.promote()

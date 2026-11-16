@@ -139,9 +139,9 @@ class CpuGeneration:
 # the submodule. Doctor uses it only without OpenVMM (--no-openvmm); benchmark
 # reads the profiles of the OpenVMM checkout that it builds instead
 # (openvmm_cpu_generations), and otherwise OpenVMM reports the generation and
-# the profile itself. nvx-rs run, which guides a failed cold boot on a CPU that
+# the profile itself. nvx run, which guides a failed cold boot on a CPU that
 # no built-in profile serves, reads a copy of its own,
-# nvx-rs/src/host/cli/cpu_generations.json.
+# nvx/src/host/cli/cpu_generations.json.
 # Model 85 also covers Cascade Lake (steppings 5-7) and Cooper Lake (10-11),
 # which have no profile. Model 173 is Granite Rapids-AP and -SP; Granite
 # Rapids-D, model 174, has no profile. AMD's family 25 model 1 is Milan's in
@@ -267,7 +267,7 @@ _CPU_PROFILE_FALLBACK = re.compile(
 )
 # The issue form that requests a built-in CPU profile for a CPU
 # (.github/ISSUE_TEMPLATE/cpu-profile.yml), which OpenVMM's fallback warning,
-# nvx-rs run, and benchmark link to, prefilling the CPU fields that the form
+# nvx run, and benchmark link to, prefilling the CPU fields that the form
 # defines.
 CPU_PROFILE_REQUEST_URL = (
     "https://github.com/microsoft/nvx/issues/new?template=cpu-profile.yml"

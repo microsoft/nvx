@@ -823,9 +823,9 @@ class PageTests(unittest.TestCase):
         for output, up in ((diagrams.DEFAULT_OUTPUT, "../.."), (nested, "../../..")):
             with self.subTest(output=output):
                 links = self.links(output)
-                self.assertEqual(links["`nvx` crate"], f"{up}/nvx-rs/README.md")
+                self.assertEqual(links["`nvx` crate"], f"{up}/nvx/README.md")
                 self.assertEqual(
-                    links["`nvx-rs/src/host/mod.rs`"], f"{up}/nvx-rs/src/host/mod.rs"
+                    links["`nvx/src/host/mod.rs`"], f"{up}/nvx/src/host/mod.rs"
                 )
                 for target in links.values():
                     path = (output / target.partition("#")[0]).resolve()
@@ -1332,13 +1332,13 @@ class PublishStepTests(unittest.TestCase):
         self.git("init", "--bare", "--initial-branch=dev", str(self.origin))
         self.seed = self.root / "seed"
         self.git("clone", str(self.origin), str(self.seed))
-        # The drawn commit: the diagrams of an input, nvx-rs/src/lib.rs.
+        # The drawn commit: the diagrams of an input, nvx/src/lib.rs.
         self.drawn = self.advance(
             {
                 "doc/modules/README.md": "old page\n",
                 "doc/modules/overview.svg": "<svg/>\n",
                 "doc/ci.md": "# CI\n",
-                "nvx-rs/src/lib.rs": "// The crate.\n",
+                "nvx/src/lib.rs": "// The crate.\n",
             }
         )
         self.checkout = self.root / "checkout"
@@ -1425,7 +1425,7 @@ class PublishStepTests(unittest.TestCase):
                 "doc/ci.md",
                 "doc/modules/README.md",
                 "doc/modules/dependencies.svg",
-                "nvx-rs/src/lib.rs",
+                "nvx/src/lib.rs",
             ],
         )
         changed = self.git(
@@ -1444,7 +1444,7 @@ class PublishStepTests(unittest.TestCase):
         # the older publication alone reuses the older drawing, and must not
         # replace the newer diagrams with it.
         newer = self.advance(
-            {"nvx-rs/src/lib.rs": "// A newer crate.\n", "doc/modules/README.md": "x\n"}
+            {"nvx/src/lib.rs": "// A newer crate.\n", "doc/modules/README.md": "x\n"}
         )
         result = self.publish()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

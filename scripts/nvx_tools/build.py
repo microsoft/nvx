@@ -1082,7 +1082,7 @@ def build_scratch_template(config: ScratchTemplateBuildConfig) -> None:
         # guest, so name that build rather than _require_linux's.
         raise ScriptError(
             "build-scratch-template requires Linux; install the template with "
-            "`nvx-rs download`, or build it, with the Ubuntu distro layer, in "
+            "`nvx download`, or build it, with the Ubuntu distro layer, in "
             "Docker with `build-guest --guest all`"
         )
     output = config.output.resolve()

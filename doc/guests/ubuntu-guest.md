@@ -1,9 +1,9 @@
 # Ubuntu guest support
 
 NVX runs Ubuntu userland on its own Linux kernel. It builds two artifacts from
-one pinned Ubuntu Base root filesystem: an initramfs that `nvx-rs run` boots
+one pinned Ubuntu Base root filesystem: an initramfs that `nvx run` boots
 for an interactive Ubuntu shell, and an EROFS `distro` layer that
-`nvx-rs sandbox` runs as a non-root workload. Neither artifact boots an Ubuntu
+`nvx sandbox` runs as a non-root workload. Neither artifact boots an Ubuntu
 kernel, firmware, or systemd, and neither changes the
 [machine and device ABI](../design/2-virtual-machine-architecture.md).
 
@@ -15,8 +15,8 @@ describes how the pieces fit together and why.
 
 | Artifact | Used by | Boot supervisor |
 | --- | --- | --- |
-| `initramfs-ubuntu.cpio.gz` | `nvx-rs run --guest ubuntu` | The common NVX `/init` inside the Ubuntu initramfs |
-| `ubuntu-distro.erofs` | `nvx-rs sandbox --layer distro,...` | `nvx-init`, which the common `/init` of the Alpine initramfs starts |
+| `initramfs-ubuntu.cpio.gz` | `nvx run --guest ubuntu` | The common NVX `/init` inside the Ubuntu initramfs |
+| `ubuntu-distro.erofs` | `nvx sandbox --layer distro,...` | `nvx-init`, which the common `/init` of the Alpine initramfs starts |
 
 Alpine remains the default guest of `run` and the only control environment of
 `sandbox`. The sandbox launcher always boots the Alpine initramfs, and the
@@ -197,7 +197,7 @@ Release staging rejects an Ubuntu manifest that does not match its artifact
 and the current inputs. Platform releases carry all four Ubuntu files under
 `guest/`, with the sandbox scratch template, `ubuntu-smoke-scratch.ext4`,
 which has no manifest, as [Release packages](../build.md#release-packages)
-lists; `nvx-rs download` installs them all, and
+lists; `nvx download` installs them all, and
 `run --guest ubuntu` fails when the initramfs is missing instead of falling
 back to Alpine.
 [Package and source delivery](../distribution.md) describes how

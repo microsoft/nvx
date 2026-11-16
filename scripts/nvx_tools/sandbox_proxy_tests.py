@@ -1,6 +1,6 @@
 """Public CLI acceptance for proxy-only sandbox networking.
 
-The scenario provisions a sandbox through `nvx-rs sandbox` with a proxy-only
+The scenario provisions a sandbox through `nvx sandbox` with a proxy-only
 network: egress, ingress, and host-loopback access are denied, and a proxy on
 host loopback, which the guest reaches at its gateway, is the guest's only way
 out. A managed exec request in the Ubuntu workload layer then requests a URL

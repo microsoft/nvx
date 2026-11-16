@@ -503,7 +503,7 @@ class ClassificationTests(unittest.TestCase):
             "Validate NVX CLI",
             "Build OpenVMM",
             "Build guest artifacts",
-            "Check nvx-rs",
+            "Check nvx",
             "Run benchmark",
             "Verify required jobs",
             "Detect relevant changes",
@@ -609,7 +609,7 @@ class ClassificationTests(unittest.TestCase):
                         "error: could not compile `nvx` (lib) due to 1 previous error",
                         "##[error]Process completed with exit code 101.",
                     ],
-                    steps=(("Set up job", "success"), ("Check nvx-rs", "failure")),
+                    steps=(("Set up job", "success"), ("Check nvx", "failure")),
                 )
                 self.assertIs(failure.kind, FailureKind.TEST)
                 self.assertEqual(
@@ -627,7 +627,7 @@ class ClassificationTests(unittest.TestCase):
                 "  [28] Timeout was reached",
                 "##[error]Process completed with exit code 101.",
             ],
-            steps=(("Set up job", "success"), ("Check nvx-rs", "failure")),
+            steps=(("Set up job", "success"), ("Check nvx", "failure")),
         )
         self.assertIs(failure.kind, FailureKind.INFRASTRUCTURE)
         self.assertEqual(failure.cause, "network or download error")

@@ -1,7 +1,7 @@
 # Changelog
 
 This file lists NVX's breaking releases: those of the
-[`nvx` crate](nvx-rs/README.md), with the guest artifacts of the same commit.
+[`nvx` crate](nvx/README.md), with the guest artifacts of the same commit.
 CI publishes the crate's other versions every night, as
 [crates.io releases](doc/ci.md#cratesio-releases) describes.
 
@@ -84,3 +84,8 @@ changed item to its replacement, or to what its caller now does.
   line with `nvx_workload_uid=` or `nvx_workload_gid=` boots only when
   `nvx_identity=` names the same UID and GID.
 - **The guest kernel** no longer sets `CONFIG_MAGIC_SYSRQ`.
+- **The CLI is `nvx`.** NVX's command-line interface, `nvx-rs`, is `nvx`, and
+  the crate's directory is `nvx/`. A release package holds it as `bin/nvx`,
+  with `provenance/nvx.provenance.json`, `nvx.py` runs the one that `NVX`
+  names, in place of `NVX_RS`, and `record-nvx-provenance` replaces
+  `record-nvx-rs-provenance`.

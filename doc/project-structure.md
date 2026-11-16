@@ -19,7 +19,7 @@ are build products or caches and are not part of the tracked source tree. The
 | `guest` | Common and distribution-specific guest scripts |
 | `ubuntu` | Pinned Ubuntu supplemental binary-package lock |
 | `azurelinux` | Checksum-pinned Azure Linux supplemental RPM lock |
-| `nvx-rs` | The `nvx` package: the library of NVX's mechanisms, with NVX's own programs as its binaries |
+| `nvx` | The `nvx` package: the library of NVX's mechanisms, with NVX's own programs as its binaries |
 | `openvmm` | Public OpenVMM Git submodule from `microsoft/openvmm`, tracking its `feature/microvm/dev` branch |
 | `data` | Tracked performance history and generated benchmark data |
 | `scripts/nvx_tools` | Implementation of the `nvx.py` commands |
@@ -47,9 +47,9 @@ nvx/
 |   |   |-- copilot-setup-steps.yml Copilot cloud agent environment
 |   |   |-- module-diagrams.yml  Module diagrams of the nvx crate, drawn every night
 |   |   |-- nightly-ci-report.yml Report of failed nightly CI runs
-|   |   |-- nvx-rs-coverage.yml  Coverage of nvx-rs's own tests, for dev and pull requests
-|   |   |-- nvx-rs-mutants.yml   On-demand mutation testing of nvx-rs
-|   |   |-- nvx-rs-scenario-coverage.yml Coverage of nvx-rs by the KVM microVM scenarios, weekly
+|   |   |-- nvx-coverage.yml     Coverage of nvx's own tests, for dev and pull requests
+|   |   |-- nvx-mutants.yml      On-demand mutation testing of nvx
+|   |   |-- nvx-scenario-coverage.yml Coverage of nvx by the KVM microVM scenarios, weekly
 |   |   |-- package-platform.yml Reusable platform release package job
 |   |   |-- run-nvx-microvm-tests.yml Reusable NVX microVM test job
 |   |   |-- run-platform.yml     Reusable platform benchmark job
@@ -91,14 +91,14 @@ nvx/
 |   |-- project-structure.md     This guide
 |   |-- run.md                   Guest launch and host mapping
 |   |-- setup.md                 Initialization and development prerequisites
-|   `-- usage.md                 Complete nvx-rs and nvx.py command and option reference
+|   `-- usage.md                 Complete nvx and nvx.py command and option reference
 |-- kernel/                      Linux configuration and NVX patch set
 |   |-- patches/                 Ordered patches applied to Linux
 |   |-- COPYING-LINUX            Linux copyright and license notice
 |   |-- config-microvm           MicroVM kernel configuration, generated from the feature inventory
 |   |-- config-microvm.derived   Rule that sets each symbol of config-microvm beyond the inventory
 |   `-- config-microvm-debug     CI debug-kernel fragment (watchdogs on)
-|-- nvx-rs/                      The `nvx` package: NVX's library, with NVX's own programs as its binaries
+|-- nvx/                         The `nvx` package: NVX's library, with NVX's own programs as its binaries
 |   |-- src/
 |   |   |-- lib.rs               The crate's root, its documentation, and its public modules
 |   |   |-- protocol/            The host's mapping table on the wire, boot tokens, and the guest targets that live shares may not take, shared by the host and the guest; private to the crate, the control console's NVXS session and NVXC
@@ -107,17 +107,17 @@ nvx/
 |   |   |-- gpt/                 Strict reading of GPT disks for NVX's guest programs, private to the crate
 |   |   |-- uuid.rs              UUIDs in their canonical text and in GPT's layout, shared by the host and the guest
 |   |   |-- error.rs             `nvx::Error` and its `ErrorKind`, and the crate's private `ErrorCode`
-|   |   |-- host/                Feature `host`: the runtime and its hypervisor, VMs, their configuration and control connections, snapshots, restores, process references, outcome reports, and the lowering of network postures and host export plans; private to the crate, the platform layer and what only NVX's CLI uses, such as the export planner, the sandbox launch profile, and the egress policy compiler; with feature `cli`, NVX's hidden `nvx-rs` CLI
+|   |   |-- host/                Feature `host`: the runtime and its hypervisor, VMs, their configuration and control connections, snapshots, restores, process references, outcome reports, and the lowering of network postures and host export plans; private to the crate, the platform layer and what only NVX's CLI uses, such as the export planner, the sandbox launch profile, and the egress policy compiler; with feature `cli`, NVX's hidden `nvx` CLI
 |   |   |-- testing/             Feature `testing`: NVX's hidden fake OpenVMM
 |   |   |-- guest/               Feature `guest`, on Linux: the libraries on which a guest init builds, such as its control connection, terminal, host mappings, time ABI steps, reseed, snapshot capture, and guest restore; NVX's hidden guest programs; and NVX's guest space, private to the crate
-|   |   `-- bin/                 One file per binary, which calls its program's hidden `main`: nvx-rs, nvx-fake-openvmm, and the ten guest binaries
+|   |   `-- bin/                 One file per binary, which calls its program's hidden `main`: nvx, nvx-fake-openvmm, and the ten guest binaries
 |   |-- examples/                The external-launch example, and the documented host and guest workflows, which only compile
 |   |-- tests/                   Integration tests of the CLI's scenarios, in cli/, the fake OpenVMM, the guest binaries, the layering of `nvx::host`, a VM's lifecycle on a hypervisor, the security checklist, and the copies of the OpenVMM submodule's data, with their fixtures and the conformance vectors of the wire formats
 |   |-- public-api/              The crate's public API on Linux and on Windows, which CI checks
 |   |-- Cargo.toml               Package manifest: features, binaries, examples, and the `guest` profile
 |   |-- Cargo.lock               The package's own lockfile
 |   |-- LICENSE                  The package's MIT license, which the crate ships
-|   `-- README.md                The crate's guide: its modules, the nvx-rs CLI, its features, its guest binaries, and its tests
+|   `-- README.md                The crate's guide: its modules, the nvx CLI, its features, its guest binaries, and its tests
 |-- openvmm/                     OpenVMM Git submodule
 |-- scripts/                     Build, run, benchmark, and release tooling
 |   |-- nvx_tools/               Python implementation behind the NVX CLI
@@ -156,7 +156,7 @@ nvx/
 |   |   |-- microvm_test_scripts/ Guest workloads for the microVM tests
 |   |   |-- microvm_tests.py     NVX microVM correctness tests
 |   |   |-- nightly_ci.py        Nightly CI failure report
-|   |   |-- nvx_rs.py            Finds and builds nvx-rs, records its provenance, and runs it for the microVM tests
+|   |   |-- nvx_cli.py           Finds and builds nvx, records its provenance, and runs it for the microVM tests
 |   |   |-- openvmm_ci.py        Check that OpenVMM's own CI passed the pinned revision
 |   |   |-- openvmm_process.py   Foreground OpenVMM process control for tests
 |   |   |-- performance.py       CI performance collection, persistence, and gates
@@ -194,9 +194,9 @@ nvx/
 |   |-- nvx-hosts.example.json   Template for the ignored .nvx-hosts.json
 |   |-- nvx.py                   Supported command-line entry point
 |   |-- nvx_adversarial_executor.py Restricted adversarial executor entry point
+|   |-- nvx_coverage.py          Coverage of the nvx crate's own tests, run by CI
 |   |-- nvx_hosts.py             Remote host inventory, and commands and scripts on its hosts
-|   |-- nvx_rs_coverage.py       Coverage of the nvx crate's own tests, run by CI
-|   |-- nvx_rs_scenario_coverage.py Coverage of the nvx crate by the KVM microVM scenarios, run by CI
+|   |-- nvx_scenario_coverage.py Coverage of the nvx crate by the KVM microVM scenarios, run by CI
 |   |-- openvmm_git.py           Git and roadmap helpers of the OpenVMM tools
 |   |-- openvmm_pin.py           Checks, roadmap facts, and landing of an OpenVMM pin promotion
 |   |-- openvmm_release.py       State, checks, publication, and landing of an OpenVMM chain release
@@ -273,7 +273,7 @@ verification of the pinned OpenVMM release.
 
 `guest/common` contains scripts shared by the Alpine, Ubuntu, and Azure Linux
 initramfs builds. The ten compiled `/sbin/nvx-*` programs live under
-`nvx-rs/src/guest` and `nvx-rs/src/bin`. `init` controls early boot and then
+`nvx/src/guest` and `nvx/src/bin`. `init` controls early boot and then
 starts an initramfs program named by `nvx_exec=`, `nvx-init` for a layered root,
 `nvx-managed-agent` for a managed workload, a one-shot
 workload named by `nvx_entrypoint=`, a virtio restore probe for benchmark
@@ -322,15 +322,15 @@ notice. See the [build guide](build.md#kernel-configuration) for the
 configuration and [its packaged source](build.md#building-the-packaged-linux-source)
 for other kernel-specific details.
 
-### `nvx-rs/`
+### `nvx/`
 
-`nvx-rs/` holds the `nvx` package, the repository's one Cargo package. Its
+`nvx/` holds the `nvx` package, the repository's one Cargo package. Its
 library, `nvx`, holds the mechanisms of NVX's microVMs: the NVXS session and
 the codecs that the host and the guest share, OpenVMM's command line, the
 lowering of network postures and host export plans into OpenVMM's options,
 verified references to OpenVMM's processes, the creation, spawn, reattachment,
 and stop of VMs, their snapshots and restores, and the guest's side of a
-snapshot. Its binaries are NVX's own programs: the `nvx-rs` command-line
+snapshot. Its binaries are NVX's own programs: the `nvx` command-line
 interface (feature `cli`), which runs NVX's microVMs and sandboxes, downloads
 releases, compiles egress policies, and looks up artifacts; a fake OpenVMM for
 its tests (feature `testing`); and the ten static executables that every guest
@@ -341,7 +341,7 @@ and each binary calls a `main` that `#[doc(hidden)]` hides, so the snapshots
 in `public-api/` record the library's public API alone. The package has its
 own `Cargo.lock`, and builds independently of the OpenVMM submodule;
 [The nvx package](build.md#the-nvx-package) lists its features, profiles,
-binaries, outputs, and license inputs. See its [README](../nvx-rs/README.md)
+binaries, outputs, and license inputs. See its [README](../nvx/README.md)
 and its [module diagrams](modules/README.md).
 
 ### `openvmm/`
@@ -368,7 +368,7 @@ Standalone benchmark shell programs and parameterized guest templates
 live in `nvx_tools/benchmark_scripts/`, and the guest workloads of the microVM
 tests live in `nvx_tools/microvm_test_scripts/`.
 `nvx_tools/guest_binaries.py` builds, checks, and identifies the guest binaries
-of the `nvx` package, and `nvx_tools/nvx_rs.py` builds `nvx-rs` and records its
+of the `nvx` package, and `nvx_tools/nvx_cli.py` builds `nvx` and records its
 provenance; see [The nvx package](build.md#the-nvx-package).
 Source-collection scripts assemble corresponding-source archives for Linux,
 Alpine, and Ubuntu. The adversarial controller, typed broker, credential-free
@@ -394,7 +394,7 @@ hooks that `test-layout-allowlist.json` allows them, and
 [Test layout](contribute.md#test-layout) and
 [Changes to existing tests](contribute.md#changes-to-existing-tests).
 `public_api.py` checks the public API of `nvx` against its snapshots in
-`nvx-rs/public-api/`, and rewrites them; see [Rust crates](ci.md#rust-crates).
+`nvx/public-api/`, and rewrites them; see [Rust crates](ci.md#rust-crates).
 
 The `setup/` scripts bootstrap development hosts and GitHub Actions runners
 using the [tool manifest](../scripts/setup/tool-versions.conf);
@@ -408,11 +408,11 @@ scale set's custom data; see
 [remote agent host](setup.md#remote-agent-hosts) inventory, and CI runs
 `publish_development_release.py` to publish development releases,
 `publish_nvx_crate.py` to publish the `nvx` crate to crates.io (see
-[crates.io releases](ci.md#cratesio-releases)), `nvx_rs_coverage.py` to
+[crates.io releases](ci.md#cratesio-releases)), `nvx_coverage.py` to
 measure which code of the `nvx` crate its tests reach (see
-[nvx-rs coverage](ci.md#nvx-rs-coverage)), `nvx_rs_scenario_coverage.py` to
+[nvx coverage](ci.md#nvx-coverage)), `nvx_scenario_coverage.py` to
 measure which host code of it the KVM microVM scenarios reach (see
-[nvx-rs scenario coverage](ci.md#nvx-rs-scenario-coverage)),
+[nvx scenario coverage](ci.md#nvx-scenario-coverage)),
 `scripts_coverage.py` to measure which code of `scripts/` its unit tests reach
 (see [scripts coverage](ci.md#scripts-coverage)), and `module_diagrams.py` to
 draw the module diagrams that `doc/modules` publishes (see
@@ -422,7 +422,7 @@ The other standalone tools carry the deterministic steps of the Copilot skills,
 and serve contributors as well. `local_gates.py` lists the gates of
 [check-quality](../.github/actions/check-quality/action.yml),
 [validate-nvx](../.github/actions/validate-nvx/action.yml), and
-[check-nvx-rs](../.github/actions/check-nvx-rs/action.yml) that a change
+[check-nvx](../.github/actions/check-nvx/action.yml) that a change
 selects, with the commands that those actions define, and runs them.
 `pr_threads.py` lists a pull request's review threads, reviews, and
 conversation comments, and replies to and resolves threads, checking each
@@ -463,13 +463,13 @@ build on `openvmm_git.py`.
 | Path | Contents |
 | --- | --- |
 | `.cache/` | Downloaded and verified upstream archives and packages, and patched upstream source trees |
-| `build/` | Kernels, initramfs and EROFS images, the sandbox scratch template, package manifests, the provenance of OpenVMM, the kernels, the Alpine initramfs, and `nvx-rs`, and collected sources |
+| `build/` | Kernels, initramfs and EROFS images, the sandbox scratch template, package manifests, the provenance of OpenVMM, the kernels, the Alpine initramfs, and `nvx`, and collected sources |
 | `data/baseline/` | Base-branch histories staged by the performance gate |
 | `data/results/` | Collected p50 results for the current commit |
 | `data/runs/` | Raw benchmark logs and per-platform artifacts |
 | `dist/` | Staged binary and source release archives |
 | `openvmm/target/` | Rust build output produced inside the OpenVMM submodule |
-| `nvx-rs/target/` | Cargo's build output of the `nvx` package, among it `release/nvx-rs[.exe]` |
+| `nvx/target/` | Cargo's build output of the `nvx` package, among it `release/nvx[.exe]` |
 | `.ruff_cache/` | Ruff's local lint cache |
 | `__pycache__/` | Python bytecode caches that may appear below Python source directories |
 

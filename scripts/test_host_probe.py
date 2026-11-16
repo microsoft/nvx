@@ -96,7 +96,7 @@ class HostProbeTests(unittest.TestCase):
             (root / "openvmm" / ".git").write_text(
                 "gitdir: elsewhere", encoding="utf-8"
             )
-        (root / "nvx-rs" / "target" / "release").mkdir(parents=True)
+        (root / "nvx" / "target" / "release").mkdir(parents=True)
         build = root / "build"
         (build / "nested").mkdir(parents=True)
         (build / "one").write_text("1", encoding="utf-8")
@@ -106,7 +106,7 @@ class HostProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             self.make_checkout(root, initialized=True)
-            (root / "nvx-rs" / "target" / "release" / "nvx-rs").write_text(
+            (root / "nvx" / "target" / "release" / "nvx").write_text(
                 "binary", encoding="utf-8"
             )
             responses = _repository_responses(root, root, initialized=True)
@@ -172,7 +172,7 @@ class HostProbeTests(unittest.TestCase):
             self.assertEqual(
                 document["openvmm_processes"], ["42 /usr/bin/openvmm --run"]
             )
-            self.assertTrue(document["nvx_rs"])
+            self.assertTrue(document["nvx"])
             self.assertEqual(document["artifacts"], {"exists": True, "files": 2})
             verify = cast(dict[str, object], document["verify"])
             self.assertEqual(verify["exit_code"], 3)
@@ -192,7 +192,7 @@ class HostProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             self.make_checkout(root, initialized=False)
-            executable = root / "nvx-rs" / "target" / "release" / "nvx-rs.exe"
+            executable = root / "nvx" / "target" / "release" / "nvx.exe"
             executable.write_text("binary", encoding="utf-8")
             responses = _repository_responses(root, root, initialized=False)
             responses[
@@ -225,7 +225,7 @@ class HostProbeTests(unittest.TestCase):
             self.assertEqual(devices["HypervisorPlatform"], "unknown (needs elevation)")
             processes = cast(list[dict[str, object]], document["openvmm_processes"])
             self.assertEqual(processes[0]["Id"], 42)
-            self.assertTrue(document["nvx_rs"])
+            self.assertTrue(document["nvx"])
             self.assertNotIn("verify", document)
             backend = cast(dict[str, object], document["backend"])
             self.assertTrue(backend["usable"])

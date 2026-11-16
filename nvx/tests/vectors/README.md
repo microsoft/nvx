@@ -1,0 +1,127 @@
+# Conformance vectors
+
+These files hold the conformance vectors of NVX's wire formats: bytes that every
+implementation must produce and accept, including those that share no code with
+`nvx`, such as OpenVMM's broker and gateway and the guest agents of released
+guests, some of which run the C agent. The host, the guest agent, and the fake
+OpenVMM share one codec, so a change to it passes every round trip among them,
+yet breaks those peers. Only bytes that no codec produced catch such a change.
+
+| File | Vectors |
+| --- | --- |
+| [`nvxc-v1.txt`](nvxc-v1.txt) | Version 1 of the control protocol, which no peer speaks any longer: `NVXC` frames, which version 2 refuses, their `EXEC` and `MAPS` payloads, which version 2 carries unchanged, their features payloads, and `NVXS` records of NVX's host and guest |
+| [`nvxl-v1.txt`](nvxl-v1.txt) | Version 1 of the `NVXL` listener announcement |
+| [`activation-v2.txt`](activation-v2.txt) | Version 2 of the guest-restore record of a layered root, and what Ready reports about a guest restore |
+| [`snapshot-key-v1.txt`](snapshot-key-v1.txt) | Version 1 of the canonical encoding of a snapshot's compatibility key, with its identity |
+| [`openvmm/`](openvmm) | OpenVMM's vectors and cases of the `NVXS` session, and the excerpts of its sources that define the kernel command-line tokens of its platform tier, unchanged |
+
+[4.4 Host-Guest Control Interface](../../../doc/design/4.4-host-guest-control-interface.md)
+and
+[3.5.4 Host-Local Access and Ingress](../../../doc/design/3.5-network.md#354-host-local-access-and-ingress)
+describe the protocols, and the documentation of `nvx::guest_restore`, in
+[`src/guest_restore/mod.rs`](../../src/guest_restore/mod.rs), the guest-restore
+record.
+
+## Line format
+
+`nvxc-v1.txt`, `nvxl-v1.txt`, `activation-v2.txt`, and `snapshot-key-v1.txt`
+share one line format. A line that starts with `#` is a comment, and an empty
+line is ignored. Every other line is one vector, whose fields `|` separates:
+
+```text
+KIND|NAME|BYTES|VALUE|...
+```
+
+- `KIND` names what the bytes encode, one of the kinds that the file's header
+  lists with their values.
+- `NAME` names the vector, uniquely among the vectors of its kind.
+- `BYTES` is the encoding, with two lowercase hexadecimal digits per byte.
+- The values are what the bytes encode, in the order that the kind lists them:
+  - A number is decimal, or hexadecimal after `0x`, and a negative one starts
+    with `-`.
+  - A byte string is hexadecimal, as `BYTES` is; an empty field is an empty one.
+  - A text stands for bytes: a printable ASCII character other than `%` and `|`
+    for itself, and `%` followed by two hexadecimal digits for any byte.
+  - A word in capitals is one of those that the kind lists.
+  - `-` stands for an absent value, where the kind allows one.
+  - A list is its number of items, followed by the values of each item in turn.
+
+A decoder must decode the bytes of each vector to its values, and an encoder
+must encode the values to exactly its bytes. A kind whose name starts with
+`INVALID_` has no values: every decoder must refuse the bytes of its vectors.
+The frames and the features payload of `nvxc-v1.txt` have no codec any longer:
+version 2's decoder refuses those frames, version 2 carries their `EXEC` and
+`MAPS` payloads unchanged, and its tests pin the bytes of its own frames.
+
+A key holds too many values for one line, so the value of each vector of
+`snapshot-key-v1.txt` is its identity, and the file's header names the
+captures whose keys the vectors encode. The tests of
+`nvx::host::snapshot` derive each key from its capture, and check that it is
+the key that the vector's bytes decode to.
+
+## Rules
+
+- A vector changes only with a protocol version. A new version gets files of
+  its own, such as `nvxc-v2.txt` for the exec v2 of
+  [microsoft/nvx#623](https://github.com/microsoft/nvx/issues/623), and the
+  bytes of an earlier version that it refuses become its rejection vectors.
+  Version 1 has two exceptions. `MAPS|ROOT_SOURCE` of `nvxc-v1.txt` was the
+  rejection vector `INVALID_MAPS|EMPTY_SOURCE` until an empty source came to
+  name the export's root, for a host whose export is one directory. NVX's
+  hosts, whose exports are aggregates, send none, and a host whose export is
+  one directory sends one only to a guest that deploys with it, so the C agent
+  of earlier releases, which refuses it, never receives one. And the snapshot
+  key of `snapshot-key-v1.txt` drops the obsolete guest-build field, uses the
+  `nvx snapshot key` hash domain in place, records the compatibility identity
+  that its runtime's caller names in place of NVX's boot contract, control
+  contract, and control session versions, drops the restore packet version,
+  and appends the full capture-time contract, while its compatibility identity
+  still digests only the preceding compatibility fields: its encoding has not
+  been released, and no snapshot outlives a deployment, so no key that an
+  earlier build encoded is supported, since nothing migrates it.
+- The bytes come from the protocol's definition, never from the code that they
+  check, and so do the values of each vector.
+
+## OpenVMM's vectors
+
+`openvmm/` holds `control_session_protocol_vectors.txt` and
+`control_session_protocol_cases.txt` of OpenVMM's
+`vm/devices/virtio/virtio_console/test_data/`, unchanged, from OpenVMM commit
+[`b4028c1aa775d8aafba1a170857acc032c7c86a1`](https://github.com/microsoft/openvmm/tree/b4028c1aa775d8aafba1a170857acc032c7c86a1/vm/devices/virtio/virtio_console/test_data).
+They keep OpenVMM's own format, which its `control_session_protocol` tests read:
+one record of each type, as `NAME|BYTES`, and 37 cases of the boundaries and
+refusals of the records' payloads and headers. The tests of the crate's NVXS
+session, under `src/protocol/nvxs/`, check that each vector decodes and
+encodes to its bytes, and that each case is accepted or refused as it says.
+
+`openvmm/` also holds two excerpts of OpenVMM's sources at that commit, whole
+lines, unchanged: `platform_command_line_token_is_invariant.rs`, the function
+of `openvmm/openvmm_helpers/src/snapshot/microvm.rs` that admits the kernel
+command-line tokens of a capture at OpenVMM's platform tier, after the
+constant of the kernel tuning parameters that it admits among them, and
+`microvm_control_tty_command_line.rs`, the constant of
+`openvmm/openvmm_defs/src/microvm.rs` that names the control tty's token, which
+the function reads. The tests of `nvx::host::config` compile them, and check
+that its allowlist of a capture's kernel command-line tokens admits each token
+as OpenVMM's own function does.
+
+The tests cannot call OpenVMM's broker or its allowlist: OpenVMM's workspace
+needs a later Rust release than `nvx`'s minimum, and the `nvx` job cannot
+check out the OpenVMM submodule, whose deploy key fork pull requests lack. They
+read the copies instead, and the ignored test `tests/openvmm_vectors.rs`
+compares the copies with the submodule's files, and finds each excerpt among
+the lines of its file. It also checks that the versions of OpenVMM's snapshot
+format, time ABI, and restore packet that the sources of `nvx` define are
+the submodule's, and that the bound of a guest-restore record,
+`nvx::guest_restore::MAX_RECORD_BYTES`, is that of the submodule's restore
+packet.
+The NVX CLI jobs, which check out the submodule, run it, and so does an OpenVMM
+pin promotion, from the repository's root:
+
+```bash
+cargo test --locked --manifest-path nvx/Cargo.toml --no-default-features \
+  --test openvmm_vectors -- --ignored
+```
+
+When a pin changes OpenVMM's files, or the lines of an excerpt, copy them here
+unchanged, record the commit above, and update the tests that they fail.

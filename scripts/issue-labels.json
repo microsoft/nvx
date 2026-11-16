@@ -4,7 +4,7 @@
     "area: openvmm": ["openvmm", "microvm"],
     "area: guest": ["guest", "nvx-init"],
     "area: kernel": ["kernel"],
-    "area: nvx-rs": ["nvx-rs"],
+    "area: nvx": ["nvx", "nvx-rs"],
     "area: userland": ["userland", "alpine", "ubuntu", "azure linux", "azurelinux"],
     "area: networking": ["network", "networking"],
     "area: snapshot": ["snapshot", "snapshots"],

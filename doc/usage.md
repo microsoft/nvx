@@ -2,7 +2,7 @@
 
 NVX has two command-line interfaces, which run from the repository root:
 
-- [`nvx-rs`](#nvx-rs) runs NVX microVMs and sandboxes: [`run`](#run) boots a
+- [`nvx`](#nvx) runs NVX microVMs and sandboxes: [`run`](#run) boots a
   microVM on the terminal, or restores a named snapshot once,
   [`sandbox`](#sandbox) runs or manages workloads over an EROFS image or a GPT
   disk and a private ext4 scratch or tmpfs upper,
@@ -18,70 +18,70 @@ NVX has two command-line interfaces, which run from the repository root:
   ```
 
 The examples on this page use the POSIX spelling. On Windows, use
-`nvx-rs\target\release\nvx-rs.exe` and `python scripts\nvx.py` instead.
+`nvx\target\release\nvx.exe` and `python scripts\nvx.py` instead.
 Every command accepts `-h` or `--help`, including nested commands:
 
 ```console
-nvx-rs/target/release/nvx-rs run --help
+nvx/target/release/nvx run --help
 python3 scripts/nvx.py --help
 python3 scripts/nvx.py performance gate --help
 ```
 
-## nvx-rs
+## nvx
 
-[`nvx-rs`](../nvx-rs/README.md#the-nvx-rs-cli) is the Rust command-line
+[`nvx`](../nvx/README.md#the-nvx-cli) is the Rust command-line
 interface that runs NVX's microVMs and sandboxes. Cargo builds it from the
-repository root at `nvx-rs/target/release/nvx-rs`, or `nvx-rs.exe` on Windows,
+repository root at `nvx/target/release/nvx`, or `nvx.exe` on Windows,
 with the Rust release that `rust-toolchain.toml` pins;
 [rustup](https://rustup.rs) installs Cargo. `--target-dir` keeps the executable
 there even where `CARGO_TARGET_DIR` names another directory. Build it again
-after changing `nvx-rs`:
+after changing `nvx/`:
 
 ```console
-cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml --target-dir nvx-rs/target
+cargo build --release --locked --features cli --manifest-path nvx/Cargo.toml --target-dir nvx/target
 ```
 
-Without `--root`, `nvx-rs` uses the artifacts of the checkout that holds it:
+Without `--root`, `nvx` uses the artifacts of the checkout that holds it:
 the guest artifacts in `build/` and OpenVMM in `openvmm/target/release/`.
 [`download`](#download) installs those of a release there, and `run` and
 `sandbox` download them first into a Git checkout that holds none of them.
-The `nvx-rs` of an extracted release package, `bin/nvx-rs`, uses the release's
-artifacts; see [Artifact root](../nvx-rs/README.md#artifact-root).
+The `nvx` of an extracted release package, `bin/nvx`, uses the release's
+artifacts; see [Artifact root](../nvx/README.md#artifact-root).
 
-`nvx-rs` keeps the state of its sandboxes and snapshots in the directories that
+`nvx` keeps the state of its sandboxes and snapshots in the directories that
 their commands name, `--state-dir` and `--store-dir`, in formats of its own,
 which another version of NVX may not read and never migrates: upgrade with
 fresh state, as [Upgrades](run.md#upgrades) says.
 
-The [`test-microvm`](#test-microvm) scenarios run `nvx-rs` too. They run, in
+The [`test-microvm`](#test-microvm) scenarios run `nvx` too. They run, in
 this order:
 
-1. the executable that the `NVX_RS` environment variable names;
-2. `nvx-rs/target/release/nvx-rs[.exe]` in the checkout; or else
+1. the executable that the `NVX` environment variable names;
+2. `nvx/target/release/nvx[.exe]` in the checkout; or else
 3. that executable, after they build it with the command above, with Cargo's
    output on standard error, so that it never mixes with their output.
 
-Without `NVX_RS`, a built executable, or Cargo, they fail and name these
+Without `NVX`, a built executable, or Cargo, they fail and name these
 choices. They rebuild nothing once the executable exists. The
 `managed-lifecycle` and `vm-lifecycle` scenarios also need Cargo, which runs
-their `nvx-rs` tests.
+their `nvx` tests.
 
-The provenance of a checkout's `nvx-rs`, `build/nvx-rs.provenance.json`, binds
-the SHA-256 of its executable to a digest of the `nvx-rs` sources that built
+The provenance of a checkout's `nvx`, `build/nvx.provenance.json`, binds
+the SHA-256 of its executable to a digest of the `nvx` sources that built
 it, the crate's manifest, lock file, and `src/` tree and
 `rust-toolchain.toml`, and to the Rust release, target, and Cargo features of
-the build. `nvx.py` records it when it builds `nvx-rs` for the scenarios, and
-[`record-nvx-rs-provenance`](#record-nvx-rs-provenance) records it for a build
+the build. `nvx.py` records it when it builds `nvx` for the scenarios, and
+[`record-nvx-provenance`](#record-nvx-provenance) records it for a build
 made otherwise, such as with the command above. [`package`](#package) and the
-[adversarial executor](adversarial-testing.md#nvx-rs-on-the-target) refuse an
-`nvx-rs` that it does not describe as built from the checkout's sources, so a
+[adversarial executor](adversarial-testing.md#nvx-on-the-target) refuse an
+`nvx` that it does not describe as built from the checkout's sources, so a
 stale build never ships or runs unnoticed.
 
 ### Error codes
 
-`nvx-rs` reports each error on standard error as `error[CODE]: MESSAGE`, and
+`nvx` reports each error on standard error as `error[CODE]: MESSAGE`, and
 exits with status 1, and each usage error as the usage of its parser and then
-`PROG: error[CODE]: MESSAGE`, such as `nvx-rs run: error[argument-invalid]:
+`PROG: error[CODE]: MESSAGE`, such as `nvx run: error[argument-invalid]:
 ...`, and exits with status 2. Each error is one line: a line break in a value
 that its message names, such as a path, prints as `\n` or `\r`. `CODE` is a
 stable code, which tells errors apart where their messages may change: callers
@@ -91,7 +91,7 @@ reused, and a later release may add codes, which callers treat as failures of
 the command. The usage errors that `nvx.py` itself reports, as `argparse` does,
 carry no code, and neither does an interruption by SIGINT or, outside
 Windows, SIGTERM, which prints `Interrupted` and exits with status 130. The
-[`nvx-rs` README](../nvx-rs/README.md#error-codes) gives the `ErrorKind` of
+[`nvx` README](../nvx/README.md#error-codes) gives the `ErrorKind` of
 each code, which callers of the `nvx` library see in its place.
 
 | Code | Status | Meaning |
@@ -127,7 +127,7 @@ each code, which callers of the `nvx` library see in its place.
 ### `run`
 
 ```text
-nvx-rs/target/release/nvx-rs run
+nvx/target/release/nvx run
     [--guest {alpine,ubuntu,azurelinux}]
     [--hypervisor {auto,whp,kvm,mshv}]
     [--machine {microvm}]
@@ -207,7 +207,7 @@ Cold mount-policy options require a `--mount`, and network-policy options
 require networking. A proxy is the guest's sole egress path, so it cannot be
 combined with `--network-egress-allow` rules for direct connections.
 
-`nvx-rs run` checks its options, prints the OpenVMM command of a cold boot
+`nvx run` checks its options, prints the OpenVMM command of a cold boot
 after `>> `, and unless `--dry-run` is given, runs OpenVMM in a private
 temporary VM directory, which it removes once OpenVMM has exited, on the
 terminal. A cold boot attaches the guest's console, the boot console `hvc1`,
@@ -217,7 +217,7 @@ kernel's early messages, goes to standard error with OpenVMM's log. It exits
 with status 1 for an error, 2 for a usage error, and 130 after Ctrl-C, and
 otherwise with the status that OpenVMM returns. Its errors and usage errors
 carry their [error codes](#error-codes), as `error[CODE]: MESSAGE` and
-`nvx-rs run: error[CODE]: MESSAGE`. A run requires the OpenVMM release
+`nvx run: error[CODE]: MESSAGE`. A run requires the OpenVMM release
 binary, `build/vmlinux`, and the selected `build/initramfs*.cpio.gz`, and a
 restore the Alpine one. When one of them is missing from a Git checkout that
 holds none of the files that a release installs, `run` first installs the
@@ -263,10 +263,10 @@ until a command of the sandbox ends it; nothing else does. So does Ctrl-C once
 the workload has exited with status 0, while the run stops the VM. The
 snapshot's lock goes with the `run`, so other restores of the snapshot proceed,
 and a later `run` refuses the existing `--state-dir`. While the workload ran,
-the start was unfinished, and `nvx-rs sandbox deprovision --state-dir PATH`
+the start was unfinished, and `nvx sandbox deprovision --state-dir PATH`
 ends the VM, through the recovery of the start's launch journal, and removes
 the directory. Once the workload had exited with status 0, the VM runs as a
-started sandbox does, and `nvx-rs sandbox stop --state-dir PATH` must end it
+started sandbox does, and `nvx sandbox stop --state-dir PATH` must end it
 before `deprovision` removes the directory.
 
 If no built-in CPU profile serves an Intel or AMD host's CPU, OpenVMM falls
@@ -282,15 +282,15 @@ built-in profile serves, OpenVMM exits with `E_PROFILE_HOST_UNKNOWN` before it
 creates the VM, and `run` explains that host profiles cannot boot there
 either. A host whose hypervisor does not support its built-in profile fails
 with `E_PROFILE_UNSUPPORTED` instead, and on an Intel or AMD CPU OpenVMM's
-error itself names `--cpu-profile host`. `nvx-rs run` identifies the CPU with
+error itself names `--cpu-profile host`. `nvx run` identifies the CPU with
 CPUID, as OpenVMM does, derives the guidance from its copy of the CPUs that the
 built-in profiles serve, and prints it only after OpenVMM fails a cold boot,
-never after a dry run, a restore, an option that `nvx-rs` refuses, or Ctrl-C.
+never after a dry run, a restore, an option that `nvx` refuses, or Ctrl-C.
 
 ### `sandbox`
 
 ```text
-nvx-rs/target/release/nvx-rs sandbox
+nvx/target/release/nvx sandbox
     [{run,provision,start,exec,stop,deprovision}]
     [--layer ROLE,PATH,IMAGE_UUID]
     [--layer-format {erofs,gpt}]
@@ -335,11 +335,11 @@ Network policy and live-share options configure only the `run` and `provision`
 launches, which check the network options as one typed policy before anything
 launches or is recorded; see [Sandbox networking](run.md#sandbox-networking).
 
-`nvx-rs sandbox` runs the operation, `run` by default, with the options
+`nvx sandbox` runs the operation, `run` by default, with the options
 given. It exits with status 1 for an error, 2 for a usage error, and 130 after
 Ctrl-C, and otherwise with the status that the workload or OpenVMM returns. Its
 errors and usage errors carry their [error codes](#error-codes), as
-`error[CODE]: MESSAGE` and `nvx-rs sandbox: error[CODE]: MESSAGE`. An `exec`,
+`error[CODE]: MESSAGE` and `nvx sandbox: error[CODE]: MESSAGE`. An `exec`,
 and the workload of a `run`, stream the command's standard input to the
 workload until it ends, and the workload's standard output and error back as
 they arrive, without a limit on their size; a command whose input is the null
@@ -365,7 +365,7 @@ those of [`run`](#run) do, and their names cannot be abbreviated either.
 | `--workload-user UID:GID` | `65534:65534` | Select the fixed non-root workload identity for `run` or `provision`. Both IDs must be ASCII decimal integers from 1 to 4294967294, without signs, whitespace, or underscores. |
 | `--memory-mib MIB` | `256` | Set guest memory in MiB, an ASCII decimal integer from 1 to 17592186044415, without signs, whitespace, or underscores. |
 | `--timeout SECONDS` | `60` | Set the timeout for each managed control request and its response in `run`, `start`, `exec`, and `stop`, within which the workload of `run` and `exec`, whose output streams until it ends, must end; the longest time that `run` and `stop` wait for the VM to exit once the guest shuts it down; and the longest time that `provision`, `start`, `exec`, `stop`, and `deprovision` wait for another lifecycle transition of the sandbox. It is a decimal number, with an optional fraction and exponent, that must be finite and greater than 0. |
-| `--wait SECONDS` | `60` | Set the longest time that a managed `exec` waits for the `exec` that another `nvx-rs` process runs in the sandbox to end and release the sandbox's exec lock, since a sandbox runs one `exec` at a time; it then fails with `sandbox-busy`. `stop` never waits for an `exec`. Like `--timeout`, which still bounds each wait for another lifecycle transition, it is a decimal number that must be finite and greater than 0. |
+| `--wait SECONDS` | `60` | Set the longest time that a managed `exec` waits for the `exec` that another `nvx` process runs in the sandbox to end and release the sandbox's exec lock, since a sandbox runs one `exec` at a time; it then fails with `sandbox-busy`. `stop` never waits for an `exec`. Like `--timeout`, which still bounds each wait for another lifecycle transition, it is a decimal number that must be finite and greater than 0. |
 | `--exec-timeout-ms MILLISECONDS` | `0` | Set the guest's timeout of the workload of `run` or `exec` to an ASCII decimal integer from 0 to 4294967295, without signs, whitespace, or underscores; zero disables the workload deadline. This is separate from the finite host `--timeout` control deadline. |
 | `--cwd GUEST_PATH` | `/` | Set an absolute working directory inside the workload root for `run` or `exec`. It is resolved after the workload identity and root are applied; missing, inaccessible, or non-directory paths fail the workload launch. Default and layered environments point `PWD` at this directory; an exact replacement environment controls `PWD` itself. |
 | `--environment KEY=VALUE` | omitted | Set the exact environment of the workload of `run` or `exec`. Repeat for multiple entries. Empty values, spaces, additional equals signs, and UTF-8 are preserved. Inline values are visible in the invoking host process arguments; use `--environment-file` for sensitive values. |
@@ -388,11 +388,11 @@ those of [`run`](#run) do, and their names cannot be abbreviated either.
 | `--network-proxy IPV4:TCP-PORT` | none | Make the network proxy-only: the workload reaches the HTTP or HTTPS proxy that listens on host `127.0.0.1:TCP-PORT` at `IPV4:TCP-PORT`, where `IPV4` must be the guest gateway, and nothing else. `TCP-PORT` can't be 53, where OpenVMM answers DNS at the gateway. Requires `--network-egress deny` and `--host-loopback deny`, and refuses egress rules, `--network-ingress allow`, and forwards. NVX gives the workloads of a cold boot no proxy settings; see [Proxy-only networking](run.md#proxy-only-networking). |
 | `--host-loopback-forward PROTOCOL:HOST_PORT:GUEST_PORT` | none | Publish one TCP or UDP localhost port to the guest; repeat to add forwards. Requires `--host-loopback allow`. A UDP forward also requires egress allowed by default and no deny rule that covers the guest network, which carries its replies; OpenVMM lets the replies on a forwarded TCP connection through whatever the egress policy. |
 | `--outcome-report PATH` | none | Write a bounded local JSON outcome report: for `run`, OpenVMM's report of its VM, which the guest stopped after the workload; for `exec`, the workload's outcome. |
-| `--cmdline TEXT` | empty | Append non-sandbox kernel parameters, which `nvx-rs` reads as Linux does: split at whitespace, which includes the `0xa0` in `à`, outside double quotes, with names that match whether they spell a dash or an underscore. Parameters whose names start with `nvx_` or `virtfs_` are reserved and refused, even inside a quoted value, and so are a `--` or unclosed quote that hides the tokens that OpenVMM appends, and double quotes, which the VM control console cannot represent; see [Experimental single-workload sandbox](run.md#experimental-single-workload-sandbox). The guest powers off if its kernel applies a clock parameter that the time ABI forbids, such as `tsc=unstable`. |
+| `--cmdline TEXT` | empty | Append non-sandbox kernel parameters, which `nvx` reads as Linux does: split at whitespace, which includes the `0xa0` in `à`, outside double quotes, with names that match whether they spell a dash or an underscore. Parameters whose names start with `nvx_` or `virtfs_` are reserved and refused, even inside a quoted value, and so are a `--` or unclosed quote that hides the tokens that OpenVMM appends, and double quotes, which the VM control console cannot represent; see [Experimental single-workload sandbox](run.md#experimental-single-workload-sandbox). The guest powers off if its kernel applies a clock parameter that the time ABI forbids, such as `tsc=unstable`. |
 | `--dry-run` | off | For `run` only, print the generated OpenVMM microVM command without launching it. Other operations reject this option. |
 
 `run` and `start` install the release of a Git checkout that holds no
-artifacts before they launch, as `nvx-rs run` does. A `run` keeps no state:
+artifacts before they launch, as `nvx run` does. A `run` keeps no state:
 it launches the VM that a `provision` and a `start` of its options would
 launch, in a temporary VM directory that it removes, executes its workload
 once, as `exec` does, with its streams, has the guest shut the VM down, which
@@ -407,7 +407,7 @@ See [Run](run.md) for artifact preparation, the security boundary, the
 ### `snapshot capture`
 
 ```sh
-nvx-rs/target/release/nvx-rs snapshot capture baseline \
+nvx/target/release/nvx snapshot capture baseline \
     --store-dir /private/snapshots --hypervisor kvm
 ```
 
@@ -453,7 +453,7 @@ from them.
 ### `snapshot restore`
 
 ```sh
-nvx-rs/target/release/nvx-rs snapshot restore baseline \
+nvx/target/release/nvx snapshot restore baseline \
     --store-dir /private/snapshots --state-dir /private/sandboxes/restored \
     --layer distro,/images/distro.erofs,UUID --upper ram --hypervisor kvm
 ```
@@ -538,7 +538,7 @@ Activate: UnusableRoot, attributed to the request`.
 ### `download`
 
 ```text
-nvx-rs/target/release/nvx-rs download
+nvx/target/release/nvx download
     [--repository OWNER/REPOSITORY]
     [--hypervisor {auto,whp,kvm,mshv}]
 ```
@@ -572,9 +572,9 @@ before it shipped lack, and installs the packaged OpenVMM at
 `openvmm/target/release/openvmm[.exe]`, executable, with the build provenance
 of the artifacts in `build/`. It installs everything or, if a step fails,
 nothing, and fails on a directory where the release has a file rather than
-delete what the directory holds. It leaves the checkout's `nvx-rs` alone, which
-Cargo builds; see [nvx-rs](#nvx-rs). It warns when the release declares other
-OpenVMM contracts than the `nvx-rs` that installs it speaks, such as another
+delete what the directory holds. It leaves the checkout's `nvx` alone, which
+Cargo builds; see [nvx](#nvx). It warns when the release declares other
+OpenVMM contracts than the `nvx` that installs it speaks, such as another
 microVM ABI, time ABI, restore packet, or control contract, as a fallback
 release may, and names each field of its manifest that differs.
 
@@ -636,7 +636,7 @@ is authorized for the organization when it enforces single sign-on.
 | `verify-guest-determinism` | Rebuild Ubuntu guest artifacts twice and compare SHA-256 values. |
 | `build-openvmm` | Build the OpenVMM release binary. |
 | `record-openvmm-provenance` | Bind an existing OpenVMM binary to the pinned source revision. |
-| `record-nvx-rs-provenance` | Bind an existing `nvx-rs` executable to its sources, Rust release, target, and features. |
+| `record-nvx-provenance` | Bind an existing `nvx` executable to its sources, Rust release, target, and features. |
 | `materialize-kernel-provenance-inputs` | Write kernel provenance inputs from raw run-head blobs. |
 | `setup-cross-os-cache` | Install GNU tar and zstd for GitHub Actions cross-OS caches. |
 | `classify-ci-changes` | Select the CI suites that a list of changed files runs. |
@@ -723,16 +723,16 @@ python3 scripts/nvx.py guest-binary-source-identity [--root PATH]
 Prints the source digest that guest package manifests record for the Rust guest
 binaries: a digest of the relative path and content of every file that their
 build reads. Those are the crate's manifest and lockfile, its
-Cargo configuration under `nvx-rs/.cargo/`, every file under `nvx-rs/src/`
+Cargo configuration under `nvx/.cargo/`, every file under `nvx/src/`
 except the host side and the test modules, `rust-toolchain.toml`, and the
 `build_constants.py` and `guest_binaries.py` build modules. The host side is
-the `host` and `testing` modules and the `nvx-rs` and `nvx-fake-openvmm`
+the `host` and `testing` modules and the `nvx` and `nvx-fake-openvmm`
 binaries; the test modules are the `tests.rs` files and the `tests`
 directories. `GuestRustBuildConstants` in
 `scripts/nvx_tools/build_constants.py` defines the set, and
 [`build-guest-binaries`](#build-guest-binaries) fails when Cargo's dep-info
 lists a file outside it. The Alpine, Ubuntu, and Azure Linux cache keys end
-with the digest and hash no other file of `nvx-rs`, so a change to the
+with the digest and hash no other file of `nvx`, so a change to the
 crate's host side or tests rebuilds no guest image. Because the digest covers
 paths, and `hashFiles` hashes contents only, moving a module into its own
 `mod.rs` changes the keys even when no bytes change.
@@ -850,7 +850,7 @@ enabled by the event, repository, and suite flags, and `skipped` for jobs that
 are not enabled; mismatches are reported as errors and cause a nonzero exit.
 As in CI, a job that uses the guest artifacts or the OpenVMM binaries is
 enabled only when the flags enable the jobs that build them too. A merge group
-expects the jobs of a same-repository pull request, including the `nvx-rs`
+expects the jobs of a same-repository pull request, including the `nvx`
 builds and the platform and package jobs when their suite runs, whatever
 `--same-repository` says, but not the rehearsal of the guest artifact reuse,
 which its pull request's run made. A pull request runs the debug kernel on MSHV,
@@ -999,8 +999,8 @@ one is a 64-bit little-endian ELF executable without a program interpreter
 (`PT_INTERP`) or needed libraries (`DT_NEEDED`), so that it runs in a guest
 without a dynamic loader. A static position-independent executable passes. It
 also fails for an executable stack: a `PT_GNU_STACK` program header with
-`PF_X`. The `nvx-rs` CI job checks the
-[guest binaries](../nvx-rs/README.md#guest-binaries) with it.
+`PF_X`. The `nvx` CI job checks the
+[guest binaries](../nvx/README.md#guest-binaries) with it.
 
 ### `check-guest-binaries`
 
@@ -1014,7 +1014,7 @@ Rust toolchain that `--toolchain` names, by default the exact
 target of the `guest` feature, and the feature's musl tests, whose static test
 executables run on the host. It ignores an inherited `NVX_GUEST_BINARIES`, so
 that the integration tests run the binaries that Cargo builds from the
-checkout. The `nvx-rs` CI job runs it with the toolchain that its action
+checkout. The `nvx` CI job runs it with the toolchain that its action
 selects, before it builds the binaries.
 
 ### `build-guest-binaries`
@@ -1216,24 +1216,24 @@ already exist at `openvmm/target/release/openvmm` on POSIX or
 `openvmm/target/release/openvmm.exe` on Windows. The command fails if either
 prerequisite is missing.
 
-### `record-nvx-rs-provenance`
+### `record-nvx-provenance`
 
 ```text
-python3 scripts/nvx.py record-nvx-rs-provenance [--target TARGET]
+python3 scripts/nvx.py record-nvx-provenance [--target TARGET]
 ```
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--target TARGET` | the host target that `rustc -vV` reports | Rust target that built `nvx-rs`. |
+| `--target TARGET` | the host target that `rustc -vV` reports | Rust target that built `nvx`. |
 
-Records `build/nvx-rs.provenance.json` for the `nvx-rs` that the checkout
-runs without building it, the one that `NVX_RS` names or else
-`nvx-rs/target/release/nvx-rs[.exe]`; see [nvx-rs](#nvx-rs). The record binds
-the executable's SHA-256 to the digest of this checkout's `nvx-rs` sources,
+Records `build/nvx.provenance.json` for the `nvx` that the checkout
+runs without building it, the one that `NVX` names or else
+`nvx/target/release/nvx[.exe]`; see [nvx](#nvx). The record binds
+the executable's SHA-256 to the digest of this checkout's `nvx` sources,
 the Rust release that `rust-toolchain.toml` pins, the target, and the `cli`
-feature, so record it right after building `nvx-rs` from this checkout. For
+feature, so record it right after building `nvx` from this checkout. For
 `x86_64-unknown-linux-musl`, the target of the Linux release packages, the
-executable must be static. CI's `nvx-rs` build jobs record the builds that
+executable must be static. CI's `nvx` build jobs record the builds that
 they hand to the packages, and `nvx.py` records the builds that it makes
 itself.
 
@@ -1311,10 +1311,10 @@ it, every scenario supported by the selected guest runs, except `smp-lapic`,
 which runs only when named: it repeats `smp` and also asserts that every CPU
 uses the one-shot counting LAPIC. `managed-exec-config`, `sandbox-lifecycle`,
 `sandbox-proxy-only`, `sandbox-ram-upper`, and `sandbox-gpt-layer`, the public
-sandbox scenarios, drive the public `nvx-rs sandbox` lifecycle commands (see
+sandbox scenarios, drive the public `nvx sandbox` lifecycle commands (see
 [Run](run.md#managed-lifecycle)), `snapshot-core`, `snapshot-tiers`, and
 `untiered-network-policy` capture and restore named snapshots, the last with a
-NIC, with `nvx-rs snapshot` and `nvx-rs run` (see
+NIC, with `nvx snapshot` and `nvx run` (see
 [Run](run.md#named-snapshots)), and `vm-lifecycle` drives a VM through the
 public API of `nvx`; they also read the Ubuntu distro layer, its
 manifest, and the sandbox scratch template, which
@@ -1370,12 +1370,12 @@ the hooked rate of host UTC, then restores a snapshot with another rate, and
 with one beyond Linux's 500 ppm limit, which the guest must hold at the limit
 and report. The
 `managed-lifecycle` scenario boots a guest whose init hands
-the boot to the managed agent, and runs the ignored `nvx-rs` unit test of the
+the boot to the managed agent, and runs the ignored `nvx` unit test of the
 host's control session, in `src/host/session/tests/managed_lifecycle.rs`, with
 Cargo, which starts OpenVMM with the
 scenario's command line and drives the guest's control session; the scenario
 then checks OpenVMM's outcome report and the guest console. The
-`vm-lifecycle` scenario runs the ignored `nvx-rs` test
+`vm-lifecycle` scenario runs the ignored `nvx` test
 `tests/vm_lifecycle.rs` with Cargo, which creates and spawns a VM of nvx-init
 over the Ubuntu layer and a scratch copy through the public API of `nvx`,
 reattaches to it from the values that it saved, and stops it through its
@@ -1397,7 +1397,7 @@ error, misrouted IOAPIC interrupt, or spurious interrupt. A snapshot of a guest
 with the NIC, the share, and the boot console must then restore with the same
 interrupts, which fire again. The scenarios that
 run microVMs or sandboxes as the public commands do, or that compile egress
-policies, run [`nvx-rs`](#nvx-rs). The
+policies, run [`nvx`](#nvx). The
 command requires `build/vmlinux` (with `--debug-kernel`, `build/vmlinux-debug`
 and its `build/vmlinux-debug.config`), the selected initramfs, and
 `openvmm/target/release/openvmm[.exe]`.
@@ -1650,7 +1650,7 @@ Linux 6.13.
 
 On an Intel or AMD development host that no built-in profile serves,
 `--cpu-profile auto` falls back to a host profile, `intel.host.v1` or
-`amd.host.v1`, which `nvx-rs run --cpu-profile host` also selects, for
+`amd.host.v1`, which `nvx run --cpu-profile host` also selects, for
 example where the hypervisor does not support the built-in profile. OpenVMM
 fingerprints the
 hypervisor on this host and applies the built-in profiles' derivation policy
@@ -2057,12 +2057,12 @@ python3 scripts/nvx.py package
 | `--force` | Replace an existing staging destination. |
 
 Exactly one of `--include-source` and `--binary-only` is required. Every
-package ships `nvx-rs` with its provenance, which must describe
-`nvx-rs/target/release/nvx-rs[.exe]` as built from the checkout's sources
+package ships `nvx` with its provenance, which must describe
+`nvx/target/release/nvx[.exe]` as built from the checkout's sources
 for the release target of the host's operating system:
 `x86_64-unknown-linux-musl`, a static executable, on Linux, and
 `x86_64-pc-windows-msvc` on Windows; see
-[`record-nvx-rs-provenance`](#record-nvx-rs-provenance). See
+[`record-nvx-provenance`](#record-nvx-provenance). See
 [Package and source delivery](distribution.md) for release procedures and
 source-publication requirements.
 

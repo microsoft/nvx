@@ -17,7 +17,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import cast
 
-from . import nvx_rs
+from . import nvx_cli
 from .archive import create_reproducible_release_archive, create_reproducible_tar_gz
 from .azurelinux import input_sha256 as azurelinux_input_sha256
 from .azurelinux import package_lock_sha256 as azurelinux_package_lock_sha256
@@ -309,11 +309,11 @@ def _release_archive_layout(
 
 def release_package_executables(platform: str) -> tuple[str, ...]:
     """Return the paths of the executables that every package of the release
-    platform `platform`, such as linux-kvm, ships: OpenVMM and nvx-rs."""
+    platform `platform`, such as linux-kvm, ships: OpenVMM and nvx."""
     suffix = ".exe" if platform.startswith("windows-") else ""
     return tuple(
         f"bin/{name}{suffix}"
-        for name in (OpenVMMBuildConstants.BINARY_NAME, nvx_rs.BINARY_NAME)
+        for name in (OpenVMMBuildConstants.BINARY_NAME, nvx_cli.BINARY_NAME)
     )
 
 
@@ -842,63 +842,63 @@ def _require_runtime_provenance_paths() -> tuple[Path, Path, Path]:
     )
 
 
-def _describes_checkout_nvx_rs(
+def _describes_checkout_nvx(
     provenance: dict[str, object], *, target: str | None
 ) -> bool:
-    """Return whether the nvx-rs provenance `provenance` describes a build of
-    this checkout's nvx-rs sources with its features and Rust release, for
+    """Return whether the nvx provenance `provenance` describes a build of
+    this checkout's nvx sources with its features and Rust release, for
     `target` if given, whatever executable it names."""
     recorded_target = provenance.get("target")
     return (
-        provenance.get("format") == nvx_rs.PROVENANCE_FORMAT
+        provenance.get("format") == nvx_cli.PROVENANCE_FORMAT
         and provenance.get("source_sha256")
-        == nvx_rs.source_sha256(BuildConstants.REPO_ROOT)
+        == nvx_cli.source_sha256(BuildConstants.REPO_ROOT)
         and provenance.get("toolchain") == pinned_guest_rust_toolchain()
-        and provenance.get("features") == list(nvx_rs.FEATURES)
+        and provenance.get("features") == list(nvx_cli.FEATURES)
         and isinstance(recorded_target, str)
         and (target is None or recorded_target == target)
     )
 
 
-def _validate_nvx_rs_provenance(
+def _validate_nvx_provenance(
     executable: Path,
     provenance_path: Path,
     *,
     target: str | None,
 ) -> dict[str, object]:
-    """Check that the nvx-rs provenance at `provenance_path` describes the
-    executable at `executable`, built with nvx-rs's features and this
-    checkout's Rust release from its nvx-rs sources, for `target` if given,
+    """Check that the nvx provenance at `provenance_path` describes the
+    executable at `executable`, built with nvx's features and this
+    checkout's Rust release from its nvx sources, for `target` if given,
     and return it."""
-    provenance = _read_json_object(provenance_path, "nvx-rs build provenance")
-    if not _describes_checkout_nvx_rs(provenance, target=target) or provenance.get(
+    provenance = _read_json_object(provenance_path, "nvx build provenance")
+    if not _describes_checkout_nvx(provenance, target=target) or provenance.get(
         "executable_sha256"
     ) != sha256_file(executable):
         build = "a build" if target is None else f"a {target} build"
         raise ScriptError(
-            f"nvx-rs build provenance does not describe {executable} as {build} "
-            "from the current nvx-rs sources; build nvx-rs from them, and record "
-            "its provenance with `nvx.py record-nvx-rs-provenance`"
+            f"nvx build provenance does not describe {executable} as {build} "
+            "from the current nvx sources; build nvx from them, and record "
+            "its provenance with `nvx.py record-nvx-provenance`"
         )
     return provenance
 
 
-def _require_runtime_nvx_rs() -> tuple[Path, Path]:
-    """Return the nvx-rs that nvx.py runs without building it and its
+def _require_runtime_nvx() -> tuple[Path, Path]:
+    """Return the nvx that nvx.py runs without building it and its
     provenance."""
-    executable = nvx_rs.find_binary() or require_file(
-        nvx_rs.binary_path(), "nvx-rs executable"
+    executable = nvx_cli.find_binary() or require_file(
+        nvx_cli.binary_path(), "nvx executable"
     )
     provenance = require_file(
-        artifact_path(nvx_rs.PROVENANCE_NAME), "nvx-rs build provenance"
+        artifact_path(nvx_cli.PROVENANCE_NAME), "nvx build provenance"
     )
     return executable, provenance
 
 
 def validate_runtime_artifact_provenance() -> None:
-    """Check that OpenVMM, the kernel, the Alpine initramfs, and the nvx-rs
+    """Check that OpenVMM, the kernel, the Alpine initramfs, and the nvx
     that nvx.py runs match their build provenance and this checkout's
-    sources, so that nothing stale runs, such as an nvx-rs left from before a
+    sources, so that nothing stale runs, such as an nvx left from before a
     change of its sources, which nvx.py never rebuilds."""
     binary = require_file(openvmm_binary_path(), "OpenVMM release binary")
     kernel = require_file(
@@ -922,7 +922,7 @@ def validate_runtime_artifact_provenance() -> None:
         kernel_provenance_path,
         initramfs_provenance_path,
     ) = _require_runtime_provenance_paths()
-    nvx_rs_executable, nvx_rs_provenance_path = _require_runtime_nvx_rs()
+    nvx_executable, nvx_provenance_path = _require_runtime_nvx()
     _validate_openvmm_provenance(binary, openvmm_provenance_path)
     _validate_kernel_provenance(kernel, kernel_config, kernel_provenance_path)
     _validate_initramfs_provenance(
@@ -930,7 +930,7 @@ def validate_runtime_artifact_provenance() -> None:
         package_manifest,
         initramfs_provenance_path,
     )
-    _validate_nvx_rs_provenance(nvx_rs_executable, nvx_rs_provenance_path, target=None)
+    _validate_nvx_provenance(nvx_executable, nvx_provenance_path, target=None)
 
 
 def validate_guest_artifacts(directory: Path, components: Collection[str]) -> None:
@@ -980,18 +980,18 @@ def validate_guest_artifacts(directory: Path, components: Collection[str]) -> No
         )
 
 
-def _require_release_nvx_rs() -> tuple[Path, Path, dict[str, object]]:
-    """Return the nvx-rs that a package ships, its provenance path, and its
+def _require_release_nvx() -> tuple[Path, Path, dict[str, object]]:
+    """Return the nvx that a package ships, its provenance path, and its
     provenance, which must show a build for the release target of this
     operating system: on Linux, the static musl executable that runs on every
     host, which a build for the host's own target is not."""
-    executable = require_file(nvx_rs.binary_path(), "nvx-rs release executable")
+    executable = require_file(nvx_cli.binary_path(), "nvx release executable")
     provenance_path = require_file(
-        artifact_path(nvx_rs.PROVENANCE_NAME), "nvx-rs build provenance"
+        artifact_path(nvx_cli.PROVENANCE_NAME), "nvx build provenance"
     )
-    target = nvx_rs.release_target()
-    provenance = _validate_nvx_rs_provenance(executable, provenance_path, target=target)
-    nvx_rs.check_target(executable, target)
+    target = nvx_cli.release_target()
+    provenance = _validate_nvx_provenance(executable, provenance_path, target=target)
+    nvx_cli.check_target(executable, target)
     return executable, provenance_path, provenance
 
 
@@ -1001,8 +1001,8 @@ def _packaged_source_manifest(
     release_root: Path,
     openvmm_provenance: dict[str, object],
     binary_name: str,
-    nvx_rs_provenance: dict[str, object],
-    nvx_rs_name: str,
+    nvx_provenance: dict[str, object],
+    nvx_name: str,
     *,
     include_azurelinux: bool,
 ) -> bytes:
@@ -1054,10 +1054,10 @@ def _packaged_source_manifest(
     ubuntu_section["scratch_template_sha256"] = sha256_file(
         release_root / "guest" / UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME
     )
-    root_manifest["nvx_rs"] = {
-        "executable_sha256": sha256_file(release_root / "bin" / nvx_rs_name),
+    root_manifest["nvx"] = {
+        "executable_sha256": sha256_file(release_root / "bin" / nvx_name),
         **{
-            field: nvx_rs_provenance[field]
+            field: nvx_provenance[field]
             for field in ("source_sha256", "toolchain", "target", "features")
         },
     }
@@ -1411,7 +1411,7 @@ def package_release(
     ).resolve()
     _validate_release_replacement(release_destination, force)
     binary = require_file(openvmm_binary_path(), "OpenVMM release binary")
-    nvx_rs_binary, nvx_rs_provenance_path, nvx_rs_provenance = _require_release_nvx_rs()
+    nvx_binary, nvx_provenance_path, nvx_provenance = _require_release_nvx()
     kernel = require_file(
         artifact_path(KernelBuildConstants.BINARY_NAME),
         "required guest artifact vmlinux",
@@ -1470,7 +1470,7 @@ def package_release(
     preserve_staging = False
     try:
         _copy_release_file(binary, staging / "bin" / binary.name)
-        _copy_release_file(nvx_rs_binary, staging / "bin" / nvx_rs_binary.name)
+        _copy_release_file(nvx_binary, staging / "bin" / nvx_binary.name)
         for name in guest_names:
             _copy_release_file(artifact_path(name), staging / "guest" / name)
         _copy_release_file(
@@ -1486,8 +1486,8 @@ def package_release(
             staging / "provenance" / InitramfsBuildConstants.PROVENANCE_NAME,
         )
         _copy_release_file(
-            nvx_rs_provenance_path,
-            staging / "provenance" / nvx_rs.PROVENANCE_NAME,
+            nvx_provenance_path,
+            staging / "provenance" / nvx_cli.PROVENANCE_NAME,
         )
         for name in ("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"):
             _copy_release_file(BuildConstants.REPO_ROOT / name, staging / name)
@@ -1542,11 +1542,11 @@ def package_release(
                 "packaged OpenVMM executable does not match its build provenance"
             )
         if (
-            sha256_file(staging / "bin" / nvx_rs_binary.name)
-            != nvx_rs_provenance["executable_sha256"]
+            sha256_file(staging / "bin" / nvx_binary.name)
+            != nvx_provenance["executable_sha256"]
         ):
             raise ScriptError(
-                "packaged nvx-rs executable does not match its build provenance"
+                "packaged nvx executable does not match its build provenance"
             )
         if sha256_file(packaged_kernel) != kernel_provenance["kernel_sha256"]:
             raise ScriptError("packaged kernel does not match its build provenance")
@@ -1588,12 +1588,12 @@ def package_release(
             raise ScriptError("packaged initramfs provenance changed while staging")
         if (
             _read_json_object(
-                staging / "provenance" / nvx_rs.PROVENANCE_NAME,
-                "packaged nvx-rs build provenance",
+                staging / "provenance" / nvx_cli.PROVENANCE_NAME,
+                "packaged nvx build provenance",
             )
-            != nvx_rs_provenance
+            != nvx_provenance
         ):
-            raise ScriptError("packaged nvx-rs provenance changed while staging")
+            raise ScriptError("packaged nvx provenance changed while staging")
         (staging / "SOURCE-MANIFEST.json").write_bytes(
             _packaged_source_manifest(
                 root_manifest,
@@ -1601,8 +1601,8 @@ def package_release(
                 staging,
                 openvmm_provenance,
                 binary.name,
-                nvx_rs_provenance,
-                nvx_rs_binary.name,
+                nvx_provenance,
+                nvx_binary.name,
                 include_azurelinux=not include_source,
             )
         )

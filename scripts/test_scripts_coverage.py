@@ -121,18 +121,18 @@ class WorkflowTests(unittest.TestCase):
         job = workflow["jobs"]["measure"]
         cli = ci["jobs"]["nvx-cli-linux"]
         self.assertEqual(job["runs-on"], cli["runs-on"])
-        # The tests that run nvx-rs run the build that NVX_RS names.
+        # The tests that run nvx run the build that NVX names.
         self.assertEqual(job["env"], cli["env"])
         for name in ("Checkout", "Checkout OpenVMM", "Set up Python"):
             with self.subTest(step=name):
                 self.assertEqual(
                     _step(workflow, "measure", name), _step(ci, "nvx-cli-linux", name)
                 )
-        for name in ("Build nvx-rs", "Record nvx-rs provenance"):
+        for name in ("Build nvx", "Record nvx provenance"):
             with self.subTest(step=name):
                 self.assertEqual(
                     _step(workflow, "measure", name),
-                    _step(ci, "build-nvx-rs-linux-musl", name),
+                    _step(ci, "build-nvx-linux-musl", name),
                 )
 
     def test_the_job_installs_the_coverage_release_that_requirements_pin(self) -> None:

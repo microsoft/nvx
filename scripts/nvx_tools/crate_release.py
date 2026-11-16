@@ -83,7 +83,7 @@ REQUIRED_FILES = (
 GUEST_TOOL = "nvx-ingress"
 # The socket tables of a snapshot that holds no socket, which the tool's test
 # mode reads, and what it prints for them: a scan at time 0 that announces no
-# listener, the conformance vector NONE of nvx-rs/tests/vectors/nvxl-v1.txt.
+# listener, the conformance vector NONE of nvx/tests/vectors/nvxl-v1.txt.
 GUEST_TOOL_TABLES = ("tcp", "tcp6", "udp", "udp6")
 GUEST_TOOL_TABLE_HEADER = (
     b"  sl  local_address rem_address st tx rx tr tm retr uid timeout inode\n"

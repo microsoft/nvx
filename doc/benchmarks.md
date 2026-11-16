@@ -665,7 +665,7 @@ follow the same flow with their own platform jobs:
   first-parent order, so that `dev` takes the history once a night rather than after each merge;
   see [Development releases and performance history](ci.md#development-releases-and-performance-history).
 - `Publish development release` (`release`, `dev` pushes only) doesn't read them, but it and
-  `performance-record` run only when both `nvx-rs` builds, both NVX CLI jobs, the three
+  `performance-record` run only when both `nvx` builds, both NVX CLI jobs, the three
   platform jobs, and their three package jobs succeeded and every correctness job,
   `nvx-microvm-tests-kvm` included, succeeded or was skipped.
 - `Required status check` fails unless every job that the change schedules, including

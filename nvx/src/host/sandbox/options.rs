@@ -1,0 +1,423 @@
+//! The contracts that `nvx sandbox` and `nvx run` apply to their options:
+//!
+//! - [`SandboxOptions::check`]: the checks of `nvx sandbox` before it builds the launch: the
+//!   operations that each option is valid for, the options that need others, and the managed exec
+//!   environment, from `--environment` or `--environment-file`.
+//! - [`sandbox_mounts`]: the shares of the `--mount` options, with each `--mount-deny`,
+//!   `--mount-allow`, and `--mount-write` attributed to its share, and each share's kind.
+//! - [`validate_sandbox_entrypoint`]: the refusal of systemd entrypoints.
+//! - [`validate_run_share_targets`]: the guest targets of several `nvx run` shares, or of a
+//!   shared file.
+//! - [`validate_exec_environment`] and [`exec_environment_from_file`]: the environment of a
+//!   managed exec.
+
+use std::fmt;
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
+
+use super::mount::{
+    AGGREGATE_MOUNT_TARGET, MountKind, MountOwner, MountPolicy, POLICY_KINDS, PolicyKind,
+    SandboxMount, has_forbidden_character, has_irregular_component, mount_kind, targets_overlap,
+};
+use super::refused;
+use crate::error::Result;
+use crate::protocol::root::RootUpper;
+
+/// The entrypoints of systemd, which the sandbox security profile does not run.
+pub(crate) const SYSTEMD_ENTRYPOINTS: [&str; 2] =
+    ["/usr/lib/systemd/systemd", "/lib/systemd/systemd"];
+/// The largest environment file of a managed exec, in bytes.
+pub(crate) const MAX_ENVIRONMENT_FILE_BYTES: usize = 1024 * 1024;
+/// The most entries of a managed exec environment.
+pub(crate) const MAX_EXEC_ENVIRONMENT: usize = 256;
+/// The longest entry of a managed exec environment, in UTF-8 bytes.
+pub(crate) const MAX_EXEC_ENVIRONMENT_BYTES: usize = 4096;
+
+/// An operation of `nvx sandbox`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum SandboxOperation {
+    /// `run`: a sandbox that runs one managed execution and stops, without a state directory, the
+    /// default.
+    Run,
+    /// `provision`: record a managed sandbox's launch in its state directory.
+    Provision,
+    /// `start`: start a provisioned sandbox.
+    Start,
+    /// `exec`: run a workload in a started sandbox.
+    Exec,
+    /// `stop`: stop a started sandbox.
+    Stop,
+    /// `deprovision`: remove a sandbox's state directory.
+    Deprovision,
+}
+
+impl SandboxOperation {
+    /// Returns the operation's name.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Provision => "provision",
+            Self::Start => "start",
+            Self::Exec => "exec",
+            Self::Stop => "stop",
+            Self::Deprovision => "deprovision",
+        }
+    }
+
+    /// Returns whether the operation launches a sandbox: `run` or `provision`.
+    fn launches(self) -> bool {
+        matches!(self, Self::Run | Self::Provision)
+    }
+
+    /// Returns whether the operation runs a managed execution: `run` or `exec`.
+    fn executes(self) -> bool {
+        matches!(self, Self::Run | Self::Exec)
+    }
+}
+
+impl fmt::Display for SandboxOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// A `--mount-deny`, `--mount-allow`, or `--mount-write` option, with the position among the
+/// `--mount` options of the one before it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PolicyPathOption {
+    /// The kind of path, which the option gives.
+    pub(crate) kind: PolicyKind,
+    /// The index of the last `--mount` option before this one, if any.
+    pub(crate) preceding_mount: Option<usize>,
+    /// The host path, as given.
+    pub(crate) path: String,
+}
+
+/// The options of `nvx sandbox` that [`SandboxOptions::check`] examines, as given.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SandboxOptions {
+    /// The operation.
+    pub(crate) operation: SandboxOperation,
+    /// `--dry-run`.
+    pub(crate) dry_run: bool,
+    /// `--cwd`.
+    pub(crate) cwd: Option<String>,
+    /// The `--environment` options.
+    pub(crate) environment: Vec<String>,
+    /// `--environment-file`.
+    pub(crate) environment_file: Option<String>,
+    /// `--inherit-default-environment`.
+    pub(crate) inherit_default_environment: bool,
+    /// Whether any network policy option was given: `--net`, `--network-profile`,
+    /// `--network-egress`, `--network-ingress`, `--network-egress-policy-file`,
+    /// `--host-loopback`, `--network-proxy`, `--network-egress-allow`,
+    /// `--network-egress-deny`, or `--host-loopback-forward`.
+    pub(crate) network_options: bool,
+    /// Whether `--net` was given.
+    pub(crate) net: bool,
+    /// Whether `--network-profile` was given.
+    pub(crate) network_profile: bool,
+    /// `--entrypoint`.
+    pub(crate) entrypoint: String,
+    /// Whether `--outcome-report` was given.
+    pub(crate) outcome_report: bool,
+    /// The `--mount` options.
+    pub(crate) mounts: Vec<String>,
+    /// The `--mount-deny`, `--mount-allow`, and `--mount-write` options, in order.
+    pub(crate) policy_paths: Vec<PolicyPathOption>,
+    /// `--mount-owner`.
+    pub(crate) mount_owner: Option<MountOwner>,
+    /// Whether any `--layer` was given.
+    pub(crate) layers: bool,
+    /// Whether `--scratch` was given.
+    pub(crate) scratch: bool,
+    /// `--upper`, if given: a launch keeps its upper on scratch without it.
+    pub(crate) upper: Option<RootUpper>,
+}
+
+impl SandboxOptions {
+    /// Applies the checks of `nvx sandbox` that precede the launch, in its order, and
+    /// returns the managed exec environment of a `run` or `exec`, if one was given.
+    ///
+    /// It refuses `--dry-run` except for `run`, both `--environment` and `--environment-file`,
+    /// the managed exec options except for `run` and `exec`, an environment that
+    /// [`exec_environment_from_file`] or [`validate_exec_environment`] refuses, network policy
+    /// options except for `run` and `provision`, a systemd entrypoint for `run`, `provision`,
+    /// and `exec`, `--outcome-report` except for `run` and `exec`, share options without a
+    /// `--mount`, `--mount` and `--upper` except for `run` and `provision`, and for `run` and
+    /// `provision`, `--net` without `--network-profile` or the reverse, a missing `--layer`, and
+    /// a missing `--scratch` for an upper on scratch, or one given for `--upper ram`, whose upper
+    /// is in RAM.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
+    pub(crate) fn check(&self) -> Result<Option<Vec<String>>> {
+        let operation = self.operation;
+        if self.dry_run && operation != SandboxOperation::Run {
+            return Err(refused("--dry-run is only valid for sandbox run"));
+        }
+        if !self.environment.is_empty() && self.environment_file.is_some() {
+            return Err(refused(
+                "--environment and --environment-file are mutually exclusive",
+            ));
+        }
+        if !operation.executes()
+            && (self.cwd.is_some()
+                || !self.environment.is_empty()
+                || self.environment_file.is_some()
+                || self.inherit_default_environment)
+        {
+            return Err(refused(
+                "managed execution options are only valid for sandbox run or exec",
+            ));
+        }
+        let mut environment = None;
+        if operation.executes() {
+            if let Some(file) = &self.environment_file {
+                environment = Some(exec_environment_from_file(file)?);
+            } else if !self.environment.is_empty() {
+                validate_exec_environment(&self.environment)?;
+                environment = Some(self.environment.clone());
+            }
+        }
+        if !operation.launches() && self.network_options {
+            return Err(refused(
+                "network policy options are only valid for sandbox run or provision",
+            ));
+        }
+        if matches!(
+            operation,
+            SandboxOperation::Run | SandboxOperation::Provision | SandboxOperation::Exec
+        ) {
+            validate_sandbox_entrypoint(&self.entrypoint)?;
+        }
+        if self.outcome_report && !operation.executes() {
+            return Err(refused(
+                "--outcome-report is only valid for sandbox run or exec",
+            ));
+        }
+        for kind in POLICY_KINDS {
+            if self.mounts.is_empty() && self.policy_paths.iter().any(|path| path.kind == kind) {
+                return Err(refused(format!("{} requires --mount", kind.option())));
+            }
+        }
+        if self.mount_owner.is_some() && self.mounts.is_empty() {
+            return Err(refused("--mount-owner requires --mount"));
+        }
+        if !self.mounts.is_empty() && !operation.launches() {
+            return Err(refused(
+                "--mount is only valid for sandbox run or provision",
+            ));
+        }
+        if self.upper.is_some() && !operation.launches() {
+            return Err(refused(
+                "--upper is only valid for sandbox run or provision",
+            ));
+        }
+        if operation.launches() {
+            if self.net != self.network_profile {
+                return Err(refused(
+                    "--net and --network-profile must be specified together",
+                ));
+            }
+            match self.upper.unwrap_or(RootUpper::Scratch) {
+                RootUpper::Scratch if !self.layers || !self.scratch => {
+                    return Err(refused(format!(
+                        "sandbox {operation} requires --layer and --scratch"
+                    )));
+                }
+                RootUpper::Ram if self.scratch => {
+                    return Err(refused(
+                        "--upper ram and --scratch are mutually exclusive: an upper in RAM has \
+                         no scratch image",
+                    ));
+                }
+                RootUpper::Ram if !self.layers => {
+                    return Err(refused(format!("sandbox {operation} requires --layer")));
+                }
+                RootUpper::Scratch | RootUpper::Ram => {}
+            }
+        }
+        Ok(environment)
+    }
+}
+
+/// Returns the shares of the `--mount` values in `mounts`, each with its access-policy paths, the
+/// `owner` (`vmm` by default), and the kind that [`mount_kind`] finds for its host path.
+///
+/// With one `--mount`, every policy path names a path in it. With several, each names a path in
+/// the `--mount` before it. Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported)
+/// for a policy path without a `--mount` before it among several, and as
+/// [`SandboxMount::parse`] and [`SandboxMount::with_kind`] do.
+pub(crate) fn sandbox_mounts(
+    mounts: &[String],
+    policy_paths: &[PolicyPathOption],
+    owner: Option<MountOwner>,
+) -> Result<Vec<SandboxMount>> {
+    sandbox_mounts_with(mounts, policy_paths, owner, &|mount| {
+        mount_kind(mount.host_path())
+    })
+}
+
+/// Implements [`sandbox_mounts`] with `kind_of` as [`mount_kind`].
+pub(crate) fn sandbox_mounts_with(
+    mounts: &[String],
+    policy_paths: &[PolicyPathOption],
+    owner: Option<MountOwner>,
+    kind_of: &dyn Fn(&SandboxMount) -> MountKind,
+) -> Result<Vec<SandboxMount>> {
+    let mut policies = vec![MountPolicy::default(); mounts.len()];
+    for kind in POLICY_KINDS {
+        for option in policy_paths.iter().filter(|option| option.kind == kind) {
+            let index = match (mounts.len(), option.preceding_mount) {
+                (1, _) => 0,
+                (_, Some(index)) => index,
+                (_, None) => {
+                    return Err(refused(format!(
+                        "with several --mount options, each {} must follow the --mount whose \
+                         host directory it names",
+                        kind.option()
+                    )));
+                }
+            };
+            let policy = policies.get_mut(index).ok_or_else(|| {
+                refused(format!(
+                    "{} follows --mount number {}, which is missing",
+                    kind.option(),
+                    index + 1
+                ))
+            })?;
+            match kind {
+                PolicyKind::Denied => &mut policy.denied,
+                PolicyKind::Allowed => &mut policy.allowed,
+                PolicyKind::Writable => &mut policy.writable,
+            }
+            .push(option.path.clone());
+        }
+    }
+    let owner = owner.unwrap_or(MountOwner::Vmm);
+    mounts
+        .iter()
+        .zip(policies)
+        .map(|(value, policy)| {
+            let mount = SandboxMount::parse(value, policy, owner, MountKind::Directory)?;
+            mount.with_kind(kind_of(&mount))
+        })
+        .collect()
+}
+
+/// Refuses the guest targets of `nvx run` shares that the guest cannot bind from an
+/// aggregate: targets that would not survive the kernel command line, or that hide each other or
+/// the aggregate itself. `nvx run` checks them when it attaches several shares, or a file.
+///
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
+pub(crate) fn validate_run_share_targets(targets: &[&str]) -> Result<()> {
+    for (index, target) in targets.iter().enumerate() {
+        if !target.starts_with('/')
+            || *target == "/"
+            || has_forbidden_character(target)
+            || has_irregular_component(target)
+        {
+            return Err(refused(format!(
+                "invalid --mount target {target:?}: with several shares, or a shared file, each target \
+                 must be an absolute non-root path without empty, dot, or parent components, \
+                 whitespace, control characters, quotes, '\\', '=', or ','",
+            )));
+        }
+        for other in std::iter::once(&AGGREGATE_MOUNT_TARGET).chain(&targets[..index]) {
+            if targets_overlap(target, other) {
+                return Err(refused(format!(
+                    "--mount targets {other} and {target} overlap; a share cannot hide another"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a systemd entrypoint, which the sandbox security profile does not run.
+///
+/// This is the cheap check of every launch, which reads nothing: it applies whether or not the
+/// distro layer has a manifest, and never reads the manifest's package list. Fails with
+/// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
+pub(crate) fn validate_sandbox_entrypoint(entrypoint: &str) -> Result<()> {
+    if SYSTEMD_ENTRYPOINTS.contains(&entrypoint) {
+        return Err(refused(
+            "systemd entrypoints are unsupported by the sandbox security profile",
+        ));
+    }
+    Ok(())
+}
+
+/// Checks a managed exec environment, as `encode_exec_environment` does: at most
+/// [`MAX_EXEC_ENVIRONMENT`] entries, each a `KEY=VALUE` string with a nonempty key, without NUL,
+/// of at most [`MAX_EXEC_ENVIRONMENT_BYTES`] bytes, and no key twice.
+///
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
+pub(crate) fn validate_exec_environment(entries: &[String]) -> Result<()> {
+    if entries.len() > MAX_EXEC_ENVIRONMENT {
+        return Err(refused(format!(
+            "managed exec environment exceeds {MAX_EXEC_ENVIRONMENT} entries"
+        )));
+    }
+    let mut names = std::collections::HashSet::new();
+    for entry in entries {
+        let (name, separator) = match entry.split_once('=') {
+            Some((name, _)) => (name, true),
+            None => (entry.as_str(), false),
+        };
+        if !separator
+            || name.is_empty()
+            || entry.contains('\0')
+            || entry.len() > MAX_EXEC_ENVIRONMENT_BYTES
+        {
+            return Err(refused(format!(
+                "managed exec environment entries must be non-empty KEY=VALUE strings of at most \
+                 {MAX_EXEC_ENVIRONMENT_BYTES} bytes"
+            )));
+        }
+        if !names.insert(name) {
+            return Err(refused(format!(
+                "managed exec environment contains duplicate key: {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Reads the managed exec environment of `--environment-file`: a JSON array of `KEY=VALUE`
+/// strings of at most [`MAX_ENVIRONMENT_FILE_BYTES`] bytes, which must then pass
+/// [`validate_exec_environment`].
+///
+/// The file must be strict UTF-8 JSON; non-finite numbers and unpaired surrogate escapes are
+/// refused. Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), naming the
+/// file and the native I/O or JSON error when it cannot be read or decoded.
+pub(crate) fn exec_environment_from_file(path: &str) -> Result<Vec<String>> {
+    let path = Path::new(path);
+    let mut data = Vec::new();
+    File::open(path)
+        .and_then(|file| {
+            file.take(MAX_ENVIRONMENT_FILE_BYTES as u64 + 1)
+                .read_to_end(&mut data)
+        })
+        .map_err(|error| {
+            refused(format!(
+                "failed to read managed execution environment {path:?}: {error}"
+            ))
+        })?;
+    if data.len() > MAX_ENVIRONMENT_FILE_BYTES {
+        return Err(refused(format!(
+            "managed execution environment file exceeds {MAX_ENVIRONMENT_FILE_BYTES}-byte limit"
+        )));
+    }
+    let entries: Vec<String> = serde_json::from_slice(&data).map_err(|error| {
+        refused(format!(
+            "invalid managed execution environment {path:?}: {error}"
+        ))
+    })?;
+    validate_exec_environment(&entries)?;
+    Ok(entries)
+}
+
+#[cfg(test)]
+mod tests;

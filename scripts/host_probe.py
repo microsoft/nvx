@@ -357,7 +357,7 @@ def collect_probe(
         devices = {}
         processes = []
 
-    executable = root / "nvx-rs" / "target" / "release" / "nvx-rs"
+    executable = root / "nvx" / "target" / "release" / "nvx"
     if system == "Windows":
         executable = executable.with_suffix(".exe")
 
@@ -375,7 +375,7 @@ def collect_probe(
         "openvmm": _openvmm(runner, root),
         "devices": devices,
         "openvmm_processes": processes,
-        "nvx_rs": executable.exists(),
+        "nvx": executable.exists(),
         "artifacts": _artifacts(root),
     }
     if not no_verify:
@@ -401,7 +401,7 @@ def _write_text(document: dict[str, object]) -> None:
         print(f"Verify exit code: {verify['exit_code']}")
     print(f"Devices: {json.dumps(document['devices'], sort_keys=True)}")
     print(f"OpenVMM processes: {json.dumps(document['openvmm_processes'])}")
-    print(f"nvx-rs built: {document['nvx_rs']}")
+    print(f"nvx built: {document['nvx']}")
     artifacts = cast(dict[str, object], document["artifacts"])
     print(f"Artifacts: exists={artifacts['exists']} files={artifacts['files']}")
     if "backend" in document:

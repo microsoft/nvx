@@ -33,10 +33,10 @@
   `python3 scripts/local_gates.py --base origin/dev` lists the gates that a
   change selects, with their commands read from the actions, and `--run` runs
   them.
-- For changes under `nvx-rs/`, run the commands in
-  [check-nvx-rs](./actions/check-nvx-rs/action.yml).
+- For changes under `nvx/`, run the commands in
+  [check-nvx](./actions/check-nvx/action.yml).
   They need no hypervisor. Its public-API check compares the public API of
-  `nvx` with the snapshots in `nvx-rs/public-api/`: a change to the public API
+  `nvx` with the snapshots in `nvx/public-api/`: a change to the public API
   updates them with `python3 scripts/public_api.py --update` (see
   [Rust crates](../doc/ci.md#rust-crates)).
 - OpenVMM source changes also require the package-scoped checks prescribed by the
@@ -59,7 +59,7 @@
 
 ## Documentation
 
-- In [`nvx-rs/README.md`](../nvx-rs/README.md#layout), each row of the module
+- In [`nvx/README.md`](../nvx/README.md#layout), each row of the module
   table says in one line, of at most 200 characters, what a module is for, and
   links to the module's section after the table, which holds the module's
   details. Put a module's details in its section, wrapped like the rest of the
@@ -101,16 +101,16 @@
   and `test-openvmm` to OpenVMM's own CI, whose results NVX CI checks for the
   pin, and `build-guest --guest all`, `verify-guest-determinism`, and
   `benchmark` to CI.
-- `nvx-rs/target/release/nvx-rs run` and `nvx-rs/target/release/nvx-rs sandbox`
-  run microVMs and sandboxes. Build `nvx-rs` there, in about a minute, with
-  `cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml`,
-  and again after changing `nvx-rs/`. The microVM scenarios run it too, and build
-  it there the first time that they need it, unless `NVX_RS` names another build
-  (see [Usage](../doc/usage.md#nvx-rs)). The `managed-lifecycle` and
-  `vm-lifecycle` scenarios run `nvx-rs` tests with Cargo. In a checkout that
+- `nvx/target/release/nvx run` and `nvx/target/release/nvx sandbox`
+  run microVMs and sandboxes. Build `nvx` there, in about a minute, with
+  `cargo build --release --locked --features cli --manifest-path nvx/Cargo.toml`,
+  and again after changing `nvx/`. The microVM scenarios run it too, and build
+  it there the first time that they need it, unless `NVX` names another build
+  (see [Usage](../doc/usage.md#nvx)). The `managed-lifecycle` and
+  `vm-lifecycle` scenarios run `nvx` tests with Cargo. In a checkout that
   holds no artifacts, `run` and
   `sandbox` first download those of the release of `HEAD` or of its nearest
-  released ancestor, as `nvx-rs download` does; build the artifacts that a change
+  released ancestor, as `nvx download` does; build the artifacts that a change
   affects instead of testing a release's.
 - Build trees are large. Check `df -h .` before a build, keep one OpenVMM build
   profile at a time, and delete trees you no longer need with `cargo clean` or
@@ -178,8 +178,8 @@
   maintenance, and change an expected benchmark host, `data/*-host.json`, only
   to accept a new host together with a reset of its series' history.
 - Full runs of `dev`, scheduled or dispatched, publish the `nvx` crate, the
-  only crate that NVX publishes, to crates.io when `nvx-rs/` changed; see
+  only crate that NVX publishes, to crates.io when `nvx/` changed; see
   [crates.io releases](../doc/ci.md#cratesio-releases). Do not publish it by
-  hand, and change the version that `nvx-rs/Cargo.toml` declares only to start
+  hand, and change the version that `nvx/Cargo.toml` declares only to start
   another series, as [The nvx crate](../doc/distribution.md#the-nvx-crate)
   describes.

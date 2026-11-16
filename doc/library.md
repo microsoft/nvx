@@ -1,20 +1,20 @@
 # The nvx library
 
-[`nvx`](../nvx-rs/README.md) is the Rust library with which a program runs NVX
+[`nvx`](../nvx/README.md) is the Rust library with which a program runs NVX
 microVMs on OpenVMM. It holds mechanisms and value types: a VM's configuration,
 its launch in a directory that the program owns, one snapshot format, a
 restore that the program drives, verified connections to a running VM, and the
 guest's side of a capture and of a restore. It keeps no state, runs no
 workload, and builds no guest space: whatever a deployment needs beyond the
 mechanisms, its program owns, as [What the caller owns](#what-the-caller-owns)
-lists. NVX's own `nvx-rs` command-line interface is one such program, which
+lists. NVX's own `nvx` command-line interface is one such program, which
 keeps its sandboxes and snapshots in stores of its own, private to the crate.
 
 This guide follows a host program through the three workflows of a VM: a
 [cold boot](#cold-boot), a [restore](#restore-from-a-snapshot) from a snapshot,
 and a [reattach](#reattach-after-a-restart) once the program restarted. Code
 that CI compiles through the public API alone shows each one, and the guide
-links it rather than repeat it. The crate's [README](../nvx-rs/README.md#layout)
+links it rather than repeat it. The crate's [README](../nvx/README.md#layout)
 says what each module holds, and its rustdoc gives the contract of each item.
 An init agent, which runs in the guest, follows the
 [guest-agent guidelines](guest-agent-guidelines.md).
@@ -23,7 +23,7 @@ An init agent, which runs in the guest, follows the
 
 `nvx` is published on crates.io as a preview, whose API can change in any
 release, so a program requires an exact version, as the crate's
-[README](../nvx-rs/README.md) explains. Its default feature, `host`, holds the
+[README](../nvx/README.md) explains. Its default feature, `host`, holds the
 host's side, and `guest` the guest's, for Linux guests.
 
 A launch takes two values:
@@ -63,10 +63,10 @@ A launch takes two values:
    reading OpenVMM's outcome report, which never hides the exit.
 
 The example of the crate's documentation, in
-[`lib.rs`](../nvx-rs/src/lib.rs), which rustdoc compiles, boots and stops a VM
+[`lib.rs`](../nvx/src/lib.rs), which rustdoc compiles, boots and stops a VM
 this way, and so do `cold_boot` and `stop` in the compile-only
-[`host-workflows`](../nvx-rs/examples/host-workflows.rs) example.
-[`external-launch`](../nvx-rs/examples/external-launch.rs) runs a cold boot end
+[`host-workflows`](../nvx/examples/host-workflows.rs) example.
+[`external-launch`](../nvx/examples/external-launch.rs) runs a cold boot end
 to end, through a launcher of its own.
 
 ## Restore from a snapshot
@@ -82,9 +82,9 @@ guest for a snapshot in its own protocol, and the guest captures the VM with
 exit, from `Process::wait`, `snapshot::finish_capture` checks the capture and
 writes its key and description beside `openvmm/`, and the program moves those
 three entries into a new, empty directory of its own. `capture` in
-[`host-workflows`](../nvx-rs/examples/host-workflows.rs) captures a snapshot
+[`host-workflows`](../nvx/examples/host-workflows.rs) captures a snapshot
 this way, and `capture` in
-[`guest-workflows`](../nvx-rs/examples/guest-workflows.rs) takes the guest's
+[`guest-workflows`](../nvx/examples/guest-workflows.rs) takes the guest's
 part.
 
 A restore then:
@@ -114,9 +114,9 @@ A restore then:
 
 The program keeps the VM directory's `openvmm/` until the VM exited, then
 removes it under its lock. `restore` in
-[`host-workflows`](../nvx-rs/examples/host-workflows.rs) drives a restore to
+[`host-workflows`](../nvx/examples/host-workflows.rs) drives a restore to
 Ready this way, and `activate` in
-[`guest-workflows`](../nvx-rs/examples/guest-workflows.rs) is the guest's side.
+[`guest-workflows`](../nvx/examples/guest-workflows.rs) is the guest's side.
 
 ## Reattach after a restart
 
@@ -142,8 +142,8 @@ that a stop reads. Then:
 
 Their failures neither signal the VM nor change the saved values, which the
 program keeps to try again. `attach` in
-[`host-workflows`](../nvx-rs/examples/host-workflows.rs) reattaches this way,
-and the example of [`host::vm::Connection`](../nvx-rs/src/host/vm/connection.rs),
+[`host-workflows`](../nvx/examples/host-workflows.rs) reattaches this way,
+and the example of [`host::vm::Connection`](../nvx/src/host/vm/connection.rs),
 which rustdoc compiles, connects to a VM that the program launched.
 
 ## What the caller owns
@@ -178,7 +178,7 @@ owns the following.
   The program keeps them naming the objects that it means: across that race;
   through a recheck, before each later launch, of the paths that lie in parts
   that a workload may write; and for as long as each denial is to hold, as
-  [`host::filesystem`](../nvx-rs/src/host/filesystem/mod.rs) details.
+  [`host::filesystem`](../nvx/src/host/filesystem/mod.rs) details.
 - The VM directory and the runtime's files stay where they are, unchanged,
   from `vm::create` through the spawn, and while the VM runs.
 

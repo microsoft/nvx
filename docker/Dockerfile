@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /repo
 COPY rust-toolchain.toml /repo/
-COPY nvx-rs/ /repo/nvx-rs/
+COPY nvx/ /repo/nvx/
 COPY scripts/ /repo/scripts/
 RUN set -eux; \
     toolchain="$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)"; \
@@ -66,7 +66,7 @@ RUN python3 scripts/nvx.py kernel-config --native
 # Only the guest images install the Rust guest binaries and record their sources,
 # so the kernel and Linux source targets never build them.
 FROM base AS guest-base
-COPY nvx-rs/ /repo/nvx-rs/
+COPY nvx/ /repo/nvx/
 COPY rust-toolchain.toml /repo/
 COPY --from=guest-binaries /out/guest-binaries/ /repo/build/guest-binaries/
 ENV NVX_GUEST_BINARIES=/repo/build/guest-binaries

@@ -388,7 +388,7 @@ class CiTriageTests(unittest.TestCase):
         runner.assert_finished()
 
     def test_a_cancelled_push_of_another_workflow_reads_that_workflow(self) -> None:
-        mutants = ".github/workflows/nvx-rs-mutants.yml"
+        mutants = ".github/workflows/nvx-mutants.yml"
         name, document, runner = self.json_classification(
             [
                 Response(
@@ -397,7 +397,7 @@ class CiTriageTests(unittest.TestCase):
                         conclusion="cancelled",
                         branch="dev",
                         workflow_id=9,
-                        workflow_name="nvx-rs mutants",
+                        workflow_name="nvx mutants",
                     )
                 ),
                 Response(workflow_document(mutants, 9)),
@@ -440,7 +440,7 @@ class CiTriageTests(unittest.TestCase):
                         conclusion="cancelled",
                         branch="feature/test",
                         workflow_id=9,
-                        workflow_name="nvx-rs mutants",
+                        workflow_name="nvx mutants",
                     )
                 ),
                 Response(encoded([pull_request(head=NEW_HEAD)])),

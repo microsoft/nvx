@@ -1,6 +1,6 @@
 ---
 name: nvx-run-microvm
-description: "Boot an NVX microVM with nvx-rs on Linux/KVM, Linux/MSHV, or Windows/WHP, exercise the guest, and debug failed boots. Use for boot smoke tests, guest shell sessions, virtio-fs mounts, networking, kernel command lines, missing boot markers, OpenVMM errors, guest hangs, and benchmark acceptance failures."
+description: "Boot an NVX microVM with nvx on Linux/KVM, Linux/MSHV, or Windows/WHP, exercise the guest, and debug failed boots. Use for boot smoke tests, guest shell sessions, virtio-fs mounts, networking, kernel command lines, missing boot markers, OpenVMM errors, guest hangs, and benchmark acceptance failures."
 argument-hint: "[local|host-profile] [kvm|mshv|whp] [run options or failure]"
 ---
 
@@ -17,7 +17,7 @@ PowerShell, except where noted; use `python` instead of `python3` on Windows.
 1. Assemble the run with only the options that the task needs, and check it:
 
    ```console
-   nvx-rs/target/release/nvx-rs run --hypervisor BACKEND --dry-run
+   nvx/target/release/nvx run --hypervisor BACKEND --dry-run
    ```
 
    [Usage](../../../doc/usage.md#run) documents the options, such as
@@ -51,7 +51,7 @@ PowerShell, except where noted; use `python` instead of `python3` on Windows.
    PowerShell, and use `trace` only when `debug` does not show the failing
    component. The terminal transcript is the record.
 3. Run the OpenVMM command that `--dry-run` prints directly only for options
-   that `nvx-rs` lacks, and record every deviation.
+   that `nvx` lacks, and record every deviation.
 4. Reduce a benchmark acceptance failure to one run before changing the
    measured suite:
    `python3 scripts/nvx.py benchmark --suite e2e --backend BACKEND --warmups 1 --runs 1 --skip-build --output <fresh file>`.
