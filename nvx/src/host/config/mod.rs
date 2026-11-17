@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 
 use super::filesystem::{ExportPlan, ReservedTargets};
 use super::network::{self, NetworkPolicy};
-use super::platform::parse_hex32;
+use super::platform::{parse_hex, write_hex};
 use super::runtime::{GuestPowerAction, Hypervisor, Runtime};
 use crate::error::{Error, Result};
 use crate::guest_restore;
@@ -387,9 +387,7 @@ pub struct CaptureIdentity([u8; 32]);
 
 impl fmt::Display for CaptureIdentity {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0
-            .iter()
-            .try_for_each(|byte| write!(formatter, "{byte:02x}"))
+        write_hex(formatter, &self.0)
     }
 }
 
@@ -408,7 +406,7 @@ impl serde::Serialize for CaptureIdentity {
 impl<'de> serde::Deserialize<'de> for CaptureIdentity {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = <String as serde::Deserialize>::deserialize(deserializer)?;
-        parse_hex32(&text).map(Self).ok_or_else(|| {
+        parse_hex(&text).map(Self).ok_or_else(|| {
             serde::de::Error::custom(format!(
                 "{text:?} is not a capture's identity, which is 64 hexadecimal digits"
             ))

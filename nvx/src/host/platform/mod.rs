@@ -323,32 +323,25 @@ pub(crate) fn unless_exited(
     if exited()? { Ok(()) } else { Err(error) }
 }
 
-/// Parses exactly 32 hexadecimal digits, in either case, into the 16 bytes that they spell.
-pub(crate) fn parse_hex_id(digits: &str) -> Option<[u8; 16]> {
-    let digits = digits.as_bytes();
-    if digits.len() != 32 {
-        return None;
-    }
-    let mut id = [0; 16];
-    for (byte, pair) in id.iter_mut().zip(digits.chunks_exact(2)) {
-        let nibble = |digit: u8| char::from(digit).to_digit(16);
-        *byte = u8::try_from(nibble(pair[0])? * 16 + nibble(pair[1])?).ok()?;
-    }
-    Some(id)
-}
-
-/// Parses 64 hexadecimal digits, in either case, into the 32 bytes that they spell.
-pub(crate) fn parse_hex32(text: &str) -> Option<[u8; 32]> {
+/// Parses exactly `2 * N` hexadecimal digits, in either case, into the `N` bytes that they spell.
+pub(crate) fn parse_hex<const N: usize>(text: &str) -> Option<[u8; N]> {
     let digits = text.as_bytes();
-    if digits.len() != 64 {
+    if digits.len() != 2 * N {
         return None;
     }
-    let mut bytes = [0; 32];
+    let mut bytes = [0; N];
     for (byte, pair) in bytes.iter_mut().zip(digits.chunks_exact(2)) {
         let nibble = |digit: u8| char::from(digit).to_digit(16);
         *byte = u8::try_from(nibble(pair[0])? * 16 + nibble(pair[1])?).ok()?;
     }
     Some(bytes)
+}
+
+/// Writes `bytes` as lowercase hexadecimal digits, two for each byte.
+pub(crate) fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
+    bytes
+        .iter()
+        .try_for_each(|byte| write!(formatter, "{byte:02x}"))
 }
 
 /// Parses the identity of a host as OpenVMM reads it: 32 hexadecimal digits, in either case,
@@ -363,7 +356,7 @@ fn parse_host_id(text: &str) -> Option<[u8; 16]> {
         .chars()
         .filter(|&character| character != '-')
         .collect();
-    parse_hex_id(&digits)
+    parse_hex(&digits)
 }
 
 #[cfg(test)]
