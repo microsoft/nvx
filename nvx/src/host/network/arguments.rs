@@ -20,8 +20,9 @@ use crate::net::{self, cidr};
 /// proxy at the guest network's gateway (`--network-proxy GATEWAY:PORT`). Otherwise the portable
 /// profile applies the egress posture, the ingress default, the host-loopback access, which
 /// [`HostLoopback::Outbound`] leaves to OpenVMM's default, and the host-loopback forwards. Each
-/// action's rules are lowered as the CLI's egress policy files are, and fail with their messages,
-/// which name the rules after [`EgressRules::name`].
+/// action's rules are lowered as the CLI's egress policy files are, even those of a policy that
+/// attaches no network device, and fail with their messages, which name the rules after
+/// [`EgressRules::name`].
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when a rule is invalid,
 /// when the rules of one action need more than [`MAX_RULES`] OpenVMM rules, when host-loopback
@@ -61,6 +62,21 @@ pub fn openvmm_arguments(
              shorter, which leaves an address at which OpenVMM presents host peers to the guest"
         )));
     }
+    // As in an egress policy file, the allow rules are checked and lowered before the deny rules,
+    // and so are those of a policy that attaches no device.
+    let mut rule_arguments = Vec::new();
+    let mut deny = Vec::new();
+    for (action, option) in [
+        (&policy.allow, "--network-egress-allow"),
+        (&policy.deny, "--network-egress-deny"),
+    ] {
+        let parsed = parse_rules(action)?;
+        for rule in lowering::lower(&parsed.concat(), &action.name)? {
+            rule_arguments.push(option.to_owned());
+            rule_arguments.push(rule);
+        }
+        deny = parsed;
+    }
     if policy.egress == Access::Deny
         && policy.allow.rules.is_empty()
         && policy.ingress == Access::Deny
@@ -85,20 +101,7 @@ pub fn openvmm_arguments(
         arguments.push("--host-loopback".to_owned());
         arguments.push(policy.host_loopback.as_str().to_owned());
     }
-    // As in an egress policy file, the allow rules are checked and lowered before the deny rules.
-    let mut deny = Vec::new();
-    for (rules, option) in [
-        (&policy.allow, "--network-egress-allow"),
-        (&policy.deny, "--network-egress-deny"),
-    ] {
-        let parsed = parse_rules(rules)?;
-        let lowered = lowering::lower(&parsed.concat(), &rules.name)?;
-        for rule in lowered {
-            arguments.push(option.to_owned());
-            arguments.push(rule);
-        }
-        deny = parsed;
-    }
+    arguments.extend(rule_arguments);
     check_loopback_forwards(policy, &deny, guest_network)?;
     for forward in &policy.host_loopback_forwards {
         arguments.push("--host-loopback-forward".to_owned());
