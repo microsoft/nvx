@@ -1483,7 +1483,14 @@ impl RestoreFixture {
 
     pub(in crate::host) fn console_listener(&mut self) {
         self.config.console = ConsoleAttachment::Listener;
-        let console = &mut self.snapshot.spec.contract().attachments[0];
+        let console = self
+            .snapshot
+            .spec
+            .contract()
+            .attachments
+            .iter_mut()
+            .find(|attachment| attachment.stable_id == "console:microvm-virtio0")
+            .unwrap();
         console.reconnect_policy = "recreate-listener".to_owned();
         console.identity_kind = "unix-socket".to_owned();
         console.identity = b"/captured/boot-console".to_vec();
@@ -1932,10 +1939,21 @@ fn snapshot_open_refuses_captured_network_gateway_and_broadcast_addresses_as_io(
 }
 
 #[test]
+fn snapshot_accepts_a_listener_or_none_on_a_boot_console_captured_disconnected() {
+    let mut fixture = RestoreFixture::new(false);
+    for console in [ConsoleAttachment::Disconnected, ConsoleAttachment::Listener] {
+        fixture.config.console = console;
+        fixture
+            .opened()
+            .accepts(&fixture.config, &fixture.runtime, &fixture.now)
+            .unwrap();
+    }
+}
+
+#[test]
 fn snapshot_accepts_requires_the_boot_console_attachment_not_the_control_listener_or_device() {
     let mut fixture = RestoreFixture::new(false);
     fixture.config.console = ConsoleAttachment::Listener;
-    fixture.refused("boot console");
     let console = &mut fixture.snapshot.spec.contract().attachments[0];
     console.reconnect_policy = "recreate-listener".to_owned();
     console.identity_kind = "unix-socket".to_owned();

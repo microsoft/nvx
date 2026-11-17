@@ -219,12 +219,14 @@ impl Snapshot {
     /// a scratch upper must have the dormant scratch's complete geometry.
     ///
     /// NIC presence must match. A named address must equal the captured address; an unnamed
-    /// one inherits it. Network policies are not compared. The boot console must keep its
-    /// captured attachment policy: `recreate-listener` for a listener, or
-    /// `discard-while-disconnected` for a disconnected console. Neither its device nor the
-    /// control console proves this attachment. The runtime must use the captured backend and
-    /// CPU profile, and have the same runtime identity. An omitted profile or `auto` names
-    /// the captured profile; `host` also names it when that profile is host-derived.
+    /// one inherits it. Network policies are not compared. The boot console follows its
+    /// captured attachment policy: one captured as a listener, `recreate-listener`, restores
+    /// only as a listener, and one captured disconnected, `discard-while-disconnected`, restores
+    /// disconnected or with a listener, which keeps discarding the guest's output while no
+    /// client is connected. Neither its device nor the control console proves this attachment.
+    /// The runtime must use the captured backend and CPU profile, and have the same runtime
+    /// identity. An omitted profile or `auto` names the captured profile; `host` also names it
+    /// when that profile is host-derived.
     ///
     /// Reads only the requested image and scratch metadata, never the snapshot entries again.
     /// The caller keeps the snapshot private and immutable, as [`open`](Self::open) requires.
@@ -318,11 +320,14 @@ impl Snapshot {
             .attachments
             .iter()
             .find(|attachment| attachment.stable_id == "console:microvm-virtio0");
-        let policy = match config.console {
-            ConsoleAttachment::Listener => "recreate-listener",
-            ConsoleAttachment::Disconnected => "discard-while-disconnected",
+        // OpenVMM attaches a restore's listener to a console captured disconnected, whose device
+        // keeps discarding the guest's output while no client is connected.
+        let accepted = match console.map(|attachment| attachment.reconnect_policy.as_str()) {
+            Some("recreate-listener") => config.console == ConsoleAttachment::Listener,
+            Some("discard-while-disconnected") => true,
+            _ => false,
         };
-        if console.is_none_or(|attachment| attachment.reconnect_policy != policy) {
+        if !accepted {
             return Err(Error::unsupported(
                 "snapshot boot console attachment policy does not match the requested console",
             ));
