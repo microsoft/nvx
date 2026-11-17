@@ -1,12 +1,14 @@
 """Publication of the nvx crate to crates.io by CI's full runs of dev.
 
 The crate's versions are pre-releases of the form ``X.Y.Z-LABEL.N``. A run
-publishes a new version whenever the crate's directory changed since the
-commit from which the newest version on crates.io was packed: the next number
-of the series that the crate's ``Cargo.toml`` declares, and at least the
-declared number. The new version exists only in the run's checkout, so the
-package's ``.cargo_vcs_info.json`` records the run's commit, as dirty when the
-version differs from the declared one.
+publishes a new version whenever the crate's directory differs from the one
+from which the newest version on crates.io was packed, in the commit from which
+it was packed, both of which that version records, so that a crate that moved
+is compared with its old directory: the next number of the series that the
+crate's ``Cargo.toml`` declares, and at least the declared number. The new
+version exists only in the run's checkout, so the package's
+``.cargo_vcs_info.json`` records the run's commit, as dirty when the version
+differs from the declared one.
 
 Before the upload, the package must hold the commit's files byte for byte, but
 for the version, must build with every feature, and must install its guest
@@ -324,19 +326,16 @@ class Repository:
             "comparing commits", "merge-base", "--is-ancestor", ancestor, descendant
         )
 
-    def changed(self, base: str, head: str) -> bool:
-        """Return whether the crate's directory differs between two commits."""
-        return not self._predicate(
-            "comparing the crate's files",
-            "diff",
-            "--quiet",
-            "--no-ext-diff",
-            "--no-textconv",
-            base,
-            head,
-            "--",
-            ".",
-        )
+    def directory(self, commit: str, path: str) -> str | None:
+        """Return the ID of the tree that `commit` holds at `path`, relative to
+        the root of the checkout, or None when it holds no directory there.
+        Two directories hold the same files exactly when their IDs match."""
+        result = self._git("rev-parse", "--verify", "--quiet", f"{commit}:{path}")
+        if result.returncode != 0:
+            return None
+        object_id = result.stdout.decode("ascii").strip()
+        kind = self._text(f"reading object {object_id}", "cat-file", "-t", object_id)
+        return object_id if kind == "tree" else None
 
     def status(self) -> list[str]:
         """Return the changed and untracked files of the crate's directory,
@@ -831,8 +830,10 @@ def plan_release(
     work_dir: Path,
 ) -> Plan:
     """Decide whether `commit` needs a new version: it does when the crate's
-    directory changed since the commit from which the newest version on
-    crates.io was packed, unless that commit already contains it."""
+    directory differs from the directory from which the newest version on
+    crates.io was packed, in the commit from which it was packed, unless that
+    commit already contains this one. Both directories are the crate's, at
+    paths that differ once the crate moves."""
     releases = registry.releases(manifest.name)
     if not releases:
         return Plan(
@@ -856,18 +857,21 @@ def plan_release(
             "this run cannot tell which changes it holds: publish the next "
             "version by hand (doc/distribution.md, The nvx crate)"
         )
-    if vcs.path_in_vcs != repository.path_in_vcs:
-        raise ScriptError(
-            f"{label} was packed from {vcs.path_in_vcs!r}, not from "
-            f"{repository.path_in_vcs!r}"
-        )
     if not repository.has_commit(vcs.commit):
         raise ScriptError(
             f"{label} was packed from {vcs.commit}, which this checkout lacks: "
             "check out the full history, or publish the next version by hand "
             "(doc/distribution.md, The nvx crate)"
         )
+    published = repository.directory(vcs.commit, vcs.path_in_vcs)
+    if published is None:
+        raise ScriptError(
+            f"{label} was packed from {vcs.path_in_vcs!r}, which is not a "
+            f"directory of {vcs.commit}: publish the next version by hand "
+            "(doc/distribution.md, The nvx crate)"
+        )
     directory = f"{repository.prefix or './'}"
+    published_directory = f"{vcs.path_in_vcs}/" if vcs.path_in_vcs else "./"
     short = vcs.commit[:12]
     if vcs.commit == commit:
         return Plan(
@@ -879,16 +883,20 @@ def plan_release(
             newest.version,
             f"{label} was packed from {short}, which contains this commit",
         )
-    if not repository.changed(vcs.commit, commit):
-        return Plan(
-            False,
-            newest.version,
-            f"{directory} is unchanged since {short}, from which {label} was packed",
-        )
+    unchanged = published == repository.directory(commit, repository.path_in_vcs)
+    since = f"{short}, from which {label} was packed"
+    if published_directory == directory:
+        state = "is unchanged" if unchanged else "changed"
+        reason = f"{directory} {state} since {since}"
+    else:
+        relation = "holds the files of" if unchanged else "differs from"
+        reason = f"{directory} {relation} {published_directory} in {since}"
+    if unchanged:
+        return Plan(False, newest.version, reason)
     return Plan(
         True,
         next_version(manifest.version, [release.version for release in releases]),
-        f"{directory} changed since {short}, from which {label} was packed",
+        reason,
     )
 
 

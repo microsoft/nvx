@@ -88,11 +88,12 @@ def _version(text: str) -> Version:
 
 
 class _Checkout:
-    """A Git repository whose `crate/` directory holds a crate."""
+    """A Git repository whose `directory`, first `crate/`, holds a crate."""
 
     def __init__(self, root: Path) -> None:
         self.root = root
-        self.crate_dir = root / "crate"
+        self.directory = "crate"
+        self.crate_dir = root / self.directory
         root.mkdir(parents=True)
         self.git("init", "-q")
         for key, value in (
@@ -131,6 +132,13 @@ class _Checkout:
     @property
     def head(self) -> str:
         return self.git("rev-parse", "HEAD")
+
+    def move(self, directory: str) -> str:
+        """Move the crate to `directory`, and commit the move."""
+        self.git("mv", self.directory, directory)
+        self.directory = directory
+        self.crate_dir = self.root / directory
+        return self.commit(f"Move the crate to {directory}")
 
     def status(self) -> str:
         return self.git("status", "--porcelain", "--untracked-files=all")
@@ -184,12 +192,12 @@ def _pack(
     manifest = crate_release.read_manifest(
         (checkout.crate_dir / "Cargo.toml").read_bytes(), "Cargo.toml"
     )
-    dirty = bool(checkout.git("status", "--porcelain", "--", "crate"))
+    dirty = bool(checkout.git("status", "--porcelain", "--", checkout.directory))
     if dirty and not allow_dirty:
         raise ScriptError("command failed with exit 101: cargo package")
     files = {
-        path.removeprefix("crate/"): (checkout.root / path).read_bytes()
-        for path in checkout.git("ls-files", "-z", "--", "crate").split("\0")
+        path.removeprefix(f"{checkout.directory}/"): (checkout.root / path).read_bytes()
+        for path in checkout.git("ls-files", "-z", "--", checkout.directory).split("\0")
         if path
     }
     files["Cargo.toml.orig"] = files["Cargo.toml"]
@@ -200,7 +208,7 @@ def _pack(
     if dirty:
         git["dirty"] = True
     files[".cargo_vcs_info.json"] = (
-        json.dumps({"git": git, "path_in_vcs": "crate"}, indent=2) + "\n"
+        json.dumps({"git": git, "path_in_vcs": checkout.directory}, indent=2) + "\n"
     ).encode()
     if transform is not None:
         transform(files)
@@ -256,7 +264,7 @@ class _CratesIo:
         try:
             _root, package = _pack(checkout, transform=transform)
         finally:
-            checkout.git("checkout", "--", "crate")
+            checkout.git("checkout", "--", checkout.directory)
         self.add(version, package, yanked=yanked)
 
 
@@ -1173,6 +1181,42 @@ class ReleaseTests(unittest.TestCase):
             self.summary.read_text(encoding="utf-8"),
         )
 
+    def test_a_moved_crate_compares_its_files_with_its_old_directory(self):
+        self.crates_io.release(self.checkout)
+        base = self.checkout.head[:12]
+        self.checkout.move("moved")
+        plan = self.package()
+        self.assertEqual(
+            plan,
+            crate_release.Plan(
+                False,
+                _version(DECLARED),
+                f"moved/ holds the files of crate/ in {base}, from which demo "
+                f"{DECLARED} was packed",
+            ),
+        )
+        self.assertEqual(self.cargo.commands, [])
+        self.change_crate()
+        plan = self.package()
+        self.assertEqual(
+            plan,
+            crate_release.Plan(
+                True,
+                _version("0.1.0-alpha.4"),
+                f"moved/ differs from crate/ in {base}, from which demo "
+                f"{DECLARED} was packed",
+            ),
+        )
+        # The new version records the crate's new directory.
+        package = self.work_dir / "target" / "package" / "demo-0.1.0-alpha.4.crate"
+        self.assertEqual(
+            crate_release.read_vcs_info(
+                crate_release.read_crate(package, "demo-0.1.0-alpha.4"), package.name
+            ),
+            crate_release.VcsInfo(self.checkout.head, True, "moved"),
+        )
+        self.assertEqual(self.outputs()["publish"], "true")
+
     def test_an_older_commit_publishes_nothing(self):
         older = self.checkout.head
         self.change_crate()
@@ -1223,7 +1267,13 @@ class ReleaseTests(unittest.TestCase):
             ),
             (
                 vcs({"git": {"sha1": self.checkout.head}, "path_in_vcs": "other"}),
-                "was packed from 'other', not from 'crate'",
+                f"was packed from 'other', which is not a directory of "
+                f"{self.checkout.head}",
+            ),
+            (
+                vcs({"git": {"sha1": self.checkout.head}, "path_in_vcs": "README.md"}),
+                f"was packed from 'README.md', which is not a directory of "
+                f"{self.checkout.head}",
             ),
         ):
             with self.subTest(message=message):
