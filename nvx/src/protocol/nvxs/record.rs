@@ -49,7 +49,7 @@ impl RecordType {
     }
 
     /// Returns the type with `code`, or `None` if protocol version 1 defines no such type.
-    pub(crate) const fn from_code(code: u8) -> Option<Self> {
+    pub(in crate::protocol) const fn from_code(code: u8) -> Option<Self> {
         match code {
             OUTER_GUEST_ATTACH => Some(Self::GuestAttach),
             OUTER_HOST_ATTACH => Some(Self::HostAttach),
@@ -66,12 +66,12 @@ impl RecordType {
 
     /// Returns whether records of this type are bootstrap records, whose instance ID, epoch, and
     /// sequence are zero.
-    pub(crate) const fn is_bootstrap(self) -> bool {
+    pub(super) const fn is_bootstrap(self) -> bool {
         matches!(self, Self::GuestAttach | Self::HostAttach)
     }
 
     /// Returns whether a record of this type may carry a payload of `length` bytes.
-    pub(crate) const fn allows_length(self, length: usize) -> bool {
+    pub(super) const fn allows_length(self, length: usize) -> bool {
         match self {
             Self::GuestAttach | Self::Reset | Self::Wait | Self::Ready => length == 0,
             Self::HostAttach => length == CAPABILITY_LEN,
@@ -81,7 +81,7 @@ impl RecordType {
     }
 
     /// Returns the protocol's name of the type, such as `GUEST_ATTACH`.
-    pub(crate) const fn name(self) -> &'static str {
+    pub(in crate::protocol) const fn name(self) -> &'static str {
         match self {
             Self::GuestAttach => "GUEST_ATTACH",
             Self::HostAttach => "HOST_ATTACH",
@@ -118,7 +118,7 @@ impl ErrorCode {
     }
 
     /// Returns the code with value `code`, or `None` if protocol version 1 defines no such code.
-    pub(crate) const fn from_code(code: u32) -> Option<Self> {
+    pub(super) const fn from_code(code: u32) -> Option<Self> {
         match code {
             1 => Some(Self::Authentication),
             _ => None,
