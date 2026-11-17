@@ -768,6 +768,13 @@ missing format magic for the earliest manifests of version 2, before it
 decodes the rest: capture such a snapshot again, as [Upgrades](#upgrades) says
 of every snapshot of other artifacts.
 
+Manifest version 2 has since gained the snapshot ID of upstream OpenVMM's
+SaveVM, in field 18, without a new version: no field moved or changed its
+type, so no snapshot needs a recapture for it. A manifest without the field,
+such as one that OpenVMM wrote before it had the field, has no ID, as the zero
+ID of a microVM capture says, and OpenVMM refuses a manifest whose field 18 is
+not an ID of 16 bytes as malformed, as `nvx` refuses a template's.
+
 The machine is the one that the earlier OpenVMM called microVM ABI 3: no
 virtio device offers `VIRTIO_F_ACCESS_PLATFORM`, no console offers its size
 (see
