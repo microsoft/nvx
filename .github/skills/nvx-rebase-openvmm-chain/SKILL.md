@@ -161,18 +161,20 @@ and 6 of nvx-promote-openvmm-pin describe, with these differences:
   commit's coordinated changes. A release that changes an ABI changes more,
   such as the CLI's compatibility policy, the snapshot manifest's versions,
   `SOURCE-MANIFEST.json`, the guest's decoders, and the tests that encode the
-  versions, which the pull request explains under the `tests-modified` label.
+  versions, which the pull request explains under **Changes to existing
+  tests**.
 - With the submodule at the new head, build OpenVMM with
   `python3 scripts/nvx.py build-openvmm`, and run
   `python3 scripts/nvx.py test-microvm --backend BACKEND` on each backend that
   you can reach, locally or through
   [nvx-prepare-host](../nvx-prepare-host/SKILL.md); leave the others to CI.
 
-Its body gives the OpenVMM source (the pinned revision, the previous pin, the
-new base, upstream `main` since it, the absence of an OpenVMM pull request, and
-the signatures), what changed in OpenVMM and in NVX, the equivalence evidence,
-the validation, and the landing order of section 7. Ask whether it is Draft or
-Ready.
+Its body fills the [pull request template](../../pull_request_template.md),
+with an **OpenVMM pin** section that gives the OpenVMM source (the pinned
+revision, the previous pin, the new base, upstream `main` since it, the
+absence of an OpenVMM pull request, and the signatures), what changed in
+OpenVMM and in NVX, the equivalence evidence, and the landing order of
+section 7. Ask whether it is Draft or Ready.
 
 ## 7. Land The Release
 

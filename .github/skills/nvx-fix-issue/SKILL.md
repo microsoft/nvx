@@ -150,12 +150,17 @@ anything public and ask the user to handle it under
 Create it Ready, without asking, with
 `gh pr create --repo microsoft/nvx --base dev --title "<subject>" --body-file <file>`,
 filling the [pull request template](../../pull_request_template.md): `Fixes #N`,
-or `Part of #N` and the tasks left open; what changed and why, including the
-root cause; the landing order of an OpenVMM change; and `Validation`, with the
-local checks, a table of the remote runs before and after the fix by profile,
-backend, and host type, and the gates left to CI. When
-`python3 scripts/check_test_changes.py --base origin/dev` lists changes, add
-the `tests-modified` label and explain each one.
+or `Part of #N` and the tasks left open; under **What does this pull request
+change?**, the change and what it leaves out; under **Why is this change
+needed?**, the root cause and the alternatives rejected, such as a patch that
+the issue proposes; under **How was this change validated?**, the local
+checks, a table of the remote runs before and after the fix by profile,
+backend, and host type, and the gates left to CI; and the **Checklist**,
+checking each item that holds or does not apply. When
+`python3 scripts/check_test_changes.py --base origin/dev` lists changes,
+explain each one under **Changes to existing tests**; the Test changes
+workflow adds the `tests-modified` label. Give the landing order of an
+OpenVMM change under **OpenVMM pin**.
 
 ## 7. Drive CI And Review To Completion
 

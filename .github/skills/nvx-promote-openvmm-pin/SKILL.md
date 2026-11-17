@@ -126,11 +126,14 @@ lists.
 
 - Right before pushing, fetch the target again; when it moved, rebuild both
   commits on it, derive the roadmap's numbers again, and rerun the validation.
-- Fill the [pull request template](../../pull_request_template.md) with the
-  OpenVMM pull request and exact pinned SHA, the scope and exclusions, the
-  prerequisites and their states, the equivalence evidence in its precise
-  term, the roadmap positions, the validation, the exact head submitted to
-  CI, and the landing order. Ask whether it is Draft or Ready.
+- Fill the [pull request template](../../pull_request_template.md): the scope
+  and exclusions under **What does this pull request change?**, the reason
+  for the pin under **Why is this change needed?**, the validation and the
+  exact head submitted to CI under **How was this change validated?**, the
+  **Checklist**, and an **OpenVMM pin** section with the OpenVMM pull request
+  and exact pinned SHA, the prerequisites and their states, the equivalence
+  evidence in its precise term, the roadmap positions, and the landing order.
+  Ask whether it is Draft or Ready.
 - Follow only the run of the current head, and triage failures with
   [nvx-triage-ci-run](../nvx-triage-ci-run/SKILL.md). Its `openvmm-ci` job
   waits up to 300 minutes for OpenVMM's CI of the pin; when a required OpenVMM

@@ -51,7 +51,7 @@ with the deploy key and on the hypervisor runners before it merges; see
 | Commit subject | `area: summary`, where `area` is the component, command, or directory that changes, such as `doc`, `ci`, `guest`, `sandbox`, or `openvmm`. Start the summary with a lowercase imperative verb and omit the trailing period: `ci: run each OpenVMM suite only when its inputs change`. |
 | Commit body | What changed and why, when the subject does not say enough. |
 | Pull request title | The commit subject of a single-commit pull request; otherwise a summary in the same form. |
-| Pull request body | What changed and why, then a `Validation` section that lists the checks you ran and the gates you leave to CI, such as backends you could not test. The [pull request template](../.github/pull_request_template.md) holds these sections. |
+| Pull request body | The sections of the [pull request template](../.github/pull_request_template.md): **What does this pull request change?**, **Why is this change needed?**, **How was this change validated?**, with the checks that you ran and the gates that you leave to CI, such as backends that you could not test, and **Checklist**. Add **Changes to existing tests** when `check_test_changes.py` lists any, and **OpenVMM pin** when the `openvmm` gitlink moves. |
 | Issue references | `Closes #N` or `Fixes #N` first when the pull request completes the issue; `Part of #N` or `Refs #N` otherwise. |
 | Review threads | Reply with the commit that addresses the comment, or with the evidence that no change is needed, then resolve the thread once the pull request's head holds that outcome. `scripts/pr_threads.py` lists the threads, and checks each reply and resolution. |
 
