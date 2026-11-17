@@ -1,4 +1,4 @@
-//! The standard streams, written as `nvx.py` writes them.
+//! Text lines for the standard streams and sandbox configuration, as `nvx.py` writes them.
 //!
 //! Python's `print` ends lines with `os.linesep`, `\r\n` on Windows and `\n` elsewhere, and
 //! translates every `\n` of the text it writes, so [`print_stdout`] and [`print_stderr`] do too.
@@ -17,7 +17,7 @@ use std::os::fd::AsFd;
 use crate::host::platform;
 
 /// The line separator of this host, `os.linesep`.
-pub(crate) const LINE_SEPARATOR: &str = if cfg!(windows) { "\r\n" } else { "\n" };
+const LINE_SEPARATOR: &str = if cfg!(windows) { "\r\n" } else { "\n" };
 
 /// Returns `text` and a line end, with each `\n` translated to [`LINE_SEPARATOR`].
 pub(crate) fn line(text: &str) -> String {
