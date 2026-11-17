@@ -8,20 +8,21 @@
   `feature/microvm/release/v6.1` rebase had moved it; see [Upstream status](#upstream-status).
 - Mapped fork tip: `227074dc1e6977649585479daf25515f90acaf9d`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126.
-- NVX's pinned OpenVMM revision: `1b25c5bbc550943472bf500efd84bd1378fa3da9`, position 296, the
-  head of the `feature/microvm/release/v7.0` branch of microsoft/openvmm. The v7.0 reorganization
-  moved the 315 commits of `feature/microvm/dev` at NVX's previous pin, `fe61f9cbf`, onto
-  `e6b458cc0`: the 269 of `feature/microvm/release/v6.1` and the 46 that microsoft/openvmm#5077
-  to microsoft/openvmm#5126 added after it. Upstream had landed none of their changes, so it
-  dropped none. It folded the 19 fixups into the commits that they fix: PR09's at v6.1 positions
-  234-236, PR13's at 240, PR18's at 241, PR20's at 242, PR19's at 243, the test fixes at 254 and
-  259, the v6.1 rebase's at 262-269, and PR10's at 271 and 273. It moved v6.1 positions 261 and
-  270, which PR10's RTC fixups need, into PR10 as positions 016 and 017. Positions 001-015 keep
-  their positions, and v6.1 positions 016-233 are positions 018-235, 237-239 are 236-238, 244-253
-  are 239-248, 255-258 are 249-252, 260 is 253, 272 is 254, and 274-315 are 255-296; see
-  [The v7.0 reorganization](#the-v70-reorganization). The pin is 170 commits past the mapped tip on
-  the same first-parent chain. Positions 127-296 are not yet assigned to PRs; see
-  [Commits after the mapped tip](#commits-after-the-mapped-tip).
+- NVX's pinned OpenVMM revision: `026d35da644b646afdfb96f9b70c577f16dacee7`, position 300, the
+  head of microsoft/openvmm#5129, whose four commits follow position 296, `1b25c5bbc`, the head of
+  `feature/microvm/dev` and of the `feature/microvm/release/v7.0` branch of microsoft/openvmm. The
+  v7.0 reorganization moved the 315 commits of `feature/microvm/dev` at NVX's previous pin,
+  `fe61f9cbf`, onto `e6b458cc0`: the 269 of `feature/microvm/release/v6.1` and the 46 that
+  microsoft/openvmm#5077 to microsoft/openvmm#5126 added after it. Upstream had landed none of
+  their changes, so it dropped none. It folded the 19 fixups into the commits that they fix: PR09's
+  at v6.1 positions 234-236, PR13's at 240, PR18's at 241, PR20's at 242, PR19's at 243, the test
+  fixes at 254 and 259, the v6.1 rebase's at 262-269, and PR10's at 271 and 273. It moved v6.1
+  positions 261 and 270, which PR10's RTC fixups need, into PR10 as positions 016 and 017.
+  Positions 001-015 keep their positions, and v6.1 positions 016-233 are positions 018-235,
+  237-239 are 236-238, 244-253 are 239-248, 255-258 are 249-252, 260 is 253, 272 is 254, and
+  274-315 are 255-296; see [The v7.0 reorganization](#the-v70-reorganization). The pin is 174
+  commits past the mapped tip on the same first-parent chain. Positions 127-300 are not yet
+  assigned to PRs; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `2c25662b2af038869f75e86dae25f8f5d21bc23b` (2026-11-16), three commits past the
   fork base; see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -1331,7 +1332,11 @@ e6b458cc0
   -> comments and Guide that say what an STI shadow restored as a MOV SS shadow loses [294]
   -> restore that refuses an element that the partition lacks before it sets any state [295]
   -> contract tests that each backend refuses an element that its partition lacks [296]
-  -> 1b25c5bbc (NVX pin)
+  -> restored halted or idle VP kept suspended on WHP, with contract tests [297]
+  -> fixture accessor of those contract tests built on Windows only [298]
+  -> restored VP's suspending instruction checked through the page tables in guest memory [299]
+  -> restored VP with a pending NMI left to take it [300]
+  -> 026d35da6 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1352,18 +1357,19 @@ PR10, as positions 016 and 017, which can go upstream on their own in that order
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Its 170 later commits are not yet
+The NVX pin extends the chain past position 126 without merges. Its 174 later commits are not yet
 classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 are the ABI restart
 of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 followed the v5.0
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
-v6.0 reorganization, and positions 254-296 followed the v6.1 rebase, so they combine none, apart
-from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0
-reorganization folded into them. Each commit's v6.1 position is its v6.0 position less seven, the
-number of commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1
-position through 147 and one less from v5.1 position 149 on; see
+v6.0 reorganization, positions 254-296 followed the v6.1 rebase, and positions 297-300 followed the
+v7.0 reorganization, so they combine none, apart from position 215, which combines v5.1 positions
+222 and 223, and the commits that the v7.0 reorganization folded into them. Each commit's v6.1
+position is its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before
+it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on,
+and positions 297-300 have no earlier position; see
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.1 position counts in
@@ -1545,12 +1551,17 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 294 | `3489a6459` | 313 | - | - | - | - | - | virt: say what an STI shadow restored as a MOV SS shadow loses (microsoft/openvmm#5125) |
 | 295 | `5e2e92338` | 314 | - | - | - | - | - | virt: refuse to restore an element that the partition lacks (microsoft/openvmm#5126) |
 | 296 | `1b25c5bbc` | 315 | - | - | - | - | - | vmm_tests: check that each backend refuses unsupported restore state (microsoft/openvmm#5126) |
+| 297 | `c5f505cdb` | - | - | - | - | - | - | virt_whp: keep a restored halted VP halted (microsoft/openvmm#5129) |
+| 298 | `786c0c0a7` | - | - | - | - | - | - | vmm_tests: build the fixture's memory accessor on Windows only (microsoft/openvmm#5129) |
+| 299 | `bcb8e530d` | - | - | - | - | - | - | virt_whp: resuspend a restored VP without the hypervisor's translation (microsoft/openvmm#5129) |
+| 300 | `026d35da6` | - | - | - | - | - | - | virt_whp: let a restored VP with a pending NMI take it (microsoft/openvmm#5129) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
 that it regrouped, and later fork bases, up to `7d90c4104` for v6.1 positions 270-315, for later
-commits. They name the positions that the commits have now, but the v7.0 reorganization did not
-check them again on `e6b458cc0`, nor did the v6.1 rebase check the earlier ones on `7d90c4104`.
+commits, and `c0694c4da`, upstream main on 2026-11-16, for positions 297-300. They name the
+positions that the commits have now, but the v7.0 reorganization did not check them again on
+`e6b458cc0`, nor did the v6.1 rebase check the earlier ones on `7d90c4104`.
 
 Some of these commits change mapped work rather than add to it. Position 142 removes the legacy
 microVM clock paths, changing files that PR10 and PR17 also change, and makes manifest version 6 the
@@ -3054,6 +3065,105 @@ follows the ones that positions 273 and 279 add. Its tests also need the `StateE
 that position 295 adds, and `SpecCtrl`, `UmwaitControl`, `DebugCtl`, `MiscMsrs`, and `MachineCheck`
 and the capabilities that name them, which positions 272, 277, and 278 add. So it follows positions
 272, 273, 277, 278, 279, 283, and 295, and the positions that they follow, upstream.
+
+Position 297 makes WHP keep a restored VP that was saved halted, or idle, suspended, where a VP that
+was saved in `cli; hlt` ran on past the `hlt` when it first ran, although its activity read back as
+halted, and a guest that halts with its interrupts disabled, as Linux does for an offlined
+processor, expects no wake-up. With the hypervisor's APIC, WHP keeps a suspend state that the VMM
+writes only until the VMM writes more of the VP's state, and `restore_all` writes the registers, the
+activity, and then the APIC page, so a VP ran on after a restore into the VP that was saved and into
+a new partition's alike. Only a VP that runs its own `hlt`, or its `rdmsr` of
+`HV_X64_MSR_GUEST_IDLE` for an idle one, after the VMM's last write stays suspended, and a VP that
+waits for a SIPI is not affected. `restore_activity` now records a halted or idle state in the VP's
+run state, which `save_activity` reports until the VP runs, and `run_vp` calls the new
+`resuspend_restored_vp` before it first runs the VP: where guest memory holds the `hlt`, or the
+`rdmsr` of an idle VP whose RCX holds `HV_X64_MSR_GUEST_IDLE`, before RIP, it puts RIP back onto the
+instruction, clears the activity, and sets the interrupt shadow, so that the VP suspends itself
+again in the state that it was saved in. The shadow is needed: an NMI or an interrupt that the
+restore queued, as that of an LAPIC timer that expired during the downtime, would be taken before
+the instruction and return to it, and the VP would suspend again with nothing left to wake it. A VP
+that has an interruption pending, or whose RIP does not follow the instruction, is left as the
+restore wrote it, with a rate-limited warning, and the VPs of the user-mode APIC, whose halted state
+the VMM keeps, are unchanged. No element, field, or version of the saved state changes. The commit
+adds the contract tests of the restore in the new `suspend.rs`, which builds on Windows and runs on
+WHP: eight cases run a real-mode guest of a few bytes, which the test writes into the fixture's RAM,
+that halts, or idles, with its interrupts enabled or disabled, save the VP, restore it into the same
+VP or into a new partition's, and require that the VP stays suspended until an NMI or a fixed
+interrupt wakes it and then resumes after the instruction. Three of them also deliver the wake-up
+before the VP first runs. Four of them fail without the change, and those three fail without the
+interrupt shadow. The commit also gives the fixture a `memory` accessor, which position 298 builds
+on Windows only, and says in the Guide's page of the contract tests, and in a comment of `msi.rs`,
+that a test can run the VP and that WHP reports the halted state that it restored. It changes files
+that PR01's positions 002 and 003, PR05's positions 007 and 008, PR10's positions 021 and 026,
+PR12's position 036, PR17's position 072, PR20's position 093, and 26 positions that no PR has yet
+also change, and it changes one line that a mapped PR adds: it rewrites the first line of the header
+of `fixture.rs`, which PR05's position 008 adds, into two. It also rewrites four lines of the
+comment in `msi.rs` that position 284 adds and a line of the Guide's page of the contract tests that
+upstream main has and no commit of the chain changes, and adds the rest. Replaying it on upstream
+main conflicts in four files, where it edits or adds beside what upstream main lacks: in
+`fixture.rs`, its header rewrites the line that position 008 rewrites; in `main.rs`, `mod suspend;`
+sits between the `mod speculation;` that position 273 adds and the `mod time;` that upstream main
+has, among the `mod` lines that positions 260, 263, 266-268, 273, 277, 283, 284, 288, 290, 293, and
+296 add; in `msi.rs`, which does not exist there, since position 284 adds it; and in the Guide's
+page of the contract tests, its paragraph follows the ones that positions 273, 279, and 296 add. Its
+changes to `virt_whp` apply without conflicts, and `cargo check -p virt_whp --all-targets` passes
+with them on upstream main, but `suspend.rs` is a new file whose cases write their guest into the
+RAM that only position 008 maps into the fixture's partition. So it follows positions 008, 273, 279,
+284, and 296, and the positions that they follow, upstream.
+
+Position 298 builds the `memory` accessor that position 297 adds to the fixture of the contract
+tests on Windows only, as `suspend.rs`, the one module that calls it, is. The Linux builds of
+`virt_backend_tests` found the accessor unused, and Clippy's `dead_code` check, which the quick
+check of OpenVMM's pull request runs with `-D warnings` on `x86_64-unknown-linux-gnu`, failed on
+it. The commit adds one `cfg` attribute to `fixture.rs`, so no code that a build for Windows
+compiles changes. It fixes position 297, which no PR maps yet, so it is not a fixup of a PR yet, and
+folds into position 297 when that position goes into one. It changes `fixture.rs`, which PR05's
+position 008, PR12's position 036, PR17's position 072, and positions 127, 142, and 297 also change,
+and adds to no line that a mapped PR adds. Replaying it on upstream main conflicts in `fixture.rs`,
+since the accessor that it gates does not exist there. So it follows position 297, and the
+positions that position 297 follows, upstream.
+
+Position 299 makes position 297's check of the instruction before RIP read the page tables from
+guest memory, where it asked the hypervisor to translate the address with `WHvTranslateGva`, which
+fails with an unmapped GPA for a page, or a page table, that a lazy restore, as that of a
+copy-on-write snapshot is, has not registered yet, so that the check failed and the VP ran past its
+`hlt` as before. It walks the tables from the VP's registers and guest memory, as the emulator does
+without nested virtualization, and leaves the translation to the hypervisor with nested
+virtualization, as the emulator does. It also drops position 297's record of the suspend state
+where the VMM sets a VP's activity itself, in the injection of an extint through the synic, in a
+VTL2 write of the activity register, and in the start of VTL0 by VTL2, and says in the doc comment
+of `resuspend_restored_vp` what a save reads when a stop cancels the run before the VP runs the
+instruction. It adds a case to position 297's `suspend.rs`, which runs the guest in 64-bit mode
+with paging, through page tables that are the fixture's page alone, and says in the Guide that one
+case runs in 64-bit mode. It fixes position 297, which no PR maps yet, so it is not a fixup of a PR
+yet, and folds into position 297 when that position goes into one. It changes files that PR01's
+positions 002 and 003, PR05's position 007, PR10's positions 021 and 026, PR12's position 036,
+PR17's position 072, PR20's position 093, position 297, and 19 positions that no PR has yet also
+change, and it changes no line that a mapped PR adds: it rewrites 28 lines of `suspend.rs`, six of
+`apic.rs`, two of `lib.rs`, and two of the Guide that position 297 adds, and adds the rest.
+Replaying it on upstream main conflicts in four files, since it rewrites lines that position 297
+adds, in `apic.rs`, `lib.rs`, and the Guide's page of the contract tests, and `suspend.rs` is the
+new file of position 297; its additions to `vp.rs` and `hypercalls.rs` apply without conflicts, and
+`cargo check -p virt_whp --all-targets` passes on upstream main with the `virt_whp` changes of
+positions 297 and 299. So it follows position 297, and the positions that position 297 follows,
+upstream.
+
+Position 300 has position 297's `resuspend_restored_vp` leave a restored VP that holds an NMI
+pending, and not masked, alone: the NMI wakes it, as it would the VP that was saved suspended, so
+the VP takes the NMI as it first runs and resumes after its suspending instruction. Putting RIP
+back onto the instruction, in the interrupt shadow, left such a VP suspended with its NMI still
+pending on the AMD host of OpenVMM's CI, whose hypervisor does not wake it, and so failed the case
+of position 297 that queues an NMI before the VP first runs. An interrupt still waits for the
+instruction in the shadow, which that host passes, and an NMI that the guest has masked does not
+wake the VP, so it is suspended again as before. It makes the cases of `suspend.rs` that queue an
+NMI before the VP first runs require that the VP holds it as pending, and rewords the comment on
+them. It fixes position 297, which no PR maps yet, so it is not a fixup of a PR yet, and folds into
+position 297 when that position goes into one. It changes files that six positions that no PR has
+yet, and positions 297 and 299, also change, and it changes no line that a mapped PR adds: it
+rewrites seven lines of `apic.rs` and three of `suspend.rs` that position 297 adds, and one of
+`suspend.rs` that position 299 adds, and adds the rest. Replaying it on upstream main conflicts in
+`apic.rs`, beside the check that position 297 adds, and in `suspend.rs`, which is position 297's
+new file. So it follows positions 297 and 299 upstream.
 
 ## PR summary
 
