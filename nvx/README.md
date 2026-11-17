@@ -591,6 +591,13 @@ the `ExportPlan` of the host paths that it exports, if any, the
 boot takes: the caller's own kernel command-line tokens and, for a capture, a
 `CaptureConfig`.
 
+`Boot::memory_capacity_mib` optionally reserves a cold VM's memory capacity,
+at least its boot memory and fitting a byte count. With a capture it must be
+`None`: `CaptureConfig::memory.capacity` alone supplies the capacity.
+`VmConfig::check` and command-line rendering reject setting both with
+`Unsupported`, even if the capacities match, rather than emitting duplicate
+`--memory-capacity` options.
+
 A root is `Blockless`, the guest's own system from its initramfs, or `Layered`,
 a `LayeredRoot`: the path of an image and its `RootImage`, EROFS or a GPT disk,
 with the identity that the guest expects, an optional bound of a GPT disk's
