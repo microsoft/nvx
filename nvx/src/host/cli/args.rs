@@ -81,7 +81,7 @@ pub(crate) enum Stop {
 
 /// How many values an option or positional takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Arity {
+enum Arity {
     /// No value: a flag.
     Flag,
     /// Exactly one value.
@@ -97,7 +97,7 @@ pub(crate) struct Spec {
     /// positional, such as `sandbox_operation`.
     pub(crate) name: &'static str,
     /// How many values it takes.
-    pub(crate) arity: Arity,
+    arity: Arity,
 }
 
 impl Spec {
