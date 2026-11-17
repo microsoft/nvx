@@ -280,7 +280,8 @@ class IssueWorkspaceTests(unittest.TestCase):
         self.assertTrue(any(name.startswith("#10 ") for name in names))
         self.assertTrue(any(name.startswith("#12 ") for name in names))
         self.assertFalse(any("#11 " in name for name in names))
-        self.assertFalse(any("570" in name for name in names))
+        # Commit candidates start with a SHA prefix, which can contain 570.
+        self.assertFalse(any("issue-570" in name for name in names))
         pull = next(
             candidate
             for candidate in result.candidates
