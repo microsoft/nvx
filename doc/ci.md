@@ -2211,6 +2211,25 @@ to the workflow or to the script takes effect once it merges into `dev`, and
 the script itself counts as test policy, so a pull request that changes it is
 flagged once it does.
 
+Code scanning's `actions/untrusted-checkout/critical` query reports the fetch
+of the pull request's commits as a checkout of untrusted code in a privileged
+workflow, since it cannot tell that nothing runs them. That alert is
+dismissed as a false positive, with the evidence in
+[#1658](https://github.com/microsoft/nvx/issues/1658). Code scanning matches
+a later result to the dismissed alert by a hash of the first lines of the
+step that it reports, so a change that leaves those lines alone raises no new
+alert, even one that makes the job run the pull request's code. The job's
+tests guard it instead: the `WorkflowStepTests` of
+[`test_test_changes.py`](../scripts/test_test_changes.py) run its steps as an
+Ubuntu runner does, on local repositories and a pull request whose copies of
+the job's scripts leave a mark when they run. They fail when the job runs
+them, changes the work tree that its checkout left, runs an action other than
+the checkout, no longer labels the pull request `tests-modified`, or uses a
+setting that they do not model, such as another shell or working directory.
+A change to those lines, or a move of the workflow, raises a new alert, which
+needs the same review: dismiss only that alert, never the query or the
+workflow.
+
 The `quality` job checks the [test layout](contribute.md#test-layout) with
 [`check_test_layout.py`](../scripts/check_test_layout.py), whose rules say
 where tests live, which test hooks a production file may hold, and which the
