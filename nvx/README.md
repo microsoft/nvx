@@ -1223,7 +1223,13 @@ hides the tokens that OpenVMM appends is refused.
 Host paths are the host's own, which `std::path` holds: spelled with their
 components alone, as `Path::components` reads them, with backslashes on
 Windows, and resolved by `std::fs::canonicalize`, with the components that do
-not exist yet appended. Paths that are not valid Unicode are refused. The
+not exist yet resolved in order. A `..` after a missing directory cancels that
+directory, so `missing/../state` names `state` without creating `missing`.
+Existing symbolic links are resolved before applying a following `..`, even
+after a missing component was cancelled. A dangling link followed by `..` still
+fails rather than cancelling the link; permission, non-directory, and other
+errors besides a missing path still fail resolution. Paths that are not valid
+Unicode are refused. The
 filesystem queries are those of `std::fs`, and the identities of files those
 of the crate's private platform layer: the device and inode on Unix, and the
 volume serial number and the 64-bit file index on Windows.
@@ -1741,9 +1747,9 @@ intended changes of behavior.
   such as `sandbox configuration is malformed`, and exits with status 1.
 - Paths print with their components alone, as `std::path::Path::components`
   reads them, so a leading `.` stays, as in `./snapshot`, where `nvx.py`
-  printed `snapshot`, as `pathlib` normalizes it. A path resolves as the host
-  resolves it: on Linux, a `..` that follows a directory that does not exist
-  fails, where `Path.resolve` dropped both.
+  printed `snapshot`, as `pathlib` normalizes it. Resolution cancels a missing
+  directory followed by `..` on Linux as well as Windows, as `Path.resolve`
+  did.
 - On Windows, a junction counts as a link, as `std::path::Path::is_symlink`
   tells it, so a share's host path, or the directory of an outcome report, that
   is a junction is refused as a link is, where Python's `os.path.islink` counted

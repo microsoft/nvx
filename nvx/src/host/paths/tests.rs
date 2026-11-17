@@ -173,3 +173,61 @@ fn resolution_keeps_the_verbatim_path_that_alone_names_the_object() {
     fs::create_dir(&dotted).unwrap();
     assert_eq!(resolve(&dotted).unwrap(), dotted);
 }
+
+#[cfg(feature = "cli")]
+#[test]
+fn resolution_cancels_missing_directories_before_parent_components() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = resolve(directory.path()).unwrap();
+    fs::create_dir(root.join("state")).unwrap();
+    for (path, expected) in [
+        ("missing/../state", "state"),
+        ("missing/..", ""),
+        ("missing/deeper/../../state", "state"),
+        ("missing/../new/child", "new/child"),
+    ] {
+        assert_eq!(
+            resolve(&root.join(native(path))).unwrap(),
+            root.join(native(expected)),
+            "{path}"
+        );
+    }
+    assert!(!root.join("missing").exists());
+}
+
+#[cfg(all(feature = "cli", unix))]
+#[test]
+fn resolution_keeps_link_semantics_around_missing_parents() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = resolve(directory.path()).unwrap();
+    let target = root.join("elsewhere").join("target");
+    fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(&target, root.join("link")).unwrap();
+    for (path, expected) in [
+        ("link/missing/../..", root.join("elsewhere")),
+        ("missing/../link/..", root.join("elsewhere")),
+        ("link/missing/../../new", root.join("elsewhere/new")),
+    ] {
+        assert_eq!(resolve(&root.join(path)).unwrap(), expected, "{path}");
+    }
+    fs::write(root.join("file"), b"").unwrap();
+    for path in ["file/../state", "missing/../file/../state"] {
+        assert_eq!(
+            resolve(&root.join(path)).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory,
+            "{path}"
+        );
+    }
+    std::os::unix::fs::symlink(target.join("absent"), root.join("dangling")).unwrap();
+    for path in [
+        "dangling/../state",
+        "missing/../dangling/../state",
+        "dangling/missing/../../state",
+    ] {
+        assert_eq!(
+            resolve(&root.join(path)).unwrap_err().kind(),
+            io::ErrorKind::NotFound,
+            "{path}"
+        );
+    }
+}

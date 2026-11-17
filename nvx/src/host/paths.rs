@@ -13,7 +13,10 @@
 //!   the directory if the drive is the directory's own, and otherwise below the current directory
 //!   of its drive, which the process keeps for each drive, as [`std::path::absolute`] gives it.
 //! - [`resolve`] makes a path absolute, resolves the links of its longest existing prefix as
-//!   [`std::fs::canonicalize`] resolves them, and appends the rest. On Windows, it drops the
+//!   [`std::fs::canonicalize`] resolves them, and resolves the remaining components in order.
+//!   A `..` after a missing directory cancels that directory; links encountered afterwards are
+//!   still resolved. A dangling link before `..` still fails, as do errors other than a missing
+//!   path. On Windows, it drops the
 //!   verbatim prefix `\\?\` that `canonicalize` gives, and turns `\\?\UNC\` into `\\`, unless only
 //!   the verbatim path names the object, as for a name that ends in a period or a space.
 //!
@@ -143,15 +146,37 @@ pub(crate) fn resolve(path: &Path) -> io::Result<PathBuf> {
         match std::fs::canonicalize(existing) {
             Ok(resolved) => {
                 let mut resolved = without_verbatim_prefix(resolved);
-                resolved.extend(missing.iter().rev());
+                for component in missing.iter().rev() {
+                    let candidate = appended(&resolved, std::iter::once(*component));
+                    match std::fs::canonicalize(&candidate) {
+                        Ok(path) => resolved = without_verbatim_prefix(path),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                            if *component == Component::ParentDir {
+                                match std::fs::symlink_metadata(&resolved) {
+                                    Ok(metadata) if metadata.is_symlink() => return Err(error),
+                                    Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                                        return Err(error);
+                                    }
+                                    _ => {}
+                                }
+                                resolved.pop();
+                            } else {
+                                resolved = candidate;
+                            }
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
                 text(&resolved)?;
                 return Ok(resolved);
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+                let (Some(parent), Some(component)) =
+                    (existing.parent(), existing.components().next_back())
+                else {
                     return Err(error);
                 };
-                missing.push(name);
+                missing.push(component);
                 existing = parent;
             }
             Err(error) => return Err(error),

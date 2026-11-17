@@ -326,6 +326,47 @@ fn exec_and_stop_tell_a_directory_without_a_sandbox_from_a_stopped_sandbox() {
 }
 
 #[test]
+fn state_directory_resolution_cancels_a_missing_parent() {
+    let root = Root::new();
+    fs::create_dir(root.path.join("state")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(root.path.join("state"), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    for operation in ["start", "stop", "exec"] {
+        let invoke = |state: &str| {
+            let mut arguments = lifecycle(operation, &root, state);
+            if operation == "exec" {
+                arguments.extend(["--entrypoint".to_owned(), "/bin/true".to_owned()]);
+            }
+            run(&root, &arguments)
+        };
+        let direct = invoke("state");
+        let missing = invoke("missing/../state");
+        assert_eq!(direct.status.code(), Some(1), "{operation}");
+        assert!(
+            text(&direct.stderr).starts_with("error[sandbox-not-provisioned]: "),
+            "{operation}: {}",
+            text(&direct.stderr)
+        );
+        assert_eq!(missing.status.code(), direct.status.code(), "{operation}");
+        assert_eq!(text(&missing.stderr), text(&direct.stderr), "{operation}");
+        assert!(missing.stdout.is_empty(), "{operation}");
+    }
+    let output = run(&root, &provision(&root, "missing/../provisioned", ""));
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert!(root.path.join("provisioned/config.json").is_file());
+    assert!(!root.path.join("missing").exists());
+    let output = run(
+        &root,
+        &lifecycle("deprovision", &root, "missing/../provisioned"),
+    );
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert!(!root.path.join("provisioned").exists());
+}
+
+#[test]
 fn a_sandbox_whose_configuration_names_another_layer_role_does_not_start() {
     // The typed record takes one image, not additional named layers. Injecting another role is
     // refused before spawn, while deprovision still removes the sandbox.
