@@ -8,9 +8,10 @@
   `feature/microvm/release/v6.1` rebase had moved it; see [Upstream status](#upstream-status).
 - Mapped fork tip: `227074dc1e6977649585479daf25515f90acaf9d`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126 and the PR18 fixup at position 302.
-- NVX's pinned OpenVMM revision: `2807bafcfcc0e83974366b97e68e0367f565f178`, position 302, the
-  head of microsoft/openvmm#5132, whose commit follows position 301, `c7122cd20`, the head of
-  `feature/microvm/dev`, which microsoft/openvmm#5131 merged after position 300, `026d35da6`,
+- NVX's pinned OpenVMM revision: `c9755a905618feeae5072d74c206a65736406aab`, position 306, the
+  head of microsoft/openvmm#5134, whose commits, positions 303-306, follow position 302,
+  `2807bafcf`, the head of `feature/microvm/dev`, which microsoft/openvmm#5132 merged after position
+  301, `c7122cd20`, which microsoft/openvmm#5131 merged after position 300, `026d35da6`,
   where microsoft/openvmm#5129 put positions 297-300 after position 296, `1b25c5bbc`, the head of
   the `feature/microvm/release/v7.0` branch of microsoft/openvmm. The
   v7.0 reorganization moved the 315 commits of `feature/microvm/dev` at NVX's previous pin,
@@ -22,9 +23,9 @@
   positions 261 and 270, which PR10's RTC fixups need, into PR10 as positions 016 and 017.
   Positions 001-015 keep their positions, and v6.1 positions 016-233 are positions 018-235,
   237-239 are 236-238, 244-253 are 239-248, 255-258 are 249-252, 260 is 253, 272 is 254, and
-  274-315 are 255-296; see [The v7.0 reorganization](#the-v70-reorganization). The pin is 176
-  commits past the mapped tip on the same first-parent chain. Positions 127-301 are not yet
-  assigned to PRs, and position 302 is a PR18 fixup; see
+  274-315 are 255-296; see [The v7.0 reorganization](#the-v70-reorganization). The pin is 180
+  commits past the mapped tip on the same first-parent chain. Positions 127-301 and 303-306 are not
+  yet assigned to PRs, and position 302 is a PR18 fixup; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `2c25662b2af038869f75e86dae25f8f5d21bc23b` (2026-11-16), three commits past the
   fork base; see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1341,7 +1342,11 @@ e6b458cc0
   -> restored VP with a pending NMI left to take it [300]
   -> RAM of a KVM VM mapped into its SMM address space [301]
   -> PR18 fixup [302]
-  -> 2807bafcf (NVX pin)
+  -> IA32_UMWAIT_CONTROL saved and restored on WHP and MSHV [303]
+  -> IA32_BNDCFGS saved and restored where the guest's CPUID has MPX [304]
+  -> AMD's VM_CR, VM_HSAVE_PA, and OSVW MSRs saved and restored on KVM [305]
+  -> MSHV and WHP save refused for a VP that delivers a software interrupt [306]
+  -> c9755a905 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1368,19 +1373,19 @@ NIC an IPv6 identity.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 176 later commits, position
+The NVX pin extends the chain past position 126 without merges. Of its 180 later commits, position
 302 is a PR18 fixup, and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 are the ABI restart
 of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 followed the v5.0
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
-v6.0 reorganization, positions 254-296 followed the v6.1 rebase, and positions 297-302 followed the
+v6.0 reorganization, positions 254-296 followed the v6.1 rebase, and positions 297-306 followed the
 v7.0 reorganization, so they combine none, apart from position 215, which combines v5.1 positions
 222 and 223, and the commits that the v7.0 reorganization folded into them. Each commit's v6.1
 position is its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before
 it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on,
-and positions 297-302 have no earlier position; see
+and positions 297-306 have no earlier position; see
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.1 position counts in
@@ -1568,11 +1573,15 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 300 | `026d35da6` | - | - | - | - | - | - | virt_whp: let a restored VP with a pending NMI take it (microsoft/openvmm#5129) |
 | 301 | `c7122cd20` | - | - | - | - | - | - | virt_kvm: map RAM into KVM's SMM address space (microsoft/openvmm#5131) |
 | 302 | `2807bafcf` | - | - | - | - | - | - | microVM: refuse a decoded network identity other than the derived one (microsoft/openvmm#5132); fold into 078, its test's configuration into 093, its IPv6 cases into 193 |
+| 303 | `07dcf07d7` | - | - | - | - | - | - | virt_whp, virt_mshv: save and restore a guest's IA32_UMWAIT_CONTROL (microsoft/openvmm#5134) |
+| 304 | `3587c0111` | - | - | - | - | - | - | virt: save and restore a guest's IA32_BNDCFGS (microsoft/openvmm#5134) |
+| 305 | `3c40841df` | - | - | - | - | - | - | virt, virt_kvm: save and restore AMD's VM_CR, VM_HSAVE_PA, and OSVW (microsoft/openvmm#5134) |
+| 306 | `c9755a905` | - | - | - | - | - | - | virt_mshv, virt_whp: refuse to save a pending software interrupt (microsoft/openvmm#5134) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
 that it regrouped, and later fork bases, up to `7d90c4104` for v6.1 positions 270-315, for later
-commits, and `c0694c4da`, upstream main on 2026-11-16, for positions 297-302. They name the
+commits, and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306. They name the
 positions that the commits have now, but the v7.0 reorganization did not check them again on
 `e6b458cc0`, nor did the v6.1 rebase check the earlier ones on `7d90c4104`.
 
@@ -3245,6 +3254,126 @@ positions also change, and no other line that a mapped PR adds. Replaying it on 
 conflicts in that file, which upstream main lacks. So it follows PR18 upstream, folded into position
 078, with its test's configuration in PR20's position 093 and its IPv6 cases in position 193, which
 gives every NIC an IPv6 identity.
+
+Position 303 has the WHP and MSHV backends save and restore a guest's `IA32_UMWAIT_CONTROL`, which
+Linux writes on every CPU at boot where the CPU profile enumerates WAITPKG, as the Alder Lake and
+Granite Rapids profiles do. Position 277 gave KVM the `umwait_control` element and had both of the
+Microsoft hypervisor's backends clear its capability and refuse its accessors, so a WHP or MSHV
+snapshot restored the MSR as 0. The hypervisor keeps the MSR as a register of the VP, as it keeps
+the `IA32_SPEC_CTRL` of position 272, so the commit maps `UmwaitControl` to WHP's register, reads
+and writes it through the register state on both, and keeps the capability that the guest's CPUID
+gives, which MSHV clears for an SNP guest. No element, field, or version of the saved state changes.
+It says in the Guide which elements MSHV and WHP hold and why they hold no others: the hypervisor
+drops a guest's writes of `IA32_DEBUGCTL` and `IA32_MISC_ENABLE`, raises #GP for the other feature
+and power MSRs, and gives the guest no machine-check banks, as a guest showed on WHP and MSHV hosts.
+It completes position 277 for WHP and MSHV, which no PR maps yet, so it is not a fixup of a PR yet,
+and can fold into position 277 when that position goes into one. It changes files that PR01's
+positions 002 and 003, PR05's positions 007 and 008, PR10's positions 021, 022, 025, and 026, PR11's
+positions 029 and 030, PR12's positions 033-036, PR13's positions 041 and 046, PR17's positions 071,
+072, and 074, PR18's positions 077, 079, and 083-085, PR19's positions 087 and 088, PR20's positions
+089, 090, and 092-094, PR21's position 101, PR23's positions 108 and 113, PR24's position 118, and
+82 positions that no PR has yet also change, and it changes no line that a mapped PR adds. It
+rewrites two lines of the Guide's page on the snapshot format, one of its page on the VMM tests, and
+two of its snapshots page that position 279 adds, two of the snapshots page that position 295 adds,
+one line of MSHV's `finalize.rs` that position 272 adds, and two lines of `finalize.rs`, three of
+MSHV's `vp_state.rs`, two of WHP's `lib.rs`, and three of WHP's `vp_state.rs` that position 277
+adds, and adds the rest. Replaying it on upstream main conflicts in seven files, where it edits or
+adds beside what upstream main lacks: in the three Guide pages, its edits sit in what positions 279,
+295, and 296 write; in MSHV's `finalize.rs` and `vp_state.rs` and WHP's `vp_state.rs`, it rewrites
+lines that positions 272 and 277 add; and in WHP's `regs.rs`, its mapping follows the one that
+position 272 adds. Its change to WHP's `lib.rs` applies, since upstream main lacks the two lines of
+position 277 that it removes. So it follows positions 272, 277, 279, 295, and 296, and the positions
+that they follow, upstream.
+
+Position 304 adds an optional VP state element, `bndcfgs`, in field 21 of the saved state, which
+holds `IA32_BNDCFGS`, MPX's supervisor configuration, where the guest's CPUID enumerates MPX, as the
+Skylake-SP profile does, with a capability that `from_cpuid` derives from `CPUID.(7,0):EBX[14]`.
+Position 279 had said that no guest can write the MSR, since KVM had not exposed MPX since Linux
+5.6, which is not so: Linux 5.6 dropped MPX for the kernel's own processes but still enables MPX's
+state components for KVM's guests, and `vmx_set_msr` takes a guest's write where its CPUID has MPX.
+KVM reads and writes the MSR as `0xd90`, which it lists exactly where it exposes MPX, so the
+capability follows the list, as `umwait_control`'s does; MSHV and WHP read and write it as a
+register; and OpenHCL leaves the capability clear and its accessors unimplemented. A saved state of
+an earlier build lacks the field, so its restore leaves the MSR at 0, as before, and an earlier
+build ignores it, so no version changes. The commit adds the field's wire bytes and both directions
+of a build without it to the tests of `vp.rs`, the bit, its leaf gating, and the pinned profiles
+that have it, KVM's gating, a KVM test of the MSR where the host lists it, a contract test,
+`bndcfgs_survives_a_save_and_restore`, which runs on a host with MPX, and the element to
+`refuses_unsupported_cpu_state`. It changes files that PR01's position 002, PR05's positions
+007-009, PR10's positions 021-026, PR11's positions 029 and 030, PR12's positions 033-035, PR13's
+positions 041 and 046, PR17's positions 071, 072, and 074, PR18's positions 077, 079, and 083-085,
+PR19's positions 087 and 088, PR20's positions 089, 090, 092, and 094, PR21's position 101, PR23's
+positions 108 and 113, PR24's position 118, and 95 positions that no PR has yet also change, and it
+changes no line that a mapped PR adds. It rewrites 10 lines of the Guide's page on the snapshot
+format that position 279 adds and eight that position 303 adds, two lines of the Guide's page on the
+VMM tests and five of its snapshots page that position 303 adds, two lines of OpenHCL's `lib.rs` and
+six of KVM's `msr_state.rs` that position 277 adds, two lines of MSHV's `finalize.rs` that position
+303 adds, one line of the contract tests' `msr_state.rs` that position 278 adds, and one of
+`unsupported_state.rs` that position 296 adds, and adds the rest. Replaying it on upstream main
+conflicts in every file that it changes but `x86defs`'s `lib.rs`, whose constant applies, where it
+edits or adds beside what upstream main lacks: what positions 272, 277, 278, 283, 296, and 303 add,
+and in the Guide what position 279 writes. So it follows positions 272, 277-279, 283, 296, and 303,
+and the positions that they follow, upstream.
+
+Position 305 adds two optional VP state elements for the MSRs that KVM on an AMD host keeps for
+every guest: `svm_msrs`, in field 22, which holds `VM_CR` and `VM_HSAVE_PA`, whatever the guest's
+CPUID says, though no CPU profile enumerates SVM, and `osvw`, in field 23, which holds
+`OSVW_ID_LENGTH` and `OSVW_STATUS` where the guest's CPUID enumerates OSVW, as every AMD profile
+does. KVM lists `VM_HSAVE_PA` and not `VM_CR`, but lists `VM_HSAVE_PA` wherever the host can read
+it, as an Intel host under Hyper-V can, so `svm_msrs` also needs KVM to run on SVM, as the vendor of
+its supported CPUID shows, and `osvw` needs that CPUID to enumerate OSVW, since a recent kernel
+keeps a vCPU's features within KVM's own. A restore refuses a `VM_HSAVE_PA` that no guest can write,
+or a `VM_CR` that sets `SVMDIS` while the restored `EFER.SVME` is set, which KVM would refuse only
+after it set `SVMDIS` and `LOCK`, before it writes either SVM MSR, and a VM reset puts back the OSVW
+values that KVM gave the vCPU at bind, which the backend now records, rather than their reset value.
+MSHV, WHP, and OpenHCL clear both capabilities, and the elements need no version, as position 304's
+needs none. The commit adds the elements, the capabilities and their tests, KVM's gating and its
+tests, KVM tests that its host keeps the SVM MSRs exactly where the capability says, and of both
+pairs where KVM runs on SVM or supports OSVW, three contract tests, which run on an AMD host, and
+the elements to `refuses_unsupported_cpu_state`. It rewrites position 279's remark in the Guide that
+the SVM MSRs need no element. It changes files that PR01's positions 002 and 003, PR05's positions
+007-009, PR10's positions 021-026, PR11's positions 029 and 030, PR12's positions 033-036, PR13's
+positions 041 and 046, PR17's positions 071, 072, and 074, PR18's positions 077, 079, and 083-085,
+PR19's positions 087 and 088, PR20's positions 089, 090, and 092-094, PR21's position 101, PR23's
+positions 108 and 113, PR24's position 118, and 104 positions that no PR has yet also change, and it
+changes no line that a mapped PR adds. It rewrites 15 lines of the Guide's page on the snapshot
+format and two of its page on the VMM tests that position 279 adds, six lines of the page on the
+snapshot format that position 304 adds, one line of the snapshots page that position 303 adds, one
+line each of OpenHCL's `lib.rs`, the contract tests' `msr_state.rs`, and `unsupported_state.rs`, and
+four of KVM's `msr_state.rs`, that position 304 adds, seven lines of `virt`'s `x86/mod.rs` that
+position 272 adds, one line of KVM's `mod.rs` and 10 of its `msr_state.rs` that position 277 adds,
+and one line of `x86/mod.rs` and two of KVM's `mod.rs` that upstream main has and no commit of the
+chain changes, and adds the rest. Replaying it on upstream main conflicts in every file that it
+changes but `x86defs`'s `lib.rs` and WHP's `lib.rs`, where it edits or adds beside what upstream
+main lacks: what positions 128, 248, 272, 277, 278, 283, 296, 303, and 304 add, and in the Guide
+what position 279 writes. So it follows positions 128, 248, 272, 277-279, 283, 296, 303, and 304,
+and the positions that they follow, upstream.
+
+Position 306 has the MSHV and WHP backends refuse to save a VP whose Hyper-V registers hold a
+pending interruption or event that the saved activity cannot hold, instead of panicking: a software
+interrupt (`INT n`), a privileged software exception (`INT1`), or a software exception (`INT3` or
+`INTO`), which the hypervisor holds pending, with the length of the instruction that raised it,
+while an intercept interrupts its delivery, an interruption of a type that Hyper-V does not define,
+an event other than an exception or an extint, and a vector beyond 8 bits. The activity's
+`HvRegisterState::set_values`, which upstream main has, panicked on each, so a capture at such a
+moment panicked instead of failing. The commit adds `Activity::from_hv_values`, which converts the
+four registers or names what it cannot hold, and the activity getters of MSHV and WHP use it, so a
+save fails with `UnsupportedState`, and a guest-requested capture rolls back. No element, field, or
+version of the saved state changes. It changes files that PR05's position 008, PR10's positions 022,
+024, and 026, PR11's positions 029 and 030, PR12's positions 033-035, PR13's positions 041 and 046,
+PR17's positions 071 and 074, PR18's positions 077, 079, and 083-085, PR19's positions 087 and 088,
+PR20's positions 089, 090, 092, and 094, PR21's position 101, PR23's positions 108 and 113, PR24's
+position 118, and 81 positions that no PR has yet also change, and it changes no line that a mapped
+PR adds: it rewrites 52 lines of `vp.rs`, four of MSHV's `vp_state.rs`, two of WHP's `apic.rs`, and
+three of WHP's `vp_state.rs` that upstream main has and no commit of the chain changes, and adds the
+rest. Replaying it on upstream main conflicts in three files, where it edits or adds beside what
+upstream main lacks: in the Guide's page on the snapshot format and its snapshots page, its
+paragraphs sit beside what positions 071, 285, 289, 292, and 301 write, and in `vp.rs`, the
+conversion that it rewrites builds the `nmi_pending_count` and `interrupt_shadow_kind` that
+positions 287 and 291 add, and its tests follow one that position 291 adds. Its changes to
+`virt_mshv` and `virt_whp` apply without conflicts, but call the conversion that it adds to `vp.rs`.
+So it follows positions 071, 285, 287, 289, 291, 292, and 301, and the positions that they follow,
+upstream.
 
 ## PR summary
 
