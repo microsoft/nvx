@@ -8,9 +8,10 @@
   `feature/microvm/release/v6.1` rebase had moved it; see [Upstream status](#upstream-status).
 - Mapped fork tip: `227074dc1e6977649585479daf25515f90acaf9d`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126.
-- NVX's pinned OpenVMM revision: `026d35da644b646afdfb96f9b70c577f16dacee7`, position 300, the
-  head of microsoft/openvmm#5129, whose four commits follow position 296, `1b25c5bbc`, the head of
-  `feature/microvm/dev` and of the `feature/microvm/release/v7.0` branch of microsoft/openvmm. The
+- NVX's pinned OpenVMM revision: `c7122cd2022cfd96f6a923593bc584f51c228ab8`, position 301, the
+  head of microsoft/openvmm#5131, whose commit follows position 300, `026d35da6`, the head of
+  `feature/microvm/dev`, where microsoft/openvmm#5129 put positions 297-300 after position 296,
+  `1b25c5bbc`, the head of the `feature/microvm/release/v7.0` branch of microsoft/openvmm. The
   v7.0 reorganization moved the 315 commits of `feature/microvm/dev` at NVX's previous pin,
   `fe61f9cbf`, onto `e6b458cc0`: the 269 of `feature/microvm/release/v6.1` and the 46 that
   microsoft/openvmm#5077 to microsoft/openvmm#5126 added after it. Upstream had landed none of
@@ -20,8 +21,8 @@
   positions 261 and 270, which PR10's RTC fixups need, into PR10 as positions 016 and 017.
   Positions 001-015 keep their positions, and v6.1 positions 016-233 are positions 018-235,
   237-239 are 236-238, 244-253 are 239-248, 255-258 are 249-252, 260 is 253, 272 is 254, and
-  274-315 are 255-296; see [The v7.0 reorganization](#the-v70-reorganization). The pin is 174
-  commits past the mapped tip on the same first-parent chain. Positions 127-300 are not yet
+  274-315 are 255-296; see [The v7.0 reorganization](#the-v70-reorganization). The pin is 175
+  commits past the mapped tip on the same first-parent chain. Positions 127-301 are not yet
   assigned to PRs; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `2c25662b2af038869f75e86dae25f8f5d21bc23b` (2026-11-16), three commits past the
   fork base; see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1336,7 +1337,8 @@ e6b458cc0
   -> fixture accessor of those contract tests built on Windows only [298]
   -> restored VP's suspending instruction checked through the page tables in guest memory [299]
   -> restored VP with a pending NMI left to take it [300]
-  -> 026d35da6 (NVX pin)
+  -> RAM of a KVM VM mapped into its SMM address space [301]
+  -> c7122cd20 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1357,19 +1359,19 @@ PR10, as positions 016 and 017, which can go upstream on their own in that order
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Its 174 later commits are not yet
+The NVX pin extends the chain past position 126 without merges. Its 175 later commits are not yet
 classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 are the ABI restart
 of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 followed the v5.0
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
-v6.0 reorganization, positions 254-296 followed the v6.1 rebase, and positions 297-300 followed the
+v6.0 reorganization, positions 254-296 followed the v6.1 rebase, and positions 297-301 followed the
 v7.0 reorganization, so they combine none, apart from position 215, which combines v5.1 positions
 222 and 223, and the commits that the v7.0 reorganization folded into them. Each commit's v6.1
 position is its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before
 it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on,
-and positions 297-300 have no earlier position; see
+and positions 297-301 have no earlier position; see
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.1 position counts in
@@ -1555,11 +1557,12 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 298 | `786c0c0a7` | - | - | - | - | - | - | vmm_tests: build the fixture's memory accessor on Windows only (microsoft/openvmm#5129) |
 | 299 | `bcb8e530d` | - | - | - | - | - | - | virt_whp: resuspend a restored VP without the hypervisor's translation (microsoft/openvmm#5129) |
 | 300 | `026d35da6` | - | - | - | - | - | - | virt_whp: let a restored VP with a pending NMI take it (microsoft/openvmm#5129) |
+| 301 | `c7122cd20` | - | - | - | - | - | - | virt_kvm: map RAM into KVM's SMM address space (microsoft/openvmm#5131) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
 that it regrouped, and later fork bases, up to `7d90c4104` for v6.1 positions 270-315, for later
-commits, and `c0694c4da`, upstream main on 2026-11-16, for positions 297-300. They name the
+commits, and `c0694c4da`, upstream main on 2026-11-16, for positions 297-301. They name the
 positions that the commits have now, but the v7.0 reorganization did not check them again on
 `e6b458cc0`, nor did the v6.1 rebase check the earlier ones on `7d90c4104`.
 
@@ -3164,6 +3167,53 @@ rewrites seven lines of `apic.rs` and three of `suspend.rs` that position 297 ad
 `suspend.rs` that position 299 adds, and adds the rest. Replaying it on upstream main conflicts in
 `apic.rs`, beside the check that position 297 adds, and in `suspend.rs`, which is position 297's
 new file. So it follows positions 297 and 299 upstream.
+
+Position 301 has the KVM backend register each RAM slot of a VM without private memory in KVM's
+address space 1, which a vCPU uses while in system management mode (SMM), as well as in address
+space 0, so that a system management interrupt (SMI) that a guest sends itself enters SMM instead of
+ending the VM. A vCPU that takes an SMI saves the state that it interrupts to SMRAM at SMBASE, which
+is in RAM, through that address space, and KVM takes the address space from the upper 16 bits of the
+slot ID, which `map_region` gave it as a dense slot index, so with no slot in address space 1 KVM
+marked the whole VM dead: `KVM_RUN` failed with `EIO`, and so did every later ioctl, as position 285
+recorded. `map_region` now sets each userspace-backed slot in both address spaces, `clear_slot`
+clears both, and a slot that is unmapped, reused, or moved takes its mirror along, when
+`KVM_CAP_MULTI_ADDRESS_SPACE` reports a second address space for the VM, which x86 does where KVM
+has SMM built in and the VM has no private memory; a VM with guest_memfd-backed RAM, such as an SNP
+VM, is unchanged. It mirrors all of RAM, not the default SMBASE alone, since a guest's handler can
+relocate SMBASE. A vCPU can now be in SMM when a save is requested, as well as hold an SMI, and
+position 285's refusal holds for both: no element, field, or version of the saved state changes. The
+commit adds two ignored tests that need `/dev/kvm` to the `smm` module of position 285, one of
+which relocates SMBASE and unmaps, reuses, and moves ranges of RAM, and a KVM-only contract test,
+`smm::kvm::a_guest_smi_enters_smm_instead_of_killing_the_vm`, which runs a VP through `run_vp` and
+checks that a save refuses it in the guest's handler. It rewrites the module documentation of
+`smm.rs` and a paragraph of the Guide's snapshots page that position 285 adds, which said that
+mapping memory for SMM would change them, lists the contract test in the Guide's section on the
+backend contract tests, where positions 297 and 299 say that only `suspend.rs` runs a VP, and
+documents the address space of a slot ID in the `kvm` crate. It also builds the fixture accessor
+that positions 297 and 298 build on Windows only on Linux too, where its contract test needs it, and
+lets a test choose the size of the fixture's RAM. It changes files that PR01's position 002, PR05's
+positions 007 and 008, PR06's position 010, PR09's positions 013 and 014, PR10's positions 018, 021,
+024, and 026, PR11's position 030, PR12's positions 032-036, PR13's positions 037, 041, and 046,
+PR14's position 049, PR15's position 055, PR17's positions 067-069, 071, 072, and 074, PR18's
+positions 077, 079, and 083-085, PR19's positions 087 and 088, PR20's positions 089, 090, 092, and
+094, PR21's positions 096 and 101, PR23's positions 105, 108, and 113, PR24's positions 117 and 118,
+and 97 positions that no PR has yet also change, and it changes no line that a mapped PR adds. It
+rewrites 13 lines of `smm.rs` and 7 of the Guide's snapshots page that position 285 adds, one line
+of the Guide's page on the VMM tests that position 297 adds and two that position 299 adds, two
+lines of `fixture.rs` that position 297 adds and one that position 298 adds, and two lines each of
+`memory.rs` and `fixture.rs` that upstream main has and no commit of the chain changes, and adds the
+rest. Replaying it on upstream main conflicts in seven files, where it edits or adds beside what
+upstream main lacks: `smm.rs` does not exist there, since position 285 adds it; in `mod.rs` and
+`lib.rs`, the `smm_address_space` that it adds follows the `lapic_preemption_timer` that position
+248 adds; in the Guide's snapshots page, its paragraph replaces one that position 285 adds, in the
+block that positions 071, 235, 265, 269, and 285 write; in the Guide's page on the VMM tests, its
+edits sit beside what positions 273, 279, 296, 297, and 299 write; in `fixture.rs`, its module
+documentation rewrites what positions 008 and 297 write, and its accessor gate what positions 297
+and 298 add; and in `main.rs`, its `mod smm;` sits among the `mod` lines that positions 260, 266,
+273, 288, 290, 293, and 297 add. Its contract test also needs the `check_saveable` that position 264
+adds, and the rest of its files apply without conflicts. So it follows positions 008, 071, 235, 248,
+260, 264, 265, 266, 269, 273, 279, 285, 288, 290, 293, and 296-299, and the positions that they
+follow, upstream.
 
 ## PR summary
 
