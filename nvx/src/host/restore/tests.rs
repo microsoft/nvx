@@ -152,6 +152,54 @@ fn the_held_vm_process_is_accepted_even_after_its_client_closed() {
 }
 
 #[test]
+fn a_timeout_beyond_the_clock_waits_for_the_event_without_a_deadline() {
+    let (_temporary, directory) = vm_directory();
+    let mut listener = ReadyListener::bind(&directory).unwrap();
+    let endpoint = listener.endpoint().to_owned();
+    let event = b"OPENVMM_RESTORE_READY_V1\n";
+    // The delay lets the receive start waiting before the client connects.
+    let client = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        #[cfg(target_os = "linux")]
+        let mut peer = std::os::unix::net::UnixStream::connect(endpoint).unwrap();
+        #[cfg(windows)]
+        let mut peer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(endpoint.replace('/', "\\"))
+            .unwrap();
+        peer.write_all(event).unwrap();
+    });
+    let process = held_process(std::process::id());
+    // The receives run apart, so that one that never returns fails the test instead of hanging
+    // it. A signal may end a wait early, but a deadline that passed at once would return again
+    // and again before the client connects.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut received, mut idle) = (Vec::new(), 0);
+        loop {
+            let length = received.len();
+            if !listener
+                .receive(&process, &mut received, 64, Duration::MAX)
+                .unwrap()
+            {
+                break;
+            }
+            idle += usize::from(received.len() == length);
+            assert!(
+                idle < 10,
+                "receives without a deadline returned without data"
+            );
+        }
+        sender.send(received).unwrap();
+    });
+    let received = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the receive returns once the client closes");
+    client.join().unwrap();
+    assert_eq!(received, event);
+}
+
+#[test]
 fn a_different_real_process_cannot_supply_the_event() {
     let (_temporary, directory) = vm_directory();
     let mut listener = ReadyListener::bind(&directory).unwrap();

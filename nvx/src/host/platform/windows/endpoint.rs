@@ -94,9 +94,10 @@ impl ReadyListener {
         Ok(self.pipe)
     }
 
-    /// Waits at most `timeout` for what the VMM, the process `pid`, sends to the endpoint, and
-    /// appends it to `received`, which then holds at most `limit` bytes. Returns whether more may
-    /// arrive: `false` once the VMM closed its end of the pipe.
+    /// Waits at most `timeout`, or without a deadline if `timeout` is beyond the clock's range,
+    /// for what the VMM, the process `pid`, sends to the endpoint, and appends it to `received`,
+    /// which then holds at most `limit` bytes. Returns whether more may arrive: `false` once the
+    /// VMM closed its end of the pipe.
     ///
     /// The pipe's client must be the VMM: another process fails with
     /// [`io::ErrorKind::PermissionDenied`].
@@ -107,7 +108,8 @@ impl ReadyListener {
         limit: usize,
         timeout: Duration,
     ) -> io::Result<bool> {
-        let deadline = Instant::now() + timeout;
+        // A timeout beyond the clock's range has no deadline.
+        let deadline = Instant::now().checked_add(timeout);
         let (pipe, event) = (raw(&self.pipe), raw(&self.event));
         if !self.connected {
             // ConnectNamedPipe does not promise to reset the event before it starts, as ReadFile
@@ -119,7 +121,7 @@ impl ReadyListener {
             // A wait that times out cancels the connection's operation, and the next wait issues
             // it again, which a client that connected meanwhile completes at once.
             // SAFETY: the operation's `OVERLAPPED` outlives it, as `overlapped` guarantees.
-            let connection = overlapped(pipe, event, Some(deadline), |pipe, overlapped| unsafe {
+            let connection = overlapped(pipe, event, deadline, |pipe, overlapped| unsafe {
                 ConnectNamedPipe(pipe, overlapped)
             });
             match connection {
@@ -152,7 +154,7 @@ impl ReadyListener {
         let (data, length) = (buffer.as_mut_ptr(), room as u32);
         // SAFETY: `data` is valid for `length` bytes until the operation completes, which
         // `overlapped` guarantees before it returns.
-        let read = overlapped(pipe, event, Some(deadline), |pipe, overlapped| unsafe {
+        let read = overlapped(pipe, event, deadline, |pipe, overlapped| unsafe {
             ReadFile(pipe, data, length, ptr::null_mut(), overlapped)
         });
         match read {

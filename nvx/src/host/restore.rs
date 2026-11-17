@@ -540,7 +540,9 @@ impl ReadyListener {
         &self.endpoint
     }
 
-    /// Appends at most `limit` total bytes to `received`, waiting at most `timeout`.
+    /// Appends at most `limit` total bytes to `received`, waiting at most `timeout`. A `timeout`
+    /// beyond what [`Instant`](std::time::Instant) can represent, such as [`Duration::MAX`], sets
+    /// no deadline.
     ///
     /// Returns `false` at end of stream, or `true` when more may arrive, including after a
     /// timeout without data. The first client must match `process`; another client, or a later
