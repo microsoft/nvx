@@ -959,6 +959,17 @@ class MarkdownLinkTests(unittest.TestCase):
         )
         self.assertEqual(_targets(document), [(6, "used.md")])
 
+    def test_comment_blocks_run_to_the_line_that_holds_their_end(self):
+        # A block that starts with "<!--" ends only at a line that holds "-->",
+        # so after a comment that ends at "--!>", its Markdown renders as text
+        # up to there, while its tags render.
+        document = (
+            "<!-- a --!>\n[a](block.md)\n\n# Hidden\n-->\n\n[b](after.md)\n\n"
+            '<!-- c --!> <a href="tag.md">x</a>\n[d](text.md)\n-->\n'
+        )
+        self.assertEqual(_targets(document), [(7, "after.md"), (9, "tag.md")])
+        self.assertEqual(_anchors(document), set())
+
     def test_cdata_instruction_and_declaration_blocks_run_to_their_ends(self):
         document = (
             "<![CDATA[\n\n[a](cdata.md)\n\n]]>\n\n"
