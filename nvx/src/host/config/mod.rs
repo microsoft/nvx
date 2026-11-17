@@ -180,6 +180,8 @@ pub struct Boot {
     pub command_line: String,
     /// Memory capacity of a cold VM, in MiB, if it reserves more than its boot memory.
     /// It must be at least [`VmConfig::memory_mib`] and fit a byte count.
+    /// With [`Self::capture`], this must be `None`: use [`CaptureConfig::memory`]'s capacity
+    /// instead, even when the two capacities would match.
     pub memory_capacity_mib: Option<u64>,
     /// What a capture of the VM adds, if the VM may be captured.
     pub capture: Option<CaptureConfig>,
@@ -821,7 +823,8 @@ impl VmConfig {
     /// without a path, or with a RAM upper whose cap is not 1 to 90 percent; a hostname that is
     /// empty, longer than [`MAX_HOSTNAME_BYTES`], or holds a NUL; an export that
     /// [`ExportPlan::check`] refuses for the root, whose error is the source; a boot's capture
-    /// that [`CaptureConfig::check`] refuses; and caller boot tokens that collide with the root's,
+    /// that [`CaptureConfig::check`] refuses; a boot memory capacity alongside a capture or
+    /// outside the cold boot's bounds; and caller boot tokens that collide with the root's,
     /// the view's, `nvx_maps`, or any `virtfs_*` name.
     ///
     /// The NIC's address is checked when it is built, and the network's policy where it is
@@ -856,6 +859,12 @@ impl VmConfig {
             capture.check()?;
         }
         if let Some(boot) = &self.boot {
+            if boot.memory_capacity_mib.is_some() && boot.capture.is_some() {
+                return Err(Error::unsupported(
+                    "Boot.memory_capacity_mib must be None with a capture; use \
+                     CaptureConfig.memory.capacity instead",
+                ));
+            }
             if let Some(capacity) = boot.memory_capacity_mib
                 && (capacity < self.memory_mib || capacity > u64::MAX >> 20)
             {

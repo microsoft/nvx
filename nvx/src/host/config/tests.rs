@@ -45,6 +45,34 @@ fn cold_memory_capacity_is_checked_and_lowered_without_a_capture() {
     }
 }
 
+#[test]
+fn capture_refuses_a_boot_memory_capacity_even_when_it_matches() {
+    for capacity in [1024, 512] {
+        let mut config = captured();
+        let boot = config.boot.as_mut().unwrap();
+        boot.command_line = "nvx_sandbox=1".to_owned();
+        boot.memory_capacity_mib = Some(capacity);
+        let arguments = config.openvmm_arguments(
+            &runtime(),
+            "/control",
+            Path::new("/report"),
+            Some("/console"),
+        );
+        assert!(arguments.is_err(), "capacity {capacity}: {arguments:?}");
+        for result in [
+            config.check(),
+            config.check_command_line(),
+            arguments.map(|_| ()),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+            for field in ["Boot.memory_capacity_mib", "CaptureConfig.memory.capacity"] {
+                assert!(error.to_string().contains(field), "{error}");
+            }
+        }
+    }
+}
+
 /// Returns a blockless configuration of one processor and 512 MiB.
 fn blockless() -> VmConfig {
     VmConfig {
