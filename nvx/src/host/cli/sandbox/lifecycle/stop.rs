@@ -50,7 +50,12 @@ pub(crate) fn stop(state_path: &str, artifacts: &Artifacts<'_>, timeout: f64) ->
     };
     let grace = Deadline::after(timeout);
     let requested = connect(&saved, artifacts, timeout).and_then(|mut session| {
-        session.stop(grace.remaining().map_or(0.0, |left| left.as_secs_f64()))
+        // A grace that never passes leaves the guest's own stop unbounded too.
+        session.stop(
+            grace
+                .remaining()
+                .map_or(f64::INFINITY, |left| left.as_secs_f64()),
+        )
     });
     if matches!(requested, Err(Exit::Interrupted)) {
         return requested;

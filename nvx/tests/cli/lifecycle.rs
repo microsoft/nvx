@@ -736,6 +736,51 @@ fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
     assert!(!state.exists());
 }
 
+/// A stop whose timeout is longer than the clock can bound still asks the guest to stop, and so
+/// ends once OpenVMM exits, rather than waiting without end for an exit that it never requested.
+#[test]
+fn a_stop_with_an_unbounded_timeout_asks_the_guest_to_stop() {
+    let root = Root::new();
+    let state = root.below("state");
+    root.nvx(&provision("{root/state}", &[]))
+        .assert_silent_success();
+    operate(&root, "start", "state", &[]).assert_silent_success();
+    let (_, process) = assert_runtime_record(&root, "state", &json(&state.join("runtime.json")));
+    let arguments: Vec<String> = sandbox("stop", "{root/state}", &["--timeout", "1e20"])
+        .iter()
+        .map(|argument| root.expand(argument))
+        .collect();
+    let mut stop = root
+        .command(&arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while stop.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if stop.try_wait().unwrap().is_none() {
+        stop.kill().unwrap();
+        let outcome = Outcome::new(arguments, stop.wait_with_output().unwrap());
+        operate(&root, "stop", "state", &[]).assert_silent_success();
+        panic!(
+            "the stop waited on for an OpenVMM that it never asked to stop: {}",
+            outcome.describe()
+        );
+    }
+    Outcome::new(arguments, stop.wait_with_output().unwrap()).assert_silent_success();
+    assert!(
+        process
+            .wait(Instant::now() + Duration::from_secs(10))
+            .unwrap()
+            .is_some(),
+        "OpenVMM runs on"
+    );
+    assert_eq!(entries(&state), STOPPED);
+    operate(&root, "deprovision", "state", &[]).assert_silent_success();
+}
+
 /// Whatever the caller's umask, even one that clears the owner's own permissions, the caller stops
 /// its sandbox, which reads OpenVMM's outcome report, and can read the report itself, whose group's
 /// and others' permissions the umask narrows: OpenVMM starts with the caller's umask without the
