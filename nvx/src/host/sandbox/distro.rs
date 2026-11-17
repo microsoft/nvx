@@ -58,27 +58,27 @@ use crate::host::seal::{self, FileKind, FileSeal};
 pub(crate) const DISTRO_POLICY_REVISION: u32 = 1;
 
 /// The version of the serde form of [`DistroBinding`] that this build writes and checks.
-pub(crate) const BINDING_VERSION: u32 = 1;
+const BINDING_VERSION: u32 = 1;
 
 /// How the operations of a binding reach files: the opens of [`seal`] and [`FileSeal::of`], or,
 /// in tests, opens that forbid reading the content, and seals that change a file as it is read.
 #[derive(Clone, Copy)]
-pub(crate) struct Access<'a> {
+struct Access<'a> {
     /// Opens a file.
-    pub(crate) open: &'a dyn Fn(&Path) -> io::Result<File>,
+    open: &'a dyn Fn(&Path) -> io::Result<File>,
     /// Seals an open file.
-    pub(crate) seal: &'a dyn Fn(&File) -> io::Result<FileSeal>,
+    seal: &'a dyn Fn(&File) -> io::Result<FileSeal>,
 }
 
 impl Access<'static> {
     /// The access of verification: [`seal::open_read`] and [`FileSeal::of`].
-    pub(crate) const READ: Self = Self {
+    const READ: Self = Self {
         open: &seal::open_read,
         seal: &FileSeal::of,
     };
 
     /// The access of the staged check: [`seal::open_guarded`] and [`FileSeal::of`].
-    pub(crate) const GUARDED: Self = Self {
+    const GUARDED: Self = Self {
         open: &seal::open_guarded,
         seal: &FileSeal::of,
     };
@@ -113,7 +113,7 @@ impl fmt::Display for DistroFormat {
 /// The result of a distro policy for a layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum PolicyResult {
+enum PolicyResult {
     /// The policy accepts the layer.
     Accepted,
     /// The policy refuses the layer, which no check passes.
@@ -123,17 +123,17 @@ pub(crate) enum PolicyResult {
 /// The verdict of a distro policy for a layer: the policy's revision and its result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct PolicyVerdict {
+struct PolicyVerdict {
     /// The revision of the policy that judged the layer, such as [`DISTRO_POLICY_REVISION`].
-    pub(crate) revision: u32,
+    revision: u32,
     /// What the policy found.
-    pub(crate) result: PolicyResult,
+    result: PolicyResult,
 }
 
 impl PolicyVerdict {
     /// The verdict of explicit verification for a layer that it accepts: NVX's distro policy, at
     /// [`DISTRO_POLICY_REVISION`], accepts the layer.
-    pub(crate) const ACCEPTED: Self = Self {
+    const ACCEPTED: Self = Self {
         revision: DISTRO_POLICY_REVISION,
         result: PolicyResult::Accepted,
     };
@@ -250,7 +250,7 @@ impl DistroBinding {
     }
 
     /// Implements [`check`](Self::check), reaching files through `access`.
-    pub(crate) fn check_with(
+    fn check_with(
         &self,
         layer: &SandboxLayer,
         policy_revision: u32,
@@ -341,7 +341,7 @@ impl DistroBinding {
 }
 
 /// Implements [`DistroBinding::verify`], reaching files through `access`.
-pub(crate) fn verify_with(layer: &SandboxLayer, access: Access<'_>) -> Result<DistroBinding> {
+fn verify_with(layer: &SandboxLayer, access: Access<'_>) -> Result<DistroBinding> {
     let path = layer.path();
     let manifest = manifest_path(path)?;
     if !manifest.exists() {

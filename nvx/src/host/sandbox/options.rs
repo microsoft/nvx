@@ -25,14 +25,13 @@ use crate::error::Result;
 use crate::protocol::root::RootUpper;
 
 /// The entrypoints of systemd, which the sandbox security profile does not run.
-pub(crate) const SYSTEMD_ENTRYPOINTS: [&str; 2] =
-    ["/usr/lib/systemd/systemd", "/lib/systemd/systemd"];
+const SYSTEMD_ENTRYPOINTS: [&str; 2] = ["/usr/lib/systemd/systemd", "/lib/systemd/systemd"];
 /// The largest environment file of a managed exec, in bytes.
-pub(crate) const MAX_ENVIRONMENT_FILE_BYTES: usize = 1024 * 1024;
+const MAX_ENVIRONMENT_FILE_BYTES: usize = 1024 * 1024;
 /// The most entries of a managed exec environment.
-pub(crate) const MAX_EXEC_ENVIRONMENT: usize = 256;
+const MAX_EXEC_ENVIRONMENT: usize = 256;
 /// The longest entry of a managed exec environment, in UTF-8 bytes.
-pub(crate) const MAX_EXEC_ENVIRONMENT_BYTES: usize = 4096;
+const MAX_EXEC_ENVIRONMENT_BYTES: usize = 4096;
 
 /// An operation of `nvx sandbox`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -260,7 +259,7 @@ pub(crate) fn sandbox_mounts(
 }
 
 /// Implements [`sandbox_mounts`] with `kind_of` as [`mount_kind`].
-pub(crate) fn sandbox_mounts_with(
+fn sandbox_mounts_with(
     mounts: &[String],
     policy_paths: &[PolicyPathOption],
     owner: Option<MountOwner>,
@@ -392,7 +391,7 @@ pub(crate) fn validate_exec_environment(entries: &[String]) -> Result<()> {
 /// The file must be strict UTF-8 JSON; non-finite numbers and unpaired surrogate escapes are
 /// refused. Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), naming the
 /// file and the native I/O or JSON error when it cannot be read or decoded.
-pub(crate) fn exec_environment_from_file(path: &str) -> Result<Vec<String>> {
+fn exec_environment_from_file(path: &str) -> Result<Vec<String>> {
     let path = Path::new(path);
     let mut data = Vec::new();
     File::open(path)
