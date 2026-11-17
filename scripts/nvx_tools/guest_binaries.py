@@ -39,7 +39,7 @@ def guest_binary_source_files(root: Path | None = None) -> tuple[Path, ...]:
     files = {root / path for path in GuestRustBuildConstants.SOURCE_FILES}
     source = root / GuestRustBuildConstants.SOURCE_DIRECTORY
     if not source.is_dir():
-        raise ScriptError(f"nvx-rs source directory not found: {source}")
+        raise ScriptError(f"nvx source directory not found: {source}")
     for directory in GuestRustBuildConstants.SOURCE_DIRECTORIES:
         if not (root / directory).is_dir():
             continue

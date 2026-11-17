@@ -15,7 +15,7 @@ from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
-from nvx_tools import nvx_rs
+from nvx_tools import nvx_cli
 from nvx_tools.adversarial import configure_parser as configure_adversarial_parser
 from nvx_tools.benchmark import configure_parser as configure_benchmark_parser
 from nvx_tools.benchmark import run as run_benchmark
@@ -243,9 +243,9 @@ def command_record_openvmm_provenance(_: argparse.Namespace) -> None:
     record_openvmm_provenance(OpenVmmBuildConfig())
 
 
-def command_record_nvx_rs_provenance(args: argparse.Namespace) -> None:
-    path = nvx_rs.record_provenance(args.target)
-    print(f">> recorded the provenance of nvx-rs in {path}")
+def command_record_nvx_provenance(args: argparse.Namespace) -> None:
+    path = nvx_cli.record_provenance(args.target)
+    print(f">> recorded the provenance of nvx in {path}")
 
 
 def command_materialize_kernel_provenance_inputs(_: argparse.Namespace) -> None:
@@ -575,18 +575,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     provenance.set_defaults(handler=command_record_openvmm_provenance)
 
-    nvx_rs_provenance = subparsers.add_parser(
-        "record-nvx-rs-provenance",
-        help="bind an existing nvx-rs executable to the nvx-rs sources",
+    nvx_provenance = subparsers.add_parser(
+        "record-nvx-provenance",
+        help="bind an existing nvx executable to the nvx sources",
     )
-    nvx_rs_provenance.add_argument(
+    nvx_provenance.add_argument(
         "--target",
         help=(
-            "Rust target that built nvx-rs (default: the host target that "
-            "rustc reports)"
+            "Rust target that built nvx (default: the host target that rustc reports)"
         ),
     )
-    nvx_rs_provenance.set_defaults(handler=command_record_nvx_rs_provenance)
+    nvx_provenance.set_defaults(handler=command_record_nvx_provenance)
 
     kernel_provenance = subparsers.add_parser(
         "materialize-kernel-provenance-inputs",

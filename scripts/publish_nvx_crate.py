@@ -45,8 +45,8 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--crate-dir",
         type=Path,
-        default=BuildConstants.REPO_ROOT / "nvx-rs",
-        help="the crate's directory in a Git checkout (default: nvx-rs)",
+        default=BuildConstants.REPO_ROOT / "nvx",
+        help="the crate's directory in a Git checkout (default: nvx)",
     )
     parser.add_argument(
         "--work-dir",

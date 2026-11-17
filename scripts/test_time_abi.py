@@ -2545,12 +2545,12 @@ class DoctorTests(unittest.TestCase):
     def test_the_rate_limit_is_the_guests_frequency_budget(self):
         # #1008: H4's limit is what the guest's wall-clock discipline leaves
         # for the host's clock correction: Linux's frequency limit, to which
-        # nvx-rs clamps the correction, less a restore's rate deviation,
-        # which nvx-rs's restore packet decoder bounds by the time ABI's
+        # nvx clamps the correction, less a restore's rate deviation,
+        # which nvx's restore packet decoder bounds by the time ABI's
         # restore tolerance, the one that OpenVMM's rate policy applies.
         root = Path(__file__).resolve().parents[1]
         decoders = rust_integer_constants(
-            (root / "nvx-rs" / "src" / "guest" / "time" / "decoders.rs").read_text(
+            (root / "nvx" / "src" / "guest" / "time" / "decoders.rs").read_text(
                 encoding="utf-8"
             )
         )

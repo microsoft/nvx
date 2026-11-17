@@ -19,8 +19,8 @@ on:
         description: Base name of the compatible OpenVMM artifacts
         required: true
         type: string
-      nvx-rs-artifact:
-        description: Base name of the nvx-rs artifacts for the runner's OS
+      nvx-artifact:
+        description: Base name of the nvx artifacts for the runner's OS
         required: true
         type: string
       debug-kernel:
@@ -67,7 +67,7 @@ on:
 permissions:
   contents: read
 
-# The jobs test the artifacts that the build jobs made, so nvx-rs must never
+# The jobs test the artifacts that the build jobs made, so nvx must never
 # replace missing ones with those of a release.
 env:
   NVX_AUTO_DOWNLOAD: "0"
@@ -165,18 +165,18 @@ jobs:
         run: chmod +x openvmm/target/release/openvmm
 
       # The scenarios and the steps below run their sandboxes and microVMs
-      # with nvx-rs, which they find where `cargo build --release` puts it,
+      # with nvx, which they find where `cargo build --release` puts it,
       # and whose artifact root is then this checkout.
-      - name: Download nvx-rs executable
+      - name: Download nvx executable
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: ${{ inputs.nvx-rs-artifact }}-executable
-          path: nvx-rs/target/release
+          name: ${{ inputs.nvx-artifact }}-executable
+          path: nvx/target/release
 
-      - name: Make nvx-rs executable
+      - name: Make nvx executable
         if: runner.os != 'Windows'
         shell: bash
-        run: chmod +x nvx-rs/target/release/nvx-rs
+        run: chmod +x nvx/target/release/nvx
 
       # Qualification verifies the downloaded OpenVMM's time ABI preflight.
       - name: Validate runner
@@ -333,7 +333,7 @@ jobs:
           cp --reflink=auto build/ubuntu-smoke-scratch.ext4 "${scratch}"
           # A run executes the probe once, as nvx-init runs each execution,
           # and the probe checks the security profile of that execution.
-          nvx-rs/target/release/nvx-rs sandbox \
+          nvx/target/release/nvx sandbox \
             --hypervisor "${{ inputs.backend }}" \
             --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
             --scratch "${scratch}" \
@@ -362,7 +362,7 @@ jobs:
           printf 'secret\n' >"${share}/nvx-denied/secret"
           printf 'host-outside\n' >"${outside}"
           chmod 0777 "${share}" "${share}/nvx-links"
-          nvx-rs/target/release/nvx-rs sandbox \
+          nvx/target/release/nvx sandbox \
             --hypervisor "${{ inputs.backend }}" \
             --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
             --scratch "${scratch}" \
@@ -389,7 +389,7 @@ jobs:
           rm -rf "${share}/nvx-guest-marker" "${share}/nvx-guest-directory" \
             "${share}/nvx-tool" "${share}/nvx-links"
           cp --reflink=auto build/ubuntu-smoke-scratch.ext4 "${scratch}"
-          nvx-rs/target/release/nvx-rs sandbox \
+          nvx/target/release/nvx sandbox \
             --hypervisor "${{ inputs.backend }}" \
             --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
             --scratch "${scratch}" \
@@ -420,7 +420,7 @@ jobs:
           state=$(mktemp -d)
           cleanup() {
             if [ -f "${state}/runtime.json" ]; then
-              nvx-rs/target/release/nvx-rs sandbox stop --state-dir "${state}" --timeout 30 || true
+              nvx/target/release/nvx sandbox stop --state-dir "${state}" --timeout 30 || true
             fi
             mkdir -p "${logs}"
             cp "${state}/openvmm.log" "${logs}/managed-share-openvmm.log" 2>/dev/null || true
@@ -434,7 +434,7 @@ jobs:
           printf 'secret\n' >"${share}/nvx-denied/secret"
           printf 'host-outside\n' >"${outside}"
           chmod 0777 "${share}" "${share}/nvx-links"
-          nvx-rs/target/release/nvx-rs sandbox provision \
+          nvx/target/release/nvx sandbox provision \
             --state-dir "${state}" \
             --hypervisor "${{ inputs.backend }}" \
             --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
@@ -442,14 +442,14 @@ jobs:
             --mount "/workspace,${share},rw" \
             --mount-deny nvx-denied \
             --workload-user 65534:65534
-          nvx-rs/target/release/nvx-rs sandbox start --state-dir "${state}"
-          nvx-rs/target/release/nvx-rs sandbox exec \
+          nvx/target/release/nvx sandbox start --state-dir "${state}"
+          nvx/target/release/nvx sandbox exec \
             --state-dir "${state}" \
             --entrypoint /sbin/nvx-sandbox-smoke \
             --arg init \
             --arg /workspace \
             --arg rw
-          nvx-rs/target/release/nvx-rs sandbox stop --state-dir "${state}"
+          nvx/target/release/nvx sandbox stop --state-dir "${state}"
           # nvx-init owns the sandbox VM's lifecycle, so OpenVMM, which starts
           # it without a lifecycle option, reports a run.
           python3 - "${state}/outcome.json" <<'EOF'
@@ -472,7 +472,7 @@ jobs:
           test ! -L "${share}/nvx-links/marker"
           test "$(cat "${outside}")" = host-outside
           test "$(cat "${share}/nvx-denied/secret")" = secret
-          nvx-rs/target/release/nvx-rs sandbox deprovision --state-dir "${state}"
+          nvx/target/release/nvx sandbox deprovision --state-dir "${state}"
           rm -rf "${share}" "${scratch}" "${outside}"
 
       - name: Run Ubuntu sandbox caller-owned live-share test on Linux
@@ -490,7 +490,7 @@ jobs:
           state=$(mktemp -d)
           cleanup() {
             if [ -f "${state}/runtime.json" ]; then
-              nvx-rs/target/release/nvx-rs sandbox stop --state-dir "${state}" --timeout 30 || true
+              nvx/target/release/nvx sandbox stop --state-dir "${state}" --timeout 30 || true
             fi
             mkdir -p "${logs}"
             cp "${state}/openvmm.log" "${logs}/caller-share-openvmm.log" 2>/dev/null || true
@@ -511,7 +511,7 @@ jobs:
           # run fails without running its workload.
           cp --reflink=auto build/ubuntu-smoke-scratch.ext4 "${scratch}"
           errors=$(mktemp)
-          if nvx-rs/target/release/nvx-rs sandbox \
+          if nvx/target/release/nvx sandbox \
             --hypervisor "${{ inputs.backend }}" \
             --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
             --scratch "${scratch}" \
@@ -535,7 +535,7 @@ jobs:
           # mode squashes to the share's owner, before any workload runs, so
           # that request fails with EPERM too, and the sandbox never starts.
           cp --reflink=auto build/ubuntu-smoke-scratch.ext4 "${scratch}"
-          nvx-rs/target/release/nvx-rs sandbox provision \
+          nvx/target/release/nvx sandbox provision \
             --state-dir "${state}" \
             --hypervisor "${{ inputs.backend }}" \
             --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
@@ -553,7 +553,7 @@ jobs:
               sys.exit(f"managed sandbox did not persist caller ownership: {config}")
           EOF
           errors=$(mktemp)
-          if nvx-rs/target/release/nvx-rs sandbox start --state-dir "${state}" 2>"${errors}"; then
+          if nvx/target/release/nvx sandbox start --state-dir "${state}" 2>"${errors}"; then
             echo "the caller-owned managed sandbox reached its share as the runner" >&2
             exit 1
           fi
@@ -566,7 +566,7 @@ jobs:
           rm -f "${errors}"
           test ! -e "${state}/runtime.json"
           test "$(ls -A "${share}")" = nvx-host-marker
-          nvx-rs/target/release/nvx-rs sandbox deprovision --state-dir "${state}"
+          nvx/target/release/nvx sandbox deprovision --state-dir "${state}"
           rm -rf "${share}" "${scratch}"
 
       - name: Run Ubuntu sandbox concurrent read-write and read-only shares on Linux
@@ -587,7 +587,7 @@ jobs:
           state=$(mktemp -d)
           cleanup() {
             if [ -f "${state}/runtime.json" ]; then
-              nvx-rs/target/release/nvx-rs sandbox stop --state-dir "${state}" --timeout 30 || true
+              nvx/target/release/nvx sandbox stop --state-dir "${state}" --timeout 30 || true
             fi
             mkdir -p "${logs}"
             cp "${state}/openvmm.log" "${logs}/shares-openvmm.log" 2>/dev/null || true
@@ -646,7 +646,7 @@ jobs:
             --arg /results/output.txt --arg file-rw
           )
           prepare_shares
-          nvx-rs/target/release/nvx-rs sandbox \
+          nvx/target/release/nvx sandbox \
             --hypervisor "${{ inputs.backend }}" \
             --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
             --scratch "${scratch}" \
@@ -657,7 +657,7 @@ jobs:
           check_shares
           # A managed sandbox persists every share and reattaches them on start.
           prepare_shares
-          nvx-rs/target/release/nvx-rs sandbox provision \
+          nvx/target/release/nvx sandbox provision \
             --state-dir "${state}" \
             --hypervisor "${{ inputs.backend }}" \
             --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
@@ -695,10 +695,10 @@ jobs:
           if config["format"] != 10 or "mounts" in config or shares != expected:
               sys.exit(f"managed sandbox did not persist every share: {config}")
           EOF
-          nvx-rs/target/release/nvx-rs sandbox start --state-dir "${state}"
-          nvx-rs/target/release/nvx-rs sandbox exec --state-dir "${state}" \
+          nvx/target/release/nvx sandbox start --state-dir "${state}"
+          nvx/target/release/nvx sandbox exec --state-dir "${state}" \
             --arg init "${smoke_arguments[@]}"
-          nvx-rs/target/release/nvx-rs sandbox stop --state-dir "${state}"
+          nvx/target/release/nvx sandbox stop --state-dir "${state}"
           python3 - "${state}/outcome.json" <<'EOF'
           import json
           import sys
@@ -710,7 +710,7 @@ jobs:
               sys.exit(f"managed sandbox outcome is invalid: {outcome}")
           EOF
           check_shares
-          nvx-rs/target/release/nvx-rs sandbox deprovision --state-dir "${state}"
+          nvx/target/release/nvx sandbox deprovision --state-dir "${state}"
           rm -rf "${workspace}" "${toolcache}" "${files}" "${scratch}" "${outside}"
 
       - name: Run Ubuntu sandbox share access policy on Linux
@@ -728,7 +728,7 @@ jobs:
           state=$(mktemp -d)
           cleanup() {
             if [ -f "${state}/runtime.json" ]; then
-              nvx-rs/target/release/nvx-rs sandbox stop --state-dir "${state}" --timeout 30 || true
+              nvx/target/release/nvx sandbox stop --state-dir "${state}" --timeout 30 || true
             fi
             mkdir -p "${logs}"
             cp "${state}/openvmm.log" "${logs}/policy-openvmm.log" 2>/dev/null || true
@@ -771,7 +771,7 @@ jobs:
             --arg /workspace --arg policy
           )
           prepare_share
-          nvx-rs/target/release/nvx-rs sandbox \
+          nvx/target/release/nvx sandbox \
             --hypervisor "${{ inputs.backend }}" \
             --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
             --scratch "${scratch}" \
@@ -783,7 +783,7 @@ jobs:
           # A managed sandbox persists the access policy and reapplies it on
           # start.
           prepare_share
-          nvx-rs/target/release/nvx-rs sandbox provision \
+          nvx/target/release/nvx sandbox provision \
             --state-dir "${state}" \
             --hypervisor "${{ inputs.backend }}" \
             --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
@@ -824,10 +824,10 @@ jobs:
           if config["format"] != 10 or "mounts" in config or shares != expected:
               sys.exit(f"managed sandbox did not persist the access policy: {config}")
           EOF
-          nvx-rs/target/release/nvx-rs sandbox start --state-dir "${state}"
-          nvx-rs/target/release/nvx-rs sandbox exec --state-dir "${state}" \
+          nvx/target/release/nvx sandbox start --state-dir "${state}"
+          nvx/target/release/nvx sandbox exec --state-dir "${state}" \
             --arg init "${smoke_arguments[@]}"
-          nvx-rs/target/release/nvx-rs sandbox stop --state-dir "${state}"
+          nvx/target/release/nvx sandbox stop --state-dir "${state}"
           python3 - "${state}/outcome.json" <<'EOF'
           import json
           import sys
@@ -839,7 +839,7 @@ jobs:
               sys.exit(f"managed sandbox outcome is invalid: {outcome}")
           EOF
           check_share
-          nvx-rs/target/release/nvx-rs sandbox deprovision --state-dir "${state}"
+          nvx/target/release/nvx sandbox deprovision --state-dir "${state}"
           rm -rf "${share}" "${scratch}"
 
       - name: Run Ubuntu sandbox layer smoke test on Windows
@@ -852,7 +852,7 @@ jobs:
           Copy-Item build\ubuntu-smoke-scratch.ext4 $scratch
           # A run executes the probe once, as nvx-init runs each execution,
           # and the probe checks the security profile of that execution.
-          nvx-rs\target\release\nvx-rs.exe sandbox `
+          nvx\target\release\nvx.exe sandbox `
             --hypervisor "${{ inputs.backend }}" `
             --layer "distro,build\ubuntu-distro.erofs,$($manifest.uuid)" `
             --scratch $scratch `
@@ -879,7 +879,7 @@ jobs:
           [IO.File]::WriteAllText((Join-Path $share "nvx-host-marker"), "host-to-guest`n")
           [IO.File]::WriteAllText((Join-Path $share "nvx-denied\secret"), "secret`n")
           [IO.File]::WriteAllText($outside, "host-outside`n")
-          nvx-rs\target\release\nvx-rs.exe sandbox `
+          nvx\target\release\nvx.exe sandbox `
             --hypervisor "${{ inputs.backend }}" `
             --layer "distro,build\ubuntu-distro.erofs,$($manifest.uuid)" `
             --scratch $scratch `
@@ -923,7 +923,7 @@ jobs:
           if ([IO.File]::ReadAllText((Join-Path $share "nvx-denied\secret")) -ne "secret`n") { throw "a guest link reached a denied file" }
           Remove-Item -Recurse -Force (Join-Path $share "nvx-guest-marker"), (Join-Path $share "nvx-guest-directory"), (Join-Path $share "nvx-tool"), (Join-Path $share "nvx-links")
           Copy-Item -Force build\ubuntu-smoke-scratch.ext4 $scratch
-          nvx-rs\target\release\nvx-rs.exe sandbox `
+          nvx\target\release\nvx.exe sandbox `
             --hypervisor "${{ inputs.backend }}" `
             --layer "distro,build\ubuntu-distro.erofs,$($manifest.uuid)" `
             --scratch $scratch `
@@ -946,9 +946,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           function Invoke-Nvx {
-              nvx-rs\target\release\nvx-rs.exe @args
+              nvx\target\release\nvx.exe @args
               if ($LASTEXITCODE -ne 0) {
-                  throw "nvx-rs $($args[0]) $($args[1]) failed with exit code $LASTEXITCODE"
+                  throw "nvx $($args[0]) $($args[1]) failed with exit code $LASTEXITCODE"
               }
           }
           $manifest = Get-Content -Raw build\ubuntu-distro.erofs.manifest.json |
@@ -985,7 +985,7 @@ jobs:
               Invoke-Nvx sandbox stop --state-dir $state
           } finally {
               if (Test-Path (Join-Path $state "runtime.json")) {
-                  nvx-rs\target\release\nvx-rs.exe sandbox stop --state-dir $state --timeout 30
+                  nvx\target\release\nvx.exe sandbox stop --state-dir $state --timeout 30
               }
               New-Item -ItemType Directory -Force $logs | Out-Null
               $log = Join-Path $state "openvmm.log"
@@ -1032,9 +1032,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           function Invoke-Nvx {
-              nvx-rs\target\release\nvx-rs.exe @args
+              nvx\target\release\nvx.exe @args
               if ($LASTEXITCODE -ne 0) {
-                  throw "nvx-rs $($args[0]) $($args[1]) failed with exit code $LASTEXITCODE"
+                  throw "nvx $($args[0]) $($args[1]) failed with exit code $LASTEXITCODE"
               }
           }
           $manifest = Get-Content -Raw build\ubuntu-distro.erofs.manifest.json |
@@ -1136,7 +1136,7 @@ jobs:
               Invoke-Nvx sandbox stop --state-dir $state
           } finally {
               if (Test-Path (Join-Path $state "runtime.json")) {
-                  nvx-rs\target\release\nvx-rs.exe sandbox stop --state-dir $state --timeout 30
+                  nvx\target\release\nvx.exe sandbox stop --state-dir $state --timeout 30
               }
               New-Item -ItemType Directory -Force $logs | Out-Null
               $log = Join-Path $state "openvmm.log"
@@ -1156,9 +1156,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           function Invoke-Nvx {
-              nvx-rs\target\release\nvx-rs.exe @args
+              nvx\target\release\nvx.exe @args
               if ($LASTEXITCODE -ne 0) {
-                  throw "nvx-rs $($args[0]) $($args[1]) failed with exit code $LASTEXITCODE"
+                  throw "nvx $($args[0]) $($args[1]) failed with exit code $LASTEXITCODE"
               }
           }
           $manifest = Get-Content -Raw build\ubuntu-distro.erofs.manifest.json |
@@ -1234,7 +1234,7 @@ jobs:
               Invoke-Nvx sandbox stop --state-dir $state
           } finally {
               if (Test-Path (Join-Path $state "runtime.json")) {
-                  nvx-rs\target\release\nvx-rs.exe sandbox stop --state-dir $state --timeout 30
+                  nvx\target\release\nvx.exe sandbox stop --state-dir $state --timeout 30
               }
               New-Item -ItemType Directory -Force $logs | Out-Null
               $log = Join-Path $state "openvmm.log"

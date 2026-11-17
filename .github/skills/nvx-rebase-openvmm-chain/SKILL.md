@@ -157,7 +157,7 @@ and 6 of nvx-promote-openvmm-pin describe, with these differences:
   (or `reorganized onto upstream main`) and
   `doc: map the OpenVMM roadmap onto the microVM VERSION rebase` (or
   `reorganization`).
-- The comparisons of what `nvx-rs` copies from OpenVMM decide the gitlink
+- The comparisons of what `nvx` copies from OpenVMM decide the gitlink
   commit's coordinated changes. A release that changes an ABI changes more,
   such as the CLI's compatibility policy, the snapshot manifest's versions,
   `SOURCE-MANIFEST.json`, the guest's decoders, and the tests that encode the

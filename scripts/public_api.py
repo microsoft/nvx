@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the public API of the nvx crate against its snapshots.
 
-The snapshots, nvx-rs/public-api/linux.txt and windows.txt, list the items that
+The snapshots, nvx/public-api/linux.txt and windows.txt, list the items that
 nvx exposes on Linux and on Windows, one a line: the item's kind, its path, and
 `(hidden)` if `#[doc(hidden)]` hides it or an item that contains it. The lines
 are sorted by path, so that a change to a snapshot reads like the change to the
@@ -14,7 +14,7 @@ and fails if it does.
 
 The only hidden items are the entry points of NVX's programs, one per binary:
 the function `main` that the binary's code calls, outside its comments and
-literals, such as `nvx::host::cli::main` for `nvx-rs`, and the modules that
+literals, such as `nvx::host::cli::main` for `nvx`, and the modules that
 hold it. The script fails, with or without `--update`, when a binary calls no
 such function or several, when two binaries call one, when the API does not
 list a binary's as hidden on any platform, or lists it without hiding it on

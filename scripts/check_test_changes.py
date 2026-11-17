@@ -97,7 +97,7 @@ POLICY_FILES = frozenset(
 # workflows, commands, modules, and scenarios are.
 WIRING_FILES = frozenset(
     {
-        ".github/actions/check-nvx-rs/action.yml",
+        ".github/actions/check-nvx/action.yml",
         ".github/actions/check-quality/action.yml",
         ".github/actions/validate-nvx/action.yml",
         ".github/workflows/run-nvx-microvm-tests.yml",
@@ -105,7 +105,7 @@ WIRING_FILES = frozenset(
 )
 WIRING_TOKEN_FILES = frozenset({".github/workflows/ci.yml"})
 SHARDS_FILE = "scripts/nvx_tools/microvm_shards.json"
-DOUBLES = re.compile(r"nvx-rs/src/testing/.+\.rs|nvx-rs/src/bin/nvx-fake-openvmm\.rs")
+DOUBLES = re.compile(r"nvx/src/testing/.+\.rs|nvx/src/bin/nvx-fake-openvmm\.rs")
 END_TO_END_FILES = re.compile(
     r"scripts/nvx_tools/microvm_test_scripts/.+"
     r"|guest/common/nvx-(?:identity-probe|sandbox-smoke|virtio-restore-probe)"
@@ -125,7 +125,7 @@ SKIPPING = re.compile(
 TEST_MODULE = re.compile(r"(?:\.[/\\])?(?:[\w.-]+[/\\])*test_\w+\.py")
 WIRING_TOKENS = (
     re.compile(
-        r"uses:\s*(\./\.github/(?:actions/(?:check-nvx-rs|check-quality|validate-nvx)"
+        r"uses:\s*(\./\.github/(?:actions/(?:check-nvx|check-quality|validate-nvx)"
         r"|workflows/run-nvx-microvm-tests\.yml))"
     ),
     re.compile(r"\bnvx\.py\s+((?:test|check)-[\w-]+)"),

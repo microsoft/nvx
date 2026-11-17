@@ -1,0 +1,122 @@
+name: Check nvx
+description: Format, lint, document, and test the nvx crate
+
+inputs:
+  toolchain:
+    description: >-
+      Rust toolchain used for formatting, linting, and tests. Defaults to the release
+      that the repository's rust-toolchain.toml pins.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchains
+      id: toolchains
+      shell: bash
+      working-directory: nvx
+      env:
+        REQUESTED_TOOLCHAIN: ${{ inputs.toolchain }}
+      run: |
+        set -euo pipefail
+        toolchain=${REQUESTED_TOOLCHAIN:-$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' ../rust-toolchain.toml)}
+        msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+        test -n "${toolchain}"
+        test -n "${msrv}"
+        rustup toolchain install "${toolchain}" --profile minimal \
+          --component clippy,rustfmt
+        rustup toolchain install "${msrv}" --profile minimal
+        {
+          echo "toolchain=${toolchain}"
+          echo "msrv=${msrv}"
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: Check formatting
+      shell: bash
+      working-directory: nvx
+      run: cargo "+${{ steps.toolchains.outputs.toolchain }}" fmt --all --check
+
+    - name: Lint
+      shell: bash
+      working-directory: nvx
+      run: |
+        set -euo pipefail
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --all-targets --all-features \
+          -- -D warnings
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib \
+          -- -D warnings
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib --no-default-features \
+          -- -D warnings
+        # The serde, cli and testing features alone, so that the compiler checks the code that each
+        # feature set builds, which other features' code may otherwise use. The guest feature
+        # alone is checked with the guest binaries, below, for the guests' target.
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib \
+          --no-default-features --features serde -- -D warnings
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib --bins \
+          --features cli -- -D warnings
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib --bins \
+          --no-default-features --features testing -- -D warnings
+
+    - name: Test
+      shell: bash
+      working-directory: nvx
+      run: |
+        set -euo pipefail
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --all-features
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked
+        # Without features, the library still holds the protocol.
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" build --locked --lib --no-default-features
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --lib --no-default-features
+
+    - name: Build documentation
+      shell: bash
+      working-directory: nvx
+      env:
+        RUSTDOCFLAGS: -D warnings
+      run: cargo "+${{ steps.toolchains.outputs.toolchain }}" doc --locked --no-deps --all-features
+
+    # The public API, hidden items marked, must match the snapshots in nvx/public-api/, which
+    # `python3 scripts/public_api.py --update` rewrites. The script documents both platforms, on
+    # the pinned release, with their targets' standard libraries, so the Linux runner checks the
+    # Windows snapshot too.
+    - name: Check the public API
+      if: runner.os == 'Linux'
+      shell: bash
+      run: python3 scripts/public_api.py
+
+    - name: Check the minimum supported Rust version
+      shell: bash
+      working-directory: nvx
+      run: >-
+        cargo "+${{ steps.toolchains.outputs.msrv }}" check
+        --locked --all-targets --all-features
+
+    - name: Check the macOS build
+      if: runner.os == 'Linux'
+      shell: bash
+      working-directory: nvx
+      run: |
+        set -euo pipefail
+        rustup target add --toolchain "${{ steps.toolchains.outputs.toolchain }}" aarch64-apple-darwin
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" check --locked --all-targets --all-features \
+          --target aarch64-apple-darwin
+
+    # The guest binaries are static x86_64-unknown-linux-musl executables; see the README's
+    # guest binaries section. This step also adds the musl target that the build step needs.
+    - name: Lint and test the guest binaries
+      if: runner.os == 'Linux'
+      shell: bash
+      run: >-
+        python3 scripts/nvx.py check-guest-binaries
+        --toolchain "${{ steps.toolchains.outputs.toolchain }}"
+
+    - name: Build and check the guest binaries
+      if: runner.os == 'Linux'
+      shell: bash
+      working-directory: nvx
+      run: |
+        set -euo pipefail
+        directory="${PWD}/../build/nvx-guest-binaries"
+        python3 ../scripts/nvx.py build-guest-binaries --output "${directory}"
+        python3 ../scripts/nvx.py test-guest-binaries --binaries "${directory}"

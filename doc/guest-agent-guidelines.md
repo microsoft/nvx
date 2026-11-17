@@ -12,11 +12,11 @@ throughout. The design's
 [Guest Agents and Workload Model](design/4.2-guest-agents-and-workload-model.md)
 and [Isolation and Resource Model](design/4.3-isolation-and-resource-model.md)
 give the architecture and its boundaries, and the rustdoc of
-[`guest`](../nvx-rs/src/guest/mod.rs),
-[`guest::snapshot`](../nvx-rs/src/guest/snapshot.rs),
-[`guest::restore`](../nvx-rs/src/guest/restore.rs) and
-[`guest_restore`](../nvx-rs/src/guest_restore/mod.rs) the public mechanisms.
-The [`guest-workflows`](../nvx-rs/examples/guest-workflows.rs) example compiles
+[`guest`](../nvx/src/guest/mod.rs),
+[`guest::snapshot`](../nvx/src/guest/snapshot.rs),
+[`guest::restore`](../nvx/src/guest/restore.rs) and
+[`guest_restore`](../nvx/src/guest_restore/mod.rs) the public mechanisms.
+The [`guest-workflows`](../nvx/examples/guest-workflows.rs) example compiles
 an init's calls of them, through the public API alone: its time daemon, its
 control session, a capture, a guest restore and the host's mapping table.
 
@@ -45,7 +45,7 @@ The library's calls leave all of this to the init:
 
 One other call starts processes, which an init can avoid: `capture`, whose
 repair finishes the restore through the time ABI's private
-[`TimeAbi::restore_finish`](../nvx-rs/src/guest/time/api.rs). In report-only
+[`TimeAbi::restore_finish`](../nvx/src/guest/time/api.rs). In report-only
 mode, the finish runs the restore's deferred time work itself when
 no time daemon runs, in a calling process that must have no other thread: it
 forks a child, which waits for a grandchild that forces an RCU grace period,
@@ -147,12 +147,12 @@ nvx-init's space keeps these rules:
 ### The space's steps, checked
 
 These excerpts are nvx-init's unit test
-[`the_reference_space_steps_compile`](../nvx-rs/src/guest/init/boot/tests.rs),
+[`the_reference_space_steps_compile`](../nvx/src/guest/init/boot/tests.rs),
 which compiles them without mounting anything or switching the developer
 host's root. They use the space's own names, of `root`, `view`, the mapper and
 `restore::{apply, Applied, RootTemplate}`, which are NVX's internal
 reference code, not public API. A cold boot's space takes these steps in the
-order of [`boot::cold_boot`](../nvx-rs/src/guest/init/boot.rs), which also
+order of [`boot::cold_boot`](../nvx/src/guest/init/boot.rs), which also
 mounts the live shares of NVX's CLI after the runtime file systems:
 
 ```rust
@@ -215,7 +215,7 @@ let _restored = |record: &GuestRestoreRecord,
 
 ### The host's mapping table
 
-The public [`MappingTable`](../nvx-rs/src/guest/mappings/table.rs) keeps the
+The public [`MappingTable`](../nvx/src/guest/mappings/table.rs) keeps the
 account of the host's mapping table, and the init's mapper binds the mappings
 that it hands out: one does not replace the other. The host announces how many
 mappings its table holds, at a cold boot with `nvx_maps=COUNT`, which it leaves
@@ -240,7 +240,7 @@ empty one not at all:
 nvx-init answers a refused part with `invalid-request`, a failed mapping with
 `mapping-failed`, after a diagnostic that names its entry, and refuses every
 execution with `mappings-incomplete` until its table is complete. The
-guidelines quote this excerpt of the [`guest`](../nvx-rs/src/guest/mod.rs)
+guidelines quote this excerpt of the [`guest`](../nvx/src/guest/mod.rs)
 rustdoc, where it compiles as a public-API doc test:
 
 ```rust
@@ -354,7 +354,7 @@ When the call returns:
   before it takes the guest-restore record.
 
 The guidelines quote this excerpt of the
-[`guest::snapshot`](../nvx-rs/src/guest/snapshot.rs) rustdoc, where it
+[`guest::snapshot`](../nvx/src/guest/snapshot.rs) rustdoc, where it
 compiles as a public-API doc test:
 
 ```rust

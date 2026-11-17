@@ -256,8 +256,8 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
         consumers=(
             "nvx-managed-agent",
             "nvx-init",
-            "nvx-rs run",
-            "nvx-rs sandbox",
+            "nvx run",
+            "nvx sandbox",
             "the test-microvm and benchmark harnesses",
         ),
         validation=(
@@ -438,7 +438,7 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
             "other than a mount namespace: nvx-init and the managed agent run "
             "their workloads in the namespaces that they run in, without "
             "cgroups (doc/design/4.3-isolation-and-resource-model.md). Only "
-            "root programs in a guest, such as an nvx-rs run shell, can use "
+            "root programs in a guest, such as an nvx run shell, can use "
             "the PID and UTS namespaces, the memory, process-count, and block "
             "cgroups with their writeback, and the cgroup BPF programs that "
             "this feature keeps, and NAMESPACES also stays for NET_NS "
@@ -449,7 +449,7 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
             "other namespace and cgroup controller types stay off."
         ),
         consumers=(
-            "root programs in a guest, such as an nvx-rs run shell",
+            "root programs in a guest, such as an nvx run shell",
             "generic sandbox workloads",
         ),
         validation=("build-kernel's sandbox group",),
@@ -502,7 +502,7 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
             "steering, byte queue limits, and per-CPU device references keep "
             "the data path as upstream defaults it."
         ),
-        consumers=("guest/common/init", "nvx-ingress", "nvx-rs run --net"),
+        consumers=("guest/common/init", "nvx-ingress", "nvx run --net"),
         validation=("the network scenarios", "the netsnap benchmarks"),
         settings=(
             "CONFIG_NET=y",

@@ -95,17 +95,17 @@ change selects, with the commands of the actions below, and runs them with
 | Markdown files and `doc/` paths | Every relative link and image in a tracked Markdown file resolves to a tracked file, and every anchor to a heading slug that GitHub generates, ignoring code. Every `doc/` path that a tracked file mentions resolves too, except the test fixtures that `DOC_PATH_FIXTURES` lists. | [check-quality](../.github/actions/check-quality/action.yml), [check_markdown_links.py](../scripts/check_markdown_links.py) |
 | Tests | Every test lives in a test file, and production files hold only the test hooks that the allowlist allows; see [Test layout](#test-layout) | [check-quality](../.github/actions/check-quality/action.yml), [check_test_layout.py](../scripts/check_test_layout.py) |
 | `kernel/config-microvm` | Every setting of the kernel feature inventory holds, and every other symbol that the configuration sets is recorded in `kernel/config-microvm.derived`; see [Kernel configuration](build.md#kernel-configuration) | [check-quality](../.github/actions/check-quality/action.yml), [`check-kernel-config`](usage.md#check-kernel-config) |
-| `nvx-rs/` | rustfmt, Clippy and rustdoc with warnings denied, Clippy also for the `serde`, `cli` and `testing` features alone, tests, the minimum supported Rust version, a macOS check, the public API against its snapshots in `nvx-rs/public-api/`, and, through `nvx.py`, the musl lint, tests, build, digest manifest, and static-ELF check of the guest binaries; see [Rust crates](ci.md#rust-crates) | [check-nvx-rs](../.github/actions/check-nvx-rs/action.yml), [public_api.py](../scripts/public_api.py) |
-| NVX CLI | Compiles `scripts/`, runs every `scripts/test_*.py` module and the tests of the skills' scripts, and checks command help, on Linux and Windows, and compares the copies of OpenVMM's protocol vectors in `nvx-rs/tests/vectors/openvmm/`, and of the identities of its built-in CPU profiles in `nvx-rs/src/host/cli/cpu_generations.json`, with the submodule's files | [validate-nvx](../.github/actions/validate-nvx/action.yml), [ci.yml](../.github/workflows/ci.yml) |
+| `nvx/` | rustfmt, Clippy and rustdoc with warnings denied, Clippy also for the `serde`, `cli` and `testing` features alone, tests, the minimum supported Rust version, a macOS check, the public API against its snapshots in `nvx/public-api/`, and, through `nvx.py`, the musl lint, tests, build, digest manifest, and static-ELF check of the guest binaries; see [Rust crates](ci.md#rust-crates) | [check-nvx](../.github/actions/check-nvx/action.yml), [public_api.py](../scripts/public_api.py) |
+| NVX CLI | Compiles `scripts/`, runs every `scripts/test_*.py` module and the tests of the skills' scripts, and checks command help, on Linux and Windows, and compares the copies of OpenVMM's protocol vectors in `nvx/tests/vectors/openvmm/`, and of the identities of its built-in CPU profiles in `nvx/src/host/cli/cpu_generations.json`, with the submodule's files | [validate-nvx](../.github/actions/validate-nvx/action.yml), [ci.yml](../.github/workflows/ci.yml) |
 
 check-quality names each shell script that it checks, and a CLI test fails
 unless validate-nvx runs every `scripts/test_*.py` module on both operating
 systems, so add a new script or test module to those lists.
 
 A change to the public API of `nvx` updates its snapshots in
-`nvx-rs/public-api/`, which list it on Linux and on Windows, so that the
+`nvx/public-api/`, which list it on Linux and on Windows, so that the
 change shows in the pull request's diff. The first command checks the
-snapshots, as the `nvx-rs` job does on Linux, and the second rewrites them:
+snapshots, as the `nvx` job does on Linux, and the second rewrites them:
 
 ```bash
 python3 scripts/public_api.py
@@ -140,17 +140,17 @@ devices. Add those scenarios to
 `scripts/nvx_tools/microvm_tests.py` and run them with
 `scripts/nvx.py test-microvm --backend BACKEND`. Keep guest workloads in
 `scripts/nvx_tools/microvm_test_scripts` and retain complete failure logs.
-The scenarios that drive the public `nvx-rs sandbox` commands live in
+The scenarios that drive the public `nvx sandbox` commands live in
 `scripts/nvx_tools/managed_exec_tests.py`,
 `scripts/nvx_tools/sandbox_lifecycle_tests.py`,
 `scripts/nvx_tools/sandbox_proxy_tests.py`,
 `scripts/nvx_tools/sandbox_ram_upper_tests.py`, and `microvm_tests.py`, which
-registers them. `sandbox` and the control protocol belong to `nvx-rs`
+registers them. `sandbox` and the control protocol belong to `nvx`
 ([microsoft/nvx#359](https://github.com/microsoft/nvx/issues/359)), so the
 scenarios drive them as commands, compile egress policies with
-`nvx-rs egress compile`, and leave the control session to `nvx-rs`: the
+`nvx egress compile`, and leave the control session to `nvx`: the
 `managed-lifecycle` scenario builds OpenVMM's command line and runs the ignored
-`nvx-rs` unit test `src/host/session/tests/managed_lifecycle.rs`, which drives
+`nvx` unit test `src/host/session/tests/managed_lifecycle.rs`, which drives
 the guest, and the
 `vm-lifecycle` scenario runs the ignored test `tests/vm_lifecycle.rs`, which
 drives a VM through the public API of `nvx`. Add no
@@ -171,13 +171,13 @@ jobs run. The `nvx` crate
 keeps the unit tests of each module in the module's `tests` module, in files
 of their own beside its source, as [Test layout](#test-layout) describes, and
 integration tests in its `tests` directory, among them the
-[security checklist](../nvx-rs/tests/security_checklist.rs), which checks
+[security checklist](../nvx/tests/security_checklist.rs), which checks
 through the public API alone the security requirements that the host's
 documentation states for a VM's directory and outputs and for a snapshot's
-directory. The `nvx-rs` job runs them as
-[check-nvx-rs](../.github/actions/check-nvx-rs/action.yml) defines, and also
+directory. The `nvx` job runs them as
+[check-nvx](../.github/actions/check-nvx/action.yml) defines, and also
 runs `tests/guest_tools.rs` against the exact guest-profile binaries;
-[Testing](../nvx-rs/README.md#testing) describes them. Tests of the NVX
+[Testing](../nvx/README.md#testing) describes them. Tests of the NVX
 mechanics, such as the conformance vectors of the control protocol, belong in
 `nvx`. [Continuous integration](ci.md) describes how CI checks OpenVMM's own CI
 and what the NVX microVM suite covers.
@@ -186,7 +186,7 @@ and what the NVX microVM suite covers.
 
 Tests live apart from the code that they test, so that a change to one never
 hides in a change to the other, and so that the guest images, which carry the
-code of `nvx-rs` but not its tests, never rebuild for a test. A Rust crate's
+code of `nvx` but not its tests, never rebuild for a test. A Rust crate's
 test files are those beneath its `tests` directory and, in its `src/`, the
 `tests.rs` files and the files beneath a `tests` directory. Its other files in
 `src/` are production files, which declare their unit tests only as an
@@ -251,30 +251,30 @@ an implementation recorded. The documents in `doc/`, the READMEs of the crates
 and of their tests, and the interfaces that they name, such as the kernel's
 and OpenVMM's, specify option grammars, file and wire formats, error codes,
 and the contracts among the host, OpenVMM, and the guest. The `nvx` crate and
-its `nvx-rs` CLI are the reference of the behavior that they ported from
+its `nvx` CLI are the reference of the behavior that they ported from
 `nvx.py`: tests derived from the specification replaced the golden tests that
 compared them with what Python did
 ([microsoft/nvx#722](https://github.com/microsoft/nvx/issues/722)), as the
-crate's [Testing](../nvx-rs/README.md#testing) section describes.
+crate's [Testing](../nvx/README.md#testing) section describes.
 
 - A deliberate change of behavior updates its specification and the tests
   derived from it, in the same change, never recorded output. Fixtures, such
   as the boot-token cases and the records of the store and of sandbox
-  configurations in `nvx-rs/tests/fixtures/`, are written by hand from the
+  configurations in `nvx/tests/fixtures/`, are written by hand from the
   specification, and no change adds one that records what an implementation
   does.
-- Callers rely on exit statuses, [error codes](../nvx-rs/README.md#error-codes),
+- Callers rely on exit statuses, [error codes](../nvx/README.md#error-codes),
   and stable fragments of messages, such as the names of options and the paths
   of fields, but not on the wording of messages, which a change may revise.
   Tests of what callers observe, such as the CLI's scenario tests, check those.
-- A [conformance vector](../nvx-rs/tests/vectors/README.md) holds bytes that
+- A [conformance vector](../nvx/tests/vectors/README.md) holds bytes that
   no codec produced, the only check against peers that share no code with
   `nvx`: change one only with a protocol version, which gets vector files of
   its own.
 - Property tests use [`proptest`](https://docs.rs/proptest).
 - To show that new tests catch what the tests that they replace caught,
   compare the mutants that each selection catches with
-  [nvx-rs mutation testing](ci.md#nvx-rs-mutation-testing).
+  [nvx mutation testing](ci.md#nvx-mutation-testing).
 
 ### Changes to existing tests
 
@@ -355,13 +355,13 @@ A pin promotion moves the `openvmm` gitlink to a reviewed OpenVMM revision:
   roadmap`. Never merge OpenVMM history into NVX.
 - After committing, run `scripts/nvx.py verify`, which checks that the
   submodule checkout matches the recorded pin.
-- `nvx-rs` checks copies of OpenVMM's control-session protocol vectors, which
+- `nvx` checks copies of OpenVMM's control-session protocol vectors, which
   the NVX CLI jobs compare with the submodule's files. When a revision changes
-  them, copy them into `nvx-rs/tests/vectors/openvmm/` unchanged and record the
+  them, copy them into `nvx/tests/vectors/openvmm/` unchanged and record the
   revision, in the gitlink commit; see
-  [OpenVMM's vectors](../nvx-rs/tests/vectors/README.md#openvmms-vectors).
-  `nvx-rs run` also reads a copy of the identities of OpenVMM's built-in CPU
-  profiles, `nvx-rs/src/host/cli/cpu_generations.json`, which the NVX CLI jobs
+  [OpenVMM's vectors](../nvx/tests/vectors/README.md#openvmms-vectors).
+  `nvx run` also reads a copy of the identities of OpenVMM's built-in CPU
+  profiles, `nvx/src/host/cli/cpu_generations.json`, which the NVX CLI jobs
   compare with the pinned profiles; a revision that adds, revises, or removes
   a profile updates it in the gitlink commit.
 - In the pull request, name the OpenVMM pull request and the exact pinned

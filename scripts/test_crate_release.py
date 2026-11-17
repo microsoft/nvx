@@ -555,9 +555,9 @@ class ManifestTests(unittest.TestCase):
             )
 
     def test_the_nvx_crate_declares_a_version_that_ci_can_publish(self):
-        crate = BuildConstants.REPO_ROOT / "nvx-rs"
+        crate = BuildConstants.REPO_ROOT / "nvx"
         manifest = crate_release.read_manifest(
-            (crate / "Cargo.toml").read_bytes(), "nvx-rs/Cargo.toml"
+            (crate / "Cargo.toml").read_bytes(), "nvx/Cargo.toml"
         )
         self.assertEqual(manifest.name, "nvx")
         counter = manifest.version.counter
@@ -598,7 +598,7 @@ class RegistryTests(unittest.TestCase):
             ("ab", "2/ab"),
             ("nvx", "3/n/nvx"),
             ("Serde", "se/rd/serde"),
-            ("nvx_rs", "nv/x_/nvx_rs"),
+            ("nvx_cli", "nv/x_/nvx_cli"),
         ):
             with self.subTest(name=name):
                 self.assertEqual(crate_release.index_path(name), path)
@@ -852,7 +852,7 @@ class PackageCheckTests(unittest.TestCase):
             (generated_crlf, r"Cargo\.toml holds CR line endings"),
             (vcs(sha1="f" * 40), f"records {'f' * 40}, not"),
             (vcs(dirty=False), "records a clean checkout, but one that declares"),
-            (vcs(path_in_vcs="nvx-rs"), "records the path 'nvx-rs', not 'crate'"),
+            (vcs(path_in_vcs="nvx"), "records the path 'nvx', not 'crate'"),
         ):
             with self.subTest(problem=problem):
                 with self.assertRaisesRegex(
@@ -1437,11 +1437,11 @@ class ReleaseTests(unittest.TestCase):
 class ChangelogTests(unittest.TestCase):
     def test_the_newest_entry_is_the_series_that_the_crate_declares(self):
         # CHANGELOG.md lists the breaking releases, each the first version of
-        # the series whose floor nvx-rs/Cargo.toml then declares, so a pull
+        # the series whose floor nvx/Cargo.toml then declares, so a pull
         # request that starts another series adds its entry.
         root = BuildConstants.REPO_ROOT
         manifest = crate_release.read_manifest(
-            (root / "nvx-rs" / "Cargo.toml").read_bytes(), "nvx-rs/Cargo.toml"
+            (root / "nvx" / "Cargo.toml").read_bytes(), "nvx/Cargo.toml"
         )
         entries = re.findall(
             r"(?m)^## (\S+)$", (root / "CHANGELOG.md").read_text(encoding="utf-8")
@@ -1458,7 +1458,7 @@ class CommandLineTests(unittest.TestCase):
         ):
             publish_nvx_crate.main(["package"])
             package.assert_called_once_with(
-                (BuildConstants.REPO_ROOT / "nvx-rs").resolve(),
+                (BuildConstants.REPO_ROOT / "nvx").resolve(),
                 (BuildConstants.BUILD_DIR / "nvx-crate").resolve(),
             )
             publish_nvx_crate.main(
@@ -1473,7 +1473,7 @@ class CommandLineTests(unittest.TestCase):
                 ]
             )
             prepare.assert_called_once_with(
-                (BuildConstants.REPO_ROOT / "nvx-rs").resolve(),
+                (BuildConstants.REPO_ROOT / "nvx").resolve(),
                 Path("work").resolve(),
                 _version("0.1.0-alpha.4"),
                 "a" * 64,

@@ -782,7 +782,7 @@ def _is_gitlink(repo: Path, revision: str) -> bool:
 
 def _coordinated_path(path: str) -> bool:
     return (
-        path.startswith("nvx-rs/")
+        path.startswith("nvx/")
         or path
         in {
             "scripts/nvx_tools/time_abi.py",

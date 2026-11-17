@@ -144,7 +144,7 @@ class GateTableTests(unittest.TestCase):
         self.assertTrue(setup_rules <= local_gates.CI_SETUP_STEPS)
         for job in ("nvx-cli-linux", "nvx-cli-windows"):
             self.assertIn(
-                (local_gates.CI_WORKFLOW, job, "Download nvx-rs executable"),
+                (local_gates.CI_WORKFLOW, job, "Download nvx executable"),
                 local_gates.CI_SETUP_STEPS,
             )
 
@@ -183,12 +183,12 @@ class SelectionTests(unittest.TestCase):
             },
         )
 
-    def test_an_nvx_rs_change_selects_the_rust_gates_not_kernel_config(self) -> None:
-        report = self.report(("nvx-rs/src/lib.rs",))
+    def test_an_nvx_change_selects_the_rust_gates_not_kernel_config(self) -> None:
+        report = self.report(("nvx/src/lib.rs",))
         gate_ids = _gate_ids(report)
         self.assertNotIn("kernel-config", gate_ids)
-        self.assertIn("nvx-rs-format", gate_ids)
-        self.assertIn("nvx-rs-guest-binaries-build", gate_ids)
+        self.assertIn("nvx-format", gate_ids)
+        self.assertIn("nvx-guest-binaries-build", gate_ids)
         self.assertTrue(report.ci_suites.run_microvm_tests)
 
     def test_a_documentation_change_selects_only_the_always_run_gates(self) -> None:
@@ -347,15 +347,15 @@ class SubstitutionTests(unittest.TestCase):
     def test_toolchain_and_msrv_come_from_the_repository_files(self) -> None:
         report = local_gates.create_report(
             base="origin/dev",
-            files=("nvx-rs/src/lib.rs",),
+            files=("nvx/src/lib.rs",),
             operating_system="linux",
             root=ROOT,
             runner_temp=self.runner_temp,
-            only=("nvx-rs-format", "nvx-rs-msrv"),
+            only=("nvx-format", "nvx-msrv"),
         )
-        self.assertIn('cargo "+1.97.1" fmt', _gate(report, "nvx-rs-format").script)
-        self.assertIn('cargo "+1.89" check', _gate(report, "nvx-rs-msrv").script)
-        self.assertNotIn("${{", _gate(report, "nvx-rs-format").script)
+        self.assertIn('cargo "+1.97.1" fmt', _gate(report, "nvx-format").script)
+        self.assertIn('cargo "+1.89" check', _gate(report, "nvx-msrv").script)
+        self.assertNotIn("${{", _gate(report, "nvx-format").script)
 
     def test_an_unknown_expression_is_reported_for_ci_context(self) -> None:
         substituted, unknown = local_gates.substitute_ci_expressions(
@@ -394,14 +394,14 @@ class EnvironmentTests(unittest.TestCase):
     ) -> local_gates.Report:
         return local_gates.create_report(
             base="origin/dev",
-            files=("nvx-rs/src/lib.rs",),
+            files=("nvx/src/lib.rs",),
             operating_system=operating_system,
             root=ROOT,
             runner_temp=self.runner_temp,
             only=only,
         )
 
-    def test_windows_nvx_cli_names_a_built_nvx_rs_and_removes_xdg_cache_home(
+    def test_windows_nvx_cli_names_a_built_nvx_and_removes_xdg_cache_home(
         self,
     ) -> None:
         report = local_gates.create_report(
@@ -413,19 +413,19 @@ class EnvironmentTests(unittest.TestCase):
             only=("nvx-cli",),
         )
         gate = _gate(report, "nvx-cli")
-        built = self.runner_temp / "nvx-rs.exe"
+        built = self.runner_temp / "nvx.exe"
         built.write_text("binary", encoding="utf-8")
-        gate.environment["NVX_RS"] = str(built)
+        gate.environment["NVX"] = str(built)
         environment = local_gates.prepare_execution_environment(
             gate,
             {"PATH": "path", "XDG_CACHE_HOME": "must-not-survive"},
         )
         self.assertNotIn("XDG_CACHE_HOME", environment)
-        self.assertEqual(environment["NVX_RS"], str(built))
+        self.assertEqual(environment["NVX"], str(built))
 
-    def test_nvx_cli_leaves_nvx_rs_unset_when_it_is_not_built(self) -> None:
-        # A missing executable fails the tests that run nvx-rs, as 50 of them
-        # did, where an unset NVX_RS skips them.
+    def test_nvx_cli_leaves_nvx_unset_when_it_is_not_built(self) -> None:
+        # A missing executable fails the tests that run nvx, as 50 of them
+        # did, where an unset NVX skips them.
         report = local_gates.create_report(
             base="origin/dev",
             files=("doc/contribute.md",),
@@ -435,14 +435,14 @@ class EnvironmentTests(unittest.TestCase):
             only=("nvx-cli",),
         )
         gate = _gate(report, "nvx-cli")
-        gate.environment["NVX_RS"] = str(self.runner_temp / "missing" / "nvx-rs.exe")
+        gate.environment["NVX"] = str(self.runner_temp / "missing" / "nvx.exe")
         environment = local_gates.prepare_execution_environment(gate, {"PATH": "p"})
-        self.assertNotIn("NVX_RS", environment)
+        self.assertNotIn("NVX", environment)
         # A caller's own choice survives.
         environment = local_gates.prepare_execution_environment(
-            gate, {"PATH": "p", "NVX_RS": "C:/custom/nvx-rs.exe"}
+            gate, {"PATH": "p", "NVX": "C:/custom/nvx.exe"}
         )
-        self.assertEqual(environment["NVX_RS"], "C:/custom/nvx-rs.exe")
+        self.assertEqual(environment["NVX"], "C:/custom/nvx.exe")
 
     def test_windows_prepends_git_usr_bin_to_path(self) -> None:
         report = local_gates.create_report(
@@ -462,8 +462,8 @@ class EnvironmentTests(unittest.TestCase):
         self.assertTrue(environment["PATH"].startswith(str(git_root / "usr" / "bin")))
 
     def test_required_ci_environment_points_into_the_runner_temp(self) -> None:
-        report = self.report("linux", ("nvx-rs-format",))
-        environment = _gate(report, "nvx-rs-format").environment
+        report = self.report("linux", ("nvx-format",))
+        environment = _gate(report, "nvx-format").environment
         for name in ("GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_STEP_SUMMARY"):
             self.assertTrue(Path(environment[name]).is_file())
             self.assertTrue(Path(environment[name]).is_relative_to(self.runner_temp))
@@ -711,7 +711,7 @@ class OutputTests(unittest.TestCase):
         )
 
     def test_microvm_suite_lists_each_scenario_for_the_local_backends(self) -> None:
-        suites = self.report(("nvx-rs/src/lib.rs",)).ci_suites
+        suites = self.report(("nvx/src/lib.rs",)).ci_suites
         self.assertEqual(suites.backends, ("kvm", "mshv"))
         self.assertTrue(suites.scenarios)
         self.assertIn(

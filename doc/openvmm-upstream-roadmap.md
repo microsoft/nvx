@@ -319,7 +319,7 @@ in the snapshot publication of `openvmm_helpers`, which PR11's positions 029-031
 commits change. The v6.1 rebase therefore gives the chain's `SnapshotManifest` upstream's
 `snapshot_id`, which a microVM capture leaves zero, publishes upstream's snapshots through the
 chain's staged publication, and keeps microVMs out of RestoreVM; see [Conflicts of the v6.1
-rebase](#conflicts-of-the-v61-rebase). NVX's pin of the rebase has `nvx-rs`'s reader of a template's
+rebase](#conflicts-of-the-v61-rebase). NVX's pin of the rebase has `nvx`'s reader of a template's
 manifest, which refuses fields that it does not know, accept field 18.
 
 | Roadmap PR | Positions | Upstream pull requests, in position order |

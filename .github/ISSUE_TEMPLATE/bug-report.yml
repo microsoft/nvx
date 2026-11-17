@@ -16,7 +16,7 @@ body:
         - "area: openvmm"
         - "area: guest"
         - "area: kernel"
-        - "area: nvx-rs"
+        - "area: nvx"
         - "area: userland"
         - "area: networking"
         - "area: snapshot"

@@ -1105,15 +1105,15 @@ class WiringTests(unittest.TestCase):
 
 class ClassifyTests(unittest.TestCase):
     def test_paths_and_their_categories(self) -> None:
-        crates = ("nvx-rs",)
+        crates = ("nvx",)
         for path, expected in (
             ("scripts/test-layout-allowlist.json", (changes.TEST_POLICY, "allowlist")),
             ("scripts/check_test_layout.py", (changes.TEST_POLICY, "file")),
             (".github/actions/validate-nvx/action.yml", (changes.CI_WIRING, "lines")),
             (".github/workflows/ci.yml", (changes.CI_WIRING, "tokens")),
             ("scripts/nvx_tools/microvm_shards.json", (changes.CI_WIRING, "shards")),
-            ("nvx-rs/src/testing/fake_openvmm.rs", (changes.TEST_DOUBLES, "rust")),
-            ("nvx-rs/src/bin/nvx-fake-openvmm.rs", (changes.TEST_DOUBLES, "rust")),
+            ("nvx/src/testing/fake_openvmm.rs", (changes.TEST_DOUBLES, "rust")),
+            ("nvx/src/bin/nvx-fake-openvmm.rs", (changes.TEST_DOUBLES, "rust")),
             (
                 "scripts/nvx_tools/microvm_test_scripts/a.sh",
                 (changes.END_TO_END, "file"),
@@ -1122,13 +1122,13 @@ class ClassifyTests(unittest.TestCase):
             ("scripts/nvx_tools/microvm_tests.py", (changes.END_TO_END, "python")),
             ("scripts/test_nvx_tools.py", (changes.TEST_CODE, "python")),
             ("scripts/powershell_testing.py", (changes.TEST_CODE, "python")),
-            ("nvx-rs/tests/fixtures/store/runtime.json", (changes.TEST_DATA, "file")),
-            ("nvx-rs/tests/vectors/openvmm/a.rs", (changes.TEST_DATA, "file")),
-            ("nvx-rs/tests/cli.rs", (changes.TEST_CODE, "rust")),
-            ("nvx-rs/src/a/tests.rs", (changes.TEST_CODE, "rust")),
-            ("nvx-rs/src/a.rs", (changes.TEST_CODE, "rust-production")),
-            ("nvx-rs/tests/vectors/README.md", None),
-            ("nvx-rs/README.md", None),
+            ("nvx/tests/fixtures/store/runtime.json", (changes.TEST_DATA, "file")),
+            ("nvx/tests/vectors/openvmm/a.rs", (changes.TEST_DATA, "file")),
+            ("nvx/tests/cli.rs", (changes.TEST_CODE, "rust")),
+            ("nvx/src/a/tests.rs", (changes.TEST_CODE, "rust")),
+            ("nvx/src/a.rs", (changes.TEST_CODE, "rust-production")),
+            ("nvx/tests/vectors/README.md", None),
+            ("nvx/README.md", None),
             ("scripts/nvx_tools/benchmark.py", None),
             ("doc/ci.md", None),
         ):

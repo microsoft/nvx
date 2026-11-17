@@ -60,7 +60,7 @@ def _write_dep_info(directory: Path, names: list[str], sources: Sequence[Path]) 
 
 @contextlib.contextmanager
 def _fake_guest_build(
-    sources: Sequence[Path] = (BuildConstants.REPO_ROOT / "nvx-rs" / "src" / "lib.rs",),
+    sources: Sequence[Path] = (BuildConstants.REPO_ROOT / "nvx" / "src" / "lib.rs",),
 ) -> Generator[MagicMock]:
     """Stand for Cargo, which writes each binary's name as its contents.
 
@@ -115,8 +115,8 @@ class GuestBinaryBuildTests(unittest.TestCase):
             relative,
         )
         self.assertIn("rust-toolchain.toml", relative)
-        self.assertIn("nvx-rs/Cargo.toml", relative)
-        self.assertIn("nvx-rs/Cargo.lock", relative)
+        self.assertIn("nvx/Cargo.toml", relative)
+        self.assertIn("nvx/Cargo.lock", relative)
         self.assertIn("scripts/nvx_tools/build_constants.py", relative)
         self.assertIn("scripts/nvx_tools/guest_binaries.py", relative)
         # The guest build compiles every source file of the crate but the host
@@ -135,30 +135,30 @@ class GuestBinaryBuildTests(unittest.TestCase):
             )
             test = "tests" in parts[:-1] or parts[-1] == "tests.rs"
             if path.is_file() and not host and not test:
-                compiled.add(f"nvx-rs/src/{name}")
+                compiled.add(f"nvx/src/{name}")
         self.assertEqual(
-            {path for path in relative if path.startswith("nvx-rs/src/")}, compiled
+            {path for path in relative if path.startswith("nvx/src/")}, compiled
         )
         for path in (
-            "nvx-rs/src/lib.rs",
-            "nvx-rs/src/uuid.rs",
-            "nvx-rs/src/protocol/nvxs/host.rs",
-            "nvx-rs/src/guest/exit.rs",
-            "nvx-rs/src/guest/device_io.rs",
-            *(f"nvx-rs/src/{name}" for name in sorted(guest_roots)),
+            "nvx/src/lib.rs",
+            "nvx/src/uuid.rs",
+            "nvx/src/protocol/nvxs/host.rs",
+            "nvx/src/guest/exit.rs",
+            "nvx/src/guest/device_io.rs",
+            *(f"nvx/src/{name}" for name in sorted(guest_roots)),
         ):
             with self.subTest(compiled=path):
                 self.assertIn(path, relative)
         for path in (
-            "nvx-rs/README.md",
-            "nvx-rs/tests/guest_tools.rs",
-            "nvx-rs/src/host/mod.rs",
-            "nvx-rs/src/testing/mod.rs",
-            "nvx-rs/src/bin/nvx-rs.rs",
-            "nvx-rs/src/bin/nvx-fake-openvmm.rs",
-            "nvx-rs/src/protocol/tests.rs",
-            "nvx-rs/src/protocol/nvxs/tests/guest.rs",
-            "nvx-rs/src/guest/managed_agent/tests/loopback.rs",
+            "nvx/README.md",
+            "nvx/tests/guest_tools.rs",
+            "nvx/src/host/mod.rs",
+            "nvx/src/testing/mod.rs",
+            "nvx/src/bin/nvx.rs",
+            "nvx/src/bin/nvx-fake-openvmm.rs",
+            "nvx/src/protocol/tests.rs",
+            "nvx/src/protocol/nvxs/tests/guest.rs",
+            "nvx/src/guest/managed_agent/tests/loopback.rs",
         ):
             with self.subTest(omitted=path):
                 self.assertTrue((root / path).is_file())
@@ -177,25 +177,25 @@ class GuestBinaryBuildTests(unittest.TestCase):
             root = Path(temporary)
             inputs = (
                 *(path.as_posix() for path in GuestRustBuildConstants.SOURCE_FILES),
-                "nvx-rs/src/lib.rs",
-                "nvx-rs/src/uuid.rs",
-                "nvx-rs/src/net/cidr.rs",
-                "nvx-rs/src/protocol/mod.rs",
-                "nvx-rs/src/protocol/nvxs/host.rs",
-                "nvx-rs/src/guest/managed_agent/exec.rs",
-                "nvx-rs/src/bin/nvx-time.rs",
+                "nvx/src/lib.rs",
+                "nvx/src/uuid.rs",
+                "nvx/src/net/cidr.rs",
+                "nvx/src/protocol/mod.rs",
+                "nvx/src/protocol/nvxs/host.rs",
+                "nvx/src/guest/managed_agent/exec.rs",
+                "nvx/src/bin/nvx-time.rs",
             )
             others = (
-                "nvx-rs/README.md",
-                "nvx-rs/tests/guest_tools.rs",
-                "nvx-rs/src/host/mod.rs",
-                "nvx-rs/src/host/cli/args.rs",
-                "nvx-rs/src/testing/fake_openvmm.rs",
-                "nvx-rs/src/bin/nvx-rs.rs",
-                "nvx-rs/src/bin/nvx-fake-openvmm.rs",
-                "nvx-rs/src/protocol/tests.rs",
-                "nvx-rs/src/protocol/nvxs/tests/host.rs",
-                "nvx-rs/src/guest/managed_agent/tests/loopback.rs",
+                "nvx/README.md",
+                "nvx/tests/guest_tools.rs",
+                "nvx/src/host/mod.rs",
+                "nvx/src/host/cli/args.rs",
+                "nvx/src/testing/fake_openvmm.rs",
+                "nvx/src/bin/nvx.rs",
+                "nvx/src/bin/nvx-fake-openvmm.rs",
+                "nvx/src/protocol/tests.rs",
+                "nvx/src/protocol/nvxs/tests/host.rs",
+                "nvx/src/guest/managed_agent/tests/loopback.rs",
             )
             for name in (*inputs, *others):
                 path = root / name
@@ -203,7 +203,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
                 path.write_text(f"{name}\n", encoding="utf-8")
             identity = guest_binaries.guest_binary_source_sha256(root)
 
-            for name in (*others, "nvx-rs/src/host/added.rs", "nvx-rs/tests/added.rs"):
+            for name in (*others, "nvx/src/host/added.rs", "nvx/tests/added.rs"):
                 with self.subTest(unchanged=name):
                     (root / name).write_text("changed\n", encoding="utf-8")
                     self.assertEqual(
@@ -220,9 +220,9 @@ class GuestBinaryBuildTests(unittest.TestCase):
                     path.write_bytes(original)
             # A new module counts unless it belongs to the host side or tests.
             for name in (
-                "nvx-rs/src/guest/added.rs",
-                "nvx-rs/src/added.rs",
-                "nvx-rs/.cargo/config.toml",
+                "nvx/src/guest/added.rs",
+                "nvx/src/added.rs",
+                "nvx/.cargo/config.toml",
             ):
                 with self.subTest(added=name):
                     path = root / name
@@ -254,7 +254,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
         ) as temporary:
             root = Path(temporary)
             relative_root = Path(os.path.relpath(root, Path.cwd()))
-            crate = root / "nvx-rs"
+            crate = root / "nvx"
             source = crate / "src"
             tools = root / "scripts" / "nvx_tools"
             source.mkdir(parents=True)
@@ -283,7 +283,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
         # file's bytes but changes the source that guest provenance records.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            crate = root / "nvx-rs"
+            crate = root / "nvx"
             module = crate / "src" / "guest" / "ingress"
             tools = root / "scripts" / "nvx_tools"
             module.mkdir(parents=True)
@@ -321,7 +321,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
             dir=BuildConstants.REPO_ROOT,
         ) as temporary:
             root = Path(temporary)
-            crate = root / "nvx-rs"
+            crate = root / "nvx"
             source = crate / "src"
             tools = root / "scripts" / "nvx_tools"
             source.mkdir(parents=True)
@@ -478,7 +478,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
         # The guest image cache keys end with the source identity, so a file that
         # the build reads outside it could change the executables without
         # changing the keys.
-        crate = BuildConstants.REPO_ROOT / "nvx-rs"
+        crate = BuildConstants.REPO_ROOT / "nvx"
         with tempfile.TemporaryDirectory() as outside_directory:
             outside = Path(outside_directory).resolve() / "outside.rs"
             outside.write_text("pub fn outside() {}\n", encoding="utf-8")
@@ -486,22 +486,22 @@ class GuestBinaryBuildTests(unittest.TestCase):
                 (
                     "file in the checkout",
                     crate / "README.md",
-                    "source identity omits.*: nvx-rs/README.md$",
+                    "source identity omits.*: nvx/README.md$",
                 ),
                 (
                     "host module",
                     crate / "src" / "host" / "mod.rs",
-                    "source identity omits.*: nvx-rs/src/host/mod.rs$",
+                    "source identity omits.*: nvx/src/host/mod.rs$",
                 ),
                 (
                     "test module",
                     crate / "src" / "protocol" / "tests.rs",
-                    "source identity omits.*: nvx-rs/src/protocol/tests.rs$",
+                    "source identity omits.*: nvx/src/protocol/tests.rs$",
                 ),
                 (
                     "directory in the checkout",
                     crate / "tests" / "fixtures",
-                    "source identity omits.*nvx-rs/tests/fixtures/root-tokens.json",
+                    "source identity omits.*nvx/tests/fixtures/root-tokens.json",
                 ),
                 (
                     "file outside the checkout",
@@ -511,7 +511,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
                 (
                     "missing file",
                     crate / "src" / "missing.rs",
-                    "source identity omits.*: nvx-rs/src/missing.rs$",
+                    "source identity omits.*: nvx/src/missing.rs$",
                 ),
                 ("relative path", Path("src") / "lib.rs", "lists a relative path"),
             ):
@@ -574,11 +574,11 @@ class GuestBinaryBuildTests(unittest.TestCase):
             root = Path(temporary)
             for path in (
                 *GuestRustBuildConstants.SOURCE_FILES,
-                Path("nvx-rs") / "src" / "lib.rs",
+                Path("nvx") / "src" / "lib.rs",
             ):
                 (root / path).parent.mkdir(parents=True, exist_ok=True)
                 (root / path).write_text(f"{path.name}\n", encoding="utf-8")
-            watched = root / "nvx-rs" / "src" / "guest" / "watched"
+            watched = root / "nvx" / "src" / "guest" / "watched"
             watched.mkdir(parents=True)
             target = root / "target"
             outputs = (
@@ -590,12 +590,12 @@ class GuestBinaryBuildTests(unittest.TestCase):
             _write_dep_info(
                 outputs,
                 list(GuestRustBuildConstants.BINARIES),
-                (root / "nvx-rs" / "src" / "lib.rs", watched),
+                (root / "nvx" / "src" / "lib.rs", watched),
             )
             with patch.object(BuildConstants, "REPO_ROOT", root):
                 with self.assertRaisesRegex(
                     guest_binaries.ScriptError,
-                    "source identity omits.*: nvx-rs/src/guest/watched$",
+                    "source identity omits.*: nvx/src/guest/watched$",
                 ):
                     guest_binaries._check_guest_build_inputs(target)
                 # Once the directory holds a file that the identity covers, it
@@ -627,7 +627,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
             dir=BuildConstants.REPO_ROOT,
         ) as temporary:
             root = Path(temporary)
-            crate = root / "nvx-rs"
+            crate = root / "nvx"
             source = crate / "src"
             source.mkdir(parents=True)
             sentinel = source / "uncommitted.rs"
@@ -654,7 +654,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
             dir=BuildConstants.REPO_ROOT,
         ) as temporary:
             root = Path(temporary)
-            crate = root / "nvx-rs"
+            crate = root / "nvx"
             crate.mkdir()
             toolchain = root / "rust-toolchain.toml"
             toolchain.write_text('[toolchain]\nchannel = "1.97.1"\n', encoding="utf-8")

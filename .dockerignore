@@ -5,7 +5,7 @@
 build
 data
 dist
-nvx-rs/target
+nvx/target
 openvmm
 third_party
 **/__pycache__

@@ -18,7 +18,7 @@ on:
       - reopened
       - ready_for_review
     paths:
-      - nvx-rs/**
+      - nvx/**
       - rust-toolchain.toml
       - scripts/module_diagrams.py
       - scripts/nvx_tools/build_constants.py
@@ -183,7 +183,7 @@ jobs:
           # The inputs of the diagrams: the paths that start the workflow for
           # a pull request.
           INPUTS: >-
-            nvx-rs rust-toolchain.toml scripts/module_diagrams.py
+            nvx rust-toolchain.toml scripts/module_diagrams.py
             scripts/nvx_tools/build_constants.py
             .github/workflows/module-diagrams.yml
         run: |

@@ -42,9 +42,9 @@ WINDOWS: tuple[OperatingSystem, ...] = ("windows",)
 
 CHECK_QUALITY = ".github/actions/check-quality/action.yml"
 VALIDATE_NVX = ".github/actions/validate-nvx/action.yml"
-CHECK_NVX_RS = ".github/actions/check-nvx-rs/action.yml"
+CHECK_NVX = ".github/actions/check-nvx/action.yml"
 CI_WORKFLOW = ".github/workflows/ci.yml"
-ACTION_FILES = (CHECK_QUALITY, VALIDATE_NVX, CHECK_NVX_RS)
+ACTION_FILES = (CHECK_QUALITY, VALIDATE_NVX, CHECK_NVX)
 WORKFLOW_JOBS = ((CI_WORKFLOW, "nvx-cli-linux"), (CI_WORKFLOW, "nvx-cli-windows"))
 
 ALWAYS = ("<always>",)
@@ -55,23 +55,23 @@ KERNEL_INPUTS = (
     "scripts/nvx_tools/kernel_config.py",
     "scripts/nvx_tools/kernel_features.py",
 )
-NVX_RS_INPUTS = (
-    "nvx-rs/",
+NVX_INPUTS = (
+    "nvx/",
     "rust-toolchain.toml",
     "scripts/public_api.py",
     "scripts/nvx_tools/guest_binaries.py",
-    CHECK_NVX_RS,
+    CHECK_NVX,
 )
 OPENVMM_COMPARISON_INPUTS = (
     "openvmm",
     "openvmm/",
-    "nvx-rs/tests/vectors/",
-    "nvx-rs/tests/openvmm_*.rs",
-    "nvx-rs/src/host/cli/cpu_generations.json",
-    "nvx-rs/src/host/snapshot/manifest.rs",
-    "nvx-rs/src/host/artifacts/compatibility.rs",
-    "nvx-rs/src/guest/time/checks.rs",
-    "nvx-rs/src/guest/time/decoders.rs",
+    "nvx/tests/vectors/",
+    "nvx/tests/openvmm_*.rs",
+    "nvx/src/host/cli/cpu_generations.json",
+    "nvx/src/host/snapshot/manifest.rs",
+    "nvx/src/host/artifacts/compatibility.rs",
+    "nvx/src/guest/time/checks.rs",
+    "nvx/src/guest/time/decoders.rs",
     "scripts/nvx_tools/time_abi.py",
     CI_WORKFLOW,
 )
@@ -250,76 +250,76 @@ GATE_RULES = (
     ),
     GateRule(
         "ci-setup-rust-toolchains",
-        CHECK_NVX_RS,
+        CHECK_NVX,
         "Install Rust toolchains",
-        NVX_RS_INPUTS,
+        NVX_INPUTS,
         requirements=("rustup",),
         setup=True,
     ),
     GateRule(
-        "nvx-rs-format",
-        CHECK_NVX_RS,
+        "nvx-format",
+        CHECK_NVX,
         "Check formatting",
-        NVX_RS_INPUTS,
+        NVX_INPUTS,
         requirements=RUST_REQUIREMENT,
     ),
     GateRule(
-        "nvx-rs-lint",
-        CHECK_NVX_RS,
+        "nvx-lint",
+        CHECK_NVX,
         "Lint",
-        NVX_RS_INPUTS,
+        NVX_INPUTS,
         requirements=RUST_REQUIREMENT,
     ),
     GateRule(
-        "nvx-rs-test",
-        CHECK_NVX_RS,
+        "nvx-test",
+        CHECK_NVX,
         "Test",
-        NVX_RS_INPUTS,
+        NVX_INPUTS,
         requirements=RUST_REQUIREMENT,
     ),
     GateRule(
-        "nvx-rs-doc",
-        CHECK_NVX_RS,
+        "nvx-doc",
+        CHECK_NVX,
         "Build documentation",
-        NVX_RS_INPUTS,
+        NVX_INPUTS,
         requirements=RUST_REQUIREMENT,
     ),
     GateRule(
-        "nvx-rs-public-api",
-        CHECK_NVX_RS,
+        "nvx-public-api",
+        CHECK_NVX,
         "Check the public API",
-        NVX_RS_INPUTS,
+        NVX_INPUTS,
         LINUX,
         requirements=RUST_REQUIREMENT,
     ),
     GateRule(
-        "nvx-rs-msrv",
-        CHECK_NVX_RS,
+        "nvx-msrv",
+        CHECK_NVX,
         "Check the minimum supported Rust version",
-        NVX_RS_INPUTS,
+        NVX_INPUTS,
         requirements=RUST_REQUIREMENT,
     ),
     GateRule(
-        "nvx-rs-macos",
-        CHECK_NVX_RS,
+        "nvx-macos",
+        CHECK_NVX,
         "Check the macOS build",
-        NVX_RS_INPUTS,
+        NVX_INPUTS,
         LINUX,
         requirements=RUST_REQUIREMENT,
     ),
     GateRule(
-        "nvx-rs-guest-binaries-lint",
-        CHECK_NVX_RS,
+        "nvx-guest-binaries-lint",
+        CHECK_NVX,
         "Lint and test the guest binaries",
-        NVX_RS_INPUTS,
+        NVX_INPUTS,
         LINUX,
         requirements=RUST_REQUIREMENT,
     ),
     GateRule(
-        "nvx-rs-guest-binaries-build",
-        CHECK_NVX_RS,
+        "nvx-guest-binaries-build",
+        CHECK_NVX,
         "Build and check the guest binaries",
-        NVX_RS_INPUTS,
+        NVX_INPUTS,
         LINUX,
         requirements=RUST_REQUIREMENT,
     ),
@@ -334,9 +334,9 @@ GATE_RULES = (
         setup=True,
     ),
     GateRule(
-        "ci-setup-nvx-rs-executable",
+        "ci-setup-nvx-executable",
         CI_WORKFLOW,
-        "Make nvx-rs executable",
+        "Make nvx executable",
         ALWAYS,
         LINUX,
         job="nvx-cli-linux",
@@ -407,20 +407,20 @@ CI_SETUP_STEPS = frozenset(
     {
         (CHECK_QUALITY, None, "Set up Python"),
         (CHECK_QUALITY, None, "Install development tools"),
-        (CHECK_NVX_RS, None, "Install Rust toolchains"),
+        (CHECK_NVX, None, "Install Rust toolchains"),
         (CI_WORKFLOW, "nvx-cli-linux", "Checkout"),
         (CI_WORKFLOW, "nvx-cli-linux", "Checkout OpenVMM"),
         (CI_WORKFLOW, "nvx-cli-linux", "Set up Python"),
         (CI_WORKFLOW, "nvx-cli-linux", "Install the pinned Rust release"),
-        (CI_WORKFLOW, "nvx-cli-linux", "Download nvx-rs executable"),
-        (CI_WORKFLOW, "nvx-cli-linux", "Download nvx-rs provenance"),
-        (CI_WORKFLOW, "nvx-cli-linux", "Make nvx-rs executable"),
+        (CI_WORKFLOW, "nvx-cli-linux", "Download nvx executable"),
+        (CI_WORKFLOW, "nvx-cli-linux", "Download nvx provenance"),
+        (CI_WORKFLOW, "nvx-cli-linux", "Make nvx executable"),
         (CI_WORKFLOW, "nvx-cli-windows", "Checkout"),
         (CI_WORKFLOW, "nvx-cli-windows", "Checkout OpenVMM"),
         (CI_WORKFLOW, "nvx-cli-windows", "Set up Python"),
         (CI_WORKFLOW, "nvx-cli-windows", "Install the pinned Rust release"),
-        (CI_WORKFLOW, "nvx-cli-windows", "Download nvx-rs executable"),
-        (CI_WORKFLOW, "nvx-cli-windows", "Download nvx-rs provenance"),
+        (CI_WORKFLOW, "nvx-cli-windows", "Download nvx executable"),
+        (CI_WORKFLOW, "nvx-cli-windows", "Download nvx provenance"),
     }
 )
 
@@ -434,19 +434,19 @@ GATE_ORDER = (
     "specula-wiring",
     "openvmm-vectors",
     "openvmm-cpu-profiles",
-    "nvx-rs-format",
-    "nvx-rs-lint",
-    "nvx-rs-test",
-    "nvx-rs-bundling",
-    "nvx-rs-doc",
-    "nvx-rs-public-api",
-    "nvx-rs-msrv",
-    "nvx-rs-macos",
-    "nvx-rs-guest-binaries-lint",
-    "nvx-rs-guest-binaries-build",
-    "nvx-rs-adapter-protocol",
-    "nvx-rs-adapter-host",
-    "nvx-rs-adapter-guest",
+    "nvx-format",
+    "nvx-lint",
+    "nvx-test",
+    "nvx-bundling",
+    "nvx-doc",
+    "nvx-public-api",
+    "nvx-msrv",
+    "nvx-macos",
+    "nvx-guest-binaries-lint",
+    "nvx-guest-binaries-build",
+    "nvx-adapter-protocol",
+    "nvx-adapter-host",
+    "nvx-adapter-guest",
     "nvx-cli",
     "openvmm-ci",
 )
@@ -811,14 +811,14 @@ def _pinned_toolchain(root: Path, default: str) -> str:
 
 
 def _minimum_rust_version(root: Path) -> str:
-    path = root / "nvx-rs" / "Cargo.toml"
+    path = root / "nvx" / "Cargo.toml"
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as error:
         raise LocalGatesError(f"cannot read {path}: {error}") from error
     match = re.search(r'^\s*rust-version\s*=\s*"([^"]+)"', text, re.MULTILINE)
     if match is None:
-        raise LocalGatesError("nvx-rs/Cargo.toml has no rust-version")
+        raise LocalGatesError("nvx/Cargo.toml has no rust-version")
     return match.group(1)
 
 
@@ -1302,15 +1302,15 @@ def prepare_execution_environment(
     """Apply the CI environment and the gate-specific inheritance rules."""
     environment = dict(inherited)
     environment.update(gate.environment)
-    # CI's CLI jobs name a built nvx-rs. Naming a missing one fails the tests
-    # that run nvx-rs instead of skipping them, so keep the caller's choice or
+    # CI's CLI jobs name a built nvx. Naming a missing one fails the tests
+    # that run nvx instead of skipping them, so keep the caller's choice or
     # leave the variable unset.
-    executable = gate.environment.get("NVX_RS")
+    executable = gate.environment.get("NVX")
     if executable is not None and not Path(executable).is_file():
-        if "NVX_RS" in inherited:
-            environment["NVX_RS"] = inherited["NVX_RS"]
+        if "NVX" in inherited:
+            environment["NVX"] = inherited["NVX"]
         else:
-            environment.pop("NVX_RS", None)
+            environment.pop("NVX", None)
     if os.name == "nt" or gate.operating_system == "windows":
         if gate.operating_system == "windows" and gate.gate_id == "nvx-cli":
             environment.pop("XDG_CACHE_HOME", None)
@@ -1488,16 +1488,16 @@ def _shell_command(
     return None, f"unsupported shell {gate.shell!r}"
 
 
-def _warn_missing_nvx_rs(gate: Gate, stream: TextIO) -> None:
+def _warn_missing_nvx(gate: Gate, stream: TextIO) -> None:
     if gate.gate_id != "nvx-cli":
         return
-    executable = gate.environment.get("NVX_RS")
+    executable = gate.environment.get("NVX")
     if executable is None or Path(executable).is_file():
         return
     message = (
-        "NVX_RS is left unset because nvx-rs is not built, so the tests that run "
-        "nvx-rs skip; build it with cargo build --release --locked --features cli "
-        "--manifest-path nvx-rs/Cargo.toml"
+        "NVX is left unset because nvx is not built, so the tests that run "
+        "nvx skip; build it with cargo build --release --locked --features cli "
+        "--manifest-path nvx/Cargo.toml"
     )
     gate.adaptations.append(message)
     print(f"warning: {message}", file=stream)
@@ -1580,7 +1580,7 @@ def execute_report(
             gate.block(blocked or "the shell command could not be built")
             print(f"blocked: {gate.detail}", file=stream, flush=True)
             continue
-        _warn_missing_nvx_rs(gate, stream)
+        _warn_missing_nvx(gate, stream)
         _print_adaptations(gate, stream)
         started = time.monotonic()
         try:

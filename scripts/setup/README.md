@@ -250,7 +250,7 @@ ssh HOST powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 The same pass adds the `llvm-tools` component and the pinned cargo-llvm-cov to
 a runner whose setup predates them. The weekly
-[nvx-rs scenario coverage](../../doc/ci.md#nvx-rs-scenario-coverage) job needs
+[nvx scenario coverage](../../doc/ci.md#nvx-scenario-coverage) job needs
 both on the KVM runners, and fails its check of them on a runner that lacks
 either.
 
@@ -282,10 +282,10 @@ Validate dependencies without changing the host or requiring build artifacts:
 sh scripts/setup/setup-linux.sh --backend kvm --check-only --skip-build
 ```
 
-Omit `--skip-build` to also validate the built artifacts, build `nvx-rs` from
+Omit `--skip-build` to also validate the built artifacts, build `nvx` from
 the `nvx` package with the command of
-[Usage](../../doc/usage.md#nvx-rs) and record its provenance, and check the
-command that `nvx-rs run --dry-run` generates for the backend. Use
+[Usage](../../doc/usage.md#nvx) and record its provenance, and check the
+command that `nvx run --dry-run` generates for the backend. Use
 `--workspace PATH` when the script is outside the checkout.
 
 To produce a revision-bound guest bundle for a Windows build:
@@ -332,9 +332,9 @@ Validate dependencies without changing the host or requiring build artifacts:
 ```
 
 Omit `-SkipBuild` to also validate the guest artifacts and the OpenVMM binary,
-build `nvx-rs` from the `nvx` package with the command of
-[Usage](../../doc/usage.md#nvx-rs) and record its provenance, and check the
-command that `nvx-rs run --dry-run` generates for WHP. Use `-Workspace PATH`
+build `nvx` from the `nvx` package with the command of
+[Usage](../../doc/usage.md#nvx) and record its provenance, and check the
+command that `nvx run --dry-run` generates for WHP. Use `-Workspace PATH`
 when the script is outside the checkout.
 
 ## Tool versions

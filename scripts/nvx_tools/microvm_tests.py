@@ -31,7 +31,7 @@ from pathlib import Path
 from stat import S_ISUID
 from typing import Any, NamedTuple, cast
 
-from . import nvx_rs
+from . import nvx_cli
 from .adversarial_oracles import terminate_process_tree
 from .benchmark import (
     CAPTURE_LOG_FILTER,
@@ -80,7 +80,7 @@ from .managed_exec_tests import (
 from .microvm_durations import REPORT_NAME, DurationReport
 from .microvm_shards import configure_parser as configure_shards_parser
 from .microvm_shards import load_partition, shard_scenarios
-from .nvx_rs import EgressRules, compile_egress_policy
+from .nvx_cli import EgressRules, compile_egress_policy
 from .openvmm_process import BootConsole, OpenvmmProcess
 from .sandbox_lifecycle_tests import (
     CONFIG,
@@ -211,9 +211,9 @@ SANDBOX_CONTROL_SCENARIOS = frozenset(
         "vm-lifecycle",
     )
 )
-# The public scenarios, of `nvx-rs sandbox`, of its named snapshots, and of
+# The public scenarios, of `nvx sandbox`, of its named snapshots, and of
 # the public API's VM lifecycle, which also read the Ubuntu distro layer and
-# the sandbox scratch template that `nvx-rs download` installs. A default run
+# the sandbox scratch template that `nvx download` installs. A default run
 # runs them, but CI runs them in its guest and sandbox jobs, which take those
 # Ubuntu artifacts, rather than in the shards of the default suite.
 PUBLIC_SANDBOX_SCENARIOS = frozenset(
@@ -557,7 +557,7 @@ PLATFORM_NETWORK_GUEST_MARKERS = (
     RESTORE_MARKER,
 )
 # A NIC template without a tier is a named snapshot of a blockless VM, which
-# `nvx-rs snapshot capture --net` captures with its NIC under the complete
+# `nvx snapshot capture --net` captures with its NIC under the complete
 # deny-all policy. Each restore installs a policy of its own, and the restored
 # guest's activation applies the DNS server and the listener announcement of
 # that policy.
@@ -666,7 +666,7 @@ TIME_HOST_CORRECTION_PHASE_SETTLE_SECONDS = 2
 TIME_HOST_CORRECTION_ATTEMPTS = 3
 # The largest uncertainty, in ns, of a time sample that a measurement window
 # pairs: the bound of the guest's discipline (SAMPLE_BOUND_NS in
-# nvx-rs/src/guest/time/system.rs). nvx-time sample also reports a sample
+# nvx/src/guest/time/system.rs). nvx-time sample also reports a sample
 # beyond it, whose realtime bracket can widen the rate check's allowance past
 # the hooks' corrections: two samples 5 s apart, each uncertain by 1 ms, would
 # allow 400 ppm. Such a window is retried instead.
@@ -1510,10 +1510,10 @@ def run_workload_identity(
             raise RuntimeError(f"a boot with {description} did not fail closed")
 
 
-# The ignored nvx-rs test that drives the managed lifecycle of a guest whose
+# The ignored nvx test that drives the managed lifecycle of a guest whose
 # init hands the boot to the managed agent: a unit test of the host's control
 # session, which is private to nvx and which the cli feature builds, in
-# nvx-rs/src/host/session/tests/managed_lifecycle.rs.
+# nvx/src/host/session/tests/managed_lifecycle.rs.
 MANAGED_LIFECYCLE_TEST = (
     "host::session::tests::managed_lifecycle::"
     "a_managed_guest_runs_request_scoped_workloads_until_it_stops"
@@ -1524,14 +1524,14 @@ MANAGED_LIFECYCLE_TEST = (
 MANAGED_LIFECYCLE_TOKENS = "nvx_mode=managed nvx_identity=65534:65534"
 
 
-def ignored_nvx_rs_test_command(cargo: str, test: str) -> list[str]:
-    """Return the Cargo command that runs the ignored tests of the nvx-rs
+def ignored_nvx_test_command(cargo: str, test: str) -> list[str]:
+    """Return the Cargo command that runs the ignored tests of the nvx
     test target ``test``."""
     return [
         cargo,
         "test",
         "--manifest-path",
-        os.fspath(nvx_rs.DIRECTORY / "Cargo.toml"),
+        os.fspath(nvx_cli.DIRECTORY / "Cargo.toml"),
         "--locked",
         "--test",
         test,
@@ -1543,12 +1543,12 @@ def ignored_nvx_rs_test_command(cargo: str, test: str) -> list[str]:
 
 def managed_lifecycle_test_command(cargo: str) -> list[str]:
     """Return the Cargo command that runs MANAGED_LIFECYCLE_TEST, an ignored
-    unit test of nvx-rs's library, with the cli feature."""
+    unit test of nvx's library, with the cli feature."""
     return [
         cargo,
         "test",
         "--manifest-path",
-        os.fspath(nvx_rs.DIRECTORY / "Cargo.toml"),
+        os.fspath(nvx_cli.DIRECTORY / "Cargo.toml"),
         "--locked",
         "--features",
         "cli",
@@ -1574,19 +1574,19 @@ def run_managed_lifecycle(
     """Run the managed lifecycle of a guest whose init hands the boot to the
     managed agent.
 
-    The nvx-rs test MANAGED_LIFECYCLE_TEST starts OpenVMM with the command
-    built here and drives the guest's control session with nvx-rs, so that no
+    The nvx test MANAGED_LIFECYCLE_TEST starts OpenVMM with the command
+    built here and drives the guest's control session with nvx, so that no
     Python client of the control protocol remains. This checks what the test
     leaves: OpenVMM's outcome report and the guest console.
     """
     cargo = shutil.which("cargo")
     if cargo is None:
         raise ScriptError(
-            "the managed-lifecycle scenario runs the nvx-rs test "
+            "the managed-lifecycle scenario runs the nvx test "
             f"{MANAGED_LIFECYCLE_TEST} with Cargo, which is not on PATH; "
             "install Rust (https://rustup.rs)"
         )
-    # Cargo runs the test in the nvx-rs directory, so every path is absolute.
+    # Cargo runs the test in the nvx directory, so every path is absolute.
     output_dir = output_dir.resolve()
     with tempfile.TemporaryDirectory(prefix="nvx-managed-lifecycle-") as temporary:
         root = Path(temporary).resolve()
@@ -1626,7 +1626,7 @@ def run_managed_lifecycle(
         )
         environment = os.environ.copy()
         # The test records OpenVMM's process ID for an adversarial campaign
-        # as the microVM scenarios do, but from the nvx-rs directory, so a
+        # as the microVM scenarios do, but from the nvx directory, so a
         # relative journal resolves here.
         journal = environment.get("NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL")
         if journal:
@@ -1722,8 +1722,8 @@ def run_managed_lifecycle(
         )
 
 
-# The ignored nvx-rs test of a cold VM's lifecycle through the public API of
-# `nvx`: nvx-rs/tests/vm_lifecycle.rs.
+# The ignored nvx test of a cold VM's lifecycle through the public API of
+# `nvx`: nvx/tests/vm_lifecycle.rs.
 VM_LIFECYCLE_TEST = "vm_lifecycle"
 VM_LIFECYCLE_EVIDENCE_PREFIX = "vm-lifecycle-"
 
@@ -1754,7 +1754,7 @@ def run_vm_lifecycle(
 ) -> None:
     """Run a cold VM's lifecycle through the public API of `nvx`.
 
-    The nvx-rs test VM_LIFECYCLE_TEST creates and spawns a VM of nvx-init over
+    The nvx test VM_LIFECYCLE_TEST creates and spawns a VM of nvx-init over
     the Ubuntu EROFS layer and a new copy of the sandbox scratch template,
     lets the launch go, reattaches to the VM from the values that it saved,
     and stops it through its guest. This gives the test its inputs, then
@@ -1763,12 +1763,12 @@ def run_vm_lifecycle(
     cargo = shutil.which("cargo")
     if cargo is None:
         raise ScriptError(
-            "the vm-lifecycle scenario runs the nvx-rs test "
+            "the vm-lifecycle scenario runs the nvx test "
             f"{VM_LIFECYCLE_TEST} with Cargo, which is not on PATH; "
             "install Rust (https://rustup.rs)"
         )
     artifacts = load_workload_artifacts()
-    # Cargo runs the test in the nvx-rs directory, so every path is absolute.
+    # Cargo runs the test in the nvx directory, so every path is absolute.
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="nvx-vm-lifecycle-")).resolve()
@@ -1790,7 +1790,7 @@ def run_vm_lifecycle(
             "vm_dir": os.fspath(vm_dir),
             "timeout_seconds": timeout,
         }
-        test_command = ignored_nvx_rs_test_command(cargo, VM_LIFECYCLE_TEST)
+        test_command = ignored_nvx_test_command(cargo, VM_LIFECYCLE_TEST)
         print(f">> {shlex.join(test_command)}", flush=True)
         process = subprocess.Popen(
             test_command,
@@ -2258,7 +2258,7 @@ def run_sandbox_gpt_layer(
 
 
 # The public snapshot scenarios, snapshot-core and snapshot-tiers, capture a
-# named snapshot with `nvx-rs snapshot capture`, whose VM nvx-init runs without
+# named snapshot with `nvx snapshot capture`, whose VM nvx-init runs without
 # a NIC, and restore it with `snapshot restore` and `run --restore-snapshot`,
 # under the CLI's lock of the snapshot (#1118). The workload of each restore is
 # the snapshot probe, which reports on one line what the restored guest sees:
@@ -2473,7 +2473,7 @@ def check_restored_report(report: dict[str, Any], backend: str, context: str) ->
 
 class SnapshotAcceptance(LifecycleAcceptance):
     """A public snapshot scenario's fixture: a named snapshot store, in which
-    `nvx-rs snapshot capture` captures ``snapshot_name`` with nvx-init as the
+    `nvx snapshot capture` captures ``snapshot_name`` with nvx-init as the
     guest, and the restores of that snapshot, each in a state directory of its
     own in ``self.state``, which cleanup stops and deprovisions."""
 
@@ -2519,13 +2519,13 @@ class SnapshotAcceptance(LifecycleAcceptance):
         code: str | None = None,
         message: str | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
-        """Runs `nvx-rs ARGUMENTS`, records its bounded observations, its
+        """Runs `nvx ARGUMENTS`, records its bounded observations, its
         output, and when it ran, as ``label``, and requires the status
         ``expected``, and the error ``code`` whose message holds ``message``,
         when given."""
         started = time.time()
         result = subprocess.run(
-            nvx_rs.command_line(arguments),
+            nvx_cli.command_line(arguments),
             cwd=BuildConstants.REPO_ROOT,
             capture_output=True,
             timeout=2 * self.timeout + 30,
@@ -2533,7 +2533,7 @@ class SnapshotAcceptance(LifecycleAcceptance):
         self.timings[label] = (started, time.time())
         self.record(label, result, state=state, expected=expected)
         self.save_evidence(f"{label}.log", result.stdout + result.stderr)
-        reported = nvx_rs.reported_error(result.stderr)
+        reported = nvx_cli.reported_error(result.stderr)
         if (
             result.returncode != expected
             or (
@@ -2548,7 +2548,7 @@ class SnapshotAcceptance(LifecycleAcceptance):
         ):
             wanted = "" if code is None else f" with error[{code}]"
             raise RuntimeError(
-                f"{label}: nvx-rs {' '.join(arguments[:2])} returned "
+                f"{label}: nvx {' '.join(arguments[:2])} returned "
                 f"{result.returncode}, expected {expected}{wanted}; "
                 f"stdout={bounded_text(result.stdout)!r}; "
                 f"stderr={bounded_text(result.stderr)!r}"
@@ -3001,7 +3001,7 @@ class SnapshotCoreAcceptance(SnapshotAcceptance):
         )
         if SNAPSHOT_PROBE_PREFIX in refused.stdout:
             raise RuntimeError(f"the {short} restore ran its workload")
-        reported = nvx_rs.reported_error(refused.stderr)
+        reported = nvx_cli.reported_error(refused.stderr)
         assert reported is not None
         if not all(
             text in reported.message
@@ -3047,7 +3047,7 @@ class SnapshotCoreAcceptance(SnapshotAcceptance):
         )
         if SNAPSHOT_PROBE_PREFIX in failed.stdout:
             raise RuntimeError(f"the {zeroed} restore ran its workload")
-        reported = nvx_rs.reported_error(failed.stderr)
+        reported = nvx_cli.reported_error(failed.stderr)
         assert reported is not None
         if not reported.message.endswith(SNAPSHOT_CORE_UNUSABLE_ROOT_ATTRIBUTION):
             raise RuntimeError(
@@ -4417,7 +4417,7 @@ def run_l3_l4_egress_policy(
             policy_file=policy_path,
         )
         command = [
-            *nvx_rs.command_line(("run",)),
+            *nvx_cli.command_line(("run",)),
             "--guest",
             guest,
             "--hypervisor",
@@ -4545,7 +4545,7 @@ def run_l3_l4_egress_policy(
         (output_dir / "l3-l4-egress-policy-results.json").write_text(
             json.dumps(
                 {
-                    "interface": "nvx-rs run",
+                    "interface": "nvx run",
                     "policy_file": policy_path.name,
                     "tcp_ports": {
                         "adjacent_low": tcp_ports[0],
@@ -4783,7 +4783,7 @@ def run_l3_l4_egress_protocols(
                 encoding="utf-8",
             )
             command = [
-                *nvx_rs.command_line(("run",)),
+                *nvx_cli.command_line(("run",)),
                 "--guest",
                 guest,
                 "--hypervisor",
@@ -4862,7 +4862,7 @@ def run_l3_l4_egress_protocols(
         (output_dir / "l3-l4-egress-protocols-results.json").write_text(
             json.dumps(
                 {
-                    "interface": "nvx-rs run",
+                    "interface": "nvx run",
                     "ports": {"named": named_port, "other": other_port},
                     "cases": results,
                 },
@@ -4961,7 +4961,7 @@ def run_l3_l4_egress_port_ranges(
             ABOVE_PORT=str(ports["above"]),
         )
         public_run = [
-            *nvx_rs.command_line(("run",)),
+            *nvx_cli.command_line(("run",)),
             "--guest",
             guest,
             "--hypervisor",
@@ -5108,7 +5108,7 @@ def run_l3_l4_egress_port_ranges(
                 timeout=timeout,
                 check=False,
             )
-            reported = nvx_rs.reported_error(rejected_run.stderr)
+            reported = nvx_cli.reported_error(rejected_run.stderr)
             if (
                 rejected_run.returncode == 0
                 or reported is None
@@ -5122,7 +5122,7 @@ def run_l3_l4_egress_port_ranges(
 
         (output_dir / "l3-l4-egress-port-ranges-results.json").write_text(
             json.dumps(
-                {"interface": "nvx-rs run", "ports": ports, "cases": results},
+                {"interface": "nvx run", "ports": ports, "cases": results},
                 indent=2,
             )
             + "\n",
@@ -5424,7 +5424,7 @@ def run_ipv6_egress_policy(
             )
             native = compile_egress_policy(policy_path)
             command = [
-                *nvx_rs.command_line(("run",)),
+                *nvx_cli.command_line(("run",)),
                 "--guest",
                 guest,
                 "--hypervisor",
@@ -5521,7 +5521,7 @@ def run_ipv6_egress_policy(
         (output_dir / "ipv6-egress-policy-results.json").write_text(
             json.dumps(
                 {
-                    "interface": "nvx-rs run",
+                    "interface": "nvx run",
                     "guest_ipv6": (
                         f"{DIRECTIONAL_NETWORK_GUEST_IPV6}/"
                         f"{DIRECTIONAL_NETWORK_IPV6_PREFIX_LENGTH}"
@@ -9285,8 +9285,8 @@ class UntieredNetworkRestore:
     host reaches the guest's server: through a forward, and through the port
     that the policy publishes on host loopback, ``host-loopback``, or to the
     host's private networks, ``private-networks``, for which the guest
-    announces its listeners; and whether `nvx-rs run --restore-snapshot`
-    restores it once, ``one_off``, or `nvx-rs snapshot restore` restores a
+    announces its listeners; and whether `nvx run --restore-snapshot`
+    restores it once, ``one_off``, or `nvx snapshot restore` restores a
     sandbox that runs on, which the scenario stops and deprovisions."""
 
     name: str
@@ -9624,10 +9624,10 @@ def _run_untiered_network_restore(
 def _untiered_network_cli(
     arguments: Sequence[str], *, timeout: float
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run `nvx-rs ARGUMENTS` on the artifacts of this checkout, within twice
+    """Run `nvx ARGUMENTS` on the artifacts of this checkout, within twice
     ``timeout`` and half a minute, and return its status and output."""
     return subprocess.run(
-        nvx_rs.command_line(arguments),
+        nvx_cli.command_line(arguments),
         stdin=subprocess.DEVNULL,
         capture_output=True,
         timeout=2 * timeout + 30,
@@ -9638,12 +9638,12 @@ def _untiered_network_cli(
 def _check_untiered_network_cli(
     arguments: Sequence[str], *, timeout: float, log_path: Path, context: str
 ) -> None:
-    """Run `nvx-rs ARGUMENTS` as _untiered_network_cli does, keep its output
+    """Run `nvx ARGUMENTS` as _untiered_network_cli does, keep its output
     at ``log_path``, and fail unless it succeeds."""
     result = _untiered_network_cli(arguments, timeout=timeout)
     log_path.write_bytes(result.stdout + result.stderr)
     if result.returncode != 0:
-        reported = nvx_rs.reported_error(result.stderr)
+        reported = nvx_cli.reported_error(result.stderr)
         error = (
             "" if reported is None else f": error[{reported.code}]: {reported.message}"
         )
@@ -9679,14 +9679,14 @@ def _untiered_network_restore_command(
 ) -> list[str]:
     """Return the command that restores the NIC template with ``restore``'s
     policy into a sandbox of the options ``sandbox``, and runs ``script`` with
-    the number of the host's exchanges as its workload: `nvx-rs run
-    --restore-snapshot` for a one-off, and `nvx-rs snapshot restore`
+    the number of the host's exchanges as its workload: `nvx run
+    --restore-snapshot` for a one-off, and `nvx snapshot restore`
     otherwise. A restore sends its workload as an exec request, so the script
     is one argument, whitespace and all."""
     command = (
         ("run", "--restore-snapshot") if restore.one_off else ("snapshot", "restore")
     )
-    return nvx_rs.command_line(
+    return nvx_cli.command_line(
         (
             *command,
             UNTIERED_NETWORK_SNAPSHOT,
@@ -9772,17 +9772,17 @@ def run_untiered_network_policy(
 ) -> None:
     """Restore one NIC template without a tier with four network policies.
 
-    The template is a named snapshot that `nvx-rs snapshot capture --net`
+    The template is a named snapshot that `nvx snapshot capture --net`
     captures, of a blockless VM whose NIC has the complete deny-all policy,
     so its guest learned no DNS server and announces no listeners. Each
     restore installs another policy, the network options of a sandbox of the
     Ubuntu layer over a RAM upper, at the NIC's captured address, and runs the
     scenario's checks as its workload: the template's deny-all and
-    private-network ingress with allowed egress through `nvx-rs snapshot
+    private-network ingress with allowed egress through `nvx snapshot
     restore`, whose sandboxes the scenario then stops and deprovisions, and
     egress rules that admit DNS over IPv4 and one host service, and explicit
     host loopback with a forward, under egress rules that admit DNS over IPv6
-    alone, through `nvx-rs run --restore-snapshot`, which removes its
+    alone, through `nvx run --restore-snapshot`, which removes its
     sandbox. Each restored guest must name the DNS server of its policy in its
     resolver, and no gateway without one, run the announcer of its listeners
     exactly when its policy publishes them, and reach exactly the host
@@ -9946,7 +9946,7 @@ def _run_untiered_network_policy(
                 timeout=timeout,
             )
             log_path.write_bytes(result.stdout + result.stderr)
-            reported = nvx_rs.reported_error(result.stderr)
+            reported = nvx_cli.reported_error(result.stderr)
             if (
                 result.returncode != 1
                 or reported is None
@@ -12377,7 +12377,7 @@ def run_filesystem_comma_paths(
     output_dir: Path,
     guest: str = "alpine",
 ) -> None:
-    """Share host directories whose paths contain commas through `nvx-rs run`:
+    """Share host directories whose paths contain commas through `nvx run`:
     a read-write `alpha,beta` and a read-only `2026, final`, each with a
     denied subdirectory, first each alone and then both through the checked
     export plan's aggregate and guest binds. The guest must find each exact
@@ -12406,7 +12406,7 @@ def run_filesystem_comma_paths(
             ("aggregate", (alpha, reports)),
         ):
             command = [
-                *nvx_rs.command_line(("run",)),
+                *nvx_cli.command_line(("run",)),
                 "--guest",
                 guest,
                 "--hypervisor",
@@ -12832,7 +12832,7 @@ def run(args: argparse.Namespace) -> int:
                 f"{error}; {', '.join(public)} "
                 f"{'reads' if len(public) == 1 else 'read'} the Ubuntu distro "
                 "layer and the sandbox scratch template: install them with "
-                "`nvx-rs download` or build them with `build-guest --guest "
+                "`nvx download` or build them with `build-guest --guest "
                 "all`, format the template alone with `build-scratch-template` "
                 "on Linux, or name other scenarios with --scenario"
             ) from error
@@ -13006,7 +13006,7 @@ def _run_scenarios(
     if "filesystem-comma-paths" in scenarios:
         report.start(
             "filesystem-comma-paths",
-            "Running public nvx-rs shares of host paths with commas "
+            "Running public nvx shares of host paths with commas "
             f"on OpenVMM/{args.backend}",
         )
         run_filesystem_comma_paths(
@@ -13143,7 +13143,7 @@ def _run_scenarios(
     if "l3-l4-egress-policy" in scenarios:
         report.start(
             "l3-l4-egress-policy",
-            "Running public nvx-rs L3/L4 egress policy acceptance "
+            "Running public nvx L3/L4 egress policy acceptance "
             f"on OpenVMM/{args.backend}",
         )
         run_l3_l4_egress_policy(
@@ -13159,7 +13159,7 @@ def _run_scenarios(
     if "l3-l4-egress-protocols" in scenarios:
         report.start(
             "l3-l4-egress-protocols",
-            "Running public nvx-rs L3/L4 egress protocol acceptance "
+            "Running public nvx L3/L4 egress protocol acceptance "
             f"on OpenVMM/{args.backend}",
         )
         run_l3_l4_egress_protocols(
@@ -13175,7 +13175,7 @@ def _run_scenarios(
     if "l3-l4-egress-port-ranges" in scenarios:
         report.start(
             "l3-l4-egress-port-ranges",
-            "Running public nvx-rs L3/L4 egress port-range acceptance "
+            "Running public nvx L3/L4 egress port-range acceptance "
             f"on OpenVMM/{args.backend}",
         )
         run_l3_l4_egress_port_ranges(
@@ -13191,7 +13191,7 @@ def _run_scenarios(
     if "ipv6-egress-policy" in scenarios:
         report.start(
             "ipv6-egress-policy",
-            "Running public nvx-rs IPv6 egress policy acceptance "
+            "Running public nvx IPv6 egress policy acceptance "
             f"on OpenVMM/{args.backend}",
         )
         run_ipv6_egress_policy(
@@ -13409,7 +13409,7 @@ def _run_scenarios(
     if "untiered-network-policy" in scenarios:
         report.start(
             "untiered-network-policy",
-            "Running public nvx-rs network policies of named snapshot restores on "
+            "Running public nvx network policies of named snapshot restores on "
             f"OpenVMM/{args.backend}",
         )
         run_untiered_network_policy(

@@ -1,6 +1,6 @@
 ---
 name: nvx-prepare-host
-description: "Prepare a local host or a configured SSH host for NVX work: resolve its profile, probe its KVM, MSHV, or WHP backend and checkout, check out the requested revision in a temporary worktree, and stage nvx-rs and the artifacts. Use before running, debugging, or benchmarking NVX on a host, or to diagnose a host's prerequisites."
+description: "Prepare a local host or a configured SSH host for NVX work: resolve its profile, probe its KVM, MSHV, or WHP backend and checkout, check out the requested revision in a temporary worktree, and stage nvx and the artifacts. Use before running, debugging, or benchmarking NVX on a host, or to diagnose a host's prerequisites."
 argument-hint: "[local|host-profile] [revision]"
 ---
 
@@ -57,7 +57,7 @@ python3 scripts/nvx_hosts.py probe PROFILE
 
 Both report the OS, Python, `HEAD`, the dirty state, the OpenVMM pin and
 checkout, `nvx.py verify`, the backend's access (`/dev/kvm`, `/dev/mshv`, or
-WHP), `nvx-rs` and the artifacts, and running OpenVMM processes. On a host,
+WHP), `nvx` and the artifacts, and running OpenVMM processes. On a host,
 `nvx_hosts.py` runs this checkout's copy of the probe, so the host's checkout
 may predate it. Report a failed access check as the probe states it. When KVM
 and MSHV are both usable and no backend was named, ask which one to use. A
@@ -81,16 +81,16 @@ at the end with the same command, `remove PATH` taking the place of `add ...`.
 
 ## 5. Artifacts
 
-Build `nvx-rs`, which runs microVMs and sandboxes and downloads releases, from
-the checkout's root, and again after `nvx-rs` changes; no package contains it:
+Build `nvx`, which runs microVMs and sandboxes and downloads releases, from
+the checkout's root, and again after `nvx` changes; no package contains it:
 
 ```console
-cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml --target-dir nvx-rs/target
+cargo build --release --locked --features cli --manifest-path nvx/Cargo.toml --target-dir nvx/target
 ```
 
 Then stage the artifacts that the task's provenance calls for:
 
-- Packaged: `nvx-rs/target/release/nvx-rs download --hypervisor BACKEND`
+- Packaged: `nvx/target/release/nvx download --hypervisor BACKEND`
   installs the release built from `HEAD`, or from its nearest released
   first-parent ancestor; report that release. It replaces every artifact, so
   never run it over artifacts that the user wants to keep.
@@ -109,7 +109,7 @@ A run downloads a release only into a checkout that holds no artifacts;
 without starting a VM:
 
 ```console
-nvx-rs/target/release/nvx-rs run --hypervisor BACKEND --dry-run
+nvx/target/release/nvx run --hypervisor BACKEND --dry-run
 ```
 
 ## Handoff

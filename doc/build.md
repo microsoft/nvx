@@ -32,7 +32,7 @@ python3 scripts/nvx.py build-guest --native --guest ubuntu
 ```
 
 Both native image builds call the same guest-binary routine that Docker and
-the `nvx-rs` CI job use. It can also be run directly:
+the `nvx` CI job use. It can also be run directly:
 
 ```bash
 python3 scripts/nvx.py build-guest-binaries --output build/guest-binaries
@@ -128,10 +128,10 @@ input configuration, generated configuration, and output hash; bind the
 initramfs and package manifest to the pinned Alpine inputs, Rust guest inputs,
 and source files; and bind OpenVMM to the exact clean gitlink revision and
 executable hash. Packaging rejects missing, dirty, stale, or mismatched
-provenance. `build/nvx-rs.provenance.json` likewise binds the checkout's
-`nvx-rs` executable to the digest of its sources and its build's
+provenance. `build/nvx.provenance.json` likewise binds the checkout's
+`nvx` executable to the digest of its sources and its build's
 Rust release, target, and features; `nvx.py` writes it when it builds
-`nvx-rs`, and [`record-nvx-rs-provenance`](usage.md#record-nvx-rs-provenance)
+`nvx`, and [`record-nvx-provenance`](usage.md#record-nvx-provenance)
 writes it for a build made otherwise.
 
 Ubuntu adds:
@@ -210,7 +210,7 @@ Ubuntu, and Azure Linux; the kernel targets do not depend on that build. The
 Ubuntu determinism target instead rebuilds them from fresh targets in both
 attempts. Native image builds also rebuild them fresh.
 
-The Alpine initramfs is the one that `nvx-rs sandbox` boots: with
+The Alpine initramfs is the one that `nvx sandbox` boots: with
 `nvx_sandbox=1` on the kernel command line, the common `/init` hands PID 1 to
 `nvx-init`, which initializes the sandbox's layered root and serves its managed
 control session. `nvx-time-probe` measures TSC and
@@ -404,9 +404,9 @@ builds, so it needs neither the serial core nor `CONFIG_SERIAL_EARLYCON`.
 | Kexec, crash dumps, `/proc/vmcore`, `/proc/kcore`, KASLR (`RANDOMIZE_BASE`, `RANDOMIZE_MEMORY`) and the relocatable kernel | OpenVMM loads `vmlinux` at its link address and never sets `boot_params`' KASLR flag, so randomization never ran |
 | The crypto API, keyrings, X.509 and PKCS#7 parsers, the security module framework and integrity | No guest component uses them; the kernel's own users, such as module signing, are off |
 | Filesystems and formats: ISO 9660, autofs, quotas, hugetlbfs, NLS code pages, MBR partitions, EROFS's file backing and LZMA and DEFLATE decompression, FUSE's io_uring and passthrough, `binfmt_misc`, and every initramfs compression but gzip | NVX's layers are EROFS (LZ4 or Zstandard) on virtio-blk, raw or GPT, its scratch ext4, its shares virtio-fs, and its initramfses gzip |
-| Cgroup controllers and namespaces beyond those that the inventory keeps for root programs in a guest: CPU, cpuset, cpuacct, devices v1, freezer v1, hugetlb, RDMA, misc, perf, and the I/O controller's policies, and the IPC and time namespaces | No NVX component creates a cgroup, or a namespace other than a mount namespace; the inventory keeps the memory, process-count, and block cgroups and the PID, UTS, and network namespaces that root programs in a guest, such as an `nvx-rs run` shell, may use, and workloads have no capabilities to create others |
+| Cgroup controllers and namespaces beyond those that the inventory keeps for root programs in a guest: CPU, cpuset, cpuacct, devices v1, freezer v1, hugetlb, RDMA, misc, perf, and the I/O controller's policies, and the IPC and time namespaces | No NVX component creates a cgroup, or a namespace other than a mount namespace; the inventory keeps the memory, process-count, and block cgroups and the PID, UTS, and network namespaces that root programs in a guest, such as an `nvx run` shell, may use, and workloads have no capabilities to create others |
 | Swap, the block layer's debugfs files, scheduler statistics, SLUB debugging, memory-init debugging, BIOS-corruption checks, process accounting, relayfs, `PM` and its debugging, the CPU idle framework, the I/O schedulers, `/dev/cpu/*/cpuid` | No guest runs swap or reads them; with no cpuidle driver the kernel idles with HLT either way, and virtio-blk uses no scheduler |
-| The magic SysRq key: `/proc/sysrq-trigger`, `kernel.sysrq`, and the SysRq sequences of the consoles | No NVX component uses it, and the hvc console took `^O` on the kernel console, where an `nvx-rs run` shell reads, as a SysRq prefix: `^O c` crashed the guest |
+| The magic SysRq key: `/proc/sysrq-trigger`, `kernel.sysrq`, and the SysRq sequences of the consoles | No NVX component uses it, and the hvc console took `^O` on the kernel console, where an `nvx run` shell reads, as a SysRq prefix: `^O c` crashed the guest |
 | Obsolete interfaces: 16-bit UIDs, `sgetmask`, 16-bit segments, `TIOCSTI` for unprivileged users, line-discipline autoloading, writes to mounted block devices | No supported workload uses them |
 | CPU vendors other than Intel and AMD | CPU profiles serve Intel and AMD hosts |
 | x86 platform options without an effect on the microVM: extended platforms, IRQ rerouting quirks, bus-lock detection, the AMD uncore PMU, ISA DMA and its memory zone, CPU isolation, `devtmpfs` automounting, the firmware build options, the vhost menu, accelerated RFS, ethtool's netlink API, runtime tests, the decompressor's verbose boot, and the version suffix from Git | Their hardware, boot path, or consumer is absent |
@@ -516,15 +516,15 @@ and SHA-256. The debug kernel is a CI artifact and is never packaged. The
 
 ## The nvx package
 
-[`nvx-rs/`](../nvx-rs/README.md) holds the repository's one Cargo package,
+[`nvx/`](../nvx/README.md) holds the repository's one Cargo package,
 `nvx`. Its library is the crate that crates.io publishes, as
 [The nvx crate](distribution.md#the-nvx-crate) describes, and its binaries are
 NVX's own programs, each of which calls a `main` that `#[doc(hidden)]` hides in
 the library. The package belongs to no workspace, since a workspace at the
 repository root would interact with the nested `openvmm/` workspace, so it
-keeps a lockfile of its own, `nvx-rs/Cargo.lock`, and builds without the
+keeps a lockfile of its own, `nvx/Cargo.lock`, and builds without the
 OpenVMM submodule. The builds that `nvx.py`, the setup scripts, and CI's
-`nvx-rs` jobs run pass `--locked`, so they build the dependency versions that
+`nvx` jobs run pass `--locked`, so they build the dependency versions that
 the lockfile pins, and the crate ships the lockfile, which
 `cargo install --locked` reads. NVX builds the package with the Rust release
 that `rust-toolchain.toml` pins, and CI also checks it with the oldest release
@@ -538,7 +538,7 @@ Its features select what it builds:
 | `host` (default) | The `host` module, the library's host side | The `serde` feature, and the optional `getrandom`, `serde_json`, `sha2`, and `nix` on Unix or `windows-sys` on Windows |
 | `guest` | The `guest` module, on Linux, and the ten guest binaries | The optional `nix` and `getrandom` |
 | `serde` | The serde form of `net::Ipv4Cidr` | The optional `serde` |
-| `cli` | NVX's `nvx-rs` binary, which adds only its hidden entry point to the API | The `host` feature, and the optional `crossterm` |
+| `cli` | NVX's `nvx` binary, which adds only its hidden entry point to the API | The `host` feature, and the optional `crossterm` |
 | `testing` | NVX's `nvx-fake-openvmm` binary, a fake OpenVMM for tests, which adds only its hidden entry point to the API | The optional `getrandom`, `serde`, `serde_json`, and `nix` on Unix or `windows-sys` on Windows |
 
 Without default features, the library holds only what the host and the guest
@@ -549,11 +549,11 @@ and leaves Cargo's built-in profiles at their defaults. NVX's builds use these:
 | Profile | Settings | Builds |
 | --- | --- | --- |
 | `dev` and `test` | Cargo's defaults | The crate's checks and tests |
-| `release` | Cargo's defaults | `nvx-rs`, with `--release` |
+| `release` | Cargo's defaults | `nvx`, with `--release` |
 | `guest` | `release`'s, with `opt-level = "s"`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = true`, `debug = false`, and `incremental = false` | The guest binaries, small and stripped |
 
 Cargo applies a package's profiles only to a build whose root it is, such as
-one in `nvx-rs/`, one with `--manifest-path nvx-rs/Cargo.toml`, or
+one in `nvx/`, one with `--manifest-path nvx/Cargo.toml`, or
 `cargo install nvx`; a package that depends on `nvx` builds it with its own
 profiles. The guest routine also drops inherited `RUSTFLAGS` and
 `CARGO_PROFILE_*` overrides, so that the `guest` profile applies as the
@@ -563,25 +563,25 @@ The package's binaries build with these features, profiles, and targets:
 
 | Binary | Feature | Profile and target | Built by | Ships in |
 | --- | --- | --- | --- | --- |
-| `nvx-rs` | `cli` | `release`, for the host's target in a checkout; for release packages, static `x86_64-unknown-linux-musl` on Linux and `x86_64-pc-windows-msvc` with a static C runtime on Windows | The [`nvx-rs` build command](usage.md#nvx-rs), which `nvx.py` and the setup scripts run, and CI's `nvx-rs` build jobs | `bin/nvx-rs[.exe]` of every [release package](#release-packages) |
+| `nvx` | `cli` | `release`, for the host's target in a checkout; for release packages, static `x86_64-unknown-linux-musl` on Linux and `x86_64-pc-windows-msvc` with a static C runtime on Windows | The [`nvx` build command](usage.md#nvx), which `nvx.py` and the setup scripts run, and CI's `nvx` build jobs | `bin/nvx[.exe]` of every [release package](#release-packages) |
 | `nvx-fake-openvmm` | `testing` | The tests' | `cargo test` with `testing`, for the crate's tests, which run it as OpenVMM | No package |
 | `nvx-console-pending`, `nvx-device-io`, `nvx-exit`, `nvx-ingress`, `nvx-init`, `nvx-managed-agent`, `nvx-mmio-write`, `nvx-reseed`, `nvx-time`, `nvx-time-probe` | `guest` | `guest`, static `x86_64-unknown-linux-musl` | [`build-guest-binaries`](usage.md#build-guest-binaries), for every guest image | `/sbin` of every initramfs; other guests [install them from the crate](distribution.md#the-guest-tools) |
 
 Its examples, `external-launch` and `host-workflows` with `host`, and
 `guest-workflows` with `guest`, build with the crate's checks of all targets;
-the [README](../nvx-rs/README.md#testing) says what each shows.
+the [README](../nvx/README.md#testing) says what each shows.
 
 The builds put their output here:
 
 | Output | Path | Written by |
 | --- | --- | --- |
-| `nvx-rs` | `nvx-rs/target/release/nvx-rs[.exe]`, where `nvx.py`, `package`, and the setup scripts look for it | `cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml --target-dir nvx-rs/target`; CI's Linux job builds for `x86_64-unknown-linux-musl` and copies `nvx-rs/target/x86_64-unknown-linux-musl/release/nvx-rs` there |
-| Its provenance | `build/nvx-rs.provenance.json` | `nvx.py` when it builds `nvx-rs`, or [`record-nvx-rs-provenance`](usage.md#record-nvx-rs-provenance) |
+| `nvx` | `nvx/target/release/nvx[.exe]`, where `nvx.py`, `package`, and the setup scripts look for it | `cargo build --release --locked --features cli --manifest-path nvx/Cargo.toml --target-dir nvx/target`; CI's Linux job builds for `x86_64-unknown-linux-musl` and copies `nvx/target/x86_64-unknown-linux-musl/release/nvx` there |
+| Its provenance | `build/nvx.provenance.json` | `nvx.py` when it builds `nvx`, or [`record-nvx-provenance`](usage.md#record-nvx-provenance) |
 | The guest binaries, with their `manifest.json` | The `--output` directory of `build-guest-binaries`, or an image build's work directory, such as `build/initramfs-alpine-work/guest-binaries`, unless `NVX_GUEST_BINARIES` names a build to install | `build-guest-binaries`, or the image build, which runs the same routine |
-| Cargo's other builds | `nvx-rs/target/`, in a directory per profile, such as `debug/` or `guest/`, under a directory per target when the build names one | Cargo |
+| Cargo's other builds | `nvx/target/`, in a directory per profile, such as `debug/` or `guest/`, under a directory per target when the build names one | Cargo |
 
-The package keeps no cache of its own. `nvx-rs/target/` keeps the checkout's
-Cargo builds between runs, and `--target-dir nvx-rs/target` keeps `nvx-rs`
+The package keeps no cache of its own. `nvx/target/` keeps the checkout's
+Cargo builds between runs, and `--target-dir nvx/target` keeps `nvx`
 there even where `CARGO_TARGET_DIR` names another directory; Cargo keeps the
 crates that the lockfile pins in its registry cache. The guest routine reuses
 no earlier target tree: it builds in a fresh target directory beside its
@@ -600,10 +600,10 @@ prints, so that a change to the package rebuilds the images only when it
 changes one of those inputs; see
 [Guest artifact handoff](ci.md#guest-artifact-handoff). The guest inputs are:
 
-- `nvx-rs/Cargo.toml`, `nvx-rs/Cargo.lock`, and any Cargo configuration in
-  `nvx-rs/.cargo/`;
-- every file under `nvx-rs/src/` but those of the host side, `src/host/`,
-  `src/testing/`, and the `nvx-rs` and `nvx-fake-openvmm` binaries, and those
+- `nvx/Cargo.toml`, `nvx/Cargo.lock`, and any Cargo configuration in
+  `nvx/.cargo/`;
+- every file under `nvx/src/` but those of the host side, `src/host/`,
+  `src/testing/`, and the `nvx` and `nvx-fake-openvmm` binaries, and those
   of the test modules, the `tests.rs` files and the `tests` directories; and
 - `rust-toolchain.toml`, and the two modules that define the build,
   `scripts/nvx_tools/build_constants.py` and
@@ -614,17 +614,17 @@ than one that the build generates in its own target directory.
 
 Three records bind the package's binaries to their sources:
 
-- `build/nvx-rs.provenance.json` binds an `nvx-rs` executable's SHA-256 to the
+- `build/nvx.provenance.json` binds an `nvx` executable's SHA-256 to the
   digest of the sources that built it, the package's manifest, lockfile, and
   `src/` tree and `rust-toolchain.toml`, and to the build's Rust release,
   target, and features. `package` and the adversarial executor refuse an
-  `nvx-rs` that it does not describe as built from the checkout's sources; see
-  [nvx-rs](usage.md#nvx-rs).
+  `nvx` that it does not describe as built from the checkout's sources; see
+  [nvx](usage.md#nvx).
 - The guest binaries' `manifest.json` binds their SHA-256 digests to the digest
   of the guest inputs, and every guest image's package manifest records that
   digest and the SHA-256 of each binary that it installs.
-- A release package's `SOURCE-MANIFEST.json` records the packaged `nvx-rs` and
-  its provenance in its `nvx_rs` section, and the guest binaries' Rust release
+- A release package's `SOURCE-MANIFEST.json` records the packaged `nvx` and
+  its provenance in its `nvx` section, and the guest binaries' Rust release
   and target in its `guest_rust` section, as
   [Release packages](#release-packages) describes.
 
@@ -632,15 +632,15 @@ On crates.io, the crate's `.cargo_vcs_info.json` records the commit from which
 CI packed it; see [crates.io releases](ci.md#cratesio-releases).
 
 The package is MIT licensed, as the `license` field of its manifest says, and
-`nvx-rs/LICENSE` holds the license, which the crate ships with the README and
-the lockfile. The binaries that NVX ships, `bin/nvx-rs[.exe]` and the guest
-binaries, statically link the crates that `nvx-rs/Cargo.lock` pins by checksum,
+`nvx/LICENSE` holds the license, which the crate ships with the README and
+the lockfile. The binaries that NVX ships, `bin/nvx[.exe]` and the guest
+binaries, statically link the crates that `nvx/Cargo.lock` pins by checksum,
 and their target's runtime: musl and LLVM's `libunwind` on Linux, and the
 Microsoft C runtime on Windows.
 [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) lists each of these with
 its license, and the crates at the versions that the lockfile pins. Unit tests
 in `scripts/test_nvx_tools.py` fail when the lockfile gains a crate that they
-do not classify as linked into `bin/nvx-rs` or not, or when the notices lack a
+do not classify as linked into `bin/nvx` or not, or when the notices lack a
 linked crate at its pinned version or a runtime that the binaries link. Release
 packages ship the notices, and
 [Package and source delivery](distribution.md#source-inclusive-packages)
@@ -648,7 +648,7 @@ describes what each license asks of a distributor.
 
 ## Release packages
 
-Each platform's release package ships the OpenVMM and `nvx-rs` executables of
+Each platform's release package ships the OpenVMM and `nvx` executables of
 its operating system, and the same guest artifacts. CI's package jobs, which
 [Release packages](ci.md#release-packages) in Continuous integration
 describes, stage the three binary packages from these builds:
@@ -656,7 +656,7 @@ describes, stage the three binary packages from these builds:
 | File | `linux-kvm` | `linux-mshv` | `windows-whp` |
 | --- | --- | --- | --- |
 | `bin/openvmm[.exe]` | `x86_64-unknown-linux-gnu` | Static `x86_64-unknown-linux-musl` | `x86_64-pc-windows-msvc` |
-| `bin/nvx-rs[.exe]` | Static `x86_64-unknown-linux-musl` | Static `x86_64-unknown-linux-musl` | `x86_64-pc-windows-msvc`, with a static C runtime |
+| `bin/nvx[.exe]` | Static `x86_64-unknown-linux-musl` | Static `x86_64-unknown-linux-musl` | `x86_64-pc-windows-msvc`, with a static C runtime |
 | `guest/vmlinux` and its configuration, and the Alpine, Ubuntu, and Azure Linux initramfses with their package manifests | Shipped | Shipped | Shipped |
 | `guest/ubuntu-distro.erofs`, the Ubuntu distro layer, with its manifest | Shipped | Shipped | Shipped |
 | `guest/ubuntu-smoke-scratch.ext4`, the sandbox scratch template, which has no manifest | Shipped | Shipped | Shipped |
@@ -669,21 +669,21 @@ how CI publishes the packages.
 Release packaging needs the OpenVMM binary, the guest artifacts in the layout
 below, and the OpenVMM, kernel, and Alpine initramfs provenance sidecars, so run
 `build-openvmm` and `build-guest --guest all` first. It also needs the release
-build of `nvx-rs` at `nvx-rs/target/release/nvx-rs[.exe]`, a static
+build of `nvx` at `nvx/target/release/nvx[.exe]`, a static
 `x86_64-unknown-linux-musl` executable on Linux and an
 `x86_64-pc-windows-msvc` one on Windows, with the provenance that
-[`record-nvx-rs-provenance`](usage.md#record-nvx-rs-provenance) writes to
-`build/nvx-rs.provenance.json`. A source-inclusive package
+[`record-nvx-provenance`](usage.md#record-nvx-provenance) writes to
+`build/nvx.provenance.json`. A source-inclusive package
 does not need the Azure Linux artifacts. Packaging stages and verifies a
 complete output before replacing an existing `dist/` version, which requires
 `--force`. Its `SOURCE-MANIFEST.json` records the package version and exact
 hashes for OpenVMM, Linux, the generated kernel config, each packaged guest
 initramfs and its package manifest, the Ubuntu distro layer and its manifest,
 and the sandbox scratch template, under `scratch_template_sha256` in its
-`ubuntu` section. Its `nvx_rs` section records the `nvx-rs` executable's
-SHA-256, the digest of the `nvx-rs` sources that built it, and the build's Rust
+`ubuntu` section. Its `nvx` section records the `nvx` executable's
+SHA-256, the digest of the `nvx` sources that built it, and the build's Rust
 release, target, and features. Its `guest_rust` section pins Rust 1.97.1 and
-`x86_64-unknown-linux-musl`, and each guest's `guest_sources` includes `nvx-rs`
+`x86_64-unknown-linux-musl`, and each guest's `guest_sources` includes `nvx`
 and `rust-toolchain.toml`. The OpenVMM section advertises microVM ABI 1, time
 ABI 1, restore packet 1, control-session protocol 1, and contract
 `nvx-microvm-v2-control-v2`; product guest-agent metadata is intentionally not
@@ -693,7 +693,7 @@ A binary release directory has this layout:
 
 ```text
 bin/openvmm[.exe]
-bin/nvx-rs[.exe]
+bin/nvx[.exe]
 guest/vmlinux
 guest/vmlinux.config
 guest/initramfs.cpio.gz
@@ -708,7 +708,7 @@ guest/initramfs-azurelinux.cpio.gz.packages.json
 provenance/openvmm.provenance.json
 provenance/initramfs.provenance.json
 provenance/vmlinux.provenance.json
-provenance/nvx-rs.provenance.json
+provenance/nvx.provenance.json
 licenses/LICENSE-OPENVMM
 licenses/COPYING-LINUX
 LICENSE
@@ -720,7 +720,7 @@ SHA256SUMS
 
 Packages built with `--include-source` additionally contain `source/` and omit
 the Azure Linux guest artifacts, whose corresponding source is not collected.
-The project source archive includes `nvx-rs` and excludes its generated
+The project source archive includes `nvx` and excludes its generated
 `target/` tree.
 `SHA256SUMS` has sorted `SHA256  relative/path` entries using POSIX separators
 for every packaged file, including `SOURCE-MANIFEST.json`, except

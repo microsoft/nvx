@@ -5031,7 +5031,7 @@ def _device_io_helper_provenance(
     args: argparse.Namespace, initrd: Path
 ) -> dict[str, str]:
     checkout = args.nvx_dir.resolve()
-    source = checkout / "nvx-rs"
+    source = checkout / "nvx"
     manifest_path = require_file(
         initrd.with_name(f"{initrd.name}{BuildConstants.PACKAGE_MANIFEST_SUFFIX}"),
         "initramfs package manifest",

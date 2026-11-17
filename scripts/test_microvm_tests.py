@@ -42,7 +42,7 @@ from nvx_tools import (  # noqa: E402
     microvm_durations,
     microvm_shards,
     microvm_tests,
-    nvx_rs,
+    nvx_cli,
     openvmm_process,
     sandbox_lifecycle_tests,
     sandbox_proxy_tests,
@@ -57,20 +57,20 @@ from nvx_tools.build_constants import (  # noqa: E402
 _LOADED = time.monotonic()
 
 
-def _compile(policy: dict[str, object]) -> nvx_rs.EgressRules:
-    """Compiles an egress policy with nvx-rs, as nvx-rs run compiles its
+def _compile(policy: dict[str, object]) -> nvx_cli.EgressRules:
+    """Compiles an egress policy with nvx, as nvx run compiles its
     --network-egress-policy-file."""
     with tempfile.TemporaryDirectory(prefix="nvx-egress-policy-") as temporary:
         path = Path(temporary) / "policy.json"
         path.write_text(json.dumps(policy), encoding="utf-8")
-        return nvx_rs.compile_egress_policy(path)
+        return nvx_cli.compile_egress_policy(path)
 
 
-# The nvx-rs that a scenario runs, in place of the one that nvx_rs finds or
+# The nvx that a scenario runs, in place of the one that nvx_cli finds or
 # builds, where the test compiles no egress policy, and the start of the
 # command line of the scenario's public runs.
-_FAKE_NVX_RS = Path("nvx-rs")
-_FAKE_PUBLIC_RUN = [os.fspath(_FAKE_NVX_RS), "--root", os.fspath(nvx_rs.ROOT), "run"]
+_FAKE_NVX = Path("nvx")
+_FAKE_PUBLIC_RUN = [os.fspath(_FAKE_NVX), "--root", os.fspath(nvx_cli.ROOT), "run"]
 
 
 def _posix_shell() -> str | None:
@@ -548,9 +548,9 @@ class PublicManagedExecAcceptanceTests(unittest.TestCase):
                     command,
                     2,
                     b"",
-                    b"usage: nvx-rs sandbox [{run,provision,start,exec,stop,"
+                    b"usage: nvx sandbox [{run,provision,start,exec,stop,"
                     b"deprovision}] [OPTIONS]\n"
-                    b"nvx-rs sandbox: error[argument-invalid]: argument "
+                    b"nvx sandbox: error[argument-invalid]: argument "
                     b"--exec-timeout-ms: expected an ASCII decimal integer between 0 "
                     b"and 4294967295, not " + f'"{timeout_ms}"'.encode() + b"\n",
                 )
@@ -654,7 +654,7 @@ class PublicManagedExecAcceptanceTests(unittest.TestCase):
             patch.object(managed_exec_tests.subprocess, "run", side_effect=run),
             patch.object(managed_exec_tests.shutil, "copyfile", side_effect=copyfile),
             patch.object(
-                managed_exec_tests.nvx_rs, "require_binary", return_value=Path("nvx-rs")
+                managed_exec_tests.nvx_cli, "require_binary", return_value=Path("nvx")
             ),
         ):
             managed_exec_tests.run_managed_exec_configuration(
@@ -685,7 +685,7 @@ class PublicManagedExecAcceptanceTests(unittest.TestCase):
         exec_commands = [command for command in commands if command[4] == "exec"]
         self.assertTrue(
             all(
-                command[:4] == ["nvx-rs", "--root", str(nvx_rs.ROOT), "sandbox"]
+                command[:4] == ["nvx", "--root", str(nvx_cli.ROOT), "sandbox"]
                 for command in commands
             )
         )
@@ -1001,7 +1001,7 @@ class PublicManagedExecAcceptanceTests(unittest.TestCase):
 
 _LIFECYCLE_STATE_SCRIPT = 'printf \'%s\\n\' "$@" >"$0"'
 _CliResult = tuple[int, bytes, bytes]
-# Each part of a runtime identity, as nvx-rs names it, its key in the runtime
+# Each part of a runtime identity, as nvx names it, its key in the runtime
 # record, and the build provenance that names its digest, by its field.
 _RUNTIME_PROVENANCE = (
     ("OpenVMM", "openvmm", "openvmm.provenance.json", "executable_sha256"),
@@ -1011,7 +1011,7 @@ _RUNTIME_PROVENANCE = (
 
 
 class _FakeSandboxCli:
-    """Emulates `nvx-rs sandbox` and the OpenVMM processes that it starts.
+    """Emulates `nvx sandbox` and the OpenVMM processes that it starts.
 
     Each fault names one regression of the public lifecycle that the
     acceptance must detect.
@@ -1042,7 +1042,7 @@ class _FakeSandboxCli:
             return self._dispatch(command)
 
     def _dispatch(self, command: list[str]) -> subprocess.CompletedProcess[bytes]:
-        # The acceptance runs `nvx-rs --root ROOT sandbox OPERATION`, under this
+        # The acceptance runs `nvx --root ROOT sandbox OPERATION`, under this
         # checkout, or under another artifact root, whose runtime identity may
         # differ from that of the sandbox's VM.
         position = command.index("sandbox")
@@ -1050,7 +1050,7 @@ class _FakeSandboxCli:
         self.operations.append(operation)
         root = command[command.index("--root") + 1]
         values: dict[str, str] = (
-            {} if root == os.fspath(nvx_rs.ROOT) else {"--root": root}
+            {} if root == os.fspath(nvx_cli.ROOT) else {"--root": root}
         )
         arguments: list[str] = []
         index = position + 2
@@ -1123,7 +1123,7 @@ class _FakeSandboxCli:
         self, values: dict[str, str], runtime: dict[str, object]
     ) -> list[str]:
         """Returns the parts in which the runtime identity of the VM differs
-        from that of the artifacts of the command's root, which nvx-rs reads
+        from that of the artifacts of the command's root, which nvx reads
         from their build provenance."""
         if "--root" not in values or "other-runtime-driven" in self.faults:
             return []
@@ -1174,7 +1174,7 @@ class _FakeSandboxCli:
             return (
                 2,
                 b"",
-                b"nvx-rs sandbox: error[argument-invalid]: argument --workload-user: "
+                b"nvx sandbox: error[argument-invalid]: argument --workload-user: "
                 b"--workload-user UID must be between 1 and 4294967294\n",
             )
         if (state / "config.json").exists():
@@ -1622,9 +1622,9 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
                 return_value=self.PROVENANCE,
             ),
             patch.object(
-                sandbox_lifecycle_tests.nvx_rs,
+                sandbox_lifecycle_tests.nvx_cli,
                 "require_binary",
-                return_value=Path("nvx-rs"),
+                return_value=Path("nvx"),
             ),
             patch.object(
                 sandbox_lifecycle_tests,
@@ -1928,7 +1928,7 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
 
     @unittest.skipIf(sys.platform == "win32", "Windows has no /proc")
     def test_a_killed_openvmm_runs_until_its_last_thread_exits(self):
-        # As nvx-rs tells, a process runs while a thread of it remains, even
+        # As nvx tells, a process runs while a thread of it remains, even
         # once its main thread is a zombie, whose command line is empty.
         runtime: dict[str, object] = {
             "process": {"pid": 4242, "startTime": 99, "boot": "b" * 32}
@@ -2013,7 +2013,7 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
 
 
 class _FakeProxySandboxCli(_FakeSandboxCli):
-    """Emulates `nvx-rs sandbox` with the scenario's open and proxy-only
+    """Emulates `nvx sandbox` with the scenario's open and proxy-only
     networks, and the guest's probes, whose traffic reaches the host's
     listeners as OpenVMM would carry it: from the gateway to host loopback,
     and elsewhere unchanged.
@@ -2221,9 +2221,9 @@ class PublicSandboxProxyOnlyTests(unittest.TestCase):
             ),
             patch.object(sandbox_proxy_tests, "ipv6_loopback", return_value=ipv6),
             patch.object(
-                sandbox_lifecycle_tests.nvx_rs,
+                sandbox_lifecycle_tests.nvx_cli,
                 "require_binary",
-                return_value=Path("nvx-rs"),
+                return_value=Path("nvx"),
             ),
         ):
             sandbox_proxy_tests.run_sandbox_proxy_only(
@@ -2524,7 +2524,7 @@ class GuestConsoleEchoTests(unittest.TestCase):
         console = _EchoingGuestConsole(self.ECHOED_PIECE)
         with patch.object(benchmark, "InteractiveProcess", return_value=console):
             result = benchmark.run_guest_script(
-                ["nvx-rs", "run"],
+                ["nvx", "run"],
                 self.ECHOED_SCRIPT,
                 microvm_tests.IPV6_EGRESS_COMPLETION_MARKER,
                 timeout=5,
@@ -2539,7 +2539,7 @@ class GuestConsoleEchoTests(unittest.TestCase):
         console = _EchoingGuestConsole(self.ECHOED_PIECE)
         with patch.object(benchmark, "InteractiveProcess", return_value=console):
             result = microvm_tests.run_guest_script(
-                ["nvx-rs", "run"],
+                ["nvx", "run"],
                 self.ECHOED_SCRIPT,
                 microvm_tests.IPV6_EGRESS_COMPLETION_MARKER,
                 timeout=5,
@@ -2705,7 +2705,7 @@ class GuestConsoleEchoTests(unittest.TestCase):
 
 
 class _FakeRamUpperSandboxCli(_FakeSandboxCli):
-    """Emulates `nvx-rs sandbox --upper ram` and its guest: no scratch image,
+    """Emulates `nvx sandbox --upper ram` and its guest: no scratch image,
     a distro layer alone, the RAM upper's token, and an upper that each start
     begins empty.
 
@@ -2888,9 +2888,9 @@ class PublicSandboxRamUpperTests(unittest.TestCase):
             ),
             patch.object(sandbox_lifecycle_tests.subprocess, "run", side_effect=fake),
             patch.object(
-                sandbox_lifecycle_tests.nvx_rs,
+                sandbox_lifecycle_tests.nvx_cli,
                 "require_binary",
-                return_value=Path("nvx-rs"),
+                return_value=Path("nvx"),
             ),
             patch.object(
                 sandbox_lifecycle_tests,
@@ -2999,7 +2999,7 @@ class PublicSandboxRamUpperTests(unittest.TestCase):
 
 
 class _FakeGptLayerSandboxCli(_FakeSandboxCli):
-    """Emulates `nvx-rs sandbox --layer-format gpt` and its guest, over a
+    """Emulates `nvx sandbox --layer-format gpt` and its guest, over a
     scratch upper and a RAM upper: the disk's layer token and the upper's on
     the kernel command line, the disk's layer partition as the lower
     directory of the root's overlay, and a scratch block device for a scratch
@@ -3157,9 +3157,9 @@ class PublicSandboxGptLayerTests(unittest.TestCase):
             patch.object(microvm_tests.tempfile, "mkdtemp", side_effect=fixture),
             patch.object(sandbox_lifecycle_tests.subprocess, "run", side_effect=fake),
             patch.object(
-                sandbox_lifecycle_tests.nvx_rs,
+                sandbox_lifecycle_tests.nvx_cli,
                 "require_binary",
-                return_value=Path("nvx-rs"),
+                return_value=Path("nvx"),
             ),
             patch.object(
                 sandbox_lifecycle_tests,
@@ -3367,7 +3367,7 @@ class PublicSandboxGptLayerTests(unittest.TestCase):
 
 
 class _FakeVmLifecycleTest:
-    """Emulates Cargo's run of the nvx-rs test vm_lifecycle: it takes its
+    """Emulates Cargo's run of the nvx test vm_lifecycle: it takes its
     inputs, and leaves the log and the outcome report of its VM, which
     reports `outcome`, and exits with `returncode`."""
 
@@ -3467,7 +3467,7 @@ class PublicVmLifecycleTests(unittest.TestCase):
 
         [(command, environment)] = test.calls
         self.assertEqual(
-            command, microvm_tests.ignored_nvx_rs_test_command("cargo", "vm_lifecycle")
+            command, microvm_tests.ignored_nvx_test_command("cargo", "vm_lifecycle")
         )
         inputs = json.loads(environment["NVX_VM_LIFECYCLE"])
         self.assertEqual(test.scratch, b"scratch template")
@@ -3564,7 +3564,7 @@ def _probe_label(script: str) -> str:
 
 
 class _FakeSnapshotCli:
-    """Emulates the commands of `nvx-rs` that the public snapshot scenarios
+    """Emulates the commands of `nvx` that the public snapshot scenarios
     run: `snapshot capture` and `snapshot restore`, `run --restore-snapshot`,
     and `sandbox exec`, `stop`, and `deprovision` of a restored sandbox, with
     the snapshot's lock, and the guests of the restores, which run the
@@ -4050,7 +4050,7 @@ class PublicSnapshotTests(unittest.TestCase):
                 patch.object(microvm_tests.subprocess, "run", side_effect=fake)
             )
             stack.enter_context(
-                patch.object(nvx_rs, "require_binary", return_value=_FAKE_NVX_RS)
+                patch.object(nvx_cli, "require_binary", return_value=_FAKE_NVX)
             )
             for module in (microvm_tests, sandbox_lifecycle_tests):
                 stack.enter_context(
@@ -4227,7 +4227,7 @@ class PublicSnapshotTests(unittest.TestCase):
             "shared-machine-id": "the repeated restores reused a machine ID",
             # The guest then cannot mount the short scratch image either.
             "serves-any-scratch": (
-                "short-scratch: nvx-rs snapshot restore returned 1, expected 1 "
+                "short-scratch: nvx snapshot restore returned 1, expected 1 "
                 "with error[unsupported]; stdout=''; stderr='error[exited]"
             ),
             "launches-before-refusing": (
@@ -4235,13 +4235,13 @@ class PublicSnapshotTests(unittest.TestCase):
                 "'outcome.json', 'sandbox.lock'] in its sandbox's state"
             ),
             "mounts-zeroed-scratch": (
-                "zeroed-scratch: nvx-rs run --restore-snapshot returned 0, expected 1 "
+                "zeroed-scratch: nvx run --restore-snapshot returned 0, expected 1 "
                 "with error[exited]"
             ),
             # A guest that ends its VM with the generic status, or a CLI that
             # attributes the failure to another cause.
             "unclassified-guest-failure": (
-                "zeroed-scratch: nvx-rs run --restore-snapshot returned 1, expected 1 "
+                "zeroed-scratch: nvx run --restore-snapshot returned 1, expected 1 "
                 "with error[exited]; stdout=''; stderr='error[exited]: OpenVMM exited "
                 "during startup: guest-exit status 125"
             ),
@@ -4251,7 +4251,7 @@ class PublicSnapshotTests(unittest.TestCase):
                 "failed during Activate: Io, attributed to the host'"
             ),
             "unserialized-restores": (
-                "busy: nvx-rs run --restore-snapshot returned 0, expected 1 "
+                "busy: nvx run --restore-snapshot returned 0, expected 1 "
                 "with error[sandbox-busy]"
             ),
             "waiters-skip-the-lock": (
@@ -4267,7 +4267,7 @@ class PublicSnapshotTests(unittest.TestCase):
             ),
             # The next restore cannot have the lock.
             "failure-keeps-the-lock": (
-                "hold: nvx-rs snapshot restore returned 1, expected 0"
+                "hold: nvx snapshot restore returned 1, expected 0"
             ),
             "shares-one-export": "the wait-one restore's guest reports share=hold",
             "rebinds-shares": "the hold sandbox reads the share markers ['wait-",
@@ -4302,7 +4302,7 @@ class PublicSnapshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             fake = _FakeSnapshotCli("capture-vm-runs")
-            with self.assertRaisesRegex(RuntimeError, "capture: nvx-rs snapshot"):
+            with self.assertRaisesRegex(RuntimeError, "capture: nvx snapshot"):
                 self._run(root, fake)
             self.assertEqual(fake.killed, [7000])
             self.assertFalse(any(fake.running.values()))
@@ -5429,7 +5429,7 @@ class FilesystemPolicyScenarioTests(unittest.TestCase):
 
 
 class FilesystemCommaPathsScenarioTests(unittest.TestCase):
-    """The filesystem-comma-paths scenario with `nvx-rs run` and the guest
+    """The filesystem-comma-paths scenario with `nvx run` and the guest
     simulated."""
 
     @staticmethod
@@ -5463,7 +5463,7 @@ class FilesystemCommaPathsScenarioTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as temporary,
             patch.object(microvm_tests, "run_guest_script", side_effect=guest),
-            patch.object(nvx_rs, "require_binary", return_value=_FAKE_NVX_RS),
+            patch.object(nvx_cli, "require_binary", return_value=_FAKE_NVX),
         ):
             microvm_tests.run_filesystem_comma_paths(
                 "kvm", memory_mib=128, timeout=1.0, output_dir=Path(temporary)
@@ -5706,7 +5706,7 @@ class MicrovmTests(unittest.TestCase):
         report: dict[str, object] | None = None,
         rejected: int = 1,
     ) -> list[tuple[list[str], dict[str, str], object]]:
-        """Runs the scenario with a stand-in for the nvx-rs test, which leaves
+        """Runs the scenario with a stand-in for the nvx test, which leaves
         `console`, `report`, and `returncode` as the real one would."""
         runs: list[tuple[list[str], dict[str, str], object]] = []
 
@@ -5746,8 +5746,8 @@ class MicrovmTests(unittest.TestCase):
             )
         return runs
 
-    def test_managed_lifecycle_runs_the_nvx_rs_test_and_checks_what_it_leaves(self):
-        # The unit test of nvx-rs's host control session in
+    def test_managed_lifecycle_runs_the_nvx_test_and_checks_what_it_leaves(self):
+        # The unit test of nvx's host control session in
         # src/host/session/tests/managed_lifecycle.rs drives the session; the
         # scenario hands it OpenVMM's command, then checks the outcome report
         # and the guest console.
@@ -5777,7 +5777,7 @@ class MicrovmTests(unittest.TestCase):
                 "cargo",
                 "test",
                 "--manifest-path",
-                os.fspath(BuildConstants.REPO_ROOT / "nvx-rs" / "Cargo.toml"),
+                os.fspath(BuildConstants.REPO_ROOT / "nvx" / "Cargo.toml"),
                 "--locked",
                 "--features",
                 "cli",
@@ -5799,7 +5799,7 @@ class MicrovmTests(unittest.TestCase):
             os.fspath(output_dir.resolve()),
         )
         openvmm = json.loads(environment["NVX_MANAGED_LIFECYCLE_COMMAND"])
-        # Cargo runs the test in the nvx-rs directory, so every path is absolute.
+        # Cargo runs the test in the nvx directory, so every path is absolute.
         for option in ("--kernel", "--initrd", "--microvm-report"):
             self.assertTrue(Path(openvmm[openvmm.index(option) + 1]).is_absolute())
         self.assertTrue(Path(openvmm[0]).is_absolute())
@@ -5836,8 +5836,8 @@ class MicrovmTests(unittest.TestCase):
         self.assertEqual(preserved, self._managed_report())
 
     def test_managed_lifecycle_hands_the_test_an_absolute_pid_journal(self):
-        # The nvx-rs test records OpenVMM in an adversarial campaign's journal
-        # from the nvx-rs directory, so a relative journal resolves here.
+        # The nvx test records OpenVMM in an adversarial campaign's journal
+        # from the nvx directory, so a relative journal resolves here.
         variable = "NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL"
         relative = os.path.join("journal", "openvmm-pids.jsonl")
         for value, expected in (
@@ -5863,7 +5863,7 @@ class MicrovmTests(unittest.TestCase):
             patch.object(microvm_tests.subprocess, "Popen") as popen,
             self.assertRaisesRegex(
                 common.ScriptError,
-                "runs the nvx-rs test host::session::tests::managed_lifecycle::"
+                "runs the nvx test host::session::tests::managed_lifecycle::"
                 "a_managed_guest_runs_request_scoped_workloads_until_it_stops with "
                 "Cargo, which is not on PATH",
             ),
@@ -9117,7 +9117,7 @@ class MicrovmTests(unittest.TestCase):
                 keywords.get("monitor", ""), r"^TimeAbiMonitor\(\w*command\)$"
             )
         # The managed lifecycle's console is a file, which the same monitor
-        # scans once the nvx-rs test that drives the guest has ended.
+        # scans once the nvx test that drives the guest has ended.
         managed = next(
             node
             for node in ast.walk(tree)
@@ -10507,14 +10507,14 @@ class MicrovmTests(unittest.TestCase):
                     patch.object(
                         microvm_tests,
                         "compile_egress_policy",
-                        return_value=nvx_rs.EgressRules(allow=(), deny=()),
+                        return_value=nvx_cli.EgressRules(allow=(), deny=()),
                     ),
                     patch.object(
                         microvm_tests.threading,
                         "Thread",
                         side_effect=ImmediateThread,
                     ),
-                    patch.object(nvx_rs, "require_binary", return_value=_FAKE_NVX_RS),
+                    patch.object(nvx_cli, "require_binary", return_value=_FAKE_NVX),
                 ):
                     wait = openvmm_process.return_value.__enter__.return_value.wait
                     wait.side_effect = (
@@ -10577,7 +10577,7 @@ class MicrovmTests(unittest.TestCase):
                             encoding="utf-8"
                         )
                     )
-                    self.assertEqual(results["interface"], "nvx-rs run")
+                    self.assertEqual(results["interface"], "nvx run")
                     self.assertEqual(
                         results["observed"]["allowed"],
                         ["tcp:start", "tcp:end", "udp:start", "udp:end"],
@@ -10661,7 +10661,7 @@ class MicrovmTests(unittest.TestCase):
                         patch.object(
                             microvm_tests,
                             "compile_egress_policy",
-                            return_value=nvx_rs.EgressRules(allow=(), deny=()),
+                            return_value=nvx_cli.EgressRules(allow=(), deny=()),
                         ),
                         patch.object(
                             microvm_tests.threading,
@@ -10868,7 +10868,7 @@ class MicrovmTests(unittest.TestCase):
                 )
             ]
             self.assertEqual(run_guest_script.call_count, len(names))
-            public_run = nvx_rs.command_line(("run",))
+            public_run = nvx_cli.command_line(("run",))
             for call, name in zip(run_guest_script.call_args_list, names, strict=True):
                 policy_path = output_dir / f"l3-l4-egress-{name}-policy.json"
                 self.assertEqual(
@@ -11312,14 +11312,14 @@ class MicrovmTests(unittest.TestCase):
 
         def public_dry_run(command: list[str], **kwargs: Any) -> object:
             if "--dry-run" not in command:
-                # nvx-rs, which compiles each policy.
+                # nvx, which compiles each policy.
                 return cast(object, run_process(command, **kwargs))
             if nvx_accepts == policy_name(command):
                 return MagicMock(returncode=0, stderr=b"")
             path = Path(command[command.index("--network-egress-policy-file") + 1])
             try:
-                nvx_rs.compile_egress_policy(path)
-            except nvx_rs.NvxRsError as error:
+                nvx_cli.compile_egress_policy(path)
+            except nvx_cli.NvxError as error:
                 return MagicMock(
                     returncode=1, stderr=f"error[{error.code}]: {error}\n".encode()
                 )
@@ -11379,7 +11379,7 @@ class MicrovmTests(unittest.TestCase):
             ]
             self.assertEqual(run_guest_script.call_count, len(names))
             public_run = [
-                *nvx_rs.command_line(("run",)),
+                *nvx_cli.command_line(("run",)),
                 "--guest",
                 "alpine",
                 "--hypervisor",
@@ -11445,7 +11445,7 @@ class MicrovmTests(unittest.TestCase):
             self.assertEqual(
                 rejected, ["192.0.2.1:tcp:20003-20001", "192.0.2.1:udp:-20003"]
             )
-            # The other calls are nvx-rs, which compiles each case's policy.
+            # The other calls are nvx, which compiles each case's policy.
             dry_runs = [
                 call.args[0]
                 for call in nvx_run.call_args_list
@@ -11958,7 +11958,7 @@ class MicrovmTests(unittest.TestCase):
                 20001,
             )
             self.assertEqual(run_guest_script.call_count, len(cases))
-            public_run = nvx_rs.command_line(("run",))
+            public_run = nvx_cli.command_line(("run",))
             for call, case in zip(run_guest_script.call_args_list, cases, strict=True):
                 policy_path = output_dir / f"ipv6-egress-{case.name}-policy.json"
                 self.assertEqual(
@@ -13018,7 +13018,7 @@ class MicrovmTests(unittest.TestCase):
         # GuestAttach record, whose bytes are OpenVMM's vector.
         vectors = (
             BuildConstants.REPO_ROOT
-            / "nvx-rs"
+            / "nvx"
             / "tests"
             / "vectors"
             / "openvmm"
@@ -15129,7 +15129,7 @@ class MicrovmTests(unittest.TestCase):
         hold: Callable[..., None] | None = None,
         record: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Run the scenario in ``root``, with a simulated nvx-rs, whose
+        """Run the scenario in ``root``, with a simulated nvx, whose
         restores' workloads request the scenario's real host services as their
         policies admit, and which ``cli`` may answer first, on a host whose
         OpenVMM processes are ``processes``, whose addresses other than
@@ -15245,7 +15245,7 @@ class MicrovmTests(unittest.TestCase):
                 ),
             ),
             patch.object(microvm_tests.tempfile, "mkdtemp", return_value=str(fixture)),
-            patch.object(nvx_rs, "require_binary", return_value=_FAKE_NVX_RS),
+            patch.object(nvx_cli, "require_binary", return_value=_FAKE_NVX),
             patch.object(microvm_tests, "_untiered_network_cli", side_effect=run_cli),
             patch.object(microvm_tests, "OpenvmmProcess", FakeProcess),
             patch.object(
@@ -15382,7 +15382,7 @@ class MicrovmTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     command[:3],
-                    [os.fspath(_FAKE_NVX_RS), "--root", os.fspath(nvx_rs.ROOT)],
+                    [os.fspath(_FAKE_NVX), "--root", os.fspath(nvx_cli.ROOT)],
                 )
                 policy = command[
                     command.index("--network-profile") + 2 : command.index(
@@ -18056,7 +18056,7 @@ class MicrovmTests(unittest.TestCase):
                 patch.object(microvm_tests, "run_sandbox_gpt_layer") as gpt_layer,
             ):
                 self.assertEqual(microvm_tests.run(args), 0)
-            # The VM of the nvx-rs test boots the run's artifacts.
+            # The VM of the nvx test boots the run's artifacts.
             run.assert_called_once_with(
                 microvm_tests.openvmm_binary_path(),
                 microvm_tests.artifact_path("vmlinux"),
@@ -18187,7 +18187,7 @@ class MicrovmTests(unittest.TestCase):
                 self.assertRaisesRegex(
                     common.ScriptError,
                     r"^sandbox scratch template not found: .*; sandbox-lifecycle "
-                    r"reads .*: install them with `nvx-rs download` .*"
+                    r"reads .*: install them with `nvx download` .*"
                     r"`build-scratch-template`",
                 ),
             ):

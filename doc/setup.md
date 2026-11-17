@@ -30,11 +30,11 @@ python3 scripts/nvx.py init
 ## Prerequisites
 
 Git is required on every platform, and Python 3.10 or newer to build, test,
-benchmark, or package NVX. Building `nvx-rs`, OpenVMM, or the other Rust crates
+benchmark, or package NVX. Building `nvx`, OpenVMM, or the other Rust crates
 requires [rustup](https://rustup.rs/), which installs the Rust release that
 [`rust-toolchain.toml`](../rust-toolchain.toml) pins on first use. NVX runs its
-microVMs and sandboxes with `nvx-rs`, which Cargo builds; see
-[Usage](usage.md#nvx-rs). Its [`download`](usage.md#download) of a release, and
+microVMs and sandboxes with `nvx`, which Cargo builds; see
+[Usage](usage.md#nvx). Its [`download`](usage.md#download) of a release, and
 the download of a checkout's first run, use the host's `curl` and `tar`, which
 Windows 10 and later include.
 
@@ -44,7 +44,7 @@ generations and AMD's EPYC Milan, Genoa, and Turin, on a hypervisor that
 supports that profile. On another Intel or AMD CPU, `--cpu-profile auto`, the
 default, falls back to a development profile derived from the host and warns
 at every cold boot, asking for the CPU's fingerprint so that a built-in
-profile can serve it; `nvx-rs run --cpu-profile host` selects that profile
+profile can serve it; `nvx run --cpu-profile host` selects that profile
 explicitly, for example where the hypervisor does not support the built-in
 profile (`E_PROFILE_UNSUPPORTED`, whose message names this option). OpenVMM
 verifies a host profile as it verifies a built-in profile: the cold boot
@@ -274,7 +274,7 @@ executor wrapper that provisions a separate disposable target and forwards
 the bounded executor protocol. See
 [Copilot-driven adversarial testing](adversarial-testing.md)
 for the containment and credential requirements, and for the Rust toolchain
-and nvx-rs that the target needs.
+and nvx that the target needs.
 
 Apply the configured Python and POSIX shell formatters with:
 

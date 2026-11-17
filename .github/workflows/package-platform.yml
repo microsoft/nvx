@@ -19,8 +19,8 @@ on:
         description: Base name of the compatible OpenVMM artifacts
         required: true
         type: string
-      nvx-rs-artifact:
-        description: Base name of the nvx-rs artifacts for the runner's OS
+      nvx-artifact:
+        description: Base name of the nvx artifacts for the runner's OS
         required: true
         type: string
     secrets:
@@ -118,5 +118,5 @@ jobs:
         uses: ./.github/actions/package-release
         with:
           platform: ${{ inputs.release-platform }}
-          nvx-rs-artifact: ${{ inputs.nvx-rs-artifact }}
+          nvx-artifact: ${{ inputs.nvx-artifact }}
           upload: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}

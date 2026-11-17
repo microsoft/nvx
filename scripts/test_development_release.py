@@ -1394,7 +1394,7 @@ def _write_package(path: Path, members: Mapping[str, bytes | None]) -> None:
 
 
 class DevelopmentReleasePackageTests(unittest.TestCase):
-    """The packages that publication checks: each ships OpenVMM and nvx-rs."""
+    """The packages that publication checks: each ships OpenVMM and nvx."""
 
     def _packages(self, directory: Path) -> dict[str, Path]:
         packages = publish_development_release.release_packages(directory, "1.2.3")
@@ -1405,7 +1405,7 @@ class DevelopmentReleasePackageTests(unittest.TestCase):
                 {
                     "SHA256SUMS": b"sums",
                     f"bin/openvmm{suffix}": b"openvmm",
-                    f"bin/nvx-rs{suffix}": b"nvx-rs",
+                    f"bin/nvx{suffix}": b"nvx",
                 },
             )
         return packages
@@ -1420,23 +1420,23 @@ class DevelopmentReleasePackageTests(unittest.TestCase):
             },
         )
 
-    def test_every_package_must_ship_openvmm_and_nvx_rs(self):
+    def test_every_package_must_ship_openvmm_and_nvx(self):
         with tempfile.TemporaryDirectory() as temporary:
             packages = self._packages(Path(temporary))
             publish_development_release.check_release_packages(packages)
             for platform, members, missing in (
-                ("linux-kvm", {"bin/openvmm": b"openvmm"}, "bin/nvx-rs"),
-                ("linux-mshv", {"bin/nvx-rs": b"nvx-rs"}, "bin/openvmm"),
+                ("linux-kvm", {"bin/openvmm": b"openvmm"}, "bin/nvx"),
+                ("linux-mshv", {"bin/nvx": b"nvx"}, "bin/openvmm"),
                 (
                     "linux-kvm",
-                    {"bin/openvmm": b"openvmm", "bin/nvx-rs": None},
-                    "bin/nvx-rs",
+                    {"bin/openvmm": b"openvmm", "bin/nvx": None},
+                    "bin/nvx",
                 ),
                 # Windows packages ship Windows executables.
                 (
                     "windows-whp",
-                    {"bin/openvmm.exe": b"openvmm", "bin/nvx-rs": b"nvx-rs"},
-                    "bin/nvx-rs.exe",
+                    {"bin/openvmm.exe": b"openvmm", "bin/nvx": b"nvx"},
+                    "bin/nvx.exe",
                 ),
             ):
                 with self.subTest(platform=platform, members=sorted(members)):
@@ -1482,7 +1482,7 @@ class DevelopmentReleasePackageTests(unittest.TestCase):
                     )
                     publish.reset_mock()
                     _write_package(packages["windows-whp"], {"bin/openvmm.exe": b""})
-                    with self.assertRaisesRegex(ScriptError, "bin/nvx-rs.exe"):
+                    with self.assertRaisesRegex(ScriptError, "bin/nvx.exe"):
                         publish_development_release.main()
                     publish.assert_not_called()
             finally:

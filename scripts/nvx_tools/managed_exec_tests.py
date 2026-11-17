@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from . import nvx_rs
+from . import nvx_cli
 from .build_constants import BuildConstants, UbuntuBuildConstants
 from .common import ScriptError, artifact_path, require_file
 
@@ -188,7 +188,7 @@ def run_managed_exec_configuration(
         state = root / "state"
         scratch = root / "scratch.ext4"
         shutil.copyfile(scratch_template, scratch)
-        base = nvx_rs.command_line(("sandbox",))
+        base = nvx_cli.command_line(("sandbox",))
 
         def invoke(
             operation: str, *arguments: str, expected: int = 0
@@ -246,9 +246,9 @@ def run_managed_exec_configuration(
         def expect_rejection(
             result: subprocess.CompletedProcess[bytes], code: str
         ) -> None:
-            # nvx-rs refuses the request before it runs anything, with the
+            # nvx refuses the request before it runs anything, with the
             # stable code of its error, whatever the wording of its message.
-            reported = nvx_rs.reported_error(result.stderr)
+            reported = nvx_cli.reported_error(result.stderr)
             if result.stdout or reported is None or reported.code != code:
                 raise RuntimeError(
                     "public managed validation returned unexpected diagnostics, "
@@ -413,7 +413,7 @@ def run_managed_exec_configuration(
                 expect_rejection(rejected, "argument-invalid")
 
             # The guest agent refuses a workload whose working directory it cannot
-            # enter before the workload runs, and nvx-rs reports that refusal with
+            # enter before the workload runs, and nvx reports that refusal with
             # its `exec-refused` code and the agent's `cwd-failed` category.
             for cwd in ("/does-not-exist", "/etc/passwd", "/root"):
                 failed = workload(
@@ -424,7 +424,7 @@ def run_managed_exec_configuration(
                     cwd,
                     expected=1,
                 )
-                refusal = nvx_rs.reported_error(failed.stderr)
+                refusal = nvx_cli.reported_error(failed.stderr)
                 if (
                     failed.stdout
                     or refusal is None

@@ -96,7 +96,8 @@ class TitleLabelsTests(unittest.TestCase):
     def test_aliases_and_phrase_whitespace(self) -> None:
         cases = (
             ("nvx-init: boot", ["area: guest"]),
-            ("nvx-rs: guest boot", ["area: guest", "area: nvx-rs"]),
+            ("nvx: guest boot", ["area: guest", "area: nvx"]),
+            ("nvx-rs: guest boot", ["area: guest", "area: nvx"]),
             ("Azure \t Linux: network", ["area: userland", "area: networking"]),
             ("azurelinux: documentation", ["area: userland", "area: docs"]),
             (
@@ -124,10 +125,10 @@ class TitleLabelsTests(unittest.TestCase):
             [],
         )
         self.assertCountEqual(
-            labels_for_title("`nvx-rs`: (guest), [whp]", self.rules),
+            labels_for_title("`nvx`: (guest), [whp]", self.rules),
             [
                 "area: guest",
-                "area: nvx-rs",
+                "area: nvx",
                 "platform: whp",
             ],
         )
@@ -328,16 +329,16 @@ class GitHubLabelsTests(unittest.TestCase):
         stale = Issue(1, "snapshot", (), "open", False)
         current = {
             "number": 1,
-            "title": "nvx-rs snapshot",
+            "title": "nvx snapshot",
             "state": "open",
             "labels": [{"name": "bug"}, {"name": "area: snapshot"}],
         }
         self.api.get.return_value = current
-        self.api.get_all.return_value = [{"name": "area: nvx-rs"}]
+        self.api.get_all.return_value = [{"name": "area: nvx"}]
         with contextlib.redirect_stdout(io.StringIO()):
             label_issue(github, stale, self.config, apply=True)
         self.api.post.assert_called_once_with(
-            "/repos/microsoft/nvx/issues/1/labels", {"labels": ["area: nvx-rs"]}
+            "/repos/microsoft/nvx/issues/1/labels", {"labels": ["area: nvx"]}
         )
 
     def test_needs_triage_is_only_a_fallback_for_unlabeled_issues(self) -> None:

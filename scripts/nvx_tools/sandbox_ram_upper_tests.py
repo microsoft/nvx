@@ -1,6 +1,6 @@
 """Public CLI acceptance for a sandbox whose overlay upper is in RAM.
 
-The scenario runs `nvx-rs sandbox --upper ram` as subprocesses against the
+The scenario runs `nvx sandbox --upper ram` as subprocesses against the
 real kernel, the Alpine control initramfs, and the Ubuntu EROFS layer, with no
 scratch image. It checks that the planner refuses `--upper ram` beside
 `--scratch`, and `--upper` outside `run` and `provision`, before it creates

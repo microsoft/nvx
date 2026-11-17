@@ -39,7 +39,7 @@
     "minirootfs_sha256": "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
     "guest_sources": [
       "guest/common",
-      "nvx-rs",
+      "nvx",
       "rust-toolchain.toml"
     ],
     "package_manifests": [
@@ -62,7 +62,7 @@
       "guest/common",
       "guest/ubuntu",
       "ubuntu/packages.lock.json",
-      "nvx-rs",
+      "nvx",
       "rust-toolchain.toml"
     ],
     "package_manifests": [
@@ -82,7 +82,7 @@
     "guest_sources": [
       "guest/common",
       "azurelinux/packages.lock.json",
-      "nvx-rs",
+      "nvx",
       "rust-toolchain.toml"
     ],
     "package_manifests": [

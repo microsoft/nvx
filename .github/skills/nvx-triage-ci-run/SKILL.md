@@ -63,8 +63,8 @@ scope, and fix repository defects without committing or pushing. Commands use
      (`git diff --name-only BASE SHA`), since `--only` keeps only the gates
      that those paths select and fails for any other; or the failed step's
      command. A failed public-API check of
-     [check-nvx-rs](../../actions/check-nvx-rs/action.yml) prints how the
-     public API of `nvx` differs from its snapshots in `nvx-rs/public-api/`; a
+     [check-nvx](../../actions/check-nvx/action.yml) prints how the
+     public API of `nvx` differs from its snapshots in `nvx/public-api/`; a
      deliberate change updates them with `python3 scripts/public_api.py
      --update`;
    - boot, microVM, snapshot, guest-console, and benchmark acceptance failures:

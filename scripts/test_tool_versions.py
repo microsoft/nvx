@@ -35,7 +35,7 @@ LINUX = SETUP / "setup-linux.sh"
 WINDOWS = SETUP / "setup-windows-whp.ps1"
 SPECULA = REPO_ROOT / ".github" / "specula" / "setup-runner.sh"
 COPILOT_SETUP = REPO_ROOT / ".github" / "workflows" / "copilot-setup-steps.yml"
-COVERAGE = REPO_ROOT / ".github" / "workflows" / "nvx-rs-coverage.yml"
+COVERAGE = REPO_ROOT / ".github" / "workflows" / "nvx-coverage.yml"
 GUIDES = (
     SETUP / "README.md",
     REPO_ROOT / "doc" / "setup.md",
