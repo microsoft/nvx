@@ -45,6 +45,7 @@ nvx/
 |   |   |-- ci.yml               Main build, test, benchmark, and release workflow
 |   |   |-- copilot-code-review.yml Copilot code review environment
 |   |   |-- copilot-setup-steps.yml Copilot cloud agent environment
+|   |   |-- issue-link.yml       Check that every pull request references an issue
 |   |   |-- module-diagrams.yml  Module diagrams of the nvx crate, drawn every night
 |   |   |-- nightly-ci-report.yml Report of failed nightly CI runs
 |   |   |-- nvx-coverage.yml     Coverage of nvx's own tests, for dev and pull requests
@@ -182,6 +183,7 @@ nvx/
 |   |   |-- setup-windows-whp.ps1 Windows/WHP development-host and Actions runner bootstrap
 |   |   `-- tool-versions.conf    Shared tool release and checksum pins
 |   |-- benchmark_series.py      Benchmark series with CI's validation, for local and remote hosts
+|   |-- check_issue_link.py      Checks that a pull request references an issue
 |   |-- check_markdown_links.py  Markdown link, anchor, and doc/ path check run by CI
 |   |-- check_test_changes.py    Flags the changes of a pull request to existing tests
 |   |-- check_test_layout.py     Check that tests live apart from the code that they test
@@ -242,7 +244,7 @@ reusable workflows: `build-openvmm-binary.yml` builds OpenVMM for one target,
 `run-platform.yml` benchmarks one platform. The full runs of `ci.yml` on `dev`
 also publish the `nvx` crate to
 crates.io. The other workflows report failed nightly CI runs, flag the pull
-requests that change existing tests, draw the module
+requests that change existing tests or reference no issue, draw the module
 diagrams of the `nvx` crate every night, run adversarial campaigns, measure
 the coverage of the `nvx` crate's tests and of the Python tooling's unit tests
 as `dev` changes, measure every week which host code of the `nvx` crate the
@@ -393,6 +395,8 @@ hooks that `test-layout-allowlist.json` allows them, and
 `check_test_changes.py` flags the pull requests that change existing tests; see
 [Test layout](contribute.md#test-layout) and
 [Changes to existing tests](contribute.md#changes-to-existing-tests).
+`check_issue_link.py` flags the pull requests that reference no issue; see
+[Issue link](ci.md#issue-link).
 `public_api.py` checks the public API of `nvx` against its snapshots in
 `nvx/public-api/`, and rewrites them; see [Rust crates](ci.md#rust-crates).
 

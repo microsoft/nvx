@@ -1,0 +1,64 @@
+name: Issue link
+
+# Checks that a pull request references an issue of the repository: GitHub
+# links it to one, or its description holds Fixes, Closes, Part of, or Refs
+# and the issue (doc/ci.md#issue-link). An unlinked pull request gets the
+# needs-issue label and one comment that says how to fix it, and the check
+# fails; a linked or exempt one loses them. pull_request_target runs the
+# workflow as the default branch holds it, with a token that may label and
+# comment, for pull requests from forks too. So the job runs the default
+# branch's script, which reads the pull request through the API and never
+# runs its code.
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      # An edit of the description, or of the base, changes the verdict
+      # without a push.
+      - edited
+      - labeled
+      - unlabeled
+
+permissions: {}
+
+jobs:
+  check:
+    name: Check that the pull request references an issue
+    # No condition: a run whose job a condition skips would replace the result
+    # of the run before it, so every event checks the pull request again.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Runs of one pull request go one at a time, so that each reads what the
+    # run before it wrote: canceling a run would not cancel a write that
+    # GitHub had already received. A newer waiting run replaces an older one,
+    # so the newest event's run comes last.
+    concurrency:
+      group: issue-link-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    # Labelling and commenting on a pull request need pull-requests: write.
+    # Reading an issue of a public repository needs no issues permission.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # The default branch's script runs, whatever the pull request's base,
+      # so that no other branch's script runs with the token.
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      # Only the pull request's number reaches the job; the script reads the
+      # rest through the API and never prints the description.
+      - name: Check that the pull request references an issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: >-
+          python3 scripts/check_issue_link.py
+          --repository "${GITHUB_REPOSITORY}"
+          --summary "${GITHUB_STEP_SUMMARY}"
+          "${NUMBER}"
