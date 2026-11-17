@@ -240,9 +240,9 @@ pub struct ExportChild {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct FileIdentity {
     /// Device, or the volume serial number on Windows.
-    pub(crate) device: u64,
+    device: u64,
     /// Inode, or the file index on Windows.
-    pub(crate) index: u64,
+    index: u64,
 }
 
 /// An export that the CLI's planner made: the description of its paths, which the CLI passes to a
