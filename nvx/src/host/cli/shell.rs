@@ -9,7 +9,7 @@
 /// An argument that is empty or holds a space or a tab is quoted. Backslashes are literal except
 /// before a quote, where they are doubled and the quote escaped, and before the closing quote of
 /// a quoted argument, where they are doubled.
-pub(crate) fn windows_command_line<S: AsRef<str>>(arguments: &[S]) -> String {
+fn windows_command_line<S: AsRef<str>>(arguments: &[S]) -> String {
     let mut result = String::new();
     for argument in arguments {
         let argument = argument.as_ref();
@@ -48,7 +48,7 @@ pub(crate) fn windows_command_line<S: AsRef<str>>(arguments: &[S]) -> String {
 /// Returns `text` quoted for a POSIX shell: `text` itself if it is a nonempty run of the
 /// characters that a shell keeps as they are, `[A-Za-z0-9_@%+=:,./-]`, and otherwise `text` in
 /// single quotes, with each single quote written as `'"'"'`.
-pub(crate) fn shell_quote(text: &str) -> String {
+fn shell_quote(text: &str) -> String {
     if text.is_empty() {
         return "''".to_owned();
     }
@@ -60,7 +60,7 @@ pub(crate) fn shell_quote(text: &str) -> String {
 }
 
 /// Returns `arguments` quoted with [`shell_quote`], joined by spaces.
-pub(crate) fn shell_command_line<S: AsRef<str>>(arguments: &[S]) -> String {
+fn shell_command_line<S: AsRef<str>>(arguments: &[S]) -> String {
     arguments
         .iter()
         .map(|argument| shell_quote(argument.as_ref()))
