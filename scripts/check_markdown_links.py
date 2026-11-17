@@ -106,6 +106,8 @@ _HTML_STARTS = (
 )
 _HTML_ENDS = (
     re.compile(r"</(?:pre|script|style|textarea)>", re.I),
+    # A comment block ends only at "-->", though the comment in it can end
+    # earlier, at "--!>", as _COMMENT_END finds.
     re.compile("-->"),
     re.compile(r"\?>"),
     re.compile(">"),
