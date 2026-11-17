@@ -1,10 +1,11 @@
-"""Tests for title-based issue-label suggestions and the Bug report form's areas."""
+"""Tests for title-based issue-label suggestions and the contribution templates."""
 
 from __future__ import annotations
 
 import contextlib
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -681,6 +682,68 @@ class BugReportFormTests(unittest.TestCase):
         )
         self.assertIn(
             "(https://github.com/microsoft/nvx/blob/dev/SECURITY.md)", reminders
+        )
+
+
+class PullRequestTemplateTests(unittest.TestCase):
+    """The pull request template, which asks the Bug report form's questions."""
+
+    ROOT = Path(__file__).resolve().parents[1]
+    SECTIONS = (
+        "What does this pull request change?",
+        "Why is this change needed?",
+        "How was this change validated?",
+        "Checklist",
+    )
+    CONDITIONAL_SECTIONS = ("Changes to existing tests", "OpenVMM pin")
+    COMMENT = re.compile(r"(<!--.*?-->)", re.DOTALL)
+
+    def setUp(self) -> None:
+        self.template = (self.ROOT / ".github" / "pull_request_template.md").read_text(
+            encoding="utf-8"
+        )
+        self.rendered = self.COMMENT.sub("", self.template)
+
+    def headings(self) -> list[tuple[str, str, bool]]:
+        """Each heading's marker, text, and whether it renders, in source order."""
+        return [
+            (marker, text, not part.startswith("<!--"))
+            for part in self.COMMENT.split(self.template)
+            for marker, text in re.findall(r"^(#+) (.+)$", part, re.MULTILINE)
+        ]
+
+    def test_sections_render_in_order_and_conditional_ones_stay_commented(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self.headings(),
+            [
+                *(("##", section, True) for section in self.SECTIONS),
+                *(("###", section, False) for section in self.CONDITIONAL_SECTIONS),
+            ],
+        )
+
+    def test_unfilled_template_renders_empty_sections_and_the_checklist(self) -> None:
+        self.assertIn("\n## Checklist\n", self.rendered)
+        questions, checklist = self.rendered.split("## Checklist\n")
+        self.assertEqual(
+            re.sub(r"^## .+$", "", questions, flags=re.MULTILINE).strip(), ""
+        )
+        lines = [line for line in checklist.splitlines() if line.strip()]
+        self.assertRegex(lines[0], r"^- \[ \] \S")
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertRegex(line, r"^(- \[ \] |      )\S")
+
+    def test_contribute_names_the_template_sections(self) -> None:
+        document = (self.ROOT / "doc" / "contribute.md").read_text(encoding="utf-8")
+        row = re.search(r"^\| Pull request body \|(.+)\|$", document, re.MULTILINE)
+        assert row is not None
+        self.assertEqual(
+            re.findall(r"\*\*(.+?)\*\*", row.group(1)),
+            [text for _, text, _ in self.headings()],
+            "the Pull request body row of doc/contribute.md must name the "
+            "sections of .github/pull_request_template.md, in its order",
         )
 
 

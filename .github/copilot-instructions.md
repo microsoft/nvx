@@ -54,7 +54,8 @@
   entry in `scripts/test-layout-allowlist.json`, and moving test code out needs
   `--tighten`. See [Test layout](../doc/contribute.md#test-layout).
 - A change to an existing test, its data, or its CI wiring gets the
-  `tests-modified` label; explain each such change in the pull request. Run
+  `tests-modified` label from the Test changes workflow; explain each such
+  change under **Changes to existing tests** in the pull request. Run
   `python3 scripts/check_test_changes.py --base origin/dev` to list them first.
 
 ## Documentation
