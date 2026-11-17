@@ -107,6 +107,31 @@ class ScriptRunner:
         return subprocess.CompletedProcess(command, returncode, "", "")
 
 
+class DockerRunner:
+    """Answer docker info and record the environment of each gate script."""
+
+    def __init__(self, *, docker_usable: bool) -> None:
+        self.docker_usable = docker_usable
+        self.environments: dict[str, dict[str, str]] = {}
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        capture_output: bool,
+        stream: TextIO | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, capture_output, stream
+        command = tuple(args)
+        if command[:2] == ("docker", "info"):
+            returncode = 0 if self.docker_usable else 1
+            return subprocess.CompletedProcess(command, returncode, "", "")
+        self.environments[Path(command[-1]).stem] = dict(env)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+
 class GateTableTests(unittest.TestCase):
     def test_every_authoritative_scripted_step_is_mapped(self) -> None:
         actual = local_gates.scripted_step_keys(ROOT)
@@ -572,6 +597,52 @@ runs:
         )
         self.assertEqual(result, 1)
         self.assertEqual(_gate(report, "fixture-pass").state, "not run")
+
+    def execute_in_git_bash(self, runner: DockerRunner) -> local_gates.Report:
+        report = local_gates.create_report(
+            base="base",
+            files=("fixture/input",),
+            operating_system="windows",
+            root=self.root,
+            runner_temp=self.runner_temp,
+            only=("fixture-pass", "quality-code"),
+            rules=self.rules,
+            definitions=self.definitions,
+        )
+
+        def tool_finder(name: str, path: str | None = None) -> str | None:
+            return "docker" if name == "docker" else self.tool_finder(name, path)
+
+        local_gates.execute_report(
+            report,
+            root=self.root,
+            runner_temp=self.runner_temp,
+            runner=runner,
+            tool_finder=tool_finder,
+            stream=io.StringIO(),
+            inherited_environment={"PATH": "fixture"},
+        )
+        return report
+
+    def test_git_bash_passes_the_container_paths_of_docker_unchanged(self) -> None:
+        # Git Bash rewrote the --workdir /workspace of check-quality's docker
+        # commands to C:/Program Files/Git/workspace, which Docker rejected.
+        runner = DockerRunner(docker_usable=True)
+        report = self.execute_in_git_bash(runner)
+        self.assertEqual(runner.environments["quality-code"]["MSYS_NO_PATHCONV"], "1")
+        self.assertTrue(
+            any(
+                "MSYS_NO_PATHCONV" in adaptation
+                for adaptation in _gate(report, "quality-code").adaptations
+            )
+        )
+        # Other Bash gates keep the conversion that they may rely on.
+        self.assertNotIn("MSYS_NO_PATHCONV", runner.environments["fixture-pass"])
+
+    def test_git_bash_keeps_path_conversion_for_local_quality_tools(self) -> None:
+        runner = DockerRunner(docker_usable=False)
+        self.execute_in_git_bash(runner)
+        self.assertNotIn("MSYS_NO_PATHCONV", runner.environments["quality-code"])
 
 
 class OutputTests(unittest.TestCase):

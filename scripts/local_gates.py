@@ -1379,10 +1379,20 @@ def _adapt_quality_tools(
     environment: dict[str, str],
     runner: CommandRunner,
     tool_finder: ToolFinder,
+    git_bash: bool,
 ) -> None:
     path = environment.get("PATH")
     docker = tool_finder("docker", path)
     if docker is not None and _docker_usable(root, environment, runner):
+        if git_bash:
+            # Git Bash rewrites arguments that look like POSIX paths, such as
+            # the --workdir /workspace of CI's docker commands, into Windows
+            # paths that the Linux engine rejects. CI's bash passes them as is.
+            environment["MSYS_NO_PATHCONV"] = "1"
+            gate.adaptations.append(
+                "MSYS_NO_PATHCONV=1 keeps Git Bash from rewriting the container "
+                "paths of docker run"
+            )
         return
     stub_directory = runner_temp / "quality-tool-stubs"
     for tool, variable in (("shellcheck", "SHELLCHECK"), ("shfmt", "SHFMT")):
@@ -1534,6 +1544,9 @@ def execute_report(
             print(f"blocked: {gate.detail}", file=stream, flush=True)
             continue
         environment = prepare_execution_environment(gate, inherited, git_root=git_root)
+        git_bash = gate.shell == "bash" and (
+            os.name == "nt" or gate.operating_system == "windows"
+        )
         if gate.gate_id == "quality-code":
             _adapt_quality_tools(
                 gate,
@@ -1542,10 +1555,9 @@ def execute_report(
                 environment=environment,
                 runner=command_runner,
                 tool_finder=tool_finder,
+                git_bash=git_bash,
             )
-        if (
-            os.name == "nt" or gate.operating_system == "windows"
-        ) and gate.shell == "bash":
+        if git_bash:
             python3 = tool_finder("python3", environment.get("PATH"))
             if python3 is None or "windowsapps" in python3.lower():
                 shim_directory = runner_temp / "python3-shim"
