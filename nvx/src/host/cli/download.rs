@@ -400,7 +400,7 @@ fn read_history(dir: &ArtifactDir) -> Result<(Git, Vec<String>)> {
             ),
         ));
     }
-    let history = Git::new(root);
+    let history = Git::new(root)?;
     let commits = history.first_parent_commits(SEARCH_COMMITS)?;
     Ok((history, commits))
 }

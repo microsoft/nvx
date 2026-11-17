@@ -2,27 +2,31 @@
 //!
 //! `git` looks for the repository at the checkout's root alone, never in a directory above it,
 //! so a checkout whose `.git` is not a repository fails instead of reading the history of another
-//! repository that holds it.
+//! repository that holds it. `git` runs in the root's physical location, with links and `..`
+//! components resolved, and its search stops at that location's parent: `git` measures the bound
+//! against its physical working directory, so the parent of a root written through a link or with
+//! `..` would let it climb above the checkout.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use super::History;
 use crate::ErrorCode;
-use crate::host::cli::{Exit, Result};
+use crate::host::cli::{Exit, Result, io_error};
+use crate::host::paths;
 
 /// The `git` of a checkout.
 pub(super) struct Git {
-    /// The root of the checkout.
+    /// The physical location of the root of the checkout, with links and `..` components resolved.
     root: PathBuf,
 }
 
 impl Git {
-    /// Returns the `git` of the checkout at `root`.
-    pub(super) fn new(root: &Path) -> Self {
-        Self {
-            root: root.to_path_buf(),
-        }
+    /// Returns the `git` of the checkout at `root`, an existing directory, at the physical
+    /// location of `root`.
+    pub(super) fn new(root: &Path) -> Result<Self> {
+        let root = paths::resolve(root).map_err(|error| io_error(ErrorCode::Io, &error, root))?;
+        Ok(Self { root })
     }
 
     /// Runs `git ARGUMENTS` in the checkout, and returns its output.
@@ -97,3 +101,6 @@ impl History for Git {
         Ok((!version.is_empty()).then(|| version.to_owned()))
     }
 }
+
+#[cfg(test)]
+mod tests;
