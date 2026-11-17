@@ -93,9 +93,7 @@ impl BootId {
 
 impl fmt::Display for BootId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0
-            .iter()
-            .try_for_each(|byte| write!(formatter, "{byte:02x}"))
+        platform::write_hex(formatter, &self.0)
     }
 }
 
@@ -111,7 +109,7 @@ impl FromStr for BootId {
     /// Parses the text form of a boot identity, failing with
     /// [`ErrorKind::Io`](crate::ErrorKind::Io) for anything other than 32 hexadecimal digits.
     fn from_str(text: &str) -> crate::Result<Self> {
-        platform::parse_hex_id(text).map(Self).ok_or_else(|| {
+        platform::parse_hex(text).map(Self).ok_or_else(|| {
             Error::io(format!(
                 "{text:?} is not a boot identity, which is 32 hexadecimal digits"
             ))

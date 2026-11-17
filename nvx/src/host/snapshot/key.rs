@@ -18,7 +18,7 @@ use super::manifest::{
 use crate::error::{Error, Result};
 use crate::guest_restore;
 use crate::host::config::{DiskCapture, check_setting};
-use crate::host::platform::parse_hex32;
+use crate::host::platform::{parse_hex, write_hex};
 use crate::host::process::BootId;
 use crate::host::runtime::{
     ArtifactIdentity, CompatibilityIdentity, Hypervisor, MAX_IDENTITY_LEN, RuntimeIdentity,
@@ -134,13 +134,6 @@ fn digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
     digest.finalize().into()
 }
 
-/// Writes `bytes` as lowercase hexadecimal digits.
-fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
-    bytes
-        .iter()
-        .try_for_each(|byte| write!(formatter, "{byte:02x}"))
-}
-
 /// Declares a 32-byte identity: the domain-separated SHA-256 digest of a canonical encoding.
 macro_rules! identity {
     ($(#[$attribute:meta])* $name:ident, $what:literal) => {
@@ -178,7 +171,7 @@ macro_rules! identity {
             /// Parses the text form of the identity, 64 hexadecimal digits, failing with
             /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for anything else.
             fn from_str(text: &str) -> Result<Self> {
-                parse_hex32(text).map(Self).ok_or_else(|| {
+                parse_hex(text).map(Self).ok_or_else(|| {
                     Error::unsupported(format!(
                         concat!("{:?} is not ", $what, ", which is 64 hexadecimal digits"),
                         text
