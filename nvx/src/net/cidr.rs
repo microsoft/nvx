@@ -82,7 +82,7 @@ impl Cidr {
     }
 
     /// Returns whether this network and `other` share an address.
-    pub(crate) fn overlaps(self, other: Self) -> bool {
+    fn overlaps(self, other: Self) -> bool {
         self.contains(other) || other.contains(self)
     }
 
