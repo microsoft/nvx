@@ -981,6 +981,12 @@ class MarkdownLinkTests(unittest.TestCase):
         )
         self.assertEqual(_targets(document), [(27, "after.md"), (31, "lowercase.md")])
 
+    def test_block_quote_markers_end_no_declaration_block(self):
+        # A block ends at what its container holds, so only the ">" after a
+        # quote's markers ends a declaration in it.
+        document = "> <!DOCTYPE html\n> [a](hidden.md)\n> >\n\n[b](after.md)\n"
+        self.assertEqual(_targets(document), [(5, "after.md")])
+
     def test_markup_other_than_comments_ends_at_the_first_angle_bracket(self):
         document = (
             '<div>\n<![CDATA[<a href="hidden.md">]]>\n'

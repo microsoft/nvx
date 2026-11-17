@@ -104,14 +104,18 @@ _HTML_STARTS = (
         re.I,
     ),
 )
+# Type 1 ends at an end tag, in any case, and types 2 to 5 at a string that a
+# line contains, as CommonMark words them. Those stay strings, since CodeQL
+# reads a regular expression that finds "-->" as an HTML filter that misses
+# comments that end at "--!>" (#1661).
 _HTML_ENDS = (
     re.compile(r"</(?:pre|script|style|textarea)>", re.I),
     # A comment block ends only at "-->", though the comment in it can end
     # earlier, at "--!>", as _COMMENT_END finds.
-    re.compile("-->"),
-    re.compile(r"\?>"),
-    re.compile(">"),
-    re.compile(r"\]\]>"),
+    "-->",
+    "?>",
+    ">",
+    "]]>",
 )
 _HTML_TAG_LINE = re.compile(
     "(?:" + _OPEN_TAG.pattern + "|" + _CLOSE_TAG.pattern + r")[ \t]*"
@@ -940,7 +944,7 @@ def _layout(lines: Sequence[str]) -> _Layout:
     leaf = ""  # the open paragraph, table, fence, code, or html block
     fence = ""
     indent = 0  # the columns of a fence's indentation, which its code drops
-    ending: re.Pattern[str] | None = None  # how the html block ends, if not blank
+    ending: re.Pattern[str] | str | None = None  # how the html block ends, if not blank
     tried = False  # whether the paragraph failed to start a table
     start = 0
 
@@ -1043,7 +1047,7 @@ def _layout(lines: Sequence[str]) -> _Layout:
         if matched == len(containers):
             if leaf == "html" and ending is not None:
                 mark(block, blank, blank)
-                if ending.search(line, nonspace):
+                if _html_block_ends(ending, line, nonspace):
                     close(number + 1)
                 continue
             if leaf == "fence":
@@ -1166,7 +1170,7 @@ def _layout(lines: Sequence[str]) -> _Layout:
             close(number)
             leaf, start, block = "html", number, adopt(_Node("html"))
             ending = _HTML_ENDS[kind - 1] if kind <= len(_HTML_ENDS) else None
-            if ending is not None and ending.search(line, nonspace):
+            if ending is not None and _html_block_ends(ending, line, nonspace):
                 close(number + 1)
         elif _ATX_HEADING.fullmatch(line, nonspace):
             close(number)
@@ -1309,6 +1313,14 @@ def _html_block(line: str, index: int, interrupting: bool) -> int:
     if not interrupting and _HTML_TAG_LINE.fullmatch(line, index):
         return len(_HTML_STARTS) + 1
     return 0
+
+
+def _html_block_ends(ending: re.Pattern[str] | str, line: str, index: int) -> bool:
+    """Returns whether a line holds, from index on, the end of an HTML block of
+    type 1 to 5: the end tag that ending matches, or the string that it is."""
+    if isinstance(ending, str):
+        return line.find(ending, index) >= 0
+    return ending.search(line, index) is not None
 
 
 def _indent(text: str, index: int, column: int) -> tuple[int, int]:
