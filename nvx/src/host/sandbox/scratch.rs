@@ -61,7 +61,7 @@ use crate::host::paths;
 use crate::host::seal::{FileId, FileKind, FileSeal, SealScheme};
 
 /// The version of the serde form of [`ScratchBinding`] that this build writes and checks.
-pub(crate) const SCRATCH_BINDING_VERSION: u32 = 1;
+const SCRATCH_BINDING_VERSION: u32 = 1;
 
 /// How long a check of a scratch image that should be free waits for its claim to be released:
 /// long enough for a process that another thread of the caller spawned to execute its program,
@@ -78,14 +78,14 @@ const DESCRIPTION: &str = "ext4 scratch image";
 /// module opens it, or, in tests, for writing alone, so that no read or mapping of its content
 /// can succeed.
 #[derive(Clone, Copy)]
-pub(crate) struct Access<'a> {
+struct Access<'a> {
     /// Opens the image for writing, to bind it, and on hosts other than Windows to check it.
-    pub(crate) open: &'a dyn Fn(&Path) -> io::Result<File>,
+    open: &'a dyn Fn(&Path) -> io::Result<File>,
 }
 
 impl Access<'static> {
     /// The access of binds and checks: [`imp::open_writable`].
-    pub(crate) const WRITABLE: Self = Self {
+    const WRITABLE: Self = Self {
         open: &imp::open_writable,
     };
 }
@@ -232,7 +232,7 @@ impl ScratchBinding {
     }
 
     /// Implements [`check`](Self::check), opening the image through `access`.
-    pub(crate) fn check_with(
+    fn check_with(
         &self,
         path: &Path,
         deadline: Instant,
@@ -270,7 +270,7 @@ impl ScratchBinding {
 }
 
 /// Implements [`ScratchBinding::bind`], opening the image through `access`.
-pub(crate) fn bind_with(path: &Path, access: Access<'_>) -> Result<ScratchBinding> {
+fn bind_with(path: &Path, access: Access<'_>) -> Result<ScratchBinding> {
     let file = match (access.open)(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::IsADirectory => return Err(missing(path)),

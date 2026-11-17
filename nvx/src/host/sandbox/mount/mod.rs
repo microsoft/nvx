@@ -53,10 +53,10 @@ pub(crate) const MOUNT_TAG: &str = "microvm";
 pub(crate) const AGGREGATE_MOUNT_TARGET: &str = "/run/nvx/shares";
 /// The most denied, allowed, and writable paths each that OpenVMM accepts for a share.
 #[cfg(feature = "cli")]
-pub(crate) const MAX_MOUNT_POLICY_PATHS: usize = 128;
+const MAX_MOUNT_POLICY_PATHS: usize = 128;
 /// The longest guest target, in UTF-8 bytes.
 #[cfg(feature = "cli")]
-pub(crate) const MAX_MOUNT_TARGET_BYTES: usize = 4096;
+const MAX_MOUNT_TARGET_BYTES: usize = 4096;
 
 /// The access mode of a share.
 #[cfg(feature = "cli")]
