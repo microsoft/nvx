@@ -176,6 +176,13 @@ absence of an OpenVMM pull request, and the signatures), what changed in
 OpenVMM and in NVX, the equivalence evidence, and the landing order of
 section 7. Ask whether it is Draft or Ready.
 
+A release completes no issue, so the
+[Issue link](../../../doc/ci.md#issue-link) check flags its pull request and
+creates the `no-issue` label when the repository lacks it. Then label the pull
+request `no-issue`, which exempts it, with
+`gh pr edit P --repo microsoft/nvx --add-label no-issue`. A pin that promotes
+an OpenVMM fix is not a release: it references the fix's issue instead.
+
 ## 7. Land The Release
 
 Once OpenVMM CI passed NVX's required jobs on the new head, and only when the
