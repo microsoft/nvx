@@ -9,11 +9,11 @@
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(18 226)">
 <title>nvx::guest</title>
 <polygon fill="white" stroke="transparent" points="-18,18 -18,-226 210,-226 210,18 -18,18"/>
-<!-- nvx::guest&#45;&gt;nvx::guest::activation -->
+<!-- nvx::guest&#45;&gt;nvx::guest::control -->
 <g id="edge1" class="edge">
-<title>nvx::guest&#45;&gt;nvx::guest::activation</title>
-<path fill="none" stroke="#a8b8ca" d="M53.97,-121.25C67.75,-138.57 90.95,-165.05 116,-182 116.26,-182.17 116.52,-182.35 116.78,-182.52"/>
-<polygon fill="#a8b8ca" stroke="#a8b8ca" points="115.81,-184.59 122.57,-185.91 118.11,-180.66 115.81,-184.59"/>
+<title>nvx::guest&#45;&gt;nvx::guest::control</title>
+<path fill="none" stroke="#a8b8ca" d="M53.97,-121.25C67.75,-138.57 90.95,-165.05 116,-182 116.83,-182.56 117.67,-183.1 118.54,-183.63"/>
+<polygon fill="#a8b8ca" stroke="#a8b8ca" points="117.69,-185.76 124.48,-186.89 119.88,-181.77 117.69,-185.76"/>
 </g>
 <!-- nvx::guest&#45;&gt;nvx::guest::mappings -->
 <g id="edge2" class="edge">
@@ -21,17 +21,17 @@
 <path fill="none" stroke="#a8b8ca" d="M65.7,-121.01C80.03,-130.48 98.62,-142.12 116,-151 116.65,-151.33 117.31,-151.66 117.97,-151.99"/>
 <polygon fill="#a8b8ca" stroke="#a8b8ca" points="117.24,-154.16 124.1,-154.86 119.17,-150.04 117.24,-154.16"/>
 </g>
-<!-- nvx::guest&#45;&gt;nvx::guest::nvxs -->
-<g id="edge3" class="edge">
-<title>nvx::guest&#45;&gt;nvx::guest::nvxs</title>
-<path fill="none" stroke="#a8b8ca" d="M80.17,-114.84C93.28,-118.47 107.74,-122.47 120.3,-125.95"/>
-<polygon fill="#a8b8ca" stroke="#a8b8ca" points="119.81,-128.17 126.68,-127.71 121.02,-123.79 119.81,-128.17"/>
-</g>
 <!-- nvx::guest&#45;&gt;nvx::guest::reseed -->
-<g id="edge4" class="edge">
+<g id="edge3" class="edge">
 <title>nvx::guest&#45;&gt;nvx::guest::reseed</title>
-<path fill="none" stroke="#a8b8ca" d="M80.17,-104C92.2,-104 105.36,-104 117.15,-104"/>
-<polygon fill="#a8b8ca" stroke="#a8b8ca" points="117.41,-106.28 123.91,-104 117.41,-101.73 117.41,-106.28"/>
+<path fill="none" stroke="#a8b8ca" d="M80.17,-114.84C92.31,-118.2 105.6,-121.88 117.48,-125.17"/>
+<polygon fill="#a8b8ca" stroke="#a8b8ca" points="117.04,-127.41 123.91,-126.95 118.25,-123.02 117.04,-127.41"/>
+</g>
+<!-- nvx::guest&#45;&gt;nvx::guest::restore -->
+<g id="edge4" class="edge">
+<title>nvx::guest&#45;&gt;nvx::guest::restore</title>
+<path fill="none" stroke="#a8b8ca" d="M80.17,-104C91.98,-104 104.9,-104 116.53,-104"/>
+<polygon fill="#a8b8ca" stroke="#a8b8ca" points="116.71,-106.28 123.21,-104 116.71,-101.73 116.71,-106.28"/>
 </g>
 <!-- nvx::guest&#45;&gt;nvx::guest::snapshot -->
 <g id="edge5" class="edge">
@@ -61,12 +61,12 @@
 </a>
 </g>
 </g>
-<!-- nvx::guest::activation -->
+<!-- nvx::guest::control -->
 <g id="node2" class="node">
-<title>nvx::guest::activation</title>
-<g id="a_node2"><a xlink:title="nvx::guest::activation (pub)">
-<path fill="#ccfbf1" stroke="#0d9488" stroke-width="1.2" d="M184.67,-208C184.67,-208 123.33,-208 123.33,-208 119.67,-208 116,-204.33 116,-200.67 116,-200.67 116,-193.33 116,-193.33 116,-189.67 119.67,-186 123.33,-186 123.33,-186 184.67,-186 184.67,-186 188.33,-186 192,-189.67 192,-193.33 192,-193.33 192,-200.67 192,-200.67 192,-204.33 188.33,-208 184.67,-208"/>
-<text text-anchor="middle" x="154" y="-193.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">activation</text>
+<title>nvx::guest::control</title>
+<g id="a_node2"><a xlink:title="nvx::guest::control (pub)">
+<path fill="#ccfbf1" stroke="#0d9488" stroke-width="1.2" d="M176.17,-208C176.17,-208 131.83,-208 131.83,-208 128.17,-208 124.5,-204.33 124.5,-200.67 124.5,-200.67 124.5,-193.33 124.5,-193.33 124.5,-189.67 128.17,-186 131.83,-186 131.83,-186 176.17,-186 176.17,-186 179.83,-186 183.5,-189.67 183.5,-193.33 183.5,-193.33 183.5,-200.67 183.5,-200.67 183.5,-204.33 179.83,-208 176.17,-208"/>
+<text text-anchor="middle" x="154" y="-193.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">control</text>
 </a>
 </g>
 </g>
@@ -79,21 +79,21 @@
 </a>
 </g>
 </g>
-<!-- nvx::guest::nvxs -->
+<!-- nvx::guest::reseed -->
 <g id="node4" class="node">
-<title>nvx::guest::nvxs</title>
-<g id="a_node4"><a xlink:title="nvx::guest::nvxs (pub)">
-<path fill="#ccfbf1" stroke="#0d9488" stroke-width="1.2" d="M173.67,-146C173.67,-146 134.33,-146 134.33,-146 130.67,-146 127,-142.33 127,-138.67 127,-138.67 127,-131.33 127,-131.33 127,-127.67 130.67,-124 134.33,-124 134.33,-124 173.67,-124 173.67,-124 177.33,-124 181,-127.67 181,-131.33 181,-131.33 181,-138.67 181,-138.67 181,-142.33 177.33,-146 173.67,-146"/>
-<text text-anchor="middle" x="154" y="-131.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">nvxs</text>
+<title>nvx::guest::reseed</title>
+<g id="a_node4"><a xlink:title="nvx::guest::reseed (pub)">
+<path fill="#ccfbf1" stroke="#0d9488" stroke-width="1.2" d="M176.67,-146C176.67,-146 131.33,-146 131.33,-146 127.67,-146 124,-142.33 124,-138.67 124,-138.67 124,-131.33 124,-131.33 124,-127.67 127.67,-124 131.33,-124 131.33,-124 176.67,-124 176.67,-124 180.33,-124 184,-127.67 184,-131.33 184,-131.33 184,-138.67 184,-138.67 184,-142.33 180.33,-146 176.67,-146"/>
+<text text-anchor="middle" x="154" y="-131.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">reseed</text>
 </a>
 </g>
 </g>
-<!-- nvx::guest::reseed -->
+<!-- nvx::guest::restore -->
 <g id="node5" class="node">
-<title>nvx::guest::reseed</title>
-<g id="a_node5"><a xlink:title="nvx::guest::reseed (pub)">
-<path fill="#ccfbf1" stroke="#0d9488" stroke-width="1.2" d="M176.67,-115C176.67,-115 131.33,-115 131.33,-115 127.67,-115 124,-111.33 124,-107.67 124,-107.67 124,-100.33 124,-100.33 124,-96.67 127.67,-93 131.33,-93 131.33,-93 176.67,-93 176.67,-93 180.33,-93 184,-96.67 184,-100.33 184,-100.33 184,-107.67 184,-107.67 184,-111.33 180.33,-115 176.67,-115"/>
-<text text-anchor="middle" x="154" y="-100.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">reseed</text>
+<title>nvx::guest::restore</title>
+<g id="a_node5"><a xlink:title="nvx::guest::restore (pub)">
+<path fill="#ccfbf1" stroke="#0d9488" stroke-width="1.2" d="M177.17,-115C177.17,-115 130.83,-115 130.83,-115 127.17,-115 123.5,-111.33 123.5,-107.67 123.5,-107.67 123.5,-100.33 123.5,-100.33 123.5,-96.67 127.17,-93 130.83,-93 130.83,-93 177.17,-93 177.17,-93 180.83,-93 184.5,-96.67 184.5,-100.33 184.5,-100.33 184.5,-107.67 184.5,-107.67 184.5,-111.33 180.83,-115 177.17,-115"/>
+<text text-anchor="middle" x="154" y="-100.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">restore</text>
 </a>
 </g>
 </g>

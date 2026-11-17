@@ -2,8 +2,8 @@
 
 # Module diagrams
 
-The public modules of the [`nvx` crate](../../nvx/README.md), the modules
-that each contains, and the dependencies between them, as
+The public modules of the [`nvx` crate](../../nvx/README.md), the modules that
+each contains, and the dependencies between them, as
 [cargo-modules](https://github.com/regexident/cargo-modules) 0.27.0 finds them
 and Graphviz 2.43.0 draws them. They cover the crate's public API, as its
 library builds with its `cli`, `testing`, and `guest` features, on Linux
@@ -47,29 +47,28 @@ to a module that it contains.
 
 ### `nvx::guest`
 
-`nvx::guest`, in [`nvx/src/guest/mod.rs`](../../nvx/src/guest/mod.rs),
-contains 7 modules.
+`nvx::guest`, in [`nvx/src/guest/mod.rs`](../../nvx/src/guest/mod.rs), contains
+7 modules.
 
 ![The modules that nvx::guest contains](nvx-guest.svg)
 
 ### `nvx::host`
 
-`nvx::host`, in [`nvx/src/host/mod.rs`](../../nvx/src/host/mod.rs),
-contains 11 modules.
+`nvx::host`, in [`nvx/src/host/mod.rs`](../../nvx/src/host/mod.rs), contains 9
+modules.
 
 ![The modules that nvx::host contains](nvx-host.svg)
 
 ### `nvx::net`
 
-`nvx::net`, in [`nvx/src/net/mod.rs`](../../nvx/src/net/mod.rs), contains
-1 module.
+`nvx::net`, in [`nvx/src/net/mod.rs`](../../nvx/src/net/mod.rs), contains 1
+module.
 
 ![The modules that nvx::net contains](nvx-net.svg)
 
 ### `nvx::protocol`
 
-`nvx::protocol`, in
-[`nvx/src/protocol/mod.rs`](../../nvx/src/protocol/mod.rs), contains 9
-modules.
+`nvx::protocol`, in [`nvx/src/protocol/mod.rs`](../../nvx/src/protocol/mod.rs),
+contains 8 modules.
 
 ![The modules that nvx::protocol contains](nvx-protocol.svg)
