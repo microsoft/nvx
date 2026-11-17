@@ -36,7 +36,7 @@ use super::{MAX_MEMORY_MIB, path_string, sandbox_network};
 use crate::ErrorCode;
 use crate::host::cli::json::{Object, pretty_serde, read_object};
 use crate::host::cli::network::{NativeRules, NetworkOptions};
-use crate::host::cli::output::LINE_SEPARATOR;
+use crate::host::cli::output;
 use crate::host::cli::snapshots::Name as SnapshotName;
 use crate::host::cli::{Exit, Result, io_error, io_message};
 use crate::host::config::{
@@ -71,7 +71,7 @@ const DESCRIPTION: &str = "sandbox configuration";
 /// host for each `\n`, in a temporary file of mode 0600 that then replaces `path`.
 pub(crate) fn write_json(path: &Path, text: &str) -> Result {
     let temporary = temporary_path(path)?;
-    let text = format!("{text}\n").replace('\n', LINE_SEPARATOR);
+    let text = output::line(text);
     let written = (|| -> Result {
         let failed = |error: std::io::Error| io_error(ErrorCode::Io, &error, &temporary);
         let mut options = OpenOptions::new();
