@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -131,6 +132,15 @@ class Opener:
 
 def serve(opener: Opener) -> contextlib.AbstractContextManager[object]:
     return patch.object(urllib.request, "build_opener", return_value=opener)
+
+
+# The fakes recognize Key Vault requests by their whole host, never by a
+# substring of the URL, which a lookalike host can hold in its path or query.
+KEY_VAULT_HOST = "nvx-ci-example-vault.vault.azure.net"
+
+
+def request_host(request: urllib.request.Request) -> str | None:
+    return urllib.parse.urlsplit(request.full_url).hostname
 
 
 class CommonCommandTests(unittest.TestCase):
@@ -490,7 +500,7 @@ class LinuxRegistrationTests(unittest.TestCase):
             if "/metadata/identity/" in request.full_url:
                 self.assertEqual(request.get_header("Metadata"), "true")
                 return {"access_token": "test-managed-identity"}
-            if ".vault.azure.net/" in request.full_url:
+            if request_host(request) == KEY_VAULT_HOST:
                 self.assertEqual(
                     request.full_url,
                     "https://nvx-ci-example-vault.vault.azure.net/secrets/"
@@ -534,7 +544,7 @@ class LinuxRegistrationTests(unittest.TestCase):
                     if missing == "identity-multiline"
                     else "identity"
                 }
-            if ".vault.azure.net/" in request.full_url:
+            if request_host(request) == KEY_VAULT_HOST:
                 if missing == "secret":
                     return {"value": ""}
                 return {
@@ -583,7 +593,7 @@ class LinuxRegistrationTests(unittest.TestCase):
             events.append("credential")
             if "/metadata/identity/" in request.full_url:
                 return {"access_token": "identity"}
-            if ".vault.azure.net/" in request.full_url:
+            if request_host(request) == KEY_VAULT_HOST:
                 return {"value": "credential"}
             return {"token": "registration"}
 
