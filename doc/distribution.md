@@ -169,9 +169,9 @@ release started `0.2.0-alpha.1`. Only `nvx`'s version changes in
 `nvx/Cargo.lock`.
 
 When CI cannot publish, as when the newest version on crates.io records no
-commit that `dev` holds, a pull request declares the next version as above,
-and once it merges, a crate owner publishes that version from a fresh clone of
-`dev`, which needs no submodule:
+commit that `dev` holds, or a directory that its commit lacks, a pull request
+declares the next version as above, and once it merges, a crate owner
+publishes that version from a fresh clone of `dev`, which needs no submodule:
 
 ```bash
 git clone --branch dev https://github.com/microsoft/nvx.git nvx-crate

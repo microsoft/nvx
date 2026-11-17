@@ -2231,11 +2231,16 @@ release instead (see
 the only crate that NVX publishes: NVX's own programs, such as the `nvx`
 CLI, nvx-init, and the other guest binaries, are binaries of that package, not
 crates of their own. A run publishes a new version only when `nvx/`
-changed since the commit from which the newest version on crates.io was
-packed, which that version's `.cargo_vcs_info.json` records. A night without
-changes to the crate publishes nothing, and neither does a run of a commit
-that the newest version's commit already contains, such as a rerun of an
-older nightly run. Such a run skips `Publish nvx crate`.
+differs from the directory from which the newest version on crates.io was
+packed, in the commit from which it was packed, both of which that version's
+`.cargo_vcs_info.json` records. That directory follows the crate when it
+moves: `0.1.0-alpha.20` was packed from `nvx-rs/`, before the crate moved to
+`nvx/`, so the first run after the move compares `nvx/` with the `nvx-rs/` of
+that version's commit. `Package nvx crate` fails when the commit holds no such
+directory. A night without changes to the crate publishes nothing, and
+neither does a run of a commit that the newest version's commit already
+contains, such as a rerun of an older nightly run. Such a run skips
+`Publish nvx crate`.
 
 The versions are pre-releases of the `0.2.0-alpha` series, such as
 `0.2.0-alpha.2`, since the breaking release `0.2.0-alpha.1` that the
