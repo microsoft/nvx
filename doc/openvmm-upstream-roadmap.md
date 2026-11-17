@@ -8,25 +8,25 @@
   `feature/microvm/release/v6.1` rebase had moved it; see [Upstream status](#upstream-status).
 - Mapped fork tip: `227074dc1e6977649585479daf25515f90acaf9d`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126 and the PR18 fixup at position 302.
-- NVX's pinned OpenVMM revision: `c9755a905618feeae5072d74c206a65736406aab`, position 306, the
-  head of microsoft/openvmm#5134, whose commits, positions 303-306, follow position 302,
-  `2807bafcf`, the head of `feature/microvm/dev`, which microsoft/openvmm#5132 merged after position
-  301, `c7122cd20`, which microsoft/openvmm#5131 merged after position 300, `026d35da6`,
-  where microsoft/openvmm#5129 put positions 297-300 after position 296, `1b25c5bbc`, the head of
-  the `feature/microvm/release/v7.0` branch of microsoft/openvmm. The
-  v7.0 reorganization moved the 315 commits of `feature/microvm/dev` at NVX's previous pin,
-  `fe61f9cbf`, onto `e6b458cc0`: the 269 of `feature/microvm/release/v6.1` and the 46 that
-  microsoft/openvmm#5077 to microsoft/openvmm#5126 added after it. Upstream had landed none of
-  their changes, so it dropped none. It folded the 19 fixups into the commits that they fix: PR09's
-  at v6.1 positions 234-236, PR13's at 240, PR18's at 241, PR20's at 242, PR19's at 243, the test
-  fixes at 254 and 259, the v6.1 rebase's at 262-269, and PR10's at 271 and 273. It moved v6.1
-  positions 261 and 270, which PR10's RTC fixups need, into PR10 as positions 016 and 017.
-  Positions 001-015 keep their positions, and v6.1 positions 016-233 are positions 018-235,
-  237-239 are 236-238, 244-253 are 239-248, 255-258 are 249-252, 260 is 253, 272 is 254, and
-  274-315 are 255-296; see [The v7.0 reorganization](#the-v70-reorganization). The pin is 180
-  commits past the mapped tip on the same first-parent chain. Positions 127-301 and 303-306 are not
-  yet assigned to PRs, and position 302 is a PR18 fixup; see
-  [Commits after the mapped tip](#commits-after-the-mapped-tip).
+- NVX's pinned OpenVMM revision: `8bbe042b1322023e95cce03ef6d4e1ae8e18a6be`, position 312, the head
+  of microsoft/openvmm#5136, whose commits, positions 307-312, follow position 306, `c9755a905`, the
+  head of `feature/microvm/dev`, where microsoft/openvmm#5134 put positions 303-306 after position
+  302, `2807bafcf`, which microsoft/openvmm#5132 merged after position 301, `c7122cd20`, which
+  microsoft/openvmm#5131 merged after position 300, `026d35da6`, where microsoft/openvmm#5129 put
+  positions 297-300 after position 296, `1b25c5bbc`, the head of the `feature/microvm/release/v7.0`
+  branch of microsoft/openvmm. The v7.0 reorganization moved the 315 commits of
+  `feature/microvm/dev` at NVX's previous pin, `fe61f9cbf`, onto `e6b458cc0`: the 269 of
+  `feature/microvm/release/v6.1` and the 46 that microsoft/openvmm#5077 to microsoft/openvmm#5126
+  added after it. Upstream had landed none of their changes, so it dropped none. It folded the 19
+  fixups into the commits that they fix: PR09's at v6.1 positions 234-236, PR13's at 240, PR18's at
+  241, PR20's at 242, PR19's at 243, the test fixes at 254 and 259, the v6.1 rebase's at 262-269,
+  and PR10's at 271 and 273. It moved v6.1 positions 261 and 270, which PR10's RTC fixups need, into
+  PR10 as positions 016 and 017. Positions 001-015 keep their positions, and v6.1 positions 016-233
+  are positions 018-235, 237-239 are 236-238, 244-253 are 239-248, 255-258 are 249-252, 260 is 253,
+  272 is 254, and 274-315 are 255-296; see [The v7.0 reorganization](#the-v70-reorganization). The
+  pin is 186 commits past the mapped tip on the same first-parent chain. Positions 127-301 and
+  303-312 are not yet assigned to PRs, and position 302 is a PR18 fixup; see [Commits after the
+  mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `2c25662b2af038869f75e86dae25f8f5d21bc23b` (2026-11-16), three commits past the
   fork base; see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -276,7 +276,8 @@ combining it with the commit that needs it. microsoft/openvmm#4619, microsoft/op
 microsoft/openvmm#4623, which proposed the fallible unit start, device start, and VM resume of v3.0
 positions 026-028, were closed in favor of microsoft/nvx#1232: position 011 now only rolls back a
 partial start, v3.0 position 027 is retired, and position 012's resume stays fallible; see [The v4.0
-reorganization](#the-v40-reorganization). PR10-PR13 and PR15-PR27 have no upstream pull requests
+reorganization](#the-v40-reorganization) and [The device restore
+contract](#the-device-restore-contract). PR10-PR13 and PR15-PR27 have no upstream pull requests
 yet.
 
 On 2026-11-04, microsoft/nvx#1260 withdrew v4.0 position 021 from PR09, since the deadline of the
@@ -351,6 +352,74 @@ v5.0 reorganization adapted positions 002, 005, 010, 011, and 014 to upstream ma
 position 014 the removal of its input gate's deadline, which microsoft/openvmm#4626 already lacks;
 see [The v5.0 reorganization](#the-v50-reorganization). The v6.1 rebase adapted position 006 to
 microsoft/openvmm#4591; see [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase).
+
+### The device restore contract
+
+microsoft/nvx#1232 asked to agree the contract between a device's restore, its preparation, and its
+activation with the authors of microsoft/openvmm#4713 and microsoft/openvmm#4729, drafts since
+October 2026, and to record the final architecture here. NVX settled the contract itself, reusing
+their designs where they apply. The chain implements it as of position 312, without a new element,
+field, or version of any saved state:
+
+- **Restore** runs while the VM is stopped, and is awaited, through upstream's chipset and
+  device-worker restore, microsoft/openvmm#4799, after PR09's position 013 checks the exact unit
+  inventory. Each device validates its saved state, applies it, and prepares the host resources that
+  the state refers to, as virtio-fs reopens the files that the guest held open, so the contract has
+  no preparation step apart from the restore. So invalid state, a missing host resource, or a failed
+  device worker fails the restore itself, before it reports readiness, even for a VM that stays
+  paused. A virtio device's restore has no effect that the guest sees: it starts no queue, so it
+  admits no host input and sends no queue notification, and since position 309 it drives no
+  interrupt line. Position 308 programs each restored MSI-X vector without delivering, so that a
+  vector delivers to its message after the start without the guest programming it again.
+- **Start** runs what a restore prepared: each device starts its queues from their restored
+  progress, after a legacy virtio-mmio or PCI INTx line goes to its restored level, and the VM
+  confirms every device's start, through position 213, before any vCPU runs. The steps that can
+  still fail are those that need a live host backend or a running queue, and each fails the start
+  instead of being logged and dropped: virtio-net's endpoint creates its queues (position 207), each
+  queue builds its wait and its ring, virtio-console checks its restored partial transmission
+  against the queue that it starts, and a remote device worker answers the confirmation, which fails
+  if the worker has ended (position 311). A failed start stops the devices that started again and
+  keeps the state that the stop records: the progress of every queue (position 212), which includes
+  the requests that a queue that did start completed before another failed, since the confirmation
+  keeps the vCPUs from running but does not undo a device's I/O, and each device's saved private
+  state in step with it (positions 307 and 312). It publishes no restore readiness and runs no vCPU,
+  so that a later resume retries the start from that state, and a save, where the VM allows one,
+  saves it.
+- **Stop** releases each queue with its exact progress, which the transport keeps, so that an
+  ordinary pause and resume keeps queue progress without a restore, as position 208 tests on both
+  transports. A device keeps its host resources across a stop, and releases them as it is removed or
+  the VM ends, as after a failed restore; position 208 also tests the removal of a restored device
+  before its first start.
+
+Each activation path follows this contract. The first run of a restored VM, paused or not, an
+ordinary resume, the resume after a capture, and the start of the units again after a failed save
+all go through the confirmed start; a unit that a hot-add adds to a running VM starts through
+`start_stopped_units`, which returns the failure; a cold boot starts a device's queues when the
+guest sets `DRIVER_OK`, and a queue that cannot start fails `DRIVER_OK`, which resets the device's
+status, since the guest already runs; and a microVM refuses a worker restart (PR15's position 058).
+Upstream's remote device proxy still panics when its worker ends during a stop, a reset, a poll, or
+a teardown; only the TPM uses a remote device worker, and no microVM has one, so the chain leaves
+that to upstream.
+
+The chain departs from two upstream drafts, where they would not meet microsoft/nvx#1232 or would
+change saved state, and adopts each at the rebase after it lands:
+
+- microsoft/openvmm#4713 reconstructs virtio-net's queues at restore, in a device task parked under
+  `TaskControl`, and keeps them across an ordinary pause with a retained pause, separate from the
+  stop that releases them. It still creates the host backend's queues at activation, so the chain
+  instead validates queue progress at restore and builds the queues at start, where a failure fails
+  the confirmed start. The chain has no retained pause: microVM NICs, which have a static identity,
+  keep their queue progress through the stop (PR13's position 046). The retained pause of other
+  NICs, and the independent ring enable of vhost-user of microsoft/openvmm#4729, stay upstream's.
+- microsoft/openvmm#4855 replays the level of every line set after its targets start. The chain
+  holds only the virtio transports' level lines until their device starts (position 309).
+
+RestoreVM follows the contract too: microsoft/openvmm#4553's RestoreVM, which the v6.1 rebase took,
+restores a standard VM, whose resume callers handle the fallible resume of PR09's position 012, and
+refuses a microVM, which restores through CreateVM. microsoft/openvmm#4676, an open upstream pull
+request that adds an eager-copy RestoreVM, changes no device contract, so the chain takes it at the
+rebase after it lands. No restore-at-start plumbing remains to remove: the v4.0 reorganization
+stopped staging device state for activation; see [The v4.0 reorganization](#the-v40-reorganization).
 
 ### The v7.0 reorganization
 
@@ -1346,7 +1415,12 @@ e6b458cc0
   -> IA32_BNDCFGS saved and restored where the guest's CPUID has MPX [304]
   -> AMD's VM_CR, VM_HSAVE_PA, and OSVW MSRs saved and restored on KVM [305]
   -> MSHV and WHP save refused for a VP that delivers a software interrupt [306]
-  -> c9755a905 (NVX pin)
+  -> restored NIC's queue lifecycle kept through a failed start [307]
+  -> restored MSI-X vectors programmed without delivering [308]
+  -> restored virtio interrupt lines held until the device starts [309]
+  -> restore and start failure tests of virtio-fs and remote devices [310-311]
+  -> the queue progress that a failed start keeps documented [312]
+  -> 8bbe042b1 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1373,19 +1447,19 @@ NIC an IPv6 identity.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 180 later commits, position
+The NVX pin extends the chain past position 126 without merges. Of its 186 later commits, position
 302 is a PR18 fixup, and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 are the ABI restart
 of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 followed the v5.0
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
-v6.0 reorganization, positions 254-296 followed the v6.1 rebase, and positions 297-306 followed the
+v6.0 reorganization, positions 254-296 followed the v6.1 rebase, and positions 297-312 followed the
 v7.0 reorganization, so they combine none, apart from position 215, which combines v5.1 positions
 222 and 223, and the commits that the v7.0 reorganization folded into them. Each commit's v6.1
 position is its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before
 it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on,
-and positions 297-306 have no earlier position; see
+and positions 297-312 have no earlier position; see
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.1 position counts in
@@ -1577,13 +1651,20 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 304 | `3587c0111` | - | - | - | - | - | - | virt: save and restore a guest's IA32_BNDCFGS (microsoft/openvmm#5134) |
 | 305 | `3c40841df` | - | - | - | - | - | - | virt, virt_kvm: save and restore AMD's VM_CR, VM_HSAVE_PA, and OSVW (microsoft/openvmm#5134) |
 | 306 | `c9755a905` | - | - | - | - | - | - | virt_mshv, virt_whp: refuse to save a pending software interrupt (microsoft/openvmm#5134) |
+| 307 | `39f3c9f91` | - | - | - | - | - | - | virtio_net: keep the saved queue lifecycle through a failed start (microsoft/openvmm#5136) |
+| 308 | `ea2169dc7` | - | - | - | - | - | - | pci_core: program the delivery of restored MSI-X vectors (microsoft/openvmm#5136) |
+| 309 | `f8c63a6c9` | - | - | - | - | - | - | virtio: hold restored interrupt lines until the device starts (microsoft/openvmm#5136) |
+| 310 | `3a6a29318` | - | - | - | - | - | - | virtiofs: test a transport restore of a file gone from the host (microsoft/openvmm#5136) |
+| 311 | `5dac44c33` | - | - | - | - | - | - | chipset_device_worker: test requests to an ended device worker (microsoft/openvmm#5136) |
+| 312 | `8bbe042b1` | - | - | - | - | - | - | vmcore, virtio: say that a failed start keeps its queues' progress (microsoft/openvmm#5136) |
 
-The remarks that say whether commits apply to upstream main record what was found on upstream
-main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
-that it regrouped, and later fork bases, up to `7d90c4104` for v6.1 positions 270-315, for later
-commits, and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306. They name the
-positions that the commits have now, but the v7.0 reorganization did not check them again on
-`e6b458cc0`, nor did the v6.1 rebase check the earlier ones on `7d90c4104`.
+The remarks that say whether commits apply to upstream main record what was found on upstream main
+when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
+regrouped, and later fork bases, up to `7d90c4104` for v6.1 positions 270-315, for later commits,
+and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, and `c4419be15`, upstream main
+on 2026-11-17, for positions 307-312. They name the positions that the commits have now, but the
+v7.0 reorganization did not check them again on `e6b458cc0`, nor did the v6.1 rebase check the
+earlier ones on `7d90c4104`.
 
 Some of these commits change mapped work rather than add to it. Position 142 removes the legacy
 microVM clock paths, changing files that PR10 and PR17 also change, and makes manifest version 6 the
@@ -3374,6 +3455,151 @@ positions 287 and 291 add, and its tests follow one that position 291 adds. Its 
 `virt_mshv` and `virt_whp` apply without conflicts, but call the conversion that it adds to `vp.rs`.
 So it follows positions 071, 285, 287, 289, 291, 292, and 301, and the positions that they follow,
 upstream.
+
+Position 307 keeps the queue-pair lifecycle that a virtio-net NIC built for save and restore, as
+each microVM NIC is, saves through a failed start of its queues. Since PR13's position 046, such a
+NIC saves how many of its queues its last stop or restore stopped, and a restore checks that count
+against the queue progress that the transport saves; but `prepare_queue_start` cleared the count as
+each pair started, and a pair whose second queue failed to build stayed half open, so that the stop
+that undid the start recorded a single queue. After a restored or paused NIC's start failed, as when
+its endpoint could not create its queues, which position 207 makes fail the start, a save therefore
+wrote a snapshot whose restore failed with "virtio-net queue lifecycle does not match transport
+state", although a device whose start fails is to keep the private state that it saves in step with
+the queue progress that the transport keeps. No microVM flow saves between a failed start and the
+next start today, since a microVM refuses a host save and its guest cannot request a capture while
+the VM is stopped, so the commit fixes the contract rather than a failure that NVX met.
+`prepare_queue_start` now only checks the saved state, the next stop of a started pair records the
+count again, and the start drops a pair whose second queue does not build before it fails. No
+element, field, or version of the saved state changes. The commit adds a test that fails a restored
+NIC's start, once in the endpoint's queue creation and once in its TX queue's, and requires that the
+transport's stop of the started queue gets no progress, that the restore's validation accepts a save
+of the stopped NIC with the restored queue progress, which it refused, and that the next start
+resumes the queues where the restore left them; it fails without either half of the change. It also
+says in the doc comment of `VirtioDevice::start_queue`, which positions 209 and 213 wrote, that a
+device whose start fails keeps the private state that it saves, and in the Guide's snapshots page
+that a save of the paused VM saves the restored state. It changes files that PR11's position 030,
+PR12's positions 033-035, PR13's positions 037, 038, 041, and 046, PR16's position 063, PR17's
+positions 071 and 074, PR18's positions 077, 079, 084, and 085, PR19's positions 087 and 088, PR20's
+positions 089, 090, 092, and 094, PR21's position 100, PR23's positions 108 and 113, PR24's position
+118, and 67 positions that no PR has yet also change, and it changes eight lines that a mapped PR
+adds: it rewrites seven lines of `prepare_queue_start` in `saved_state.rs`, and the line of the test
+harness that builds its NIC for save and restore, which PR13's position 046 adds. It also rewrites
+12 lines of the activation tests that position 207 adds, one line of the Guide's snapshots page that
+position 213 adds, and 11 lines of `lib.rs` that upstream main has and no commit of the chain
+changes, and adds the rest. Replaying it on upstream main conflicts in five of its six files:
+upstream main lacks `saved_state.rs` and the test harness, which position 046 adds, and the
+activation tests of position 207, and its sentences extend the doc comment that positions 209 and
+213 write and the Guide's paragraph that position 213 writes; its change to `lib.rs` applies without
+conflicts. So it follows PR13's position 046 and positions 207, 209, and 213 upstream. The failed
+start that it fixes is the one that positions 212 and 213 define, which keeps a restored device's
+queue progress and state for a later start or save, and which position 207 makes an endpoint's
+failure cause. No PR maps those positions yet, so it is not a fixup of a PR yet, and folds into
+positions 212 and 213 when they go into one.
+
+Position 308 has `pci_core`'s MSI-X capability program each vector's delivery as it restores it,
+where it restored the vector table without enabling the vectors' MSI interrupts, so that a restored
+PCI device delivered none of its MSI-X interrupts until the guest wrote its vector table again. A
+microVM has no PCI device, so only OpenVMM's other VMs met this. A restore now enables the interrupt
+of each enabled and unmasked vector at the address and data that it restores, and disables the
+others, without delivering anything, and a save records the pending bit that the guest's read of the
+pending bits would return, counting the interrupt that a masked vector holds on its route's event or
+in its MSI interrupt, without taking that interrupt, so that the saved state keeps it for the
+vector's unmask and the save changes nothing that the guest sees. No element, field, or version of
+the saved state changes. The commit adds two tests of the capability, one that saves a vector that
+is unmasked and one that is masked with an interrupt pending, restores them into another capability,
+and requires that the restore delivers nothing, that the unmasked vector delivers to its message,
+and that the masked one delivers as the guest unmasks it, and one that requires that a save leaves
+the interrupts that masked vectors hold where they are, so that the saved capability delivers a
+route's interrupt once, on the route, although another arrived after the save, and a virtio test, in
+the new `restore_interrupt.rs`, that a restored PCI device delivers its queue's interrupt to the
+vector that the guest programmed before the save; they fail without the change. It changes
+`msix.rs`, which no commit of the chain changes, and the virtio tests' `tests.rs`, which declares
+the new module and which PR13's position 037, PR16's position 063, and positions 177, 212, 213, and
+233 also change, and it changes no line that a mapped PR adds: it rewrites one line of `msix.rs`
+that upstream main has, and adds the rest. Replaying it on upstream main conflicts only in
+`tests.rs`, among the modules that the chain declares there; its change to `pci_core` applies
+without conflicts, and `cargo nextest run -p pci_core` passes with it on upstream main, but its
+virtio test confirms the start that position 213 adds. So its `pci_core` change can go upstream on
+its own, and its virtio test follows position 213 upstream.
+
+Position 309 has the virtio transports hold their interrupt line from a restore until the device
+starts, where the restore drove it while the interrupt controller that it reaches could still be
+restoring: the virtio-mmio transport drove a legacy line to the restored status and a shared-status
+line low, and the PCI transport drove its INTx line to the restored status. A line set drops a level
+that reaches an interrupt controller while that controller restores, and the IOAPIC restores the
+line levels that it saved, so a level that a transport drove during the restore could be lost, or
+could change the level that a controller restored. A restore now restores the status without driving
+the line, a change of the status during the hold, such as a configuration change, drives none
+either, and the device's start drives a legacy virtio-mmio line or an INTx line to the restored
+status before it starts the queues; a reset ends the hold. A shared-status line, which every microVM
+slot uses, only pulses as the device raises the status, and the pulse for the status that the
+restored word reports went out before the save, so neither the restore nor the start drives it. A
+restore sends no MSI-X message either, since the queues' messages begin with the queues. No element,
+field, or version of the saved state changes. The commit adds unit tests of the virtio-mmio
+interrupt state, which require that a restore drives no legacy line until the start releases it,
+once, and drives no shared-status line, and tests in position 308's `restore_interrupt.rs` that a
+restored virtio-mmio device and a restored PCI device with INTx drive their line only as they start;
+they fail without the change. It also says in the Guide's snapshots page that no virtio device
+drives its interrupt line during a restore. It changes files that PR11's position 030, PR12's
+positions 033-035, PR13's positions 037, 038, 041, and 046, PR16's positions 061 and 063, PR17's
+positions 071 and 074, PR18's positions 077, 079, 084, and 085, PR19's positions 087 and 088, PR20's
+positions 089, 090, 092, and 094, PR23's positions 108 and 113, PR24's position 118, positions 307
+and 308, and 68 other positions that no PR has yet also change, and it changes four lines that a
+mapped PR adds: it rewrites one line of `mmio.rs` and three lines of the virtio-mmio interrupt
+module that PR16's position 063 adds, into which position 063 moved upstream's drive of the line at
+restore. It fixes no defect of position 063, whose restore drove the line as upstream main's
+transports do, so it is not a fixup of PR16. It also rewrites one line of the Guide's snapshots page
+that position 209 adds, five that position 213 adds, and one that position 307 adds, five lines of
+`restore_interrupt.rs` that position 308 adds, and two lines of `mmio.rs` and six of `pci.rs` that
+upstream main has, and adds the rest. Replaying it on upstream main conflicts in three of its seven
+files: upstream main lacks the virtio-mmio interrupt module, which position 063 adds, and position
+308's test module, and its sentences of the Guide sit in the paragraph that positions 213 and 307
+write. Its changes to `mmio.rs` and to the PCI transport, with the PCI transport's new interrupt
+module, apply without conflicts, and with its PCI change alone, `cargo check -p virtio
+--all-targets` and `cargo nextest run -p virtio` pass on upstream main. So its virtio-mmio change
+follows PR16's position 063 upstream, and its PCI change can go upstream on its own, with a test
+outside position 308's module.
+
+Position 310 tests that the awaited restore of a microVM virtio-fs device's transport reopens the
+host files that the guest held open: a virtio-mmio transport over a device that holds a file open
+saves, the file is removed from the host, and the restore of another transport over the share fails
+because the file cannot be reopened, before any queue starts. The filesystem's own tests restore
+names that are gone, but none went through the transport's restore. The commit adds only the test,
+to the microVM virtio-fs device module, which PR18's positions 081, 083, and 085, PR22's position
+102, and positions 158-160, 164, and 175 also change, and changes no line. Replaying it on upstream
+main conflicts in that module, which upstream main lacks, since PR18's position 081 adds it. So it
+follows PR18's position 081, and the positions that it follows, upstream.
+
+Position 311 tests that a remote chipset device whose worker has ended does not start: the
+confirmation of its start, and the closing and the opening of its input gate, fail instead of
+succeeding without the device. The commit adds only the test, to the tests of the device proxy,
+which PR09's position 014 and positions 213 and 233 also change, and changes no line. Replaying it
+on upstream main conflicts in the proxy, whose tests position 213 extends; the test also needs the
+start confirmation of position 213 and the input gate of position 014. So it follows PR09's position
+014 and positions 213 and 233, and the positions that they follow, upstream.
+
+Position 312 corrects what positions 213 and 307 say that a failed start keeps.
+`ChangeDeviceState::confirm_start`, which position 213 adds, said that a device whose start fails
+keeps the state that it had before the start, so that stopping it leaves it as it was; position 307
+said in the doc comment of `VirtioDevice::start_queue` that such a device keeps the private state
+that it saves as it was before the start, and in the Guide's snapshots page that a save of the
+paused VM saves the restored state that, as position 213 wrote there, the devices keep. A virtio
+device whose second queue fails to start can have started its first one, which completes the
+requests that were pending in it before the VM stops the device again, and the stop keeps that
+queue's progress, as position 213's tests of a failed confirmation require. So a failed start leaves
+the state that its stop records, which a save saves: the confirmation keeps the vCPUs from running,
+but does not undo a device's I/O. The commit says so in the three places and changes no code. It
+changes files that PR09's position 014, PR10's position 015, PR11's position 030, PR12's positions
+033-035, PR13's positions 037, 038, 041, and 046, PR16's position 063, PR17's positions 071 and 074,
+PR18's positions 077, 079, 084, and 085, PR19's positions 087 and 088, PR20's positions 089, 090,
+092, and 094, PR23's positions 108 and 113, PR24's position 118, positions 307 and 309, and 67 other
+positions that no PR has yet also change, and it changes no line that a mapped PR adds: it rewrites
+two lines of `device_state.rs` that position 213 adds, three of `device.rs` that position 307 adds,
+and three of the Guide's snapshots page that position 309 adds. Replaying it on upstream main
+conflicts in all three of its files, since upstream main lacks the start confirmation of position
+213 and the sentences of positions 307 and 309 that it rewrites. It corrects positions 213, 307, and
+309, which no PR maps yet, so it is not a fixup of a PR yet, and folds into them when they go into
+one.
 
 ## PR summary
 
