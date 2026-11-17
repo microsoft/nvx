@@ -17,7 +17,7 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "cli")]
 use std::time::Duration;
@@ -62,6 +62,10 @@ const OPENVMM: &str = "openvmm";
 const CAPTURE_IMAGE: &str = "capture-image.raw";
 /// The dormant scratch that a capture VM attaches.
 const CAPTURE_SCRATCH: &str = "capture-scratch.raw";
+/// The activation record that a restore hands its guest in its restore packet.
+const ACTIVATION_RECORD: &str = "activation-record.bin";
+/// OpenVMM's option that reads a restore's activation record.
+const RESTORE_ACTIVATION_RECORD: &str = "--restore-activation-record";
 
 /// The credential that the host presents at a VM's control endpoint.
 ///
@@ -321,6 +325,8 @@ pub struct VmmCommand {
 pub struct Prepared {
     /// The executable checked during creation.
     program: PathBuf,
+    /// The private VM directory of the launch.
+    dir: VmDir,
     /// The directory in which the child starts, as [`vmm_working_dir`] chooses it.
     working_dir: PathBuf,
     /// Whether the child leaves the caller's Windows job.
@@ -442,6 +448,112 @@ impl Prepared {
         })
     }
 
+    /// Supplies the activation record of a restore's guest: `record`, the bytes that OpenVMM hands
+    /// the restored guest at the end of its restore packet, sealed before the first restored vCPU
+    /// runs, and passes through without interpreting them.
+    ///
+    /// Creates `activation-record.bin` in the VM directory, private to the current user whatever
+    /// the umask, with `record`, and adds `--restore-activation-record` with its path to the
+    /// arguments, which OpenVMM reads before any vCPU runs. OpenVMM takes a record only for a
+    /// platform snapshot, gates the host's input until the guest acknowledges the restore, and
+    /// refuses the restore otherwise. The record carries no secret: it reaches the guest in the
+    /// clear, through the byte channel, whose packet the guest's repair reads, and consumes,
+    /// before anything else runs. The caller frames the record: a guest-restore record that
+    /// [`guest_restore_record`](Self::guest_restore_record) built holds the settings of a layered
+    /// root's restore, which NVX's own launches precede with the workload's identity.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a cold launch, a
+    /// second record, a record of no byte or of more than
+    /// [`MAX_RECORD_BYTES`](crate::guest_restore::MAX_RECORD_BYTES), or arguments that no longer
+    /// fit the command line, and with [`ErrorKind::Io`](crate::ErrorKind::Io) when the file
+    /// cannot be created, as when it exists, made private, or written, after which it removes
+    /// what it created.
+    pub fn supply_activation_record(&mut self, record: &[u8]) -> Result<()> {
+        if self.ready.is_none() {
+            return Err(Error::unsupported(
+                "only a restore takes an activation record",
+            ));
+        }
+        if self
+            .arguments
+            .iter()
+            .any(|argument| argument == RESTORE_ACTIVATION_RECORD)
+        {
+            return Err(Error::unsupported(
+                "the restore has an activation record already",
+            ));
+        }
+        if record.is_empty() || record.len() > crate::guest_restore::MAX_RECORD_BYTES {
+            return Err(Error::unsupported(format!(
+                "an activation record holds 1 to {} bytes, not {}",
+                crate::guest_restore::MAX_RECORD_BYTES,
+                record.len()
+            )));
+        }
+        let path = self.dir.path().join(ACTIVATION_RECORD);
+        let mut arguments = self.arguments.clone();
+        arguments.extend([
+            RESTORE_ACTIVATION_RECORD.into(),
+            path.clone().into_os_string(),
+        ]);
+        check_argument_nuls(&arguments)?;
+        fit_process_command_line(self.program.as_os_str(), &arguments, 0)?;
+        let mut file = platform::private_options()
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| {
+                Error::io(format!(
+                    "cannot create the activation record {}",
+                    path.display()
+                ))
+                .with_source(error)
+            })?;
+        let written = (|| {
+            // The umask may have cleared even the owner's permission to read the record, which
+            // OpenVMM then could not open.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(fs::Permissions::from_mode(platform::PRIVATE_FILE_MODE))
+                    .map_err(|error| {
+                        Error::io(format!(
+                            "cannot make the activation record {} private",
+                            path.display()
+                        ))
+                        .with_source(error)
+                    })?;
+            }
+            if let Some(problem) = platform::private_file_problem(&file).map_err(|error| {
+                Error::io(format!(
+                    "cannot check the activation record {}",
+                    path.display()
+                ))
+                .with_source(error)
+            })? {
+                return Err(Error::io(format!(
+                    "the activation record {} {problem}",
+                    path.display()
+                )));
+            }
+            file.write_all(record)
+                .and_then(|()| file.sync_all())
+                .map_err(|error| {
+                    Error::io(format!(
+                        "cannot write the activation record {}",
+                        path.display()
+                    ))
+                    .with_source(error)
+                })
+        })();
+        if let Err(error) = written {
+            drop(file);
+            let _ = fs::remove_file(&path);
+            return Err(error);
+        }
+        self.arguments = arguments;
+        Ok(())
+    }
+
     /// Keeps this CLI launch in its caller's session, process group, and console.
     #[cfg(feature = "cli")]
     pub(crate) fn for_foreground(mut self) -> Self {
@@ -490,7 +602,8 @@ impl Prepared {
     /// putting it in the child's inheritance allowlist. Starts no process or new listener. The
     /// caller follows [`VmmCommand`]'s launch contract and may retain its capability and outputs
     /// for recovery. Read [`nic`](Self::nic) or [`capture_context`](Self::capture_context), or
-    /// build a [`guest_restore_record`](Self::guest_restore_record), before consuming the
+    /// build a [`guest_restore_record`](Self::guest_restore_record) and
+    /// [supply](Self::supply_activation_record) a restore's activation record, before consuming the
     /// preparation.
     pub fn into_command(self) -> VmmCommand {
         VmmCommand {
@@ -738,6 +851,7 @@ pub fn create(
     match checked {
         Ok((capability, arguments, nic, capture_context)) => Ok(Prepared {
             program: runtime.openvmm.clone(),
+            dir: dir.clone(),
             working_dir,
             windows_breakaway: runtime.windows_breakaway,
             foreground: false,

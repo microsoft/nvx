@@ -16,7 +16,8 @@
 //!   activates the restore's memory target, reseeds the kernel's random number generator, and
 //!   finishes the restore, with its acknowledgement.
 //! - On x86-64, `restore`: the guest restore through which each repaired clone then takes its own
-//!   configuration from the host, in one Activate on a restricted control session.
+//!   configuration from the host, in the activation record of its restore packet, and reports
+//!   Ready on its control session.
 //!
 //! The library builds no space and runs no execution: the guest's space, the root that an init
 //! assembles and what it mounts in it, and the executions that it runs are each init's own. The

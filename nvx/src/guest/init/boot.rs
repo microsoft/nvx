@@ -325,9 +325,17 @@ fn share_child(value: &[u8]) -> Result<ShareChild> {
 /// One repaired clone's guest restore and the space it owns across control epochs.
 pub(crate) struct Restored {
     pub(crate) activation: GuestRestore,
-    payload: Option<Vec<u8>>,
-    /// The status of the class of an activate request that this refused before its guest restore
-    /// took the request, which ends the VM.
+    /// The bytes of the activation record of the clone's restore packet, until the guest restore
+    /// accepts them, or `None` for a packet that carried none.
+    record: Option<Box<[u8]>>,
+    /// The guest-restore record that the guest restore accepted, and the workload identity that
+    /// the activation record carried with it, until the space applies them.
+    accepted: Option<(
+        Box<guest_restore::GuestRestoreRecord>,
+        protocol::workload::WorkloadIdentity,
+    )>,
+    /// The status of the class of an activation record that this refused before its guest
+    /// restore took the record, which ends the VM.
     refused: Option<u8>,
     _applied: Option<Applied>,
 }
@@ -344,65 +352,71 @@ pub(crate) struct RestoreHandoff {
 }
 
 impl Restored {
-    /// Anchors the guest restore once, even when the next session attaches later.
+    /// Anchors the guest restore once, even when the next session attaches later, and keeps the
+    /// activation record of the clone's restore packet for [`accept`](Self::accept).
     pub(crate) fn new(repaired: &crate::guest::snapshot::Repaired, now: Instant) -> Self {
         Self {
             activation: GuestRestore::new(repaired, Duration::from_secs(30), now),
-            payload: None,
+            record: repaired.activation_record().map(Box::from),
+            accepted: None,
             refused: None,
             _applied: None,
         }
     }
 
-    /// Takes the first bootstrap reset or checks the same deadline on a replacement session.
-    pub(crate) fn reset(&mut self, now: Instant) -> Result<()> {
-        if self.activation.state() == GuestRestoreState::Bootstrap {
-            self.activation
-                .input(now, GuestRestoreInput::Reset)
-                .map_err(activation_error)?;
-        } else {
-            self.activation.tick(now).map_err(activation_error)?;
+    /// Accepts the activation record of the clone's restore packet, before anything has a side
+    /// effect: the workload identity that nvx-init's host puts before the guest-restore record,
+    /// which [`protocol::decode_activation_record`] reads, and the record, which the guest restore
+    /// decodes and validates. A packet without a record fails the guest restore, and an
+    /// activation record that does not decode is refused as the record's failure.
+    pub(crate) fn accept(&mut self, now: Instant) -> Result<()> {
+        let bytes = self.record.take();
+        let (record, workload) = match bytes.as_deref().map(protocol::decode_activation_record) {
+            None => (None, None),
+            Some(Ok((_, workload))) => (
+                bytes
+                    .as_deref()
+                    .map(|bytes| &bytes[protocol::ACTIVATION_IDENTITY_LEN..]),
+                Some(workload),
+            ),
+            Some(Err(error)) => {
+                self.refused = Some(status::GUEST_RESTORE_RECORD);
+                return Err(protocol_error(error));
+            }
+        };
+        let accepted = self
+            .activation
+            .accept(now, record)
+            .map_err(activation_error)?;
+        // The guest restore accepts no record from a packet without one, so the workload identity
+        // came with the record that it accepted.
+        if let Some(workload) = workload {
+            self.accepted = Some((accepted, workload));
         }
         Ok(())
     }
 
-    /// Compares the complete retry payload before delegating record replay to the state machine.
-    /// A request that changes the accepted one, before or after Ready, is refused as the
-    /// protocol's failure, and one that does not decode as the record's.
-    pub(crate) fn accept(
-        &mut self,
-        payload: &[u8],
-        now: Instant,
-    ) -> Result<(GuestRestoreAction, protocol::workload::WorkloadIdentity)> {
-        if self
-            .payload
-            .as_deref()
-            .is_some_and(|accepted| accepted != payload)
-        {
-            self.refused = Some(status::GUEST_RESTORE_PROTOCOL);
-            return Err(Error::unsupported(
-                "the activate request changed after acceptance",
-            ));
-        }
-        let (_, workload) = protocol::decode_activate_payload(payload).map_err(|error| {
-            self.refused = Some(status::GUEST_RESTORE_RECORD);
-            protocol_error(error)
-        })?;
-        let action = self
-            .activation
-            .input(now, GuestRestoreInput::Activate(&payload[9..]))
+    /// Takes a session's reset, the first one, which the restore queued, or a later one, which
+    /// changes nothing of the guest restore but checks its deadline.
+    pub(crate) fn reset(&mut self, now: Instant) -> Result<()> {
+        self.activation
+            .input(now, GuestRestoreInput::Reset)
             .map_err(activation_error)?;
-        if matches!(action, GuestRestoreAction::Apply(_)) {
-            self.payload = Some(payload.to_vec());
-        }
-        Ok((action, workload))
+        Ok(())
+    }
+
+    /// Takes the host's request for Ready, and returns what the guest restore answers it with.
+    pub(crate) fn ready(&mut self, now: Instant) -> Result<GuestRestoreAction> {
+        self.activation
+            .input(now, GuestRestoreInput::Ready)
+            .map_err(activation_error)
     }
 
     /// Returns the status with which nvx-init ends the VM once this guest restore has failed:
-    /// that of a request that this refused, or else the one that [`class_status`] selects for
-    /// the guest restore's failure, or `None` while it has not failed. A guest restore that is
-    /// not ready fails once its deadline has passed at `now`, which this reports, as the session
-    /// reports every other failure where it happens.
+    /// that of an activation record that this refused, or else the one that [`class_status`]
+    /// selects for the guest restore's failure, or `None` while it has not failed. A guest restore
+    /// that is not ready fails once its deadline has passed at `now`, which this reports, as the
+    /// session reports every other failure where it happens.
     pub(crate) fn failure_status(&mut self, now: Instant) -> Option<u8> {
         if self.refused.is_some() {
             return self.refused;
@@ -415,13 +429,15 @@ impl Restored {
         Some(class_status(&failure))
     }
 
-    /// Applies and switches one restored space, retaining its root and handing over its mapper.
+    /// Applies the accepted record, and switches one restored space, retaining its root and
+    /// handing over its mapper, or returns `None` once the record applied, or with none accepted.
     pub(crate) fn apply(
         &mut self,
-        record: &guest_restore::GuestRestoreRecord,
-        workload: protocol::workload::WorkloadIdentity,
         mut announce: impl FnMut(guest_restore::Publication, Option<std::net::Ipv4Addr>) -> Result<()>,
-    ) -> Result<RestoreHandoff> {
+    ) -> Result<Option<RestoreHandoff>> {
+        let Some((record, workload)) = self.accepted.take() else {
+            return Ok(None);
+        };
         let command_line = std::fs::read("/proc/cmdline").map_err(activation_error)?;
         let template = RootTemplate {
             runtime: "/run/nvx".into(),
@@ -440,7 +456,7 @@ impl Restored {
         let (applied, handoff) = restore_in_order(
             self.activation.deadline(),
             || {
-                restore::apply(record, &template, self.activation.deadline())
+                restore::apply(&record, &template, self.activation.deadline())
                     .map_err(activation_error)
             },
             |applied| {
@@ -485,7 +501,7 @@ impl Restored {
             |applied| applied.teardown().map_err(activation_error),
         )?;
         self._applied = Some(applied);
-        Ok(handoff)
+        Ok(Some(handoff))
     }
 }
 
@@ -493,12 +509,11 @@ impl Restored {
 /// clone's guest restore failed with `failure`, that of the failure's class:
 ///
 /// - [`GUEST_RESTORE_DEADLINE`](status::GUEST_RESTORE_DEADLINE): the deadline passed before the
-///   guest restore was ready;
-/// - [`GUEST_RESTORE_PROTOCOL`](status::GUEST_RESTORE_PROTOCOL): the host reset the session again,
-///   sent a request before the guest restore, or an Activate of another transaction, or one that
-///   changes the accepted record;
-/// - [`GUEST_RESTORE_RECORD`](status::GUEST_RESTORE_RECORD): the Activate's record does not decode,
-///   breaks a limit, or is a cold boot's;
+///   guest restore was ready, as for a clone whose host never asked for its Ready;
+/// - [`GUEST_RESTORE_PROTOCOL`](status::GUEST_RESTORE_PROTOCOL): the host sent a request other
+///   than its request for Ready before the guest restore was ready;
+/// - [`GUEST_RESTORE_RECORD`](status::GUEST_RESTORE_RECORD): the restore packet carried no
+///   activation record, or its record does not decode, breaks a limit, or is a cold boot's;
 /// - [`GUEST_RESTORE_RESOURCES`](status::GUEST_RESTORE_RESOURCES): the record expects other
 ///   resources than the repaired VM has;
 /// - for a failed application of the record, that of its first cause that names a class: the
@@ -510,16 +525,16 @@ impl Restored {
 ///   `GUEST_RESTORE_WORKLOAD`; the announcer of the network's listeners, `GUEST_RESTORE_NETWORK`;
 ///   or else the root's, `GUEST_RESTORE_ROOT`, whose runtime file systems and switch the other
 ///   steps are;
-/// - [`GUEST_RESTORE_ORDER`](status::GUEST_RESTORE_ORDER): nvx-init's own order completed a guest
-///   restore that did not run, or started the workload before the guest restore was ready.
+/// - [`GUEST_RESTORE_ORDER`](status::GUEST_RESTORE_ORDER): nvx-init's own order accepted a record
+///   twice, completed a guest restore that did not run, or started the workload before the guest
+///   restore was ready.
 fn class_status(failure: &GuestRestoreFailure) -> u8 {
     match failure.cause() {
         GuestRestoreCause::Expired => status::GUEST_RESTORE_DEADLINE,
-        GuestRestoreCause::Reset
-        | GuestRestoreCause::Request
-        | GuestRestoreCause::Transaction { .. }
-        | GuestRestoreCause::Changed => status::GUEST_RESTORE_PROTOCOL,
-        GuestRestoreCause::Record(_) | GuestRestoreCause::Cold => status::GUEST_RESTORE_RECORD,
+        GuestRestoreCause::Request => status::GUEST_RESTORE_PROTOCOL,
+        GuestRestoreCause::Missing | GuestRestoreCause::Record(_) | GuestRestoreCause::Cold => {
+            status::GUEST_RESTORE_RECORD
+        }
         GuestRestoreCause::Resources { .. } => status::GUEST_RESTORE_RESOURCES,
         GuestRestoreCause::Failed(error) => {
             let error: &(dyn std::error::Error + 'static) = &**error;
@@ -537,7 +552,9 @@ fn class_status(failure: &GuestRestoreFailure) -> u8 {
                 })
                 .unwrap_or(status::GUEST_RESTORE_ROOT)
         }
-        GuestRestoreCause::Completion | GuestRestoreCause::Start => status::GUEST_RESTORE_ORDER,
+        GuestRestoreCause::Accept | GuestRestoreCause::Completion | GuestRestoreCause::Start => {
+            status::GUEST_RESTORE_ORDER
+        }
     }
 }
 

@@ -15,7 +15,10 @@ impl Capture {
         )
     }
 
-    pub(crate) fn activation_fixture() -> (Self, Vec<u8>) {
+    /// Returns the activation record of the fixtures' clones: the workload's identity, UID 1000 and
+    /// GID 1001, with the account flag, then the guest-restore record of a restore of a tmpfs
+    /// upper named `restored`, which expects the resources of the repaired fixture.
+    pub(crate) fn activation_payload() -> Vec<u8> {
         use crate::guest_restore::{
             Configuration, ExpectedResources, GuestRestoreRecord, Image, RestoreSection,
             TransactionId, Upper,
@@ -47,18 +50,35 @@ impl Capture {
             },
         )
         .unwrap();
-        let mut capture = Self::fixture(true);
-        capture.restored(repaired);
-        capture
-            .restored
-            .as_mut()
-            .unwrap()
-            .reset(Instant::now())
-            .unwrap();
         let mut payload = 1000u32.to_le_bytes().to_vec();
         payload.extend_from_slice(&1001u32.to_le_bytes());
         payload.push(1);
         payload.extend(record.encode());
+        payload
+    }
+
+    /// Returns the capture of a clone whose restore packet carried the activation record
+    /// `record`, if any, once its repair returned: its guest restore took neither the record nor
+    /// the session's reset yet.
+    pub(crate) fn restored_fixture(record: Option<&[u8]>) -> Self {
+        let repaired = match record {
+            Some(record) => crate::guest::snapshot::repair::tests::repaired_with_record(record),
+            None => crate::guest::snapshot::repair::tests::repaired_fixture(),
+        };
+        let mut capture = Self::fixture(true);
+        capture.restored(repaired);
+        capture
+    }
+
+    /// Returns the capture of a clone whose guest restore accepted the activation record of its
+    /// restore packet, [`activation_payload`](Self::activation_payload), and took the session's
+    /// reset, with that activation record.
+    pub(crate) fn activation_fixture() -> (Self, Vec<u8>) {
+        let payload = Self::activation_payload();
+        let mut capture = Self::restored_fixture(Some(&payload));
+        let restored = capture.restored.as_mut().unwrap();
+        restored.accept(Instant::now()).unwrap();
+        restored.reset(Instant::now()).unwrap();
         (capture, payload)
     }
 }

@@ -20,6 +20,9 @@ pub(crate) enum StateFile {
     Log,
     /// OpenVMM's outcome report of the latest start.
     Outcome,
+    /// The activation record that the latest start of a restored sandbox handed its guest in its
+    /// restore packet.
+    ActivationRecord,
 }
 
 impl StateFile {
@@ -40,7 +43,7 @@ impl StateFile {
     }
 
     /// Every file that the sandbox commands keep in a state directory.
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Config,
         Self::Lock,
         Self::Journal,
@@ -49,6 +52,7 @@ impl StateFile {
         Self::Socket,
         Self::Log,
         Self::Outcome,
+        Self::ActivationRecord,
     ];
 
     /// Returns the name of the file in the state directory.
@@ -62,6 +66,7 @@ impl StateFile {
             Self::Socket => "control.sock",
             Self::Log => "openvmm.log",
             Self::Outcome => "outcome.json",
+            Self::ActivationRecord => "activation-record.bin",
         }
     }
 }

@@ -419,6 +419,7 @@ with `.openvmm`, which OpenVMM gives its temporary files, such as
 | `control.sock` | The control endpoint at which OpenVMM listens, on Linux |
 | `console.sock` | The guest's boot console, on Linux, for a launch that listens on it |
 | `restore-ready.sock` | The endpoint at which a restore awaits OpenVMM's restore-ready event, on Linux |
+| `activation-record.bin` | The activation record that a restore hands its guest in its restore packet, which `Prepared::supply_activation_record` writes |
 | `openvmm/` | OpenVMM's snapshot files: a capture's destination, and a restore's view of its snapshot |
 | `key.bin`, `snapshot.json` | A finished capture's key and description, which form its snapshot with `openvmm/` |
 | `capture-image.raw`, `capture-scratch.raw` | The sparse placeholder image and the dormant scratch that a capture VM attaches |
@@ -447,12 +448,16 @@ failed creation removes only the files that it created.
 arguments, capability, and outputs; its effective NIC; a capture's checked
 `snapshot::CaptureContext`; and, for a layered root, the `GuestRestoreRecord`
 of a restore, which `Prepared::guest_restore_record` builds from the launch's
-own resolved settings. `spawn` starts OpenVMM detached and returns a `Launched`
-VM: its verified `Process`, its outputs, its capability, which reaches OpenVMM
-only on its standard input, and a restore's `ReadyListener`. Dropping
-`Launched` closes the handle of the process, not the VM. A caller with a
-launcher of its own takes `Prepared::into_command`, a `VmmCommand` that owns
-the whole launch, and follows the contract that it documents; the
+own resolved settings. `Prepared::supply_activation_record` hands a restore's
+guest its activation record, such as that record's encoding, at most
+`guest_restore::MAX_RECORD_BYTES` bytes, in a private
+`activation-record.bin`, which OpenVMM seals in the restore packet before the
+first restored processor runs. `spawn` starts OpenVMM detached and returns a
+`Launched` VM: its verified `Process`, its outputs, its capability, which
+reaches OpenVMM only on its standard input, and a restore's `ReadyListener`.
+Dropping `Launched` closes the handle of the process, not the VM. A caller
+with a launcher of its own takes `Prepared::into_command`, a `VmmCommand` that
+owns the whole launch, and follows the contract that it documents; the
 [external-launch example](examples/external-launch.rs) consumes one with a
 minimal launcher, whose documentation lists what it leaves out.
 
@@ -641,10 +646,12 @@ tells captures apart, from the values alone.
 ### `nvx::host::restore`
 
 `RestoreMachine::new(&GuestRestoreRecord)` orders a restore to its guest's
-Ready without I/O, a clock, or a retry budget. Once the caller reports
+Ready without I/O, a clock, or a retry budget. The guest takes the record
+from its restore packet, which the caller supplied with
+`Prepared::supply_activation_record`. Once the caller reports
 `RestoreInput::Spawned`, its `RestoreAction`s ask for the restore-ready event,
-a verified control session, and the sending of the same canonical record bytes
-in every session, and it checks that the guest's Ready echoes the record's
+a verified control session, and, first in every session, the request for the
+guest's Ready, and it checks that the guest's Ready echoes the record's
 transaction. The caller performs each action with its own I/O and
 protocol and reports what it observed, such as a lost session, after which
 `Connect` comes again, the VM's verified exit, with its outcome report, or its
@@ -653,6 +660,9 @@ any mappings or workload. A failure is a `RestoreError`, with the
 `RestorePhase` that failed, its `RestoreEvidence`, the `Attribution` that the
 evidence supports, whether the guest may have run, and the original cause: it
 stops no process and writes no record, and the VM stays the caller's.
+`RestoreEvidence::IncompatibleGuest` attributes to the snapshot a guest that
+refuses the request for Ready because it awaits its record on its session, as
+one captured before the restore packet carried the record does.
 
 `ReadyListener` owns a restore's restore-ready endpoint, which `vm::create`
 binds before the spawn: a mode-0600 Unix socket in the private VM directory on
@@ -924,27 +934,27 @@ time daemon enforces it.
 A `GuestRestore` of the `Repaired` clone, or, with
 `GuestRestore::with_resources`, of the resources and the instant of the
 acknowledgement that a repair reports, as in an adapter's tests, then takes the
-clone's own configuration from the host, in one Activate, on a restricted
-control session: a state machine without I/O, independent of any framing, to
-which the adapter passes what its session receives, as a `GuestRestoreInput`,
-and which returns the `GuestRestoreAction` that the adapter takes.
+clone's own configuration from the host, in the activation record of its
+restore packet, which `Repaired::activation_record` returns, and reports Ready
+on the clone's control session: a state machine without I/O, independent of any
+framing, to which the adapter passes the record, and what its session
+receives, as a `GuestRestoreInput`, and which returns the `GuestRestoreAction`
+that the adapter takes.
 
 `GuestRestore::accept` decodes the record with `GuestRestoreRecord::decode`, and
 accepts only a clone's, with a restore section, that expects the CPU count and
-the memory size that the repair reports, before any side effect, while an
-Activate whose record the adapter's framing refused unread, as longer than a
-record can be, fails as a record that long does; the adapter applies the record
-in its own space, by the guest restore's deadline, as nvx-init applies it with
-[its space](#nvx-inits-space). `MACHINE_ID_FILE` and `RESOLVER_FILE` name the
-generated machine ID's file and the resolver file in a root's runtime
-directory.
+the memory size that the repair reports, before any side effect, and a packet
+without a record fails; the adapter applies the record in its own space at
+once, without waiting for the host, by the guest restore's deadline, as
+nvx-init applies it with [its space](#nvx-inits-space). `MACHINE_ID_FILE` and
+`RESOLVER_FILE` name the generated machine ID's file and the resolver file in a
+root's runtime directory.
 
-Once the adapter passed the guest restore what the session received while the
-application ran, which came before Ready, `GuestRestore::complete` returns the
-`GuestRestoreReady` that Ready reports beside the adapter's own identities, that
-the guest restore applied, with the record's transaction ID, after which the
-host's mapping table and start follow in the adapter's order, as after a cold
-boot, and `GuestRestore::start` records the start.
+`GuestRestore::complete` then returns the `GuestRestoreReady` that Ready
+reports beside the adapter's own identities, that the guest restore applied,
+with the record's transaction ID, after which the host's mapping table and
+start follow in the adapter's order, as after a cold boot, and
+`GuestRestore::start` records the start.
 
 The clone's session runs beside the guest restore: the adapter acknowledges each
 reset, the one that the restore queued for the NVXS session and any later one,
@@ -953,7 +963,7 @@ sessions, with Ready, since OpenVMM's broker refuses the guest's records while
 no host is attached, which the guest cannot tell. A request for Ready while the
 record applies joins the guest restore, and gets what its completion returns
 unless a reset abandoned it, one once the record applied makes the guest restore
-ready, and one once the clone is ready gets the cached result, also in a later
+ready, and one once the clone is ready gets the same result, also in a later
 session; any other request before Ready, or a failed guest restore, is final.
 
 Its deadline, which the caller chooses, and which nothing extends, starts at the
@@ -1323,21 +1333,22 @@ resource options and recovery behavior.
 sandbox, with the options of `sandbox provision` that a restore takes, whose
 configuration also records the snapshot, its store, and the sandbox's workload,
 then starts it: that start, and each later one, creates the VM with
-`host::vm::create` from the snapshot, through the store's launch journal, and
-drives its restore with the blocking restore driver, which activates the guest
-with the start's own network policy, maps the sandbox's shares, and runs the
-workload, whose output the start forwards until it exits. The restore's NIC
-comes from the snapshot, which `snapshot capture --net` gives one, so the
-restore takes no `--net`: the network options of a snapshot with a NIC, which
-need `--network-profile`, are the restore's own policy at the NIC's address, as
-for `run --restore-snapshot`, and a snapshot without a NIC refuses them before
-anything is provisioned. A restore's guest accepts only a fresh upper, so a
-later start refuses a scratch image once an earlier start has created its view,
-as each start does before its guest can use the image. Each start holds the
-snapshot's exclusive lock from before it links the snapshot's files into the
-sandbox's `openvmm/` view until the start ends or the VM has exited, and
-`deprovision` holds it while it removes the view; a start whose command dies
-leaves a journal whose recovery ends the VM. No index of a
+`host::vm::create` from the snapshot, through the store's launch journal,
+hands its guest the start's own settings, with its own network policy, in the
+activation record of its restore packet, and drives its restore with the
+blocking restore driver, which awaits the guest's Ready, maps the sandbox's
+shares, and runs the workload, whose output the start forwards until it exits.
+The restore's NIC comes from the snapshot, which `snapshot capture --net` gives
+one, so the restore takes no `--net`: the network options of a snapshot with a
+NIC, which need `--network-profile`, are the restore's own policy at the NIC's
+address, as for `run --restore-snapshot`, and a snapshot without a NIC refuses
+them before anything is provisioned. A restore's guest accepts only a fresh
+upper, so a later start refuses a scratch image once an earlier start has
+created its view, as each start does before its guest can use the image. Each
+start holds the snapshot's exclusive lock from before it links the snapshot's
+files into the sandbox's `openvmm/` view until the start ends or the VM has
+exited, and `deprovision` holds it while it removes the view; a start whose
+command dies leaves a journal whose recovery ends the VM. No index of a
 snapshot's sandboxes or record of a restore in progress exists. See
 [`snapshot restore`](../doc/usage.md#snapshot-restore).
 
@@ -1607,6 +1618,7 @@ provision it again:
 | `outcome.json` | OpenVMM's outcome report of the last start |
 | `openvmm/` | A restored sandbox's view of its snapshot, hard links to the files of the snapshot's `openvmm/`, which a start creates and `deprovision` removes, each under the snapshot's lock |
 | `restore-ready.sock` | On Linux, the endpoint of a restore's restore-ready event, which the next start of a restored sandbox, or its `deprovision`, removes under the snapshot's lock |
+| `activation-record.bin` | The activation record that the last start of a restored sandbox handed its guest in its restore packet, with mode 0600: the workload's identity and the guest-restore record of the start's own settings, which the next start replaces and `deprovision` removes |
 
 `provision`, `start`, `stop`, and `deprovision` hold the store's lock for their
 whole transition, and `exec` only while it finds the running VM, so that a long
@@ -2018,17 +2030,19 @@ Each binary's command line, exit statuses, and byte output are compatibility
 contracts; the [`nvx::guest`](src/guest/mod.rs) documentation describes each
 program. After a restored platform capture, `nvx-init` keeps one guest restore
 across control-session replacements, with its deadline anchored to the repair
-acknowledgement. It applies the restore's root and network, mounts the runtime,
-starts and retains an announcer only for published listeners, switches once,
-then completes and reports Ready. The host supplies the complete mapping table
-before the first valid EXEC starts the restored workload; later executions and
-byte-identical Activate retries, also those that arrive while a workload runs,
-reuse the retained state, and an Activate with other bytes ends the VM as a
-failure. A failed guest restore, which a deadline that passes before Ready and
-a refused activate request also are, ends the VM with the status of the
-failure's class, which [`nvx::protocol::status`](#nvxprotocolstatus) defines,
-such as 54, `GUEST_RESTORE_ROOT`, for a root that does not assemble over its
-upper, or 51, `GUEST_RESTORE_PROTOCOL`, for an Activate with other bytes.
+acknowledgement. It takes the restore's record from the activation record of
+its restore packet, before its control session, then applies the restore's
+root and network, mounts the runtime, starts and retains an announcer only for
+published listeners, switches once, and completes, before the host asks for
+its Ready, which it reports in answer to the host's request, as after a cold
+boot. The host supplies the complete mapping table before the first valid EXEC
+starts the restored workload; later executions, and the requests for Ready of
+later sessions, reuse the retained state. A failed guest restore, which a
+deadline that passes before Ready and a restore packet without a valid record
+also are, ends the VM with the status of the failure's class, which
+[`nvx::protocol::status`](#nvxprotocolstatus) defines, such as 54,
+`GUEST_RESTORE_ROOT`, for a root that does not assemble over its upper, or 52,
+`GUEST_RESTORE_RECORD`, for a restore packet that carried no record.
 The accepted proxy replaces the four HTTP(S) proxy defaults, or clears them when
 the restore has no proxy. Per-EXEC layered entries still win, and exact
 environments still replace every default.

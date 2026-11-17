@@ -18,8 +18,9 @@ use crate::protocol::view::{MachineIdMode, View};
 
 /// A stand-in for OpenVMM and its guest, which serves the control endpoint, sends the
 /// restore-ready event, attaches the host with the capability of its standard input, and answers
-/// NVXC requests of version 2 as `case` asks, with `activation` in its Ready. It records each
-/// request in `trace`, and the step at which it stalls in `stage`.
+/// NVXC requests of version 2 as `case` asks, with `activation` in the Ready that answers the
+/// host's `PING`, its request for Ready, as a restored clone whose restore packet carried its
+/// record does. It records each request in `trace`, and the step at which it stalls in `stage`.
 const PEER: &str = r#"
 import json, os, socket, struct, sys, time
 case, endpoint, ready, trace, stage, activation = sys.argv[1:]
@@ -111,8 +112,12 @@ for session in range(1, 4):
             with open(trace, 'a', encoding='ascii') as out:
                 out.write(json.dumps({'session': session, 'kind': kind, 'id': rid,
                                       'payload': payload.hex()}) + '\n')
-            if kind == 8:
-                if case == 'activate-read': stall(case)
+            if kind == 1:
+                assert payload == b''
+                if case == 'ping-read': stall(case)
+                if case == 'incompatible':
+                    reply(stream, 0xff, rid, 95, b'unsupported-operation', session, sequence)
+                    stall(case)
                 if case == 'session-limit' or (case == 'reconnect' and session < 3):
                     record(stream, 3, session + 100, sequence)
                     stream.close()
@@ -185,11 +190,6 @@ fn record() -> GuestRestoreRecord {
 
 fn workload() -> Workload<'static> {
     Workload {
-        identity: WorkloadIdentity {
-            uid: 65534,
-            gid: 65534,
-            create_account: false,
-        },
         exec: protocol::Workload {
             argv: vec!["/bin/true".to_owned()],
             timeout_ms: 0,
@@ -316,7 +316,7 @@ fn machine(error: ControlRestoreError) -> RestoreError {
 }
 
 #[test]
-fn a_lost_session_is_replaced_with_the_same_activate_message_and_the_live_session_returns() {
+fn a_lost_session_is_replaced_and_asks_for_ready_again_and_the_live_session_returns() {
     let mut peer = Peer::start("reconnect");
     let cancel = Cancel::new(false);
     let workload = workload();
@@ -346,29 +346,30 @@ fn a_lost_session_is_replaced_with_the_same_activate_message_and_the_live_sessio
             status: 0
         }
     );
+    // Each session asks for Ready, with nothing of the record, which the guest took from its
+    // restore packet.
     let requests = peer.requests();
-    let activate = hex(&protocol::encode_activate_payload(&record(), &workload.identity).unwrap());
     let sessions: Vec<_> = requests
         .iter()
-        .filter(|request| request["kind"] == 8)
+        .filter(|request| request["kind"] == 1)
         .map(|request| {
-            assert_eq!(request["payload"], activate.as_str());
+            assert_eq!(request["payload"], "");
             request["session"].as_u64().unwrap()
         })
         .collect();
     assert_eq!(sessions, [1, 2, 3]);
-    assert_eq!(peer.kinds(), [8, 8, 8, 6, 2]);
+    assert_eq!(peer.kinds(), [1, 1, 1, 6, 2]);
     assert_eq!(requests[4]["id"], workload.request_id);
     assert!(!peer.vm.launched.process.has_exited().unwrap());
     assert!(peer.vm.launched.ready.is_some());
 }
 
 #[test]
-fn a_third_lost_session_and_a_malformed_ready_are_final() {
+fn a_third_lost_session_a_malformed_ready_and_an_incompatible_guest_are_final() {
     for (case, phase, evidence, requests) in [
         (
             "session-limit",
-            RestorePhase::Activate,
+            RestorePhase::Ready,
             RestoreEvidence::Reset,
             3,
         ),
@@ -376,6 +377,14 @@ fn a_third_lost_session_and_a_malformed_ready_are_final() {
             "malformed",
             RestorePhase::Ready,
             RestoreEvidence::Malformed,
+            1,
+        ),
+        // A guest that awaits an activate request refuses the request for Ready of its session,
+        // which the snapshot's capture with that guest is to blame for.
+        (
+            "incompatible",
+            RestorePhase::Ready,
+            RestoreEvidence::IncompatibleGuest,
             1,
         ),
     ] {
@@ -400,7 +409,7 @@ fn a_third_lost_session_and_a_malformed_ready_are_final() {
 }
 
 #[test]
-fn neither_an_unverified_restore_ready_client_nor_control_server_gets_the_activation() {
+fn neither_an_unverified_restore_ready_client_nor_control_server_gets_a_request() {
     for ready_mismatch in [true, false] {
         let mut peer = Peer::start(if ready_mismatch {
             "reconnect"
@@ -455,7 +464,7 @@ const STALLS: [(&str, Option<RestorePhase>); 6] = [
     ("ready-read", Some(RestorePhase::ReadyEvent)),
     ("connect", Some(RestorePhase::Connect)),
     ("attach-read", Some(RestorePhase::Connect)),
-    ("activate-read", Some(RestorePhase::Activate)),
+    ("ping-read", Some(RestorePhase::Ready)),
     ("maps-read", None),
 ];
 
@@ -657,47 +666,29 @@ fn mapping_and_start_failures_are_told_apart_from_the_machines() {
     )
     .unwrap();
     wait_for(&peer.stage, "started");
-    assert_eq!(peer.kinds(), [8, 8, 8, 2]);
+    assert_eq!(peer.kinds(), [1, 1, 1, 2]);
 }
 
 #[test]
-fn a_cold_record_and_a_root_workload_fail_before_the_vm_is_contacted() {
+fn a_cold_record_fails_before_the_vm_is_contacted() {
     let cold = GuestRestoreRecord::new(None, record().configuration().clone()).unwrap();
-    let mut root = workload();
-    root.identity = WorkloadIdentity {
-        uid: 0,
-        gid: 0,
-        create_account: false,
-    };
-    for (record, workload, phase, evidence) in [
-        (
-            cold,
-            workload(),
-            RestorePhase::ReadyEvent,
-            RestoreEvidence::InvalidActivate,
-        ),
-        (
-            record(),
-            root,
-            RestorePhase::Activate,
-            RestoreEvidence::InvalidSettings,
-        ),
-    ] {
-        let mut peer = Peer::start("connect");
-        let error = machine(
-            restore(
-                &mut peer.vm.launched,
-                &record,
-                &workload,
-                &maps(),
-                &Cancel::new(false),
-            )
-            .err()
-            .unwrap(),
-        );
-        assert_eq!((error.phase, error.evidence), (phase, evidence));
-        assert!(error.guest_may_have_run);
-        assert!(peer.requests().is_empty());
-        assert!(!peer.vm.launched.process.has_exited().unwrap());
-    }
+    let mut peer = Peer::start("connect");
+    let error = machine(
+        restore(
+            &mut peer.vm.launched,
+            &cold,
+            &workload(),
+            &maps(),
+            &Cancel::new(false),
+        )
+        .err()
+        .unwrap(),
+    );
+    assert_eq!(
+        (error.phase, error.evidence),
+        (RestorePhase::ReadyEvent, RestoreEvidence::InvalidRecord)
+    );
+    assert!(error.guest_may_have_run);
+    assert!(peer.requests().is_empty());
+    assert!(!peer.vm.launched.process.has_exited().unwrap());
 }

@@ -509,6 +509,9 @@ impl Session {
             SessionError::Protocol(message) => {
                 Exit::error(ErrorCode::Protocol, protocol_message(message))
             }
+            error @ SessionError::IncompatibleGuest => {
+                Exit::error(ErrorCode::Protocol, error.to_string())
+            }
         }
     }
 

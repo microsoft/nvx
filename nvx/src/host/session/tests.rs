@@ -22,7 +22,6 @@ const STOP: u8 = 0x03;
 const CANCEL: u8 = 0x04;
 const MAPS: u8 = 0x06;
 const CAPTURE: u8 = 0x07;
-const ACTIVATE: u8 = 0x08;
 const STDIN: u8 = 0x09;
 const STDIN_END: u8 = 0x0a;
 
@@ -780,10 +779,8 @@ fn ready_must_carry_the_protocol_version() {
             .map_host_paths(&maps, deadline())
             .unwrap_err();
         assert_violation(&error, &message, "a mapping table");
-        let error = attached(answer)
-            .activate(b"activation", deadline())
-            .unwrap_err();
-        assert_violation(&error, &message, "an activation");
+        let error = attached(answer).ready(deadline()).unwrap_err();
+        assert_violation(&error, &message, "a restored clone's Ready");
     }
     // A guest agent that predates version 2 answers in version 1's frames.
     let error = attached(|_, id| {
@@ -918,26 +915,24 @@ fn capture_refuses_invalid_acknowledgements() {
 
 #[cfg(feature = "cli")]
 #[test]
-fn activate_sends_its_payload_and_returns_the_activation_that_ready_reports() {
+fn ready_pings_a_restored_clone_and_returns_the_activation_that_its_ready_reports() {
     let (mut session, requests) = attached_recording(|kind, id| {
-        assert_eq!(kind, ACTIVATE);
+        assert_eq!(kind, PING);
         ready_frame(id, &[[1].as_slice(), &[9; 16]].concat())
     });
-    let ready = session.activate(b"activation", deadline()).unwrap();
+    let ready = session.ready(deadline()).unwrap();
     assert_eq!(
         ready.transaction,
         Some(crate::guest_restore::TransactionId::from_bytes([9; 16]))
     );
-    assert_eq!(
-        *requests.lock().unwrap(),
-        [(ACTIVATE, b"activation".to_vec())]
-    );
+    // The request carries nothing: the clone took its record from its restore packet.
+    assert_eq!(*requests.lock().unwrap(), [(PING, Vec::new())]);
 }
 
 #[cfg(feature = "cli")]
 #[test]
-fn activate_refuses_a_reply_other_than_a_valid_ready() {
-    let answers: [fn(u8, u64) -> Vec<u8>; 4] = [
+fn ready_refuses_a_reply_other_than_a_restored_clone_s_valid_ready() {
+    let answers: [fn(u8, u64) -> Vec<u8>; 5] = [
         |_, id| {
             let frame = Frame::Error {
                 status: 22,
@@ -948,13 +943,29 @@ fn activate_refuses_a_reply_other_than_a_valid_ready() {
         |_, id| ready_frame(id ^ 1, &[0]),
         |_, id| patched(ready_frame(id, &[0]), 16, &[1]),
         |_, id| ready_frame(id, &[2]),
+        // A cold boot's Ready, which reports no guest restore.
+        |_, id| ready_frame(id, &[]),
     ];
     for answer in answers {
-        let error = attached(answer)
-            .activate(b"activation", deadline())
-            .unwrap_err();
+        let error = attached(answer).ready(deadline()).unwrap_err();
         assert!(matches!(error, SessionError::Protocol(_)), "{error:?}");
     }
+    // A guest that awaits an activate request refuses the request for Ready of its session,
+    // whose root it lacks, as an unsupported operation.
+    let error = attached(|_, id| {
+        let frame = Frame::Error {
+            status: 95,
+            category: protocol::UNSUPPORTED_OPERATION,
+        };
+        encode(id, frame)
+    })
+    .ready(deadline())
+    .unwrap_err();
+    assert!(
+        matches!(error, SessionError::IncompatibleGuest),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("capture the snapshot again"));
 }
 
 #[test]

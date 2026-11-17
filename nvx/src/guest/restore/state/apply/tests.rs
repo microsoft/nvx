@@ -275,15 +275,9 @@ fn accepted_assembly() -> Assembly {
     }
 }
 
-/// Returns an activation whose transport is restricted and ready for one Activate.
-fn restricted(now: Instant) -> GuestRestore {
-    let mut activation =
-        GuestRestore::with_resources(RESOURCES, Some(now), Duration::from_secs(10), now);
-    assert_eq!(
-        activation.input(now, GuestRestoreInput::Reset).unwrap(),
-        GuestRestoreAction::Acknowledge,
-    );
-    activation
+/// Returns an activation that awaits the record of its restore packet.
+fn pending(now: Instant) -> GuestRestore {
+    GuestRestore::with_resources(RESOURCES, Some(now), Duration::from_secs(10), now)
 }
 
 #[test]
@@ -297,21 +291,14 @@ fn no_mount_spawn_or_id_generation_happens_before_the_gate() {
     wrong.resources.cpus += 1;
     let wrong = clone_record(wrong).encode();
     for offered in [&bytes[..bytes.len() - 1], &cold, &wrong] {
-        let mut activation = restricted(now);
-        assert!(
-            activation
-                .input(now, GuestRestoreInput::Activate(offered))
-                .is_err()
-        );
+        let mut activation = pending(now);
+        assert!(activation.accept(now, Some(offered)).is_err());
         assert_eq!(activation.state(), GuestRestoreState::Failed);
     }
-    let mut activation = restricted(now);
+    let mut activation = pending(now);
     assert!(matches!(
         activation
-            .input(
-                now + Duration::from_secs(10),
-                GuestRestoreInput::Activate(&bytes)
-            )
+            .accept(now + Duration::from_secs(10), Some(&bytes))
             .unwrap_err()
             .cause(),
         GuestRestoreCause::Expired,
@@ -319,17 +306,12 @@ fn no_mount_spawn_or_id_generation_happens_before_the_gate() {
 }
 
 #[test]
-fn a_valid_activate_activates_the_root_and_the_workload_once_before_ready() {
+fn a_valid_record_activates_the_root_and_the_workload_once_before_ready() {
     let now = Instant::now();
     let record = with_everything();
     let bytes = record.encode();
-    let mut activation = restricted(now);
-    let GuestRestoreAction::Apply(accepted) = activation
-        .input(now, GuestRestoreInput::Activate(&bytes))
-        .unwrap()
-    else {
-        panic!("a valid record was not accepted")
-    };
+    let mut activation = pending(now);
+    let accepted = activation.accept(now, Some(&bytes)).unwrap();
     let mut system = FakeSystem::new();
     let applied = apply_with(&mut system, &accepted, &template(), activation.deadline()).unwrap();
     let expected = vec![
@@ -349,9 +331,7 @@ fn a_valid_activate_activates_the_root_and_the_workload_once_before_ready() {
             GuestRestoreAction::Acknowledge
         );
         assert_eq!(
-            activation
-                .input(now, GuestRestoreInput::Activate(&bytes))
-                .unwrap(),
+            activation.input(now, GuestRestoreInput::Ready).unwrap(),
             GuestRestoreAction::Ready(ready)
         );
     }
@@ -563,11 +543,9 @@ fn the_application_leaves_the_images_accounts_to_each_execution() {
 #[test]
 fn a_failed_assembly_is_final_and_reads_and_tears_down_nothing() {
     let now = Instant::now();
-    let mut activation = restricted(now);
+    let mut activation = pending(now);
     let bytes = accepted().encode();
-    activation
-        .input(now, GuestRestoreInput::Activate(&bytes))
-        .unwrap();
+    activation.accept(now, Some(&bytes)).unwrap();
     let mut system = FakeSystem {
         failing: true,
         ..FakeSystem::new()
@@ -578,11 +556,8 @@ fn a_failed_assembly_is_final_and_reads_and_tears_down_nothing() {
     )));
     let failure = activation.complete(now, Err(error.into())).unwrap_err();
     assert!(matches!(failure.cause(), GuestRestoreCause::Failed(_)));
-    assert!(
-        activation
-            .input(now, GuestRestoreInput::Activate(&bytes))
-            .is_err()
-    );
+    assert!(activation.input(now, GuestRestoreInput::Ready).is_err());
+    assert!(activation.accept(now, Some(&bytes)).is_err());
     assert_eq!(system.effects, [Effect::Assemble(accepted_assembly())]);
 }
 

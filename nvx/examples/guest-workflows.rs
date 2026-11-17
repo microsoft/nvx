@@ -9,9 +9,8 @@
 //!
 //! The example's init frames its own protocol's messages in the bytes of its control connection,
 //! and it reads its connection without a deadline. A real init waits for its connection with the
-//! guest restore's deadline, and ticks the guest restore then, and gives the guest restore what
-//! its connection received while it applied a record before it sends Ready, as
-//! [`GuestRestore`]'s documentation shows.
+//! guest restore's deadline, and ticks the guest restore then, as [`GuestRestore`]'s
+//! documentation shows.
 
 #[cfg(target_os = "linux")]
 pub use linux::*;
@@ -58,8 +57,8 @@ mod linux {
         /// Takes the next bytes that the connection received, and returns the messages that they
         /// complete, in order.
         fn push(&mut self, bytes: &[u8]) -> Vec<Vec<u8>>;
-        /// Returns the bytes of the guest-restore record of `message`, if it is the host's Activate.
-        fn record<'a>(&self, message: &'a [u8]) -> Option<&'a [u8]>;
+        /// Returns whether `message` is the host's request for the clone's Ready.
+        fn asks_ready(&self, message: &[u8]) -> bool;
     }
 
     /// What the init does once [`capture`] returned.
@@ -94,14 +93,18 @@ mod linux {
         }
     }
 
-    /// Activates a restored VM on its connection, once [`capture`] returned its repair.
+    /// Activates a restored VM from the record of its restore packet, and answers the host's
+    /// request for its Ready on its connection, once [`capture`] returned its repair.
     ///
-    /// The restore queued a reset of the session that the guest attached before the capture,
-    /// which the init takes and acknowledges, abandoning the earlier session's work; then the
-    /// host's Activate brings the restore's own settings. `framing` reads the init's messages from
-    /// the connection's bytes, `space` builds the guest's space from the record, which is the
-    /// init's own code, as nvx-init's is its own, and `ready` sends Ready in the init's protocol.
-    /// Every failure is final, and the init ends the VM.
+    /// The host supplied the guest-restore record's bytes, with no framing of its own, as the
+    /// clone's activation record, which OpenVMM sealed in the restore packet before the clone's
+    /// first restored vCPU ran: the init applies it at once, without waiting for the host. The
+    /// restore queued a reset of the session that the guest attached before the capture, which the
+    /// init takes and acknowledges, abandoning the earlier session's work; then the host asks for
+    /// the clone's Ready. `framing` reads the init's messages from the connection's bytes, `space`
+    /// builds the guest's space from the record, which is the init's own code, as nvx-init's is
+    /// its own, and `ready` sends Ready in the init's protocol. Every failure is final, and the
+    /// init ends the VM.
     pub fn activate<S: Read + Write>(
         connection: &mut Connection<S>,
         repaired: &Repaired,
@@ -110,7 +113,12 @@ mod linux {
         mut ready: impl FnMut(&mut Connection<S>, GuestRestoreReady) -> io::Result<()>,
     ) -> Result<GuestRestore, Box<dyn Error>> {
         let mut restore = GuestRestore::new(repaired, Duration::from_secs(30), Instant::now());
-        let mut space = Some(space);
+        // The record is valid, and nothing happened before: the guest restore's side effects
+        // start here. The guest restore completes, or expires past its deadline, when the
+        // application ends, and awaits the host's request for Ready.
+        let record = restore.accept(Instant::now(), repaired.activation_record())?;
+        let applied = space(&record);
+        restore.complete(Instant::now(), applied)?;
         loop {
             let messages = match connection.receive()? {
                 Event::Reset => {
@@ -125,39 +133,26 @@ mod linux {
                 Some(messages) => messages
                     .iter()
                     .map(|message| {
-                        let record = framing.record(message);
-                        record.map_or(GuestRestoreInput::Request, GuestRestoreInput::Activate)
+                        if framing.asks_ready(message) {
+                            GuestRestoreInput::Ready
+                        } else {
+                            GuestRestoreInput::Request
+                        }
                     })
                     .collect(),
             };
-            let mut inputs = inputs.into_iter();
-            while let Some(input) = inputs.next() {
+            for input in inputs {
                 match restore.input(Instant::now(), input)? {
                     GuestRestoreAction::Acknowledge => connection.acknowledge()?,
+                    // The record applied before the init read the session, so no request for
+                    // Ready joins the guest restore.
                     GuestRestoreAction::Continue
                     | GuestRestoreAction::Join
                     | GuestRestoreAction::Serve => {}
-                    GuestRestoreAction::Apply(record) => {
-                        let space = space.take().ok_or("the activation applied twice")?;
-                        // The guest restore completes, or expires past its deadline, when the
-                        // application ends.
-                        let applied = space(&record);
-                        // The messages after the Activate came before Ready: a retry of the
-                        // Activate joins the application, and anything else fails it.
-                        let mut joined = 0;
-                        for input in inputs {
-                            if restore.input(Instant::now(), input)? == GuestRestoreAction::Join {
-                                joined += 1;
-                            }
-                        }
-                        let established = restore.complete(Instant::now(), applied)?;
-                        // Ready answers the Activate, and each retry that joined its application.
-                        for _ in 0..=joined {
-                            ready(connection, established)?;
-                        }
+                    GuestRestoreAction::Ready(established) => {
+                        ready(connection, established)?;
                         return Ok(restore);
                     }
-                    GuestRestoreAction::Ready(established) => ready(connection, established)?,
                 }
             }
         }

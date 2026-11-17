@@ -17,10 +17,9 @@
 //! | `CANCEL` | `0x04` | Host | None |
 //! | `MAPS` | `0x06` | Host | A `MAPS` payload |
 //! | `CAPTURE` | `0x07` | Host | The capture request's flag |
-//! | `ACTIVATE` | `0x08` | Host | The activate request's workload identity and guest-restore record |
 //! | `STDIN` | `0x09` | Host | 1 or more bytes of an execution's standard input |
 //! | `STDIN_END` | `0x0a` | Host | None |
-//! | `READY` | `0x81` | Guest | The protocol version, one byte, then, in answer to `ACTIVATE`, what Ready reports about the guest restore |
+//! | `READY` | `0x81` | Guest | The protocol version, one byte, then, in answer to a restored clone's `PING`, what Ready reports about the guest restore |
 //! | `STDOUT` | `0x82` | Guest | 1 or more bytes of an execution's standard output |
 //! | `STDERR` | `0x83` | Guest | 1 or more bytes of an execution's standard error |
 //! | `EXIT` | `0x84` | Guest | How the execution ended, an [`Outcome`], as text |
@@ -30,13 +29,14 @@
 //! | `ERROR` | `0xff` | Guest | The error category, such as `invalid-request`, as 1 or more bytes of text |
 //!
 //! The exchanges of version 1 keep their payloads and their order. `PING` asks whether the guest
-//! agent is ready, and `READY` answers with the protocol version, which the host checks. `MAPS`,
-//! `CAPTURE` and `ACTIVATE` carry the payloads that their codecs encode and decode, as in
-//! version 1, and `READY` acknowledges them; in answer to `ACTIVATE`, it also carries what Ready
-//! reports about the guest restore, in the canonical encoding of
-//! [`GuestRestoreReady`](crate::guest_restore::GuestRestoreReady). `ERROR` refuses a request, and
-//! `BUSY` refuses one while an execution runs. `STOP` shuts the VM down, also while an execution
-//! runs, and `STOPPED` acknowledges it.
+//! agent is ready, and `READY` answers with the protocol version, which the host checks; a
+//! restored clone's `READY` also carries what Ready reports about its guest restore, in the
+//! canonical encoding of [`GuestRestoreReady`](crate::guest_restore::GuestRestoreReady), since
+//! the host's `PING` is its request for the clone's Ready. `MAPS` and `CAPTURE` carry the payloads
+//! that their codecs encode and decode, as in version 1, and `READY` acknowledges them. `ERROR`
+//! refuses a request, and `BUSY` refuses one while an execution runs. `STOP` shuts the VM down,
+//! also while an execution runs, and `STOPPED` acknowledges it. Kind `0x08` is unassigned: a
+//! restored clone takes its guest-restore record from its restore packet, not from a request.
 //!
 //! An `EXEC` starts an execution, which its `EXEC` payload describes as in version 1, and which
 //! its request ID names until the `EXIT` that ends it, or the `ERROR` that refuses it. Its
@@ -79,8 +79,6 @@ const CANCEL: u8 = 0x04;
 const MAPS: u8 = 0x06;
 /// Kind of [`Frame::Capture`].
 const CAPTURE: u8 = 0x07;
-/// Kind of [`Frame::Activate`].
-const ACTIVATE: u8 = 0x08;
 /// Kind of [`Frame::Stdin`].
 const STDIN: u8 = 0x09;
 /// Kind of [`Frame::StdinEnd`].
@@ -118,8 +116,6 @@ pub(crate) enum Frame<'a> {
     Maps(&'a [u8]),
     /// `CAPTURE`: asks nvx-init to capture the VM, with the capture request's payload.
     Capture(&'a [u8]),
-    /// `ACTIVATE`: asks nvx-init to activate a restored VM, with the activate request's payload.
-    Activate(&'a [u8]),
     /// `STDIN`: bytes of the standard input of the execution that the request ID names.
     Stdin(&'a [u8]),
     /// `STDIN_END`: ends the standard input of the execution that the request ID names.
@@ -128,7 +124,8 @@ pub(crate) enum Frame<'a> {
     Ready {
         /// The protocol version that the guest agent speaks.
         version: u8,
-        /// What Ready reports about the guest restore, in answer to `ACTIVATE`; empty otherwise.
+        /// What Ready reports about the guest restore, in answer to a restored clone's `PING`;
+        /// empty otherwise.
         activation: &'a [u8],
     },
     /// `STDOUT`: bytes of the execution's standard output.
@@ -217,7 +214,6 @@ impl<'a> Frame<'a> {
             Self::Cancel => (CANCEL, 0, &[], &[]),
             Self::Maps(data) => (MAPS, 0, &[], data),
             Self::Capture(data) => (CAPTURE, 0, &[], data),
-            Self::Activate(data) => (ACTIVATE, 0, &[], data),
             Self::Stdin(data) => (STDIN, 0, &[], data),
             Self::StdinEnd => (STDIN_END, 0, &[], &[]),
             Self::Ready {
@@ -284,7 +280,6 @@ impl<'a> Frame<'a> {
             CANCEL => empty(Self::Cancel),
             MAPS => Some(Self::Maps(payload)),
             CAPTURE => Some(Self::Capture(payload)),
-            ACTIVATE => Some(Self::Activate(payload)),
             STDIN => Some(Self::Stdin(payload)),
             STDIN_END => empty(Self::StdinEnd),
             READY => payload

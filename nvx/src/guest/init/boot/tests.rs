@@ -65,36 +65,23 @@ fn the_reference_space_steps_compile() {
 
 #[test]
 fn restored_sessions_keep_the_deadline_of_the_actual_repair_acknowledgement() {
-    let repaired = crate::guest::snapshot::repair::tests::repaired_fixture();
+    let payload = super::super::Capture::activation_payload();
+    let repaired = crate::guest::snapshot::repair::tests::repaired_with_record(&payload);
     let acknowledged = repaired.acknowledged_at().unwrap();
     let mut restored = Restored::new(&repaired, acknowledged + Duration::from_secs(12));
     let deadline = acknowledged + Duration::from_secs(30);
     assert_eq!(restored.activation.deadline(), Some(deadline));
+    // The packet's record comes before the session, whose resets change nothing of it.
     restored
-        .reset(acknowledged + Duration::from_secs(13))
+        .accept(acknowledged + Duration::from_secs(13))
         .unwrap();
+    assert_eq!(restored.activation.state(), GuestRestoreState::Activating);
     restored
         .reset(acknowledged + Duration::from_secs(20))
         .unwrap();
-    assert_eq!(restored.activation.deadline(), Some(deadline));
-    let (_, payload) = super::super::Capture::activation_fixture();
-    assert!(matches!(
-        restored
-            .accept(&payload, acknowledged + Duration::from_secs(21))
-            .unwrap()
-            .0,
-        GuestRestoreAction::Apply(_)
-    ));
     restored
         .reset(acknowledged + Duration::from_secs(29))
         .unwrap();
-    assert!(matches!(
-        restored
-            .accept(&payload, acknowledged + Duration::from_secs(29))
-            .unwrap()
-            .0,
-        GuestRestoreAction::Join
-    ));
     assert_eq!(restored.activation.deadline(), Some(deadline));
     assert!(
         restored
@@ -110,8 +97,8 @@ fn restored_sessions_keep_the_deadline_of_the_actual_repair_acknowledgement() {
 fn restored_resource_steps_finish_before_completion_and_ready() {
     use crate::guest_restore::{GuestRestoreReady, Network, Publication};
     use std::cell::RefCell;
-    let (mut capture, mut payload) = super::super::Capture::activation_fixture();
-    let (record, _) = protocol::decode_activate_payload(&payload).unwrap();
+    let mut payload = super::super::Capture::activation_payload();
+    let (record, _) = protocol::decode_activation_record(&payload).unwrap();
     let mut configuration = record.configuration().clone();
     configuration.network = Some(Network {
         dns: Some("10.88.0.53".parse().unwrap()),
@@ -120,14 +107,15 @@ fn restored_resource_steps_finish_before_completion_and_ready() {
     });
     let record =
         guest_restore::GuestRestoreRecord::new(record.restore().copied(), configuration).unwrap();
-    payload.truncate(9);
+    payload.truncate(protocol::ACTIVATION_IDENTITY_LEN);
     payload.extend(record.encode());
+    let mut capture = super::super::Capture::restored_fixture(Some(&payload));
     let restored = capture.restored.as_mut().unwrap();
-    let (GuestRestoreAction::Apply(accepted), _) =
-        restored.accept(&payload, Instant::now()).unwrap()
-    else {
-        panic!("one accepted activation");
-    };
+    restored.accept(Instant::now()).unwrap();
+    let (accepted, workload) = restored.accepted.as_ref().unwrap();
+    assert_eq!(**accepted, record);
+    assert_eq!((workload.uid, workload.gid), (1000, 1001));
+    let accepted = accepted.clone();
     let calls = RefCell::new(Vec::new());
     let (retained, ()) = restore_in_order(
         None,
@@ -165,11 +153,15 @@ fn restored_resource_steps_finish_before_completion_and_ready() {
     )
     .unwrap();
     assert_eq!(retained.network, accepted.configuration().network);
-    let ready = restored
+    restored
         .activation
         .complete(Instant::now(), Ok(()))
         .unwrap();
     calls.borrow_mut().push("complete");
+    // The host's request for Ready, once the record applied, gets the record's transaction.
+    let GuestRestoreAction::Ready(ready) = restored.ready(Instant::now()).unwrap() else {
+        panic!("the applied activation answers the request for Ready");
+    };
     assert_eq!(ready, GuestRestoreReady::of(&accepted));
     calls.borrow_mut().push("ready");
     assert_eq!(
@@ -183,10 +175,11 @@ fn restored_resource_steps_finish_before_completion_and_ready() {
             "ready"
         ]
     );
-    assert!(matches!(
-        restored.accept(&payload, Instant::now()).unwrap().0,
-        GuestRestoreAction::Ready(_)
-    ));
+    // A later request for Ready gets the same Ready, without applying again.
+    assert_eq!(
+        restored.ready(Instant::now()).unwrap(),
+        GuestRestoreAction::Ready(ready)
+    );
 }
 
 #[test]
@@ -280,47 +273,40 @@ fn an_expired_activation_cannot_begin_or_advance_to_another_space_step() {
 #[test]
 fn a_failed_activation_ends_the_vm_with_the_status_of_its_class() {
     use crate::guest::restore::state::apply::NetworkError;
-    use crate::guest_restore::{Configuration, GuestRestoreRecord, RestoreSection, TransactionId};
+    use crate::guest_restore::{Configuration, GuestRestoreRecord};
     use crate::protocol::status::*;
 
     let now = Instant::now();
-    let (_, payload) = super::super::Capture::activation_fixture();
-    let (record, _) = protocol::decode_activate_payload(&payload).unwrap();
+    let payload = super::super::Capture::activation_payload();
+    let (record, _) = protocol::decode_activation_record(&payload).unwrap();
+    let identity = &payload[..protocol::ACTIVATION_IDENTITY_LEN];
+    // The activation record of `restore`, with the configuration that `change` makes, after the
+    // workload's identity.
     let encode = |restore, change: fn(&mut Configuration)| {
         let mut configuration = record.configuration().clone();
         change(&mut configuration);
-        GuestRestoreRecord::new(restore, configuration)
-            .unwrap()
-            .encode()
+        let record = GuestRestoreRecord::new(restore, configuration).unwrap();
+        [identity, &record.encode()].concat()
     };
     let cold = encode(None, |_| {});
     let larger = encode(record.restore().copied(), |configuration| {
         configuration.resources.cpus += 1
     });
-    let other = encode(
-        Some(RestoreSection {
-            transaction: TransactionId::from_bytes([0x33; TransactionId::LEN]),
-        }),
-        |_| {},
-    );
-    let restricted = || {
+    let mut flag = payload.clone();
+    flag[8] = 2;
+    // The clone whose restore packet carried `record`, once its guest restore refused it.
+    let refused = |record: Option<&[u8]>| {
+        let mut restored = super::super::Capture::restored_fixture(record)
+            .restored
+            .unwrap();
+        restored.accept(now).unwrap_err();
+        restored
+    };
+    let activating = || {
         super::super::Capture::activation_fixture()
             .0
             .restored
             .unwrap()
-    };
-    let refused = |input: GuestRestoreInput<'_>| {
-        let mut restored = restricted();
-        restored.activation.input(now, input).unwrap_err();
-        restored
-    };
-    let activating = || {
-        let mut restored = restricted();
-        assert!(matches!(
-            restored.accept(&payload, now).unwrap().0,
-            GuestRestoreAction::Apply(_)
-        ));
-        restored
     };
     // The record's application fails with `error`, as `Restored::apply` returns it.
     let failed = |error: Error| {
@@ -353,58 +339,54 @@ fn a_failed_activation_ends_the_vm_with_the_status_of_its_class() {
     let Err(assembly) = restore::apply(&record, &relative, None) else {
         panic!("a relative runtime directory was assembled");
     };
-    let mut ordered = restricted();
-    ordered.activation.start().unwrap_err();
-    let mut completed = restricted();
-    completed.activation.complete(now, Ok(())).unwrap_err();
-    let mut changed = activating();
-    changed
+    let mut request = activating();
+    request.activation.complete(now, Ok(())).unwrap();
+    request
         .activation
-        .input(now, GuestRestoreInput::Activate(&other))
+        .input(now, GuestRestoreInput::Request)
         .unwrap_err();
-    // Requests that `Restored` refuses before its activation takes them.
-    let mut identity = payload.clone();
-    identity[0] ^= 1;
-    let mut undecodable = restricted();
-    undecodable.accept(&payload[..5], now).unwrap_err();
-    let mut rewritten = activating();
-    rewritten.accept(&identity, now).unwrap_err();
-    let mut replayed = activating();
-    replayed.activation.complete(now, Ok(())).unwrap();
-    replayed.accept(&identity, now).unwrap_err();
+    let mut ordered = activating();
+    ordered.activation.start().unwrap_err();
+    let mut completed = super::super::Capture::restored_fixture(Some(&payload))
+        .restored
+        .unwrap();
+    completed.activation.complete(now, Ok(())).unwrap_err();
+    let mut again = activating();
+    again
+        .activation
+        .accept(now, Some(&payload[protocol::ACTIVATION_IDENTITY_LEN..]))
+        .unwrap_err();
     let cases = [
-        ("an expired deadline", restricted(), GUEST_RESTORE_DEADLINE),
+        ("an expired deadline", activating(), GUEST_RESTORE_DEADLINE),
+        ("a request before Ready", request, GUEST_RESTORE_PROTOCOL),
         (
-            "a second reset",
-            refused(GuestRestoreInput::Reset),
-            GUEST_RESTORE_PROTOCOL,
+            "a packet without a record",
+            refused(None),
+            GUEST_RESTORE_RECORD,
         ),
         (
-            "a request before the Activate",
-            refused(GuestRestoreInput::Request),
-            GUEST_RESTORE_PROTOCOL,
+            "a truncated workload identity",
+            refused(Some(&payload[..5])),
+            GUEST_RESTORE_RECORD,
         ),
-        ("another transaction", changed, GUEST_RESTORE_PROTOCOL),
-        ("a changed request", rewritten, GUEST_RESTORE_PROTOCOL),
         (
-            "a changed request once ready",
-            replayed,
-            GUEST_RESTORE_PROTOCOL,
+            "an invalid account flag",
+            refused(Some(&flag)),
+            GUEST_RESTORE_RECORD,
         ),
-        ("an undecodable request", undecodable, GUEST_RESTORE_RECORD),
         (
             "an undecodable record",
-            refused(GuestRestoreInput::Activate(&[0])),
+            refused(Some(&[identity, &[0]].concat())),
             GUEST_RESTORE_RECORD,
         ),
         (
             "a cold boot's record",
-            refused(GuestRestoreInput::Activate(&cold)),
+            refused(Some(&cold)),
             GUEST_RESTORE_RECORD,
         ),
         (
             "other resources",
-            refused(GuestRestoreInput::Activate(&larger)),
+            refused(Some(&larger)),
             GUEST_RESTORE_RESOURCES,
         ),
         (
@@ -465,6 +447,7 @@ fn a_failed_activation_ends_the_vm_with_the_status_of_its_class() {
             failed(Error::io("failed to switch")),
             GUEST_RESTORE_ROOT,
         ),
+        ("a second record", again, GUEST_RESTORE_ORDER),
         ("an early completion", completed, GUEST_RESTORE_ORDER),
         ("an early start", ordered, GUEST_RESTORE_ORDER),
     ];
@@ -478,10 +461,15 @@ fn a_failed_activation_ends_the_vm_with_the_status_of_its_class() {
         );
         assert_eq!(restored.failure_status(later), Some(expected), "{case}");
     }
-    // An activation fails only once its deadline has passed, and never once it is ready.
-    assert_eq!(restricted().failure_status(now), None);
+    // An activation fails only once its deadline has passed, also once its record applied, and
+    // never once it is ready.
+    assert_eq!(activating().failure_status(now), None);
+    let mut applied = activating();
+    applied.activation.complete(now, Ok(())).unwrap();
+    assert_eq!(applied.failure_status(now), None);
     let mut ready = activating();
     ready.activation.complete(now, Ok(())).unwrap();
+    ready.ready(now).unwrap();
     assert_eq!(ready.failure_status(now + Duration::from_secs(3600)), None);
 }
 

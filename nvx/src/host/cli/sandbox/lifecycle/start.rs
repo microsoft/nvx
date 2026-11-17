@@ -235,13 +235,27 @@ fn launch_locked(
     lock.clear_outputs()?;
     let mut prepared =
         vm::create(runtime, &config, snapshot.as_ref(), &dir).map_err(error_with_cause)?;
-    let activation = match &snapshot {
-        Some(_) => Some(
-            prepared
+    let activation = match (&snapshot, &restore) {
+        (Some(_), Some(restore)) => {
+            let record = prepared
                 .guest_restore_record(TransactionId::from_bytes(random_bytes()?))
-                .map_err(error_with_cause)?,
-        ),
-        None => None,
+                .map_err(error_with_cause)?;
+            // The guest takes its record, with the workload's identity, from its restore packet,
+            // which OpenVMM seals before the first restored vCPU runs.
+            let (uid, gid) = restore.identity;
+            let identity = WorkloadIdentity {
+                uid,
+                gid,
+                create_account: false,
+            };
+            let activation = protocol::encode_activation_record(&record, &identity)
+                .map_err(|error| Exit::error(ErrorCode::Unsupported, error.into_message()))?;
+            prepared
+                .supply_activation_record(&activation)
+                .map_err(error_with_cause)?;
+            Some(record)
+        }
+        _ => None,
     };
     // OpenVMM opens a restore's scratch on Windows only while no other handle may write it, so
     // the claim's handle closes there, and the guard that OpenVMM inherits keeps the claim.
@@ -441,13 +455,7 @@ fn restore_guest(
     timeout: f64,
     failure: &mut Option<RestoreError>,
 ) -> Result {
-    let (uid, gid) = restore.identity;
     let workload = Workload {
-        identity: WorkloadIdentity {
-            uid,
-            gid,
-            create_account: false,
-        },
         exec: protocol::Workload {
             argv: restore.source.workload.clone(),
             timeout_ms: 0,

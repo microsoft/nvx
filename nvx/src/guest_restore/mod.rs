@@ -68,10 +68,10 @@
 //! # Limits
 //!
 //! The limits are public constants: a record's encoding holds at most [`MAX_RECORD_BYTES`] bytes,
-//! so that a restore packet could carry the same bytes, a configuration announces at most
-//! [`MAX_MAPPINGS`] mappings, a hostname holds at most [`MAX_HOSTNAME_BYTES`] bytes, and a proxy
-//! endpoint at most [`MAX_PROXY_ENDPOINT_BYTES`]. The limits of a record's parts keep every
-//! record's encoding within [`MAX_RECORD_BYTES`].
+//! as many as the activation record of a restore packet, which carries it; a configuration
+//! announces at most [`MAX_MAPPINGS`] mappings, a hostname holds at most [`MAX_HOSTNAME_BYTES`]
+//! bytes, and a proxy endpoint at most [`MAX_PROXY_ENDPOINT_BYTES`]. The limits of a record's
+//! parts keep every record's encoding within [`MAX_RECORD_BYTES`].
 //!
 //! [`Configuration::check`] also refuses an export without mappings, mappings without an export,
 //! a tmpfs cap outside 1 to 90 percent, a hostname with a NUL, a proxy endpoint with anything
@@ -190,7 +190,8 @@ pub use self::codec::Field;
 /// [`GuestRestoreRecord`], which every record names. A record of another version is refused.
 pub const VERSION: u16 = 2;
 
-/// The most bytes of a record's encoding, so that a restore packet could carry the same bytes.
+/// The most bytes of a record's encoding: as many as the activation record of a restore packet,
+/// which carries it.
 pub const MAX_RECORD_BYTES: usize = 1024;
 
 /// The most host mappings that a configuration announces: as many as a host mapping table holds,

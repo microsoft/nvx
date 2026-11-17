@@ -31,12 +31,12 @@
 //! - ends the VM itself, without another guest program: it writes every file system's modified
 //!   data to its storage, with `sync`, and then stops the VM through OpenVMM's control port with a
 //!   status: 0 after a host `STOP` or `SIGTERM`; after its restored activation failed, which a
-//!   deadline that passed before Ready and an activate request that it refused also are, the
-//!   status of `nvx::protocol::status` of the failure's class, such as 54, `GUEST_RESTORE_ROOT`,
-//!   for a root that does not assemble over its upper, or 51, `GUEST_RESTORE_PROTOCOL`, for an
-//!   activate request that changes the accepted one, which an `NVX-INIT-ACTIVATION:` line on the
-//!   console names first; or 125 after another failure, which an
-//!   `NVX-INIT-ERROR:` line on the console names first.
+//!   deadline that passed before Ready and a restore packet without a valid activation record
+//!   also are, the status of `nvx::protocol::status` of the failure's class, such as 54,
+//!   `GUEST_RESTORE_ROOT`, for a root that does not assemble over its upper, or 52,
+//!   `GUEST_RESTORE_RECORD`, for a restore packet that carried no record, which an
+//!   `NVX-INIT-ACTIVATION:` line on the console names first; or 125 after another failure, which
+//!   an `NVX-INIT-ERROR:` line on the console names first.
 //!
 //! Outside PID 1, `nvx-init` changes nothing: it fails with status 2 and a message.
 

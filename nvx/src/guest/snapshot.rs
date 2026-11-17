@@ -7,9 +7,10 @@
 //!
 //! The caller keeps its executions still. After answering the capture request, its transport
 //! sends nothing until this call returns. After [`Captured::Continued`] or a failure with
-//! [`Disposition::Resumed`], it reports on the same session. After [`Captured::Restored`], it
-//! takes the session's reset, an `Event::Reset`, and acknowledges it with
-//! `Connection::acknowledge` before the guest restore.
+//! [`Disposition::Resumed`], it reports on the same session. After [`Captured::Restored`], its
+//! guest restore takes the activation record of the restore packet, which
+//! [`Repaired::activation_record`] returns, and the caller takes the session's reset, an
+//! `Event::Reset`, and acknowledges it with `Connection::acknowledge` before it answers the host.
 //!
 //! On a restore, the existing repair runs before this call returns: it checks the restore and
 //! its seed, activates its processor target and then its memory target, reseeds the kernel's
@@ -33,7 +34,8 @@
 //! enum Next {
 //!     /// Thaw the workspaces in reverse, where they exist, and report on the same session.
 //!     Report,
-//!     /// Take the session's reset and acknowledge it, then drive this guest restore to Ready.
+//!     /// Drive this guest restore to Ready with the restore packet's record, and take the
+//!     /// session's reset and acknowledge it before answering the host.
 //!     Activate(GuestRestore),
 //!     /// Start nothing, and power the VM off with this status.
 //!     PowerOff(u8),
@@ -109,7 +111,7 @@ pub enum Disks {
 }
 
 /// How a capture ended in this guest.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Captured {
     /// No snapshot was taken; the stall detectors were restored and this guest may continue.
