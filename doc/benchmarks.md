@@ -456,8 +456,8 @@ backing object.
 | `virtio_net_udp_roundtrip_ops` | ops/s | Completed 64-byte UDP echo request/response transactions through portable virtio-net. |
 
 Storage offsets use the same deterministic pseudo-random sequence in every backend. The host UDP
-server binds the host's primary IPv4 address, requires no TAP or firewall changes, and stops before
-the suite returns. The rate is derived during aggregation as
+server binds only the host's primary IPv4 address, to which the guest sends, requires no TAP or
+firewall changes, and stops before the suite returns. The rate is derived during aggregation as
 $\mathrm{ops/s}=N\times10^9/t_{ns}$ from integer operation counts and monotonic elapsed nanoseconds.
 
 Backing objects are reused across attempts. On Windows, extending the virtio-fs file sets its

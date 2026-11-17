@@ -18,6 +18,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -24151,6 +24152,8 @@ class BenchmarkTests(unittest.TestCase):
                     output_path=output,
                 )
                 self.assertEqual(run_guest.call_count, 6)
+                # The echo server binds the address to which the guest sends.
+                echo_server.assert_called_once_with("192.0.2.1", 5201)
                 # A hung attempt describes the host of its scratch directory.
                 host_state = run_guest.call_args.kwargs["host_state_on_timeout"]
                 self.assertIs(host_state.func, benchmark._device_io_host_state)
@@ -24192,6 +24195,15 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(len(records), 6)
             retained = [record for record in records if not record["warmup"]]
             self.assertEqual([record["sample_index"] for record in retained], [0, 0, 0])
+
+    def test_device_io_udp_echo_server_echoes_at_its_address_alone(self):
+        with benchmark.UdpEchoServer("127.0.0.1", 0) as server:
+            address = server.socket.getsockname()
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+                client.settimeout(5)
+                client.sendto(b"NVX-DEVICE-IO-ECHO", address)
+                self.assertEqual(client.recvfrom(64), (b"NVX-DEVICE-IO-ECHO", address))
+        self.assertEqual(address[0], "127.0.0.1")
 
     def test_device_io_missing_guest_result_becomes_failure(self):
         result: benchmark.GuestCommandResult = {
