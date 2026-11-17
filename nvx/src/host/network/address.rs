@@ -35,7 +35,7 @@ impl Family {
     }
 
     /// Returns the last address of this family, whose bits are all set.
-    pub(crate) const fn last_address(self) -> u128 {
+    const fn last_address(self) -> u128 {
         match self {
             Self::V4 => u32::MAX as u128,
             Self::V6 => u128::MAX,
