@@ -332,6 +332,29 @@ fn other_versions_of_the_format_are_unsupported() {
 }
 
 #[test]
+fn another_format_is_unsupported_whatever_the_numbers_of_its_fields() {
+    // Another version of the format may number its fields up to 2^29 - 1, as the wire format
+    // allows.
+    let mut version = ManifestSpec::template();
+    version.version = 6;
+    let mut magic = ManifestSpec::template();
+    magic.magic = b"OPENVMM_SNAPSHOT_V6\0".to_vec();
+    for number in [63, 64, 1000, (1 << 29) - 1] {
+        let extra = || Proto::default().varint(number, 1);
+        assert_eq!(
+            refusal(&version.encode_with(extra()), ErrorCode::FormatUnsupported),
+            "the snapshot manifest has format version 6, which this build does not read; capture \
+             the template again with the runtime of this build"
+        );
+        assert_eq!(
+            refusal(&magic.encode_with(extra()), ErrorCode::FormatUnsupported),
+            "the snapshot manifest has another format magic than its version's, which this build \
+             does not read; capture the template again with the runtime of this build"
+        );
+    }
+}
+
+#[test]
 fn fields_that_the_format_does_not_have_are_refused() {
     let template = ManifestSpec::template();
     // Fields 16 and 17, and 19 and later, do not exist yet.

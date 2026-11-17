@@ -11,8 +11,10 @@
 //! an unknown wire type, a varint longer than ten bytes or beyond 64 bits, a field number outside
 //! 1 to 2^29 - 1, and a value that runs past its message are refused. [`Message`] refuses the
 //! fields that a message type does not know, and a field that is not repeated but appears twice,
-//! which a writer never produces. The reader never recurses on its own: each message type decodes
-//! its nested messages, whose depth the manifest's types bound.
+//! which a writer never produces; [`every_field`] reads the fields of a message whose type the
+//! reader may not know, such as a manifest of another version, whatever their numbers. The reader
+//! never recurses on its own: each message type decodes its nested messages, whose depth the
+//! manifest's types bound.
 
 use std::fmt;
 
@@ -233,6 +235,21 @@ fn read_field<'a>(data: &mut &'a [u8]) -> Result<Field<'a>, WireError> {
         wire_type => return Err(WireError::WireType(wire_type as u8)),
     };
     Ok(Field { number, value })
+}
+
+/// Returns the fields of the message `data`, in their order, whatever their numbers and however
+/// often each appears, up to and including the first error, after which it returns no more.
+pub(super) fn every_field(mut data: &[u8]) -> impl Iterator<Item = Result<Field<'_>, WireError>> {
+    std::iter::from_fn(move || {
+        if data.is_empty() {
+            return None;
+        }
+        let field = read_field(&mut data);
+        if field.is_err() {
+            data = &[];
+        }
+        Some(field)
+    })
 }
 
 /// The fields of a message, in their order, which refuses an unknown field and a field that is
