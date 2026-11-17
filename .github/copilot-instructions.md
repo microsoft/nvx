@@ -155,6 +155,14 @@
   request's head holds that outcome, never for a fix that exists only locally.
   `python3 scripts/pr_threads.py` lists threads, reviews, and conversation
   comments, and replies to and resolves threads with those checks.
+- A pull request that renames, moves, or splits a file, or edits the code that
+  a dismissed CodeQL alert's fingerprint covers, the first 100 characters
+  other than spaces and tabs from the start of the flagged line, raises a new,
+  open alert in its place, among those that its `CodeQL` check links to.
+  Before it merges, have each one whose original review still holds dismissed
+  again, with the original reason and issue, as
+  [Code scanning](../doc/ci.md#code-scanning) describes; a `codeql[...]`
+  comment suppresses nothing.
 - Pull-request concurrency cancels superseded runs, while `dev` pushes queue in
   order and never cancel one another. Before debugging a cancelled pull-request
   run, compare its head SHA with the current pull-request head and classify an

@@ -2287,6 +2287,42 @@ repository's contents and write pull requests, but not issues: reading an
 issue of a public repository needs no permission. A change to the workflow or
 to the script takes effect once it merges into `dev`.
 
+## Code scanning
+
+GitHub's CodeQL code scanning analyzes the GitHub Actions workflows, the
+Python, and the Rust of the repository with CodeQL's default query suite, on
+pull requests to `dev`, on pushes to it, and weekly. The repository's settings
+configure it, as CodeQL's default setup, so no workflow of the repository
+defines it. Each analysis runs as an `Analyze (actions)`, `Analyze (python)`,
+or `Analyze (rust)` check, and on a pull request, the `CodeQL` check reports
+the new alerts in the code that the pull request changes and links to every
+open alert of its branch. `Required status check` does not wait for them. The
+repository's Security tab lists the alerts, open and closed.
+
+Review each alert, or each group of alerts with one cause, in an issue
+labelled `area: security` that records the evidence, or report a
+vulnerability privately instead, as [`SECURITY.md`](../SECURITY.md) requires.
+Then fix the code, or dismiss the alert with the reason that fits,
+`false positive`, `used in tests`, or `won't fix`, and a comment that sums up
+the evidence and cites the issue, so that the alert itself records why. The
+analysis runs no alert-suppression query, so a `codeql[RULE]` or `lgtm[RULE]`
+comment in the code suppresses nothing, and renaming code only to escape a
+query hides a result instead of recording its review.
+
+A dismissal holds for one alert, on every branch. GitHub matches each result
+of an analysis to an alert by its rule, the path of its file, and a hash of
+the first 100 characters, other than spaces and tabs, from the start of the
+flagged line, which usually reach into the next line; the line's number does
+not count. Code that moves within its file keeps its alert, but renaming,
+moving, or splitting the file, or editing the hashed characters, gives the
+result a new, open alert, while the dismissed one stays dismissed and matches
+nothing. A pull request that does so raises the new alerts on its branch,
+among the open alerts that its `CodeQL` check links to, and they keep their
+numbers when it merges. Dismiss each one there whose original review still
+holds for the code as changed, with the original reason and a comment that
+cites the original issue and alert. Triage one whose review no longer holds as
+a new alert, and dismiss one that reaches `dev` open the same way.
+
 ## crates.io releases
 
 A scheduled or manually dispatched full run of `dev` publishes the
