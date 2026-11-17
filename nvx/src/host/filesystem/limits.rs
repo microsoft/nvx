@@ -106,14 +106,21 @@ pub(super) fn policy_limits(
         let Some(relative) = relative_text(root, path) else {
             return Err(format!("{} is not valid UTF-8", path.display()));
         };
+        let length = relative.len();
+        if length > MAX_POLICY_PATH_BYTES {
+            return Err(format!(
+                "OpenVMM cannot {action} {}: below the exported directory {}, a path must hold \
+                 at most {MAX_POLICY_PATH_BYTES} bytes, but it holds {length}",
+                path.display(),
+                root.display()
+            ));
+        }
         // A name may contain spaces, but not begin or end with one.
-        if relative.len() > MAX_POLICY_PATH_BYTES
-            || relative.chars().any(|character| {
-                (character.is_whitespace() && character != ' ') || matches!(character, ':' | '\\')
-            })
-            || relative
-                .split('/')
-                .any(|name| name.starts_with(' ') || name.ends_with(' '))
+        if relative.chars().any(|character| {
+            (character.is_whitespace() && character != ' ') || matches!(character, ':' | '\\')
+        }) || relative
+            .split('/')
+            .any(|name| name.starts_with(' ') || name.ends_with(' '))
         {
             return Err(format!(
                 "OpenVMM cannot {action} {}: below the exported directory {}, a path must not \
@@ -123,7 +130,7 @@ pub(super) fn policy_limits(
                 root.display()
             ));
         }
-        total += relative.len();
+        total += length;
     }
     if total > MAX_POLICY_BYTES {
         return Err(format!(
