@@ -682,6 +682,9 @@ for each action. `NetworkPolicy::native_egress_rules` returns a policy's
 lowered rules, a `NativeEgressRules` of its allow and deny lists, without
 reading anything on the host, and fails with an `Unsupported` error for a
 malformed rule or for an action that needs more than 256 rules.
+`openvmm_arguments` refuses them too, even in a policy for which it attaches no
+network device: a deny default without allow rules, ingress, host-loopback
+access, or a proxy.
 
 ### `nvx::host::filesystem`
 

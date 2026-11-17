@@ -461,10 +461,16 @@ fn invalid_rules_are_rejected_with_the_policy_compilers_messages() {
             "egress.allow emits at most 256 native rules",
         ),
     ] {
-        let egress = NetworkPolicy::new(Access::Deny).with_allow(rule.clone());
-        let error = openvmm_arguments(Some(&egress), "10.0.0.2/24").unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Unsupported, "{rule:?}");
-        assert_eq!(error.message(), message, "{rule:?}");
+        // A deny default without allow rules, ingress, or host-loopback access attaches no
+        // device, but its deny rules are checked all the same.
+        let denied = message.replacen("egress.allow", "egress.deny", 1);
+        let allowing = NetworkPolicy::new(Access::Deny).with_allow(rule.clone());
+        let denying = NetworkPolicy::new(Access::Deny).with_deny(rule.clone());
+        for (egress, message) in [(allowing, message), (denying, denied.as_str())] {
+            let error = openvmm_arguments(Some(&egress), "10.0.0.2/24").unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unsupported, "{egress:?}");
+            assert_eq!(error.message(), message, "{egress:?}");
+        }
     }
     // The allow rules are checked and lowered before the deny rules.
     let egress = NetworkPolicy::new(Access::Allow)
@@ -1385,15 +1391,13 @@ fn native_egress_rules_refuse_malformed_rules_as_the_openvmm_options_do() {
         rules_of(ports, vec![malformed]).unwrap_err().to_string(),
         "egress.allow emits at most 256 native rules"
     );
-    // Deny rules are checked even where the OpenVMM options leave them out.
+    // Deny rules are checked even where the OpenVMM options attach no device, as the options
+    // check them there.
     let denied = NetworkPolicy::new(Access::Deny).with_deny(EgressRule::to("example.com"));
-    assert!(
-        openvmm_arguments(Some(&denied), "10.0.0.2/24")
-            .unwrap()
-            .is_empty()
-    );
+    let expected = openvmm_arguments(Some(&denied), "10.0.0.2/24").unwrap_err();
     let error = denied.native_egress_rules().unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unsupported);
+    assert_eq!(error.message(), expected.message());
     assert_eq!(
         error.to_string(),
         "egress.deny[0].to[0].cidr is not a valid IPv4 or IPv6 CIDR: \"example.com\""
