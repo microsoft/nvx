@@ -70,7 +70,7 @@ jobs:
       # so this is no isolation boundary (doc/ci.md, "Superseded merge
       # groups").
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ github.event.merge_group.base_ref }}
           persist-credentials: false
@@ -95,7 +95,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -117,7 +117,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -148,13 +148,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
       # The release that the self-hosted runners provide.
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
@@ -182,7 +182,7 @@ jobs:
           --target x86_64-unknown-linux-musl
 
       - name: Upload nvx-rs executable
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nvx-rs-linux-musl-executable
           path: nvx-rs/target/release/nvx-rs
@@ -191,7 +191,7 @@ jobs:
           retention-days: 1
 
       - name: Upload nvx-rs provenance
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nvx-rs-linux-musl-provenance
           path: build/nvx-rs.provenance.json
@@ -216,13 +216,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
       # The release that the self-hosted runners provide.
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
@@ -259,7 +259,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload nvx-rs executable
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nvx-rs-windows-msvc-executable
           path: nvx-rs/target/release/nvx-rs.exe
@@ -268,7 +268,7 @@ jobs:
           retention-days: 1
 
       - name: Upload nvx-rs provenance
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nvx-rs-windows-msvc-provenance
           path: build/nvx-rs.provenance.json
@@ -304,7 +304,7 @@ jobs:
       NVX_RS: ${{ github.workspace }}/nvx-rs/target/release/nvx-rs
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -315,7 +315,7 @@ jobs:
 
       # The release that the self-hosted runners provide.
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
@@ -331,13 +331,13 @@ jobs:
           rustup toolchain install "${toolchain}" --profile minimal --no-self-update
 
       - name: Download nvx-rs executable
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nvx-rs-linux-musl-executable
           path: nvx-rs/target/release
 
       - name: Download nvx-rs provenance
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nvx-rs-linux-musl-provenance
           path: build
@@ -390,7 +390,7 @@ jobs:
       NVX_RS: ${{ github.workspace }}\nvx-rs\target\release\nvx-rs.exe
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -401,7 +401,7 @@ jobs:
 
       # The release that the self-hosted runners provide.
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
@@ -423,13 +423,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Download nvx-rs executable
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nvx-rs-windows-msvc-executable
           path: nvx-rs/target/release
 
       - name: Download nvx-rs provenance
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nvx-rs-windows-msvc-provenance
           path: build
@@ -468,7 +468,7 @@ jobs:
       run-benchmarks: ${{ steps.changes.outputs.run-benchmarks }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -581,7 +581,7 @@ jobs:
       guest-cache-keys: ${{ steps.guest-artifacts.outputs.cache-keys }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -600,7 +600,7 @@ jobs:
       # One artifact per component, so that each job downloads only the
       # components that it reads (doc/ci.md, "Guest artifact handoff").
       - name: Upload guest kernel
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: guest-kernel
           path: |
@@ -611,7 +611,7 @@ jobs:
           retention-days: 1
 
       - name: Upload Alpine initramfs
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: guest-alpine
           path: |
@@ -648,7 +648,7 @@ jobs:
       guest-cache-keys: ${{ steps.guest-artifacts.outputs.cache-keys }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -665,7 +665,7 @@ jobs:
           reuse: ${{ github.event_name == 'merge_group' || github.event_name == 'push' }}
 
       - name: Upload Ubuntu initramfs
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: guest-ubuntu
           path: |
@@ -675,7 +675,7 @@ jobs:
           retention-days: 1
 
       - name: Upload Ubuntu distro layer
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: guest-ubuntu-distro
           path: |
@@ -686,7 +686,7 @@ jobs:
           retention-days: 1
 
       - name: Upload Azure Linux initramfs
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: guest-azurelinux
           path: |
@@ -723,7 +723,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -779,7 +779,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -790,7 +790,7 @@ jobs:
           save-cache: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
       - name: Upload guest debug kernel
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: guest-debug-kernel
           path: |
@@ -920,7 +920,7 @@ jobs:
     timeout-minutes: 320
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -1601,7 +1601,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -1632,7 +1632,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Gate on performance regressions
         uses: ./.github/actions/gate-performance
@@ -1682,7 +1682,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -1840,7 +1840,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -1863,7 +1863,7 @@ jobs:
             --require-host
 
       - name: Upload performance results
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: performance-results-${{ github.run_id }}
           path: data/results
@@ -1891,7 +1891,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout dev
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: dev
           fetch-depth: 0
@@ -1936,7 +1936,7 @@ jobs:
       # The full history holds the commits from which the published versions
       # were packed.
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -1990,7 +1990,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
           persist-credentials: false

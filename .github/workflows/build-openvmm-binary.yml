@@ -38,7 +38,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -66,7 +66,7 @@ jobs:
           operation: stop
 
       - name: Upload OpenVMM executable
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.artifact }}-executable
           path: ${{ inputs.binary }}
@@ -76,7 +76,7 @@ jobs:
           retention-days: 1
 
       - name: Upload OpenVMM provenance
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.artifact }}-provenance
           path: build/openvmm.provenance.json

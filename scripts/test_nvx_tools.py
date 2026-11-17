@@ -259,6 +259,47 @@ def _yaml_scalar(configuration: str, field: str) -> str:
     raise AssertionError(f"configuration has no {field} field")
 
 
+def _yaml_uses(node: yaml.Node | None) -> list[yaml.Node]:
+    """Return the value node of every `uses` key in a composed workflow or
+    action."""
+    if isinstance(node, yaml.MappingNode):
+        uses: list[yaml.Node] = []
+        for key, child in cast(list[tuple[yaml.Node, yaml.Node]], node.value):
+            if isinstance(key, yaml.ScalarNode) and key.value == "uses":
+                uses.append(child)
+            else:
+                uses.extend(_yaml_uses(child))
+        return uses
+    if isinstance(node, yaml.SequenceNode):
+        children = cast(list[yaml.Node], node.value)
+        return [use for child in children for use in _yaml_uses(child)]
+    return []
+
+
+def _action_references() -> list[tuple[str, str, str]]:
+    """Return the location, reference, and trailing comment of every `uses`
+    value of the workflows and actions under .github/. YAML drops comments,
+    so the comment is the rest of the source line after the value."""
+    root = BuildConstants.REPO_ROOT
+    references: list[tuple[str, str, str]] = []
+    for path in sorted(
+        path
+        for pattern in ("*.yml", "*.yaml")
+        for path in (root / ".github").rglob(pattern)
+    ):
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        for node in _yaml_uses(yaml.SafeLoader(text).get_single_node()):
+            location = f"{path.relative_to(root).as_posix()}:{node.start_mark.line + 1}"
+            if not isinstance(node, yaml.ScalarNode):
+                raise AssertionError(f"{location}: uses: is not a scalar")
+            end = node.end_mark
+            references.append(
+                (location, str(node.value), lines[end.line][end.column :])
+            )
+    return references
+
+
 def _outer_parentheses_enclose(expression: str) -> bool:
     expression = expression.strip()
     if not expression.startswith("("):
@@ -5353,7 +5394,7 @@ class MergeQueueTests(unittest.TestCase):
                     [needs] if isinstance(needs, str) else needs,
                 )
         [checkout, cancel] = job["steps"]
-        self.assertEqual(checkout["uses"], "actions/checkout@v5")
+        self.assertRegex(checkout["uses"], r"^actions/checkout@")
         # The token can cancel any of the repository's runs, so the job runs
         # the command that the group's base branch has merged rather than the
         # group's copy, although its steps still come from the group's ci.yml.
@@ -6840,7 +6881,7 @@ class CiConfigurationTests(unittest.TestCase):
             job,
         )
         self.assertLess(
-            job.index("uses: actions/checkout@v5"),
+            job.index("uses: actions/checkout@"),
             job.index("python3 scripts/nvx.py check-required-ci"),
         )
         self.assertIn("persist-credentials: false", job)
@@ -9008,7 +9049,7 @@ python3() {
             self.assertIn("path: openvmm/target/release", consumer_workflow)
             self.assertIn("path: build", consumer_workflow)
             self.assertEqual(
-                consumer_workflow.count("uses: actions/download-artifact@v8"),
+                consumer_workflow.count("uses: actions/download-artifact@"),
                 download_count,
             )
             self.assertIn(
@@ -9059,9 +9100,9 @@ python3() {
         self.assertNotIn("actions/cache/", workflow)
         self.assertNotIn("openvmm-inputs-v1-", workflow)
         self.assertNotIn("openvmm-cargo-v1-", workflow)
-        self.assertNotIn("uses: actions/cache@v5", workflow)
-        self.assertNotIn("uses: actions/cache@v5", build_workflow)
-        self.assertNotIn("uses: actions/cache@v5", build_action)
+        self.assertNotIn("uses: actions/cache@", workflow)
+        self.assertNotIn("uses: actions/cache@", build_workflow)
+        self.assertNotIn("uses: actions/cache@", build_action)
 
         release_job = _workflow_job(workflow, "release")
         performance_gate_job = _workflow_job(workflow, "performance-gate")
@@ -9292,7 +9333,7 @@ python3() {
         )
         self.assertEqual(upload["name"], "Upload guest artifact record")
         self.assertEqual(upload["if"], record["if"])
-        self.assertEqual(upload["uses"], "actions/upload-artifact@v7")
+        self.assertRegex(upload["uses"], r"^actions/upload-artifact@")
         # It expires with the components' artifacts.
         self.assertEqual(
             upload["with"],
@@ -9736,11 +9777,11 @@ python3() {
 
         self.assertIn("      debug-kernel:\n", microvm_workflow)
         self.assertIn("        type: boolean\n", microvm_workflow)
-        download = microvm_workflow.index("name: guest-debug-kernel")
-        self.assertIn(
-            "if: inputs.debug-kernel",
-            microvm_workflow[download - 120 : download],
+        download = _workflow_step(
+            microvm_workflow, "test", "Download guest debug kernel"
         )
+        self.assertIn("\n          name: guest-debug-kernel\n", download)
+        self.assertEqual(_yaml_scalar(download, "if"), "inputs.debug-kernel")
         debug_flag = "${{ inputs.debug-kernel && '--debug-kernel' || '' }}"
         self.assertEqual(microvm_workflow.count(debug_flag), 2)
         # The debug run replaces every production-kernel workload rather than
@@ -10166,7 +10207,7 @@ python3() {
         self.assertNotIn("checkout-openvmm", text)
         self.assertNotIn("head.repo.full_name", text)
         checkout, check = job["steps"]
-        self.assertEqual(checkout["uses"], "actions/checkout@v5")
+        self.assertRegex(checkout["uses"], r"^actions/checkout@")
         self.assertEqual(checkout["with"], {"persist-credentials": False})
         self.assertEqual(check["env"]["GH_TOKEN"], "${{ github.token }}")
         self.assertEqual(
@@ -10328,7 +10369,7 @@ python3() {
                 self.assertEqual(job.count("uses: ./.github/actions/validate-nvx"), 1)
                 for prerequisite in (
                     "uses: ./.github/actions/checkout-openvmm",
-                    "uses: actions/setup-python@v6",
+                    "uses: actions/setup-python@",
                     "rustup toolchain install",
                 ):
                     self.assertLess(
@@ -10642,12 +10683,14 @@ python3() {
                 configuration,
             )
         download = microvm.index("      - name: Download nvx-rs executable\n")
-        self.assertIn(
-            "        uses: actions/download-artifact@v8\n"
-            "        with:\n"
-            "          name: ${{ inputs.nvx-rs-artifact }}-executable\n"
-            "          path: nvx-rs/target/release\n",
+        self.assertRegex(
             microvm[download:],
+            r"        uses: actions/download-artifact@[^\n]+\n"
+            + re.escape(
+                "        with:\n"
+                "          name: ${{ inputs.nvx-rs-artifact }}-executable\n"
+                "          path: nvx-rs/target/release\n"
+            ),
         )
         chmod = microvm.index("      - name: Make nvx-rs executable\n")
         self.assertIn(
@@ -11741,15 +11784,41 @@ Write-Output (Get-ExpectedRunnerLabels -BenchmarkRunner)
         )
         self.assertNotIn("--clobber", publish_action)
 
-    def test_ci_artifact_actions_use_node24(self):
-        configurations = "\n".join(
-            path.read_text(encoding="utf-8")
-            for pattern in ("*.yml", "*.yaml")
-            for path in (BuildConstants.REPO_ROOT / ".github").rglob(pattern)
-        )
+    def test_remote_actions_are_pinned_to_release_commits(self):
+        # A tag or a branch is a pointer that whoever controls the action's
+        # repository can move, so every remote action names a full commit SHA
+        # and the release whose commit it is (doc/ci.md#action-references).
+        # Local actions come from the checkout itself.
+        references = [
+            reference
+            for reference in _action_references()
+            if not reference[1].startswith("./")
+        ]
 
-        self.assertNotRegex(configurations, r"actions/upload-artifact@v[1-5]\b")
-        self.assertNotRegex(configurations, r"actions/download-artifact@v[1-6]\b")
+        self.assertTrue(references)
+        for location, reference, comment in references:
+            with self.subTest(location=location):
+                self.assertRegex(reference, r"^[\w.-]+/[^@\s]+@[0-9a-f]{40}$")
+                self.assertRegex(comment, r"^ # v\d+\.\d+\.\d+$")
+
+    def test_ci_artifact_actions_use_node24(self):
+        # The artifact actions run on Node 24 from upload-artifact v6 and
+        # download-artifact v7. A pin names a commit, so the release comes
+        # from its version comment.
+        minimum = {"actions/upload-artifact": 6, "actions/download-artifact": 7}
+        found = dict.fromkeys(minimum, 0)
+        for location, reference, comment in _action_references():
+            action = reference.partition("@")[0]
+            if action not in minimum:
+                continue
+            found[action] += 1
+            with self.subTest(location=location):
+                release = re.fullmatch(r" # v(\d+)\.\d+\.\d+", comment)
+                if release is None:
+                    self.fail(f"{reference} names no release: {comment!r}")
+                self.assertGreaterEqual(int(release[1]), minimum[action])
+
+        self.assertTrue(all(found.values()), found)
 
     def test_benchmark_diagnostics_preserve_each_workflow_attempt(self):
         action = (
@@ -11766,7 +11835,7 @@ Write-Output (Get-ExpectedRunnerLabels -BenchmarkRunner)
         )
 
         self.assertIn("      if: always()", diagnostics)
-        self.assertIn("      uses: actions/upload-artifact@v7", diagnostics)
+        self.assertIn("      uses: actions/upload-artifact@", diagnostics)
         self.assertIn("        path: data/runs/${{ inputs.platform }}", diagnostics)
         self.assertIn(f"        name: {name}", diagnostics)
         self.assertIn("        if-no-files-found: error", diagnostics)
@@ -12532,7 +12601,7 @@ Write-Output (Get-BenchmarkScratchDirectory)
         }
         upload = steps["Upload NVX microVM scenario durations"]
         self.assertEqual(upload["if"], "always()")
-        self.assertEqual(upload["uses"], "actions/upload-artifact@v7")
+        self.assertRegex(upload["uses"], r"^actions/upload-artifact@")
         self.assertEqual(
             upload["with"]["path"],
             f"build/test-results/*/{microvm_durations.REPORT_NAME}",
