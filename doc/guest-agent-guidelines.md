@@ -267,10 +267,10 @@ plain-process core:
   `USER` and `LOGNAME` and the working directory's `PWD`; the request's
   entries replace it, or layer over it when the request asks. The account is
   the VM's workload identity, the `nvx_identity=UID:GID` of a cold boot or the
-  identity of a restore's activate request, which nvx-init resolves in the
-  root's user and group databases once, before its switch, and creates when
-  the boot, with `nvx_workload_account=create`, or the activate request asks
-  for it.
+  identity that a restore's activation record carries, which nvx-init resolves
+  in the root's user and group databases once, before its switch, and creates
+  when the boot, with `nvx_workload_account=create`, or the activation record
+  asks for it.
 - **In the child**, which leads a process group of its own, with a pipe of
   the input that the host streams as its standard input, which nvx-init
   closes after the input's end, and pipes as its standard output and error,
@@ -349,9 +349,11 @@ When the call returns:
 - After `Captured::Restored`, it takes the session's reset and attaches again:
   the restored broker has a fresh instance, restarts at its first epoch with a
   reset queued, and ignores the guest's records until the guest acknowledges
-  it. nvx-init waits for the reset, within the guest restore's deadline, fails
-  on anything else, and acknowledges it, as `Connection::acknowledge` does,
-  before it takes the guest-restore record.
+  it. nvx-init first hands its guest restore the activation record of the
+  restore packet, which `Repaired::activation_record` returns, then waits for
+  the reset, within the guest restore's deadline, fails on anything else, and
+  acknowledges it, as `Connection::acknowledge` does, before it applies the
+  record.
 
 The guidelines quote this excerpt of the
 [`guest::snapshot`](../nvx/src/guest/snapshot.rs) rustdoc, where it
@@ -367,7 +369,8 @@ use nvx::guest::snapshot::{self, Captured, Devices, Disks, Disposition};
 enum Next {
     /// Thaw the workspaces in reverse, where they exist, and report on the same session.
     Report,
-    /// Take the session's reset and acknowledge it, then drive this guest restore to Ready.
+    /// Drive this guest restore to Ready with the restore packet's record, and take the
+    /// session's reset and acknowledge it before answering the host.
     Activate(GuestRestore),
     /// Start nothing, and power the VM off with this status.
     PowerOff(u8),
@@ -403,10 +406,12 @@ never from a session or a retry. A restore then takes these steps, in this
 order:
 
 1. `GuestRestore::new`. nvx-init makes it when `capture` returns, with a
-   30-second timeout, takes the session's reset, and accepts the activate
-   request: the guest restore decodes its record, and checks its restore section
-   and the CPUs and memory that the repair reports, before anything has a side
-   effect.
+   30-second timeout, and hands it, with `GuestRestore::accept`, the
+   guest-restore record that the restore packet's activation record carries
+   after the workload's account: the guest restore decodes the record, and
+   checks its restore section and the CPUs and memory that the repair
+   reports, before anything has a side effect. A packet without a record fails
+   the restore. nvx-init then takes the session's reset.
 2. The space: the application of the record, with this restore's own network
    policy, then the runtime file systems, the announcer and the switch, as
    [the excerpt](#the-spaces-steps-checked) shows. The init applies the
@@ -419,8 +424,11 @@ order:
 3. `after_restore()` on each workspace, where workspaces exist.
 4. `GuestRestore::complete`, with the result.
 5. The thaw of the workspaces, in reverse, where they exist.
-6. Ready. nvx-init answers the activate request, and each retry that joined
-   it, with Ready, which carries the record's transaction ID.
+6. Ready. nvx-init answers the host's request for Ready, the request with
+   which the host asks a cold boot's, with Ready, which carries the record's
+   transaction ID. nvx-init applies the record before it reads the session;
+   an init that reads it meanwhile lets the request join the guest restore,
+   whose completion answers it.
 
 nvx-init has no workspace, so it skips the third and fifth steps, not the
 order around them. It keeps the applied root, the mapper and its
@@ -429,11 +437,11 @@ for the VM's life. The host then sends the mapping table, unless it is empty,
 and nvx-init records its first execution, once the table is complete, with
 `GuestRestore::start`.
 
-A byte-equal retry joins the guest restore in progress, or gets its cached
-Ready, on a later session too, and never applies or switches again: nvx-init
-keeps the guest restore and its original deadline across sessions, and a reset
-on a later session only checks that deadline. A changed request, another
-transaction, and an application that failed, wholly or partly, are final.
+The request for Ready of a later session gets the same Ready, and never
+applies or switches again: nvx-init keeps the guest restore and its original
+deadline across sessions, and a reset on a later session only checks that
+deadline. Another request before Ready, and an application that failed,
+wholly or partly, are final.
 
 The packet with which a platform restore resumes the Fresh boot carries no
 network settings, and `capture` refuses one that does: the guest-restore

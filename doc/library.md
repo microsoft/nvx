@@ -98,16 +98,19 @@ A restore then:
    the listener of OpenVMM's restore-ready event;
 3. builds the `GuestRestoreRecord` that the guest applies with
    `Prepared::guest_restore_record` and a `TransactionId`, 16 random bytes that
-   the program picks for the restore, and starts the VM with `vm::spawn`,
-   whose `Launched::ready` holds the listener;
+   the program picks for the restore, hands the guest its activation record,
+   the record's encoding or bytes of the program's own that carry it, with
+   `Prepared::supply_activation_record`, which OpenVMM seals in the restore
+   packet before the first restored processor runs, and starts the VM with
+   `vm::spawn`, whose `Launched::ready` holds the listener;
 4. drives a `host::restore::RestoreMachine` of the record, which says what to
    do next, while the program does it with its own I/O and reports what it
    observed: it receives the restore-ready event from the VM's own process
-   with `ReadyListener::receive`, connects and authenticates, sends the
-   record's bytes in its protocol, and reports the guest's Ready, until the
-   machine is `Done` or fails. In the guest, the init activates the restore
-   with a `guest::restore::GuestRestore`, applies the record in its space,
-   and reports Ready;
+   with `ReadyListener::receive`, connects and authenticates, asks for the
+   guest's Ready in its protocol, and reports that Ready, until the machine is
+   `Done` or fails. In the guest, the init activates the restore with a
+   `guest::restore::GuestRestore`, which takes the record from the restore
+   packet, applies the record in its space, and reports Ready;
 5. sends the guest its mapping table, if it holds any mapping, and its
    workload in its own protocol once the restore is `Done`, or stops the VM
    when the restore failed.
@@ -211,7 +214,7 @@ owns the following.
   stream of a `Connection`, and frames its own messages in it. NVX's own
   control protocol is private to NVX's programs.
 - A `RestoreMachine` does no I/O: the program receives the restore-ready event,
-  connects, sends the activation record, and reads Ready. Then it sends the
+  connects, asks for Ready, and reads it. Then it sends the
   mapping table, which `VmConfig::mapping_table` returns and
   `protocol::encode_maps_payloads` encodes, but none when the table is empty,
   as it is without an export, and the workload, in its own protocol.

@@ -1257,7 +1257,7 @@ take: nvx-init ends the VM with the status of a root that does not assemble,
 54, and the run reports the guest's exit with the restore's evidence and what
 it attributes the failure to, the request, such as
 `OpenVMM exited during startup: guest-exit status 54; restore failed during
-Activate: UnusableRoot, attributed to the request`.
+Connect: UnusableRoot, attributed to the request`.
 
 Then three `snapshot restore` restores start at once, each with a host name
 and a read-only host share of its own, the last over a scratch upper and the
