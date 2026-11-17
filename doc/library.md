@@ -228,7 +228,8 @@ owns the following.
   chooses: a connection, its attachment, its sends and receives, a wait for a
   process's exit, and a stop, with its grace period. `ReadyListener::receive`
   takes a timeout instead, which the program computes from its own deadline
-  before each receive.
+  before each receive; a timeout beyond what `Instant` can represent, such as
+  `Duration::MAX`, sets none.
 - A `RestoreMachine` keeps no clock and counts no retries: the program reports
   `Expired` once its budget passed, or `Cancelled`, and decides how often a lost
   session reconnects.

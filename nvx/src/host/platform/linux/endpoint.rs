@@ -67,9 +67,10 @@ impl ReadyListener {
         Ok(self.socket)
     }
 
-    /// Waits at most `timeout` for what the VMM, the process `pid`, sends to the endpoint, and
-    /// appends it to `received`, which then holds at most `limit` bytes. Returns whether more may
-    /// arrive: `false` once the VMM closed its end of the connection.
+    /// Waits at most `timeout`, or without a deadline if `timeout` is beyond the clock's range,
+    /// for what the VMM, the process `pid`, sends to the endpoint, and appends it to `received`,
+    /// which then holds at most `limit` bytes. Returns whether more may arrive: `false` once the
+    /// VMM closed its end of the connection.
     ///
     /// The endpoint's first connection must be the VMM's: one of another process fails with
     /// [`io::ErrorKind::PermissionDenied`]. It receives only from the original socket peer while
@@ -94,9 +95,11 @@ impl ReadyListener {
         timeout: Duration,
         verify_original_peer: bool,
     ) -> io::Result<bool> {
-        let deadline = Instant::now() + timeout;
+        // A timeout beyond the clock's range has no deadline.
+        let deadline = Instant::now().checked_add(timeout);
+        let left = || deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
         if self.connection.is_none() {
-            if !sys::wait_readable(&self.socket, timeout)? {
+            if !sys::wait_readable(&self.socket, left())? {
                 return Ok(true);
             }
             let connection = match self.socket.accept() {
@@ -133,12 +136,7 @@ impl ReadyListener {
             .expect("the host accepted the VMM's connection");
         let mut buffer = [0; 64];
         let room = limit.saturating_sub(received.len()).min(buffer.len());
-        if room == 0
-            || !sys::wait_readable(
-                connection,
-                deadline.saturating_duration_since(Instant::now()),
-            )?
-        {
+        if room == 0 || !sys::wait_readable(connection, left())? {
             return Ok(true);
         }
         match connection.read(&mut buffer[..room]) {

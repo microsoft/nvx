@@ -55,11 +55,12 @@ pub(crate) fn send_nonblocking(stream: &UnixStream, data: &[u8]) -> io::Result<u
 }
 
 /// Waits until `descriptor` has something to read, or its peer closed it, a signal arrives, or
-/// `timeout` passes, and returns whether it is readable.
-pub(crate) fn wait_readable(descriptor: &impl AsFd, timeout: Duration) -> io::Result<bool> {
+/// `timeout` passes (`None` waits indefinitely), and returns whether it is readable.
+pub(crate) fn wait_readable(descriptor: &impl AsFd, timeout: Option<Duration>) -> io::Result<bool> {
     // Round up, so that a wait shorter than a millisecond does not spin.
-    let timeout =
-        PollTimeout::try_from(timeout.as_nanos().div_ceil(1_000_000)).unwrap_or(PollTimeout::MAX);
+    let timeout = timeout.map_or(PollTimeout::NONE, |timeout| {
+        PollTimeout::try_from(timeout.as_nanos().div_ceil(1_000_000)).unwrap_or(PollTimeout::MAX)
+    });
     let mut descriptors = [PollFd::new(descriptor.as_fd(), PollFlags::POLLIN)];
     match poll(&mut descriptors, timeout) {
         Ok(0) | Err(Errno::EINTR) => Ok(false),
