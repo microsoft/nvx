@@ -8,10 +8,11 @@
   `feature/microvm/release/v6.1` rebase had moved it; see [Upstream status](#upstream-status).
 - Mapped fork tip: `227074dc1e6977649585479daf25515f90acaf9d`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126 and the PR18 fixup at position 302.
-- NVX's pinned OpenVMM revision: `8bbe042b1322023e95cce03ef6d4e1ae8e18a6be`, position 312, the head
-  of microsoft/openvmm#5136, whose commits, positions 307-312, follow position 306, `c9755a905`, the
-  head of `feature/microvm/dev`, where microsoft/openvmm#5134 put positions 303-306 after position
-  302, `2807bafcf`, which microsoft/openvmm#5132 merged after position 301, `c7122cd20`, which
+- NVX's pinned OpenVMM revision: `a90c6037d4b28839b266e71fc2d5159008ef7579`, position 313, the head
+  of microsoft/openvmm#5140, whose commit follows position 312, `8bbe042b1`, the head of
+  `feature/microvm/dev`, where microsoft/openvmm#5136 put positions 307-312 after position 306,
+  `c9755a905`, where microsoft/openvmm#5134 put positions 303-306 after position 302, `2807bafcf`,
+  which microsoft/openvmm#5132 merged after position 301, `c7122cd20`, which
   microsoft/openvmm#5131 merged after position 300, `026d35da6`, where microsoft/openvmm#5129 put
   positions 297-300 after position 296, `1b25c5bbc`, the head of the `feature/microvm/release/v7.0`
   branch of microsoft/openvmm. The v7.0 reorganization moved the 315 commits of
@@ -24,8 +25,8 @@
   PR10 as positions 016 and 017. Positions 001-015 keep their positions, and v6.1 positions 016-233
   are positions 018-235, 237-239 are 236-238, 244-253 are 239-248, 255-258 are 249-252, 260 is 253,
   272 is 254, and 274-315 are 255-296; see [The v7.0 reorganization](#the-v70-reorganization). The
-  pin is 186 commits past the mapped tip on the same first-parent chain. Positions 127-301 and
-  303-312 are not yet assigned to PRs, and position 302 is a PR18 fixup; see [Commits after the
+  pin is 187 commits past the mapped tip on the same first-parent chain. Positions 127-301 and
+  303-313 are not yet assigned to PRs, and position 302 is a PR18 fixup; see [Commits after the
   mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `2c25662b2af038869f75e86dae25f8f5d21bc23b` (2026-11-16), three commits past the
   fork base; see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1420,7 +1421,8 @@ e6b458cc0
   -> restored virtio interrupt lines held until the device starts [309]
   -> restore and start failure tests of virtio-fs and remote devices [310-311]
   -> the queue progress that a failed start keeps documented [312]
-  -> 8bbe042b1 (NVX pin)
+  -> microVM snapshot rollback refused outside a snapshot boundary [313]
+  -> a90c6037d (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1447,19 +1449,19 @@ NIC an IPv6 identity.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 186 later commits, position
+The NVX pin extends the chain past position 126 without merges. Of its 187 later commits, position
 302 is a PR18 fixup, and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 are the ABI restart
 of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 followed the v5.0
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
-v6.0 reorganization, positions 254-296 followed the v6.1 rebase, and positions 297-312 followed the
+v6.0 reorganization, positions 254-296 followed the v6.1 rebase, and positions 297-313 followed the
 v7.0 reorganization, so they combine none, apart from position 215, which combines v5.1 positions
 222 and 223, and the commits that the v7.0 reorganization folded into them. Each commit's v6.1
 position is its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before
 it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on,
-and positions 297-312 have no earlier position; see
+and positions 297-313 have no earlier position; see
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.1 position counts in
@@ -1657,14 +1659,15 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 310 | `3a6a29318` | - | - | - | - | - | - | virtiofs: test a transport restore of a file gone from the host (microsoft/openvmm#5136) |
 | 311 | `5dac44c33` | - | - | - | - | - | - | chipset_device_worker: test requests to an ended device worker (microsoft/openvmm#5136) |
 | 312 | `8bbe042b1` | - | - | - | - | - | - | vmcore, virtio: say that a failed start keeps its queues' progress (microsoft/openvmm#5136) |
+| 313 | `a90c6037d` | - | - | - | - | - | - | openvmm_core: roll back a microVM snapshot only at its boundary (microsoft/openvmm#5140) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
 regrouped, and later fork bases, up to `7d90c4104` for v6.1 positions 270-315, for later commits,
-and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, and `c4419be15`, upstream main
-on 2026-11-17, for positions 307-312. They name the positions that the commits have now, but the
-v7.0 reorganization did not check them again on `e6b458cc0`, nor did the v6.1 rebase check the
-earlier ones on `7d90c4104`.
+and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`, upstream main on
+2026-11-17, for positions 307-312, and `2640ad182`, upstream main later that day, for position 313.
+They name the positions that the commits have now, but the v7.0 reorganization did not check them
+again on `e6b458cc0`, nor did the v6.1 rebase check the earlier ones on `7d90c4104`.
 
 Some of these commits change mapped work rather than add to it. Position 142 removes the legacy
 microVM clock paths, changing files that PR10 and PR17 also change, and makes manifest version 6 the
@@ -3600,6 +3603,29 @@ conflicts in all three of its files, since upstream main lacks the start confirm
 213 and the sentences of positions 307 and 309 that it rewrites. It corrects positions 213, 307, and
 309, which no PR maps yet, so it is not a fixup of a PR yet, and folds into them when they go into
 one.
+
+Position 313 has the rollback of a failed capture, which PR17's position 067 adds to the VM worker,
+refuse a VM that holds no snapshot boundary before it starts the VM's state units, so that a paused
+VM runs again only through a resume, which first measures the time ABI's guest TSC offset and, for
+a restored VM, gates its host input, publishes its readiness, and releases its vCPUs. The rollback
+had started the state units of a paused VM and only then failed, for want of a boundary to release,
+so a cold-booted VM ran without the offset, and a restored VM whose start had failed started its
+devices without its input gate while its vCPUs stayed stopped. The VM controller of PR17's position
+071 sends the rollback only after a quiesce at a boundary, so only another caller, such as a VMM
+test, could send it there, as position 235 found of the quiesce and the boundary's release. The
+commit extends the snapshot guide's paragraph on the order of the snapshot RPCs, which position 235
+adds, and adds a VMM test beside position 235's tests, with the helpers of positions 060, 234, and
+235. It changes files that PR11's position 030, PR12's positions 033-035, PR13's positions 041 and
+046, PR15's positions 051, 057, 058, and 060, PR16's positions 062 and 064, PR17's positions 067,
+068, 070-072, 074, and 075, PR18's positions 077-079, 082, 084, and 085, PR19's positions 086-088,
+PR20's positions 089, 090, and 092-094, PR23's positions 108, 110, and 113, PR24's position 118, and
+78 positions that no PR has yet also change, and it changes no line that a mapped PR adds: it
+rewrites one line of the guide that position 235 adds, and adds the rest, in the rollback of
+position 067 and beside the tests of position 235. Replaying it on upstream main conflicts in all
+three of its files, where it edits or adds beside what upstream main lacks: the VM worker's microVM
+module does not exist there, since PR15's position 051 adds it, nor do the microVM VMM tests, which
+position 060 adds, and in the guide its sentence extends the paragraph of position 235. So it
+follows positions 067, 234, and 235, and the positions that they follow, upstream.
 
 ## PR summary
 
