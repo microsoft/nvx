@@ -1838,6 +1838,45 @@ fn recorded_plans_hold_no_more_policy_than_one_aggregate_accepts() {
     );
 }
 
+#[test]
+fn recorded_policy_paths_are_refused_for_the_rule_that_they_break() {
+    let root = std::env::temp_dir().join("nvx-policy");
+    let recorded = |denied: PathBuf| ExportPlan {
+        children: vec![ExportChild {
+            root: root.clone(),
+            file: false,
+            writable: false,
+            denied: vec![denied],
+            allowed: Vec::new(),
+            write: Vec::new(),
+        }],
+        binds: vec![Bind {
+            child: 0,
+            source: String::new(),
+            target: "/data".to_owned(),
+            read_only: true,
+        }],
+        owner: Owner::Vmm,
+    };
+    // A path below the exported directory holds at most 4096 bytes, and a longer one is refused
+    // for its length.
+    recorded(root.join("x".repeat(4096)))
+        .check(ReservedTargets::BLOCKLESS_ROOT)
+        .unwrap();
+    let error = recorded(root.join("x".repeat(4097)))
+        .check(ReservedTargets::BLOCKLESS_ROOT)
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+    assert!(error.message().contains("at most 4096 bytes"), "{error}");
+    assert!(!error.message().contains("colons"), "{error}");
+    // A short path is refused for its characters.
+    let error = recorded(root.join("colon:here"))
+        .check(ReservedTargets::BLOCKLESS_ROOT)
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+    assert!(error.message().contains("colons"), "{error}");
+}
+
 #[cfg(all(feature = "cli", target_os = "linux"))]
 #[test]
 fn mapped_paths_resolve_to_utf8_paths() {
