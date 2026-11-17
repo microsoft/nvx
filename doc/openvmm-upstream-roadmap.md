@@ -7,11 +7,12 @@
   `7d90c41044077e31ca060df9206532f579f24716`, upstream main earlier that day, where the
   `feature/microvm/release/v6.1` rebase had moved it; see [Upstream status](#upstream-status).
 - Mapped fork tip: `227074dc1e6977649585479daf25515f90acaf9d`, position 126. The graph, PR
-  summary, and commit mapping below cover positions 001-126.
-- NVX's pinned OpenVMM revision: `c7122cd2022cfd96f6a923593bc584f51c228ab8`, position 301, the
-  head of microsoft/openvmm#5131, whose commit follows position 300, `026d35da6`, the head of
-  `feature/microvm/dev`, where microsoft/openvmm#5129 put positions 297-300 after position 296,
-  `1b25c5bbc`, the head of the `feature/microvm/release/v7.0` branch of microsoft/openvmm. The
+  summary, and commit mapping below cover positions 001-126 and the PR18 fixup at position 302.
+- NVX's pinned OpenVMM revision: `2807bafcfcc0e83974366b97e68e0367f565f178`, position 302, the
+  head of microsoft/openvmm#5132, whose commit follows position 301, `c7122cd20`, the head of
+  `feature/microvm/dev`, which microsoft/openvmm#5131 merged after position 300, `026d35da6`,
+  where microsoft/openvmm#5129 put positions 297-300 after position 296, `1b25c5bbc`, the head of
+  the `feature/microvm/release/v7.0` branch of microsoft/openvmm. The
   v7.0 reorganization moved the 315 commits of `feature/microvm/dev` at NVX's previous pin,
   `fe61f9cbf`, onto `e6b458cc0`: the 269 of `feature/microvm/release/v6.1` and the 46 that
   microsoft/openvmm#5077 to microsoft/openvmm#5126 added after it. Upstream had landed none of
@@ -21,9 +22,10 @@
   positions 261 and 270, which PR10's RTC fixups need, into PR10 as positions 016 and 017.
   Positions 001-015 keep their positions, and v6.1 positions 016-233 are positions 018-235,
   237-239 are 236-238, 244-253 are 239-248, 255-258 are 249-252, 260 is 253, 272 is 254, and
-  274-315 are 255-296; see [The v7.0 reorganization](#the-v70-reorganization). The pin is 175
+  274-315 are 255-296; see [The v7.0 reorganization](#the-v70-reorganization). The pin is 176
   commits past the mapped tip on the same first-parent chain. Positions 127-301 are not yet
-  assigned to PRs; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
+  assigned to PRs, and position 302 is a PR18 fixup; see
+  [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `2c25662b2af038869f75e86dae25f8f5d21bc23b` (2026-11-16), three commits past the
   fork base; see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -1157,7 +1159,7 @@ flowchart TB
         P15["PR15<br/>Machine profile<br/>P - 11 commits"]
         P16["PR16<br/>Fixed virtio-MMIO ABI<br/>P - 4 commits"]
         P17["PR17<br/>Capture + authoritative restore<br/>P - 11 commits"]
-        P18["PR18<br/>Host attachments<br/>P - 10 commits"]
+        P18["PR18<br/>Host attachments<br/>P - 10 commits + 1 fixup"]
         P19["PR19<br/>Block roles + tiers<br/>N/P - 3 commits"]
         P20["PR20<br/>Restore activation<br/>P - 7 commits"]
         P21["PR21<br/>Network egress policy<br/>P/N - 6 commits"]
@@ -1338,7 +1340,8 @@ e6b458cc0
   -> restored VP's suspending instruction checked through the page tables in guest memory [299]
   -> restored VP with a pending NMI left to take it [300]
   -> RAM of a KVM VM mapped into its SMM address space [301]
-  -> c7122cd20 (NVX pin)
+  -> PR18 fixup [302]
+  -> 2807bafcf (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1355,23 +1358,29 @@ reorganization folded the fixups of PR09, PR10, PR13, and PR18-PR20, of two late
 the v6.1 rebase, and moved the two periodic timer commits that PR10's RTC commit builds on into
 PR10, as positions 016 and 017, which can go upstream on their own in that order; see
 [The v6.0 reorganization](#the-v60-reorganization) and
-[The v7.0 reorganization](#the-v70-reorganization).
+[The v7.0 reorganization](#the-v70-reorganization). Fold position 302 into PR18's position 078
+before submission, which adds the network identity, its parser, and the check of a decoded
+identity's prefix in `validate_machine_config`; at positions 163-192, which leave the IPv6
+identity optional, its comparison accepts an identity without one, as a restore of an earlier
+snapshot builds it. Its test's configuration folds into PR20's position 093, which makes it one
+that `validate_machine_config` accepts, and its IPv6 cases into position 193, which gives every
+NIC an IPv6 identity.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Its 175 later commits are not yet
-classified or assigned to PRs.
+The NVX pin extends the chain past position 126 without merges. Of its 176 later commits, position
+302 is a PR18 fixup, and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 are the ABI restart
 of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 followed the v5.0
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
-v6.0 reorganization, positions 254-296 followed the v6.1 rebase, and positions 297-301 followed the
+v6.0 reorganization, positions 254-296 followed the v6.1 rebase, and positions 297-302 followed the
 v7.0 reorganization, so they combine none, apart from position 215, which combines v5.1 positions
 222 and 223, and the commits that the v7.0 reorganization folded into them. Each commit's v6.1
 position is its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before
 it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on,
-and positions 297-301 have no earlier position; see
+and positions 297-302 have no earlier position; see
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.1 position counts in
@@ -1558,11 +1567,12 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 299 | `bcb8e530d` | - | - | - | - | - | - | virt_whp: resuspend a restored VP without the hypervisor's translation (microsoft/openvmm#5129) |
 | 300 | `026d35da6` | - | - | - | - | - | - | virt_whp: let a restored VP with a pending NMI take it (microsoft/openvmm#5129) |
 | 301 | `c7122cd20` | - | - | - | - | - | - | virt_kvm: map RAM into KVM's SMM address space (microsoft/openvmm#5131) |
+| 302 | `2807bafcf` | - | - | - | - | - | - | microVM: refuse a decoded network identity other than the derived one (microsoft/openvmm#5132); fold into 078, its test's configuration into 093, its IPv6 cases into 193 |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream
 main when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits
 that it regrouped, and later fork bases, up to `7d90c4104` for v6.1 positions 270-315, for later
-commits, and `c0694c4da`, upstream main on 2026-11-16, for positions 297-301. They name the
+commits, and `c0694c4da`, upstream main on 2026-11-16, for positions 297-302. They name the
 positions that the commits have now, but the v7.0 reorganization did not check them again on
 `e6b458cc0`, nor did the v6.1 rebase check the earlier ones on `7d90c4104`.
 
@@ -3215,6 +3225,27 @@ adds, and the rest of its files apply without conflicts. So it follows positions
 260, 264, 265, 266, 269, 273, 279, 285, 288, 290, 293, and 296-299, and the positions that they
 follow, upstream.
 
+Position 302 has the VM worker refuse a decoded network identity other than the one that
+`MicrovmNetworkConfig`'s parser builds from its IPv4 address and prefix. The CLI and the snapshot
+restore build every identity with that parser, which PR18's position 078 adds: it derives the
+gateway, both MAC addresses, and, since position 163, the IPv6 identity, and refuses a guest address
+that is its subnet's network, broadcast, or gateway address. `validate_machine_config`, which PR15's
+position 057 adds, checked only the identity's prefix, which v6.1 position 241 added and the v7.0
+reorganization folded into position 078, before the command-line check builds the guest's
+`virtnet_*` tokens from the identity's fields. A launch message that OpenVMM's controller did not
+build could therefore carry an identity that the guest cannot use, such as one with an IPv6 prefix
+of /255, and the worker accepted it with a command line that names it. The commit adds
+`validate_microvm_network_identity`, which runs the prefix check and then compares the identity
+with the one that the parser derives, and has `validate_machine_config` call it in place of the
+prefix check, in a line that position 078 adds.
+Its test gives the configuration of PR20's position 093, which `validate_machine_config` accepts, 17
+identities that the parser does not build, with the command lines that the controller builds for
+them. It changes only `microvm.rs` of `openvmm_defs`, which PR15's position 050 adds and 37 other
+positions also change, and no other line that a mapped PR adds. Replaying it on upstream main
+conflicts in that file, which upstream main lacks. So it follows PR18 upstream, folded into position
+078, with its test's configuration in PR20's position 093 and its IPv6 cases in position 193, which
+gives every NIC an IPv6 identity.
+
 ## PR summary
 
 Each count is of v7.0 commits, which include the fixups that the v3.0, v4.0, v5.0, v6.0, and v7.0
@@ -3243,7 +3274,7 @@ reorganizations folded into them; see [The v7.0 reorganization](#the-v70-reorgan
 | PR15 | P | microVM machine profile and minimal chipset | 050-060 | `2885175e3..22a67d85b` | 11 | Foundation fan-in |
 | PR16 | P | Fixed virtio-MMIO ABI and shared interrupt status | 061-064 | `3804dd080..e7542b63b` | 4 | PR15 |
 | PR17 | P | microVM snapshot capture and authoritative restore | 065-075 | `3feb62cf5..6884f4dac` | 11 | PR16 |
-| PR18 | P | microVM host attachments and device persistence | 076-085 | `82bdce4d9..31fd672d8` | 10 | PR17 |
+| PR18 | P | microVM host attachments and device persistence | 076-085; 302 (fixup) | `82bdce4d9..31fd672d8`; `2807bafcf` | 11 | PR17 |
 | PR19 | N/P | Sandbox block roles and snapshot tiers | 086-088 | `2ac375268..a111b28d3` | 3 | PR18 |
 | PR20 | P | Restore-time processor and memory activation | 089-095 | `50a71ef6e..8703dfe87` | 7 | PR19 |
 | PR21 | P/N | Network egress policy | 096-101 | `bec576497..f54ac89cb` | 6 | PR20; core can start after PR13 |
@@ -3260,8 +3291,9 @@ reorganizations folded into them; see [The v7.0 reorganization](#the-v70-reorgan
 Each entry names the v6.1 position of the commit, its v6.0 position, which it had in v5.0 and v5.1
 too, the v4.0 position, the v3.0 and v2.4 positions that v4.0 recorded, and the v2.4, v5.1, and
 v6.1 fixups that it folds; "(part)" marks a fixup that split across commits. Positions 016 and 017,
-which followed the v6.0 reorganization and the v6.1 rebase, name their OpenVMM pull request instead
-of earlier positions. A v6.1 position counts in `feature/microvm/dev` at `fe61f9cbf`, whose first
+which followed the v6.0 reorganization and the v6.1 rebase, and position 302, which followed the
+v7.0 reorganization, name their OpenVMM pull request instead of earlier positions. A v6.1 position
+counts in `feature/microvm/dev` at `fe61f9cbf`, whose first
 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 position in `feature/microvm/dev`
 at `5ca20ee08`, whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0
 position in `feature/microvm/dev` at `e1ca353eb`, whose first 210 commits are those of
@@ -3571,7 +3603,7 @@ Landed upstream and dropped from the chain:
 </details>
 
 <details>
-<summary><strong>PR18 - microVM host attachments and device persistence (P)</strong> - 10 commits</summary>
+<summary><strong>PR18 - microVM host attachments and device persistence (P)</strong> - 11 commits</summary>
 
 - 076 `82bdce4d9` - openvmm_entry: add connect= serial backends with bounded timeouts (v6.1 074, v6.0 081, v4.0 085, v3.0 094, v2.4 094; folds v2.4 144)
 - 077 `45a1c941b` - openvmm: persist the microVM boot console and rebuild its attachment on restore (v6.1 075, v6.0 082, v4.0 086, v3.0 095, v2.4 095)
@@ -3583,6 +3615,7 @@ Landed upstream and dropped from the chain:
 - 083 `ea2bc2027` - virtiofs: persist microVM FUSE namespaces, handles, and directory cookies (v6.1 081, v6.0 088, v4.0 092, v3.0 101, v2.4 101; folds v2.4 335 (part), and v6.1 240 (part))
 - 084 `334db4cf2` - openvmm: snapshot the microVM filesystem and revalidate it on restore (v6.1 082, v6.0 089, v4.0 093, v3.0 102, v2.4 102)
 - 085 `31fd672d8` - openvmm: reserve a dormant microVM filesystem slot (v6.1 083, v6.0 090, v4.0 094, v3.0 103, v2.4 103; folds v2.4 335 (part))
+- 302 `2807bafcf` - microVM: refuse a decoded network identity other than the derived one (microsoft/openvmm#5132; **fold into 078**, its test's configuration into 093, its IPv6 cases into 193)
 
 </details>
 
