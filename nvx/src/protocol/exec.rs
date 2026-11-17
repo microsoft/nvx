@@ -502,19 +502,6 @@ fn prefixed_string<S: ExecString>(
     offset: &mut usize,
     what: &str,
 ) -> Result<S, ProtocolError> {
-    S::convert(prefixed_bytes(payload, offset, what)?, what)
-}
-
-/// Reads one little-endian length-prefixed byte string and advances `offset`.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
-fn prefixed_bytes(
-    payload: &[u8],
-    offset: &mut usize,
-    what: &str,
-) -> Result<Vec<u8>, ProtocolError> {
     let length = u32_at(payload, *offset)
         .ok_or_else(|| violation("the exec request is truncated"))? as usize;
     *offset = offset
@@ -529,7 +516,7 @@ fn prefixed_bytes(
     *offset = offset
         .checked_add(length)
         .ok_or_else(|| violation("the exec request is truncated"))?;
-    Ok(bytes)
+    S::convert(bytes, what)
 }
 
 /// Returns one bounded non-NUL byte range without imposing UTF-8.
