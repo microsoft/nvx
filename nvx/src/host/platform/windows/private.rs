@@ -2,6 +2,7 @@
 //! their owners and access control lists, and the sparse files and the renames without
 //! replacement of the stores.
 
+use std::ffi::c_void;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::windows::fs::OpenOptionsExt;
@@ -298,11 +299,7 @@ fn vm_dir_problem(
     let inherited = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
     let mut full_access = false;
     for index in 0..size.AceCount {
-        let mut ace = ptr::null_mut();
-        // SAFETY: the index is within the list, and the output pointer is valid.
-        if unsafe { GetAce(acl, index, &mut ace) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let ace = ace_at(acl, index)?;
         // SAFETY: each entry starts with an ACE_HEADER.
         let header = unsafe { *ace.cast::<ACE_HEADER>() };
         if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
@@ -405,11 +402,7 @@ pub(super) fn privacy_problem(
     }
     let mut inherited_by_files = false;
     for index in 0..size.AceCount {
-        let mut ace = ptr::null_mut();
-        // SAFETY: the index is within the list, and the output pointer is valid.
-        if unsafe { GetAce(acl, index, &mut ace) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let ace = ace_at(acl, index)?;
         // SAFETY: every entry starts with its header.
         let header = unsafe { *ace.cast::<ACE_HEADER>() };
         if u32::from(header.AceFlags) & OBJECT_INHERIT_ACE != 0 {
@@ -447,6 +440,23 @@ pub(super) fn privacy_problem(
         ));
     }
     Ok(None)
+}
+
+/// Returns the entry at `index` of the valid access control list `acl`, or the error of `GetAce`
+/// if the list holds no such entry.
+fn ace_at(acl: *const ACL, index: u32) -> io::Result<*mut c_void> {
+    let mut found: *mut c_void = ptr::null_mut();
+    // SAFETY: the list is valid, and the output pointer is valid.
+    if unsafe { GetAce(acl, index, &mut found) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // CodeQL does not see that GetAce sets `found`, and treats a method call on a `mut` variable
+    // as a possible write, past which its null check does not hold, so this checks a copy.
+    let ace = found;
+    if ace.is_null() {
+        return Err(io::Error::other("GetAce returned no access control entry"));
+    }
+    Ok(ace)
 }
 
 /// Lets the regular file that `file` holds open for writing take no space for the ranges that
