@@ -2055,8 +2055,9 @@ started it.
 The job checks out the default branch, never the run's code. Its token can
 read the repository, the run's jobs and logs, and their check annotations,
 and write issues, and no other workflow can write issues; the
-[Test changes](#test-changes) workflow labels and comments on pull requests
-with a token that writes pull requests instead. The job runs one
+[Test changes](#test-changes) and [Issue link](#issue-link) workflows label
+and comment on pull requests with tokens that write pull requests instead. The
+job runs one
 report at a time; a newer reporter can replace one that waits for its turn,
 but it reports the latest nightly result anyway. Its job summary repeats
 the report.
@@ -2214,6 +2215,77 @@ The `quality` job checks the [test layout](contribute.md#test-layout) with
 [`check_test_layout.py`](../scripts/check_test_layout.py), whose rules say
 where tests live, which test hooks a production file may hold, and which the
 flagging script shares to read Rust.
+
+## Issue link
+
+The [`issue-link.yml`](../.github/workflows/issue-link.yml) workflow checks
+that a pull request references an issue of this repository, as
+[Commits and pull requests](contribute.md#commits-and-pull-requests) asks. A
+pull request is linked when GitHub links it to an issue of the repository, as
+a closing keyword in the description of a pull request to the default branch,
+or the Development sidebar, does, or when its description holds a keyword and
+an issue: `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`,
+`resolves`, `resolved`, `Part of`, or `Refs`, in any case and with an
+optional colon, then `#N`, `microsoft/nvx#N`, or the issue's URL, where `N` is
+an issue, open or closed. The description counts whatever the base, so a
+stacked pull request, to which a closing keyword links no issue, counts too,
+and so do `Part of` and `Refs`, which never link one. A pull request's number,
+a missing number, a bare `#N`, and another repository's issue do not count.
+The script reads the description as GitHub renders it on the pull request's
+page, through GitHub's
+[Markdown API](https://docs.github.com/en/rest/markdown/markdown#render-a-markdown-document),
+and only the text that GitHub shows counts: not a reference in an HTML
+comment, such as the template's, in an attribute, such as a link's title, or
+in code, inline, fenced, indented, or in `<pre>`, nor a keyword that code or
+the end of a block, such as a paragraph, a list item, a heading, or a table
+cell, separates from its number. A link counts by where it goes, and of its
+text only a keyword that starts it: a link to an issue or a pull request on
+GitHub, such as the link that GitHub makes of `#N`, as that keyword and
+`OWNER/REPO#N`, so `[Part of #N]` linked to the issue counts and `[#N]`
+linked to another repository's issue does not, and any other link as code
+does. Such a link is `https://github.com/OWNER/REPO/issues/N` or
+`.../pull/N`, whose scheme and host may take any case or be left out; a link
+relative to the page counts as code does. In such a link, as in an issue's URL
+that GitHub shows as text, nothing may follow `N` but a slash, a query, or a
+fragment, and in text the punctuation that ends a sentence, so that no `..`
+takes it elsewhere, and the text after a link does not extend `N`. It looks up
+only the first 10 numbers that the description references, so a description
+cannot make it call the API without bound, which is one more reason to
+reference the issue on the first line.
+
+It runs when a pull request to any branch, drafts included, is opened,
+reopened, pushed to, edited, labelled, or unlabelled. The runs of one pull
+request go one at a time, so that each reads what the run before it wrote,
+since canceling a run would not cancel a write that GitHub had already
+received; a newer waiting run replaces an older one, so the newest event's run
+comes last. Its job has no condition, since a run whose job
+a condition skipped would replace the result of the run before it. An
+unlinked pull request gets the `needs-issue` label and one comment, which a
+hidden marker at its start identifies, that says how to reference an issue,
+and the check fails. Editing the description runs it again: a linked pull
+request loses the label, and the comment, if there is one, says that it
+passes. Pull requests by `dependabot[bot]` or `github-actions[bot]`, and those
+labelled `no-issue`, which a maintainer applies to a pull request that needs
+no issue, such as a release pin of the OpenVMM chain, are exempt; closed and
+merged ones are left alone. The workflow creates either label when the
+repository lacks it. `Required status check` does not wait for the workflow. A
+GitHub API error fails the check. The script reads everything before its first
+change, so an error while reading changes nothing, and the next run completes
+the changes of a run that fails while writing. The job summary gives the
+verdict and the numbers that the description references, never the
+description.
+
+As with [Test changes](#test-changes), `pull_request_target` gives the job a
+token that can label and comment, for pull requests from forks too, so the
+job runs the workflow and [`check_issue_link.py`](../scripts/check_issue_link.py)
+of the default branch, whose checkout keeps no credentials, and never a pull
+request's code. Only the pull request's number reaches the job; the script
+reads the pull request, has GitHub render its description, and reads the
+issues that GitHub links to it, the issues that its description names, and
+its comments through the API. The token can read the
+repository's contents and write pull requests, but not issues: reading an
+issue of a public repository needs no permission. A change to the workflow or
+to the script takes effect once it merges into `dev`.
 
 ## crates.io releases
 
