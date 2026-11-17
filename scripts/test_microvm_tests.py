@@ -5599,6 +5599,21 @@ class _EphemeralPortSockets:
         return endpoint
 
 
+class _RecordedSockets:
+    """Create real sockets, through ``socket_type``, that record each bind."""
+
+    def __init__(self) -> None:
+        self.bound: list[tuple[socket.socket, Any]] = []
+        bound = self.bound
+
+        class Recorded(socket.socket):
+            def bind(self, address: Any, /) -> None:
+                super().bind(address)
+                bound.append((self, address))
+
+        self.socket_type = Recorded
+
+
 class _ByteChannelGuest:
     """An OpenVMM whose guest ends lifecycle.sh: once it gets its script, it
     writes the byte channel's bytes, which OpenVMM relays to its stderr, and
@@ -6002,7 +6017,7 @@ class MicrovmTests(unittest.TestCase):
         )
         self.assertEqual(
             [endpoint.bind.call_args.args[0] for endpoint in tcp_sockets],
-            [("0.0.0.0", port) for port in candidates],
+            [("127.0.0.1", port) for port in candidates],
         )
         self.assertIs(tcp_listener, tcp_sockets[-1])
         self.assertIs(udp_listener, udp_sockets[-1])
@@ -7152,6 +7167,80 @@ class MicrovmTests(unittest.TestCase):
                 (socket.AF_INET6, "::1", published),
             ],
         )
+
+    def test_host_loopback_scenario_serves_on_host_loopback_alone(self):
+        # The guest reaches the host services at its gateway, which maps to
+        # host loopback, so no other host address may reach them (#1663).
+        sockets = _RecordedSockets()
+        general_ports: list[int] = []
+        drawn = iter(range(50001, 50101))
+
+        def publication_port() -> int:
+            # Windows lets the probe bind every address at a port that a
+            # loopback listener holds, such as the general service's.
+            if not general_ports:
+                general = sockets.bound[-1][0]
+                self.assertEqual(general.type, socket.SOCK_STREAM)
+                general_ports.append(int(general.getsockname()[1]))
+                return general_ports[0]
+            return next(drawn)
+
+        def answer_udp_control(
+            command: list[str], script: str, *_args: object, **_kwargs: object
+        ) -> None:
+            if "--host-loopback" in command:
+                return
+            ports = {
+                int(line.split()[5])
+                for line in script.splitlines()
+                if line.strip().startswith("nc -u -w 1")
+            }
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+                for port in ports:
+                    sender.sendto(b"NVX-HOST-LOOPBACK-UDP-CONTROL", ("127.0.0.1", port))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(microvm_tests.socket, "socket", sockets.socket_type),
+                patch.object(microvm_tests, "_http_server"),
+                patch.object(microvm_tests, "_udp_echo_server"),
+                patch.object(
+                    microvm_tests, "run_guest_script", side_effect=answer_udp_control
+                ),
+                patch.object(
+                    microvm_tests,
+                    "_host_loopback_publication_port",
+                    side_effect=publication_port,
+                ),
+                patch.object(
+                    microvm_tests, "_bind_host_loopback_udp_echo"
+                ) as bind_udp_echo,
+                patch.object(microvm_tests, "OpenvmmProcess") as process,
+                patch.object(
+                    microvm_tests, "_verify_host_loopback_publication"
+                ) as verify,
+                patch.object(microvm_tests, "run_host_loopback_rejections"),
+            ):
+                bind_udp_echo.return_value.getsockname.return_value = (
+                    "127.0.0.1",
+                    40000,
+                )
+                process.return_value.__enter__.return_value.wait.return_value = (
+                    openvmm_process.OpenvmmProcessResult(0, b"")
+                )
+                microvm_tests.run_host_loopback_policy(
+                    Path("openvmm"),
+                    Path("kernel"),
+                    Path("initrd"),
+                    "whp",
+                    memory_mib=128,
+                    timeout=5,
+                    output_dir=Path(temporary),
+                )
+
+        self.assertEqual({address[0] for _, address in sockets.bound}, {"127.0.0.1"})
+        # OpenVMM cannot publish a guest port that the general service holds.
+        self.assertNotIn(general_ports[0], verify.call_args.args[:2])
 
     def test_host_loopback_allow_script_checks_publication_and_traffic(self):
         run = self._run_host_loopback_allow_script
@@ -11114,6 +11203,56 @@ class MicrovmTests(unittest.TestCase):
             else:
                 reserved.close.assert_called_once_with()
         self.assertEqual(len(created), 10)
+
+    def test_egress_scenario_ports_listen_on_host_loopback_alone(self):
+        # The guest reaches these ports at its gateway, which maps to host
+        # loopback, so no other host address may reach them (#1663).
+        reserved: list[socket.socket] = []
+        try:
+            for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+                reserved += microvm_tests._bind_consecutive_ports(kind, 2)
+            for endpoints in microvm_tests._bind_dual_protocol_ports(2):
+                reserved += endpoints
+
+            self.assertEqual(len(reserved), 8)
+            self.assertEqual(
+                {endpoint.getsockname()[0] for endpoint in reserved}, {"127.0.0.1"}
+            )
+        finally:
+            for endpoint in reserved:
+                endpoint.close()
+
+    def test_network_scenario_listeners_listen_on_host_loopback_alone(self):
+        # The guest reaches these listeners at its gateway, which maps to host
+        # loopback, so no other host address may reach them (#1663).
+        for run in (
+            microvm_tests.run_directional_network_policy,
+            microvm_tests.run_network_snapshot,
+        ):
+            sockets = _RecordedSockets()
+            with (
+                self.subTest(scenario=run.__name__),
+                tempfile.TemporaryDirectory() as temporary,
+                patch.object(microvm_tests.socket, "socket", sockets.socket_type),
+                patch.object(
+                    microvm_tests,
+                    "OpenvmmProcess",
+                    side_effect=RuntimeError("stopped before boot"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "stopped before boot"):
+                    run(
+                        Path("openvmm"),
+                        Path("kernel"),
+                        Path("initrd"),
+                        "whp",
+                        memory_mib=128,
+                        timeout=0.5,
+                        output_dir=Path(temporary),
+                    )
+                self.assertEqual(
+                    {address[0] for _, address in sockets.bound}, {"127.0.0.1"}
+                )
 
     def test_runner_dispatches_l3_l4_egress_protocols(self):
         def require(path: Path, _description: str) -> Path:

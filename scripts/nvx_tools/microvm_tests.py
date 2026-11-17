@@ -4137,7 +4137,7 @@ def run_directional_network_policy(
     output_dir: Path,
 ) -> None:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.bind(("0.0.0.0", 0))
+    listener.bind(("127.0.0.1", 0))
     listener.listen(2)
     listener.settimeout(timeout)
     http_port = int(listener.getsockname()[1])
@@ -4264,13 +4264,15 @@ def run_directional_network_policy(
 def _bind_consecutive_ports(
     socket_type: socket.SocketKind, count: int
 ) -> list[socket.socket]:
+    """Reserve consecutive ports on host loopback, which the guest reaches at
+    its gateway."""
     for base in range(20000, 60000 - count):
         endpoints: list[socket.socket] = []
         try:
             for offset in range(count):
                 endpoint = socket.socket(socket.AF_INET, socket_type)
                 endpoints.append(endpoint)
-                endpoint.bind(("0.0.0.0", base + offset))
+                endpoint.bind(("127.0.0.1", base + offset))
                 if socket_type == socket.SOCK_STREAM:
                     endpoint.listen(1)
             return endpoints
@@ -4619,9 +4621,10 @@ def _egress_protocol_cases(gateway: str, named_port: int) -> tuple[_EgressCase, 
 
 
 def _bind_dual_protocol_ports(
-    count: int, host: str = "0.0.0.0"
+    count: int, host: str = "127.0.0.1"
 ) -> tuple[list[socket.socket], list[socket.socket]]:
-    """Reserve consecutive port numbers that are free for both TCP and UDP."""
+    """Reserve consecutive port numbers that are free for both TCP and UDP, by
+    default on host loopback, which the guest reaches at its gateway."""
     for base in range(20000, 60000 - count):
         tcp: list[socket.socket] = []
         udp: list[socket.socket] = []
@@ -5672,7 +5675,7 @@ def _bind_tcp_udp_listener_pair(
             try:
                 udp_listener.bind(("127.0.0.1", port))
                 protocol = "tcp"
-                tcp_listener.bind(("0.0.0.0", port))
+                tcp_listener.bind(("127.0.0.1", port))
             except OSError as error:
                 refused.append(f"{port}/{protocol}")
                 last_error = error
@@ -5831,19 +5834,27 @@ def run_host_loopback_policy(
             proxy_server.join(timeout=NETWORK_SERVER_JOIN_TIMEOUT_SECONDS)
 
     allowed_general = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    allowed_general.bind(("0.0.0.0", 0))
+    allowed_general.bind(("127.0.0.1", 0))
     allowed_general.listen(1)
     allowed_general.settimeout(timeout)
     allowed_general_port = int(allowed_general.getsockname()[1])
-    guest_port = _host_loopback_publication_port()
+    # Windows lets the publication probe bind every address at a port that a
+    # loopback listener holds, so a drawn port can equal the general service's.
     while True:
+        guest_port = _host_loopback_publication_port()
         # Busybox's UDP server answers only its first peer, so the guest
         # answers UDP over IPv6 loopback on a port of its own.
         udp_ipv6_guest_port = _host_loopback_publication_port()
         _, host_forward_port = _available_tcp_address()
         _, private_guest_port = _available_tcp_address()
-        ports = {guest_port, udp_ipv6_guest_port, host_forward_port, private_guest_port}
-        if len(ports) == 4:
+        ports = {
+            allowed_general_port,
+            guest_port,
+            udp_ipv6_guest_port,
+            host_forward_port,
+            private_guest_port,
+        }
+        if len(ports) == 5:
             break
     allow_errors: list[Exception] = []
     allow_server = threading.Thread(
@@ -5991,7 +6002,8 @@ def _host_loopback_publication_port() -> int:
     """Draw a port that OpenVMM can publish on host loopback for TCP and UDP.
 
     The port is free on every host address too, which Windows checks before
-    it binds a loopback address.
+    it binds a loopback address. The probes bind every address to check that,
+    but never listen or read, and close before the port is returned.
     """
     last_error: OSError | None = None
     for port in _host_loopback_port_candidates():
@@ -6227,7 +6239,12 @@ def run_host_loopback_rejections(
 
 
 def _private_ingress_port() -> int:
-    """Draw a port that the host can publish for both TCP and UDP."""
+    """Draw a port that the host can publish for both TCP and UDP.
+
+    Private-network ingress listens on every host address, so the probes bind
+    every address to check that the port is free there, but never listen or
+    read, and close before the port is returned.
+    """
     last_error: OSError | None = None
     for port in _host_loopback_port_candidates():
         with ExitStack() as sockets:
@@ -6253,6 +6270,8 @@ def _publishes(
     """Return whether a host socket holds ``port`` on every address of ``family``.
 
     During the scenario, that socket is OpenVMM's listener for the guest port.
+    The probe binds every address to detect it, but never listens or reads,
+    and closes before returning.
     """
     probe = socket.socket(family, kind)
     try:
@@ -11282,7 +11301,7 @@ def run_network_snapshot(
     output_dir: Path,
 ) -> None:
     tcp_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    tcp_listener.bind(("0.0.0.0", 0))
+    tcp_listener.bind(("127.0.0.1", 0))
     tcp_listener.listen(3)
     tcp_listener.settimeout(timeout)
     http_port = int(tcp_listener.getsockname()[1])

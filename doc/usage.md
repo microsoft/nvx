@@ -1395,7 +1395,12 @@ be the IOAPIC input of its device's window that
 edge-triggered, unshared, and firing, and `/proc/interrupts` must count no APIC
 error, misrouted IOAPIC interrupt, or spurious interrupt. A snapshot of a guest
 with the NIC, the share, and the boot console must then restore with the same
-interrupts, which fire again. The scenarios that
+interrupts, which fire again. The host services that the network scenarios
+offer the guest listen on host loopback, which the guest reaches through its
+gateway (see [Host-loopback access](run.md#host-loopback-access)), so no other
+host reaches them; a scenario binds every host address only to check that a
+port is free or that OpenVMM publishes it, and never listens or reads there.
+The scenarios that
 run microVMs or sandboxes as the public commands do, or that compile egress
 policies, run [`nvx`](#nvx). The
 command requires `build/vmlinux` (with `--debug-kernel`, `build/vmlinux-debug`

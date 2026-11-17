@@ -3612,9 +3612,12 @@ def parse_device_io_guest_results(text: str, device: str) -> list[dict[str, obje
 
 
 class UdpEchoServer:
-    def __init__(self, port: int) -> None:
+    """Echo UDP datagrams at ``address`` alone, the host address to which the
+    guest sends them."""
+
+    def __init__(self, address: str, port: int) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.socket.bind(("0.0.0.0", port))
+        self.socket.bind((address, port))
         self.socket.settimeout(0.2)
         self.stop = threading.Event()
         self.error: OSError | None = None
@@ -3997,8 +4000,8 @@ def benchmark_device_io_workload(
                 microvm_sandbox_block=block if device == "virtio-blk" else None,
             )
             context = (
-                UdpEchoServer(args.device_io_port)
-                if device == "virtio-net"
+                UdpEchoServer(network_target, args.device_io_port)
+                if device == "virtio-net" and network_target is not None
                 else contextlib.nullcontext()
             )
             with context as echo_server:
