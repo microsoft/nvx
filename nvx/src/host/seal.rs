@@ -38,7 +38,7 @@ mod windows;
 /// The version of the seals that this build takes. Seals of different versions never compare
 /// equal.
 #[cfg(any(all(feature = "cli", target_os = "linux"), windows))]
-pub(crate) const SEAL_VERSION: u32 = 1;
+const SEAL_VERSION: u32 = 1;
 
 /// The platform scheme of a seal: the host that took it, which fixes what its fields mean.
 #[cfg(any(feature = "cli", windows))]
@@ -77,11 +77,11 @@ pub(crate) enum FileKind {
 #[cfg(any(feature = "cli", windows))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct SealTime {
+struct SealTime {
     /// Whole seconds since 1970-01-01 00:00:00 UTC.
-    pub(crate) seconds: i64,
+    seconds: i64,
     /// Nanoseconds within the second, below 1,000,000,000.
-    pub(crate) nanoseconds: u32,
+    nanoseconds: u32,
 }
 
 /// The seal of an open file: what the host reported about it, from its metadata alone.
