@@ -172,3 +172,32 @@ fn messages_refuse_unknown_and_repeated_fields() {
     );
     assert_eq!(fields(&[], &[1], &[]).unwrap(), []);
 }
+
+#[test]
+fn every_field_reads_any_number_until_the_first_error() {
+    let data = [
+        0x08, 0x01, // 1: varint 1
+        0x80, 0x04, 0x02, // 64: varint 2
+        0xf8, 0xff, 0xff, 0xff, 0x0f, 0x03, // 2^29 - 1: varint 3
+        0x08, 0x04, // 1 again: varint 4
+        0x0b, // a group
+        0x08, 0x05, // 1, after the error
+    ];
+    let varint = |number, value| {
+        Ok(Field {
+            number,
+            value: Value::Varint(value),
+        })
+    };
+    assert_eq!(
+        every_field(&data).collect::<Vec<_>>(),
+        [
+            varint(1, 1),
+            varint(64, 2),
+            varint((1 << 29) - 1, 3),
+            varint(1, 4),
+            Err(WireError::WireType(3)),
+        ]
+    );
+    assert_eq!(every_field(&[]).count(), 0);
+}

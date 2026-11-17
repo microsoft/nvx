@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 
-use super::wire::{Field, Message, WireError};
+use super::wire::{self, Field, Message, WireError};
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::platform;
 use crate::host::process::BootId;
@@ -890,19 +890,13 @@ fn invalid(problem: impl Into<String>) -> Problem {
 }
 
 /// Checks the format of the manifest `bytes`, its version and magic, from its top-level fields
-/// alone, so that a manifest of another version, whose fields this build may not know, is reported
-/// as such.
+/// alone, whatever their numbers, so that a manifest of another version, whose fields this build
+/// may not know, is reported as such.
 fn check_format(bytes: &[u8]) -> Result<(), Problem> {
-    let all: Vec<u32> = (1..64).collect();
-    let mut message = Message::new(bytes, &[], &all);
     let mut version = None;
     let mut magic = None;
-    loop {
-        let field = match message.next_field() {
-            Ok(Some(field)) => field,
-            Ok(None) => break,
-            Err(error) => return Err(invalid(format!("is malformed: it {error}"))),
-        };
+    for field in wire::every_field(bytes) {
+        let field = field.map_err(|error| invalid(format!("is malformed: it {error}")))?;
         // A field that appears twice is refused once the manifest is decoded.
         match field.number {
             1 => version = field.uint64().ok(),
