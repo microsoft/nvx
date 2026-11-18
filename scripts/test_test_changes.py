@@ -5,6 +5,9 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1636,6 +1639,337 @@ class WorkflowTests(unittest.TestCase):
                 self.assertNotIn(forbidden, script)
         self.assertIn("scripts/check_test_changes.py", "\n".join(scripts))
         self.assertIn("--publish", "\n".join(scripts))
+
+
+BASH = shutil.which("bash")
+GIT = shutil.which("git")
+# The flags with which a runner runs a step's script with bash: without a
+# shell and with `shell: bash`.
+BASH_FLAGS: dict[str | None, tuple[str, ...]] = {
+    None: ("-e",),
+    "bash": ("--noprofile", "--norc", "-eo", "pipefail"),
+}
+# The scalars that YAML 1.2, which Actions reads, takes for a boolean, null,
+# or a number, where YAML 1.1, which PyYAML reads, may take them for others.
+YAML_TYPED = re.compile(
+    r"true|True|TRUE|false|False|FALSE|~|null|Null|NULL"
+    r"|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
+    r"|0o[0-7]+|0x[0-9a-fA-F]+|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)"
+)
+# The scripts that the job runs: the flagging script and the module that it
+# imports.
+JOB_SCRIPTS = ("check_test_changes.py", "check_test_layout.py")
+
+
+@unittest.skipIf(
+    os.name == "nt" or BASH is None or GIT is None,
+    "runs the workflow's bash steps with Git on POSIX hosts",
+)
+class WorkflowStepTests(unittest.TestCase):
+    """Runs the job's steps as an Ubuntu runner does, on local repositories,
+    with a gh that records the job's calls to GitHub instead of making them."""
+
+    NUMBER = 7
+    TOKEN = "token-of-the-run"
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        config = self.root / "gitconfig"
+        config.write_text("", encoding="utf-8")
+        tools = self.root / "bin"
+        tools.mkdir()
+        # It records each call's arguments and body, a line each, and answers
+        # only the API calls made with the run's token.
+        gh = tools / "gh"
+        gh.write_text(
+            "#!/bin/sh\n"
+            'printf \'%s\\n\' "$*" "$(cat)" >> "$GH_LOG"\n'
+            f'[ "$1" = api ] && [ "${{GH_TOKEN:-${{GITHUB_TOKEN:-}}}}" = {self.TOKEN} ]\n',
+            encoding="utf-8",
+        )
+        gh.chmod(0o755)
+        self.log = self.root / "gh.log"
+        self.log.write_text("", encoding="utf-8")
+        # Neither the host's Git configuration nor its GitHub credentials
+        # reach the job.
+        self.environment = {
+            **{
+                name: value
+                for name, value in os.environ.items()
+                if not name.startswith(("GIT_", "GH_", "GITHUB_"))
+            },
+            "GIT_CONFIG_GLOBAL": str(config),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GH_LOG": str(self.log),
+            "PATH": f"{tools}{os.pathsep}{os.environ.get('PATH', '')}",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+
+    def git(self, *arguments: str) -> str:
+        return subprocess.run(
+            [cast(str, GIT), *arguments],
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    def push(self, clone: Path, reference: str) -> str:
+        """Commits every file of the clone and pushes the commit to the
+        reference of its origin."""
+        self.git("-C", str(clone), "add", "--all")
+        self.git(
+            "-C",
+            str(clone),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "-m",
+            reference,
+        )
+        self.git("-C", str(clone), "push", "--quiet", "origin", f"HEAD:{reference}")
+        return self.git("-C", str(clone), "rev-parse", "HEAD")
+
+    def run_job(self, origin: Path, context: Mapping[str, str | int | None]) -> Path:
+        """Runs the job's steps as an Ubuntu runner does for the event that the
+        context's names describe, and returns the work tree of its checkout.
+        Fails when the job would not run, and on a setting that would change
+        how the steps run but that the test does not model."""
+
+        def lookup(
+            name: str, names: Mapping[str, str | int | None]
+        ) -> str | int | None:
+            if name not in names:
+                self.fail(f"the test has no value for {name}")
+            return names[name]
+
+        def render(value: str | int | None) -> str:
+            # Actions writes null as nothing.
+            return "" if value is None else str(value)
+
+        def expand(value: object) -> str:
+            # A value that the two versions of YAML may read as different
+            # types, the test does not model.
+            if not isinstance(value, str) or YAML_TYPED.fullmatch(value):
+                self.fail(f"the test does not model the value {value!r}")
+            return re.sub(
+                r"\$\{\{(.*?)\}\}",
+                lambda match: render(lookup(match[1].strip(), context)),
+                value,
+                flags=re.DOTALL,
+            )
+
+        def holds(condition: object, names: Mapping[str, str | int | None]) -> bool:
+            """Evaluates a condition of comparisons of names with strings or
+            null, which && and || join."""
+            text = str(condition).strip()
+            if text.startswith("${{") and text.endswith("}}"):
+                text = text[3:-2]
+            alternatives: list[bool] = []
+            for alternative in text.split("||"):
+                terms: list[bool] = []
+                for term in alternative.split("&&"):
+                    match = re.fullmatch(
+                        r"\s*([\w.-]+) (==|!=) (?:'([^']*)'|null)\s*", term
+                    )
+                    if match is None:
+                        self.fail(f"the test cannot evaluate {condition!r}")
+                    value, literal = lookup(match[1], names), match[3]
+                    # Actions compares a number with a string as numbers.
+                    if isinstance(value, int):
+                        self.fail(f"the test does not compare numbers: {term}")
+                    if (value is None) != (literal is None):
+                        self.fail(
+                            f"the test does not compare a string with null: {term}"
+                        )
+                    # Actions compares strings ignoring case.
+                    equal = value is None or value.casefold() == literal.casefold()
+                    terms.append(equal == (match[2] == "=="))
+                alternatives.append(all(terms))
+            return any(alternatives)
+
+        workflow = cast(
+            dict[str, object], yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        )
+        # The workflow runs for the event, whose activity types, unless it
+        # names others, are opened, synchronize, and reopened. YAML 1.1 reads
+        # the `on` key as True.
+        triggers = cast(dict[object, object], workflow).get(True)
+        if not isinstance(triggers, dict):
+            self.fail("the test does not model the workflow's triggers")
+        events = cast(dict[str, object], triggers)
+        event = render(context["github.event_name"])
+        self.assertIn(event, events, "the workflow would not run for the event")
+        filters = cast(dict[str, object], events[event] or {})
+        self.assertLessEqual(set(filters), {"types"}, "the test does not model it")
+        types = cast(
+            list[object], filters.get("types", ["opened", "synchronize", "reopened"])
+        )
+        self.assertIn(
+            context["github.event.action"],
+            types,
+            "the workflow would not run for the event",
+        )
+        [job] = cast(dict[str, dict[str, object]], workflow["jobs"]).values()
+        self.assertTrue(str(job["runs-on"]).startswith("ubuntu-"), job["runs-on"])
+        if "if" in job and not holds(job["if"], context):
+            self.fail("the job would not run for the event")
+        for scope in (workflow, job):
+            for setting in ("container", "defaults", "services"):
+                self.assertNotIn(setting, scope, "the test does not model it")
+        inherited = {
+            name: expand(value)
+            for scope in (workflow, job)
+            for name, value in cast(dict[str, object], scope.get("env", {})).items()
+        }
+        # The runner's GITHUB_* variables mirror the github context, but for
+        # its token.
+        runner = {
+            "GITHUB_" + name.removeprefix("github.").upper(): render(value)
+            for name, value in context.items()
+            if re.fullmatch(r"github\.\w+", name) and name != "github.token"
+        }
+        work = self.root / "work"
+        outputs: dict[str, dict[str, str]] = {}
+        for index, step in enumerate(cast(list[dict[str, object]], job["steps"])):
+            self.assertNotIn("working-directory", step, "the test does not model it")
+            if "if" in step:
+                names = {
+                    **context,
+                    **{
+                        f"steps.{name}.outputs.{key}": value
+                        for name, values in outputs.items()
+                        for key, value in values.items()
+                    },
+                }
+                if not holds(step["if"], names):
+                    continue
+            if "uses" in step:
+                # The checkout is the job's only action, since another could
+                # run the pull request's code. A clone of the ref that it
+                # names, with every branch fetched, stands for it.
+                self.assertTrue(
+                    str(step["uses"]).startswith("actions/checkout@"),
+                    f"check that {step['uses']} runs none of the pull request's "
+                    "code (doc/ci.md#test-changes), then run it here",
+                )
+                options = cast(dict[str, object], step["with"])
+                self.assertLessEqual(
+                    set(options),
+                    {"ref", "fetch-depth", "persist-credentials"},
+                    "the test does not model it",
+                )
+                self.assertEqual(
+                    options.get("fetch-depth"), 0, "the test fetches every branch"
+                )
+                ref = expand(options["ref"])
+                self.git("clone", "--quiet", "--branch", ref, str(origin), str(work))
+                continue
+            flags = BASH_FLAGS.get(cast("str | None", step.get("shell")))
+            if flags is None:
+                self.fail(f"the test runs no shell but bash, not {step['shell']}")
+            # A runner runs the step's script from a file, with the variables
+            # of the workflow, the job, and the step, but for its own GITHUB_*
+            # and RUNNER_* ones, which they cannot override.
+            script = self.root / f"step-{index}.sh"
+            script.write_text(str(step["run"]), encoding="utf-8")
+            output = self.root / f"output-{index}"
+            output.write_text("", encoding="utf-8")
+            variables = cast(dict[str, object], step.get("env", {}))
+            result = subprocess.run(
+                [cast(str, BASH), *flags, str(script)],
+                cwd=work,
+                env={
+                    **self.environment,
+                    "CI": "true",
+                    **inherited,
+                    **{name: expand(value) for name, value in variables.items()},
+                    **runner,
+                    "GITHUB_ACTIONS": "true",
+                    "GITHUB_OUTPUT": str(output),
+                    "GITHUB_STEP_SUMMARY": str(self.root / "summary.md"),
+                    "GITHUB_WORKSPACE": str(work),
+                    "RUNNER_OS": "Linux",
+                },
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            if "id" in step:
+                outputs[str(step["id"])] = dict(
+                    line.split("=", 1)
+                    for line in output.read_text(encoding="utf-8").splitlines()
+                )
+        return work
+
+    def test_the_job_labels_a_pull_request_without_running_its_scripts(
+        self,
+    ) -> None:
+        origin = self.root / "origin.git"
+        self.git("init", "--quiet", "--bare", "--initial-branch=dev", str(origin))
+        clone = self.root / "clone"
+        self.git("clone", "--quiet", str(origin), str(clone))
+        (clone / "scripts").mkdir()
+        for name in JOB_SCRIPTS:
+            shutil.copyfile(
+                layout.REPO_ROOT / "scripts" / name, clone / "scripts" / name
+            )
+        dev = self.push(clone, "refs/heads/dev")
+        # The pull request's copy of each script leaves a mark if it runs.
+        marker = self.root / "ran"
+        for name in JOB_SCRIPTS:
+            (clone / "scripts" / name).write_text(
+                f"open({str(marker)!r}, 'a').write(__file__ + '\\n')\n",
+                encoding="utf-8",
+            )
+        head = self.push(clone, f"refs/pull/{self.NUMBER}/head")
+        # A push to the pull request's branch, feature.
+        work = self.run_job(
+            origin,
+            {
+                "github.base_ref": "dev",
+                "github.event.action": "synchronize",
+                "github.event.changes.base": None,
+                "github.event.pull_request.base.ref": "dev",
+                "github.event.pull_request.head.sha": head,
+                "github.event.pull_request.number": self.NUMBER,
+                "github.event.repository.default_branch": "dev",
+                "github.event_name": "pull_request_target",
+                "github.head_ref": "feature",
+                "github.ref": "refs/heads/dev",
+                "github.ref_name": "dev",
+                "github.ref_type": "branch",
+                "github.repository": "owner/repo",
+                "github.sha": dev,
+                "github.token": self.TOKEN,
+            },
+        )
+        if marker.exists():
+            self.fail(
+                "the job ran the pull request's code:\n"
+                + marker.read_text(encoding="utf-8")
+            )
+        # The job ran the default branch's scripts, its work tree as the
+        # checkout left it, and labelled the pull request tests-modified, for
+        # its changes to them.
+        self.assertEqual(self.git("-C", str(work), "rev-parse", "HEAD"), dev)
+        self.assertEqual(self.git("-C", str(work), "status", "--porcelain"), "")
+        lines = self.log.read_text("utf-8").splitlines()
+        calls = list(zip(lines[::2], lines[1::2], strict=True))
+        labels = [
+            json.loads(body)
+            for arguments, body in calls
+            if "POST" in arguments.split()
+            and f"repos/owner/repo/issues/{self.NUMBER}/labels" in arguments.split()
+        ]
+        self.assertIn({"labels": ["tests-modified"]}, labels, calls)
 
 
 if __name__ == "__main__":
