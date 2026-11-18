@@ -30,6 +30,7 @@ runner_directory=/opt/nvx-runner
 runner_directory_is_default=true
 runner_name=
 extra_runner_labels=
+image_registry=
 runner_service_account=nvx-runner
 runner_token=
 runner_token_stdin=false
@@ -76,6 +77,7 @@ Runner options:
     --extra-runner-labels LABELS  Add labels to the required platform labels
     --repository-url URL    Runner repository URL (default: ${repository_url})
     --runner-directory PATH Runner installation path (default: ${runner_directory})
+    --image-registry PREFIX  Override pinned image pulls with an ACR prefix
     --runner-token-stdin    Read a short-lived registration token from stdin
 EOF
 }
@@ -242,6 +244,15 @@ validate_runner_name() {
     esac
 }
 
+validate_image_registry() {
+    case "$1" in
+        *[!a-z0-9./_-]*) die "invalid ACR image registry prefix: $1" ;;
+    esac
+    printf '%s\n' "$1" |
+        grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.azurecr\.io(/[a-z0-9]+([._-][a-z0-9]+)*)+$' ||
+        die "invalid ACR image registry prefix: $1"
+}
+
 append_runner_labels() {
     case "$1" in
         '' | ,* | *, | *,,* | *[!A-Za-z0-9_,.-]*)
@@ -309,6 +320,9 @@ validate_options() {
     fi
     [ "$benchmark_runner" = false ] || [ -n "$runner_name" ] ||
         die "--benchmark-runner requires --runner-name"
+    if [ -n "$image_registry" ]; then
+        validate_image_registry "$image_registry"
+    fi
     set_expected_runner_labels
 }
 
@@ -702,6 +716,10 @@ configure_runner_service() {
         "$trusted_rustup_home" \
         "$runner_sccache_dir" |
         run_as_root tee "${drop_in}/nvx.conf" >/dev/null
+    if [ -n "$image_registry" ]; then
+        printf 'Environment="NVX_IMAGE_REGISTRY=%s"\n' "$image_registry" |
+            run_as_root tee -a "${drop_in}/nvx.conf" >/dev/null
+    fi
     run_as_root systemctl daemon-reload
     run_as_root systemctl stop "$service_name"
     protect_runner_installation
@@ -1126,6 +1144,11 @@ check_runner_host() {
                 grep -Fxq "$expected_environment" ||
                 die "GitHub Actions runner service environment is not configured: ${expected_environment}"
         done
+        if [ -n "$image_registry" ]; then
+            printf '%s\n' "$service_environment" |
+                grep -Fxq "NVX_IMAGE_REGISTRY=${image_registry}" ||
+                die "GitHub Actions runner service image registry is not configured"
+        fi
         listener_pid=$(run_as_root pgrep -f \
             "^${runner_directory}/bin/Runner.Listener run --startuptype service$")
         [ -n "$listener_pid" ] ||
@@ -1152,6 +1175,11 @@ check_runner_host() {
                 grep -Fxq "$expected_environment" ||
                 die "GitHub Actions runner listener environment is not configured: ${expected_environment}"
         done
+        if [ -n "$image_registry" ]; then
+            printf '%s\n' "$listener_environment" |
+                grep -Fxq "NVX_IMAGE_REGISTRY=${image_registry}" ||
+                die "GitHub Actions runner listener image registry is not configured"
+        fi
         if getent group docker >/dev/null 2>&1; then
             docker_gid=$(getent group docker | cut -d: -f3)
             listener_groups=$(run_as_root sed -n \
@@ -1333,6 +1361,14 @@ while [ "$#" -gt 0 ]; do
             runner_option=$1
             runner_directory=$2
             runner_directory_is_default=false
+            shift 2
+            ;;
+        --image-registry)
+            [ "$#" -ge 2 ] || die "--image-registry requires a value"
+            runner_option=$1
+            image_registry=$2
+            [ -n "$image_registry" ] ||
+                die "--image-registry requires a nonempty value"
             shift 2
             ;;
         --runner-token-stdin)

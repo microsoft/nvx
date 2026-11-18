@@ -13,7 +13,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from . import common, linux_disk, linux_mshv
+from . import common, linux_disk, linux_images, linux_mshv
 from .common import BootstrapError, JsonObject
 
 # Where cloud-init writes the bootstrap files, as commands name it.
@@ -40,6 +40,7 @@ class Settings:
     lun: int
     mount_point: str
     kernel_mode: str
+    registry: linux_images.RegistrySpec | None = None
 
     @property
     def required_labels(self) -> list[str]:
@@ -63,6 +64,11 @@ def read_settings(config: JsonObject) -> Settings:
         lun=common.integer(disk, "lun", "dataDisk configuration"),
         mount_point=common.text(disk, "mountPoint", "dataDisk configuration"),
         kernel_mode=common.text(config, "kernelMode"),
+        registry=(
+            linux_images.read_registry(config["containerRegistry"])
+            if "containerRegistry" in config
+            else None
+        ),
     )
     common.split_labels(
         common.strings(config, "runnerLabels"), settings.required_labels
@@ -271,6 +277,9 @@ def bootstrap(config_path: Path) -> None:
     common.run_command(["systemctl", "enable", METADATA_SERVICE])
     common.run_command(["systemctl", "restart", METADATA_SERVICE])
     common.run_command(["systemctl", "is-active", "--quiet", METADATA_SERVICE])
+    if settings.registry is not None:
+        registry = linux_images.sync_images(settings.registry)
+        arguments += ["--image-registry", registry.image_prefix]
     token = common.registration_token(config)
     registration = [*arguments, "--runner-name", name]
     if benchmark:

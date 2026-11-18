@@ -252,7 +252,7 @@ runs:
         steps.reuse.outputs.reused != 'true'
       shell: bash
       run: >-
-        docker build
+        python3 scripts/nvx_tools/container_images.py build
         --file docker/Dockerfile
         --target kernel-artifacts
         --output type=local,dest=build
@@ -292,7 +292,7 @@ runs:
         steps.cache-linux-debug-kernel-zstd.outputs.cache-hit != 'true'
       shell: bash
       run: >-
-        docker build
+        python3 scripts/nvx_tools/container_images.py build
         --file docker/Dockerfile
         --target kernel-debug-artifacts
         --output type=local,dest=build
@@ -321,7 +321,7 @@ runs:
         steps.reuse.outputs.reused != 'true'
       shell: bash
       run: >-
-        docker build
+        python3 scripts/nvx_tools/container_images.py build
         --file docker/Dockerfile
         --target initramfs-artifacts
         --output type=local,dest=build
@@ -350,7 +350,7 @@ runs:
         steps.reuse.outputs.reused != 'true'
       shell: bash
       run: >-
-        docker build
+        python3 scripts/nvx_tools/container_images.py build
         --file docker/Dockerfile
         --target ubuntu-initramfs-artifacts
         --output type=local,dest=build
@@ -371,7 +371,7 @@ runs:
         )
       shell: bash
       run: >-
-        docker build
+        python3 scripts/nvx_tools/container_images.py build
         --file docker/Dockerfile
         --target ubuntu-determinism
         .
@@ -398,13 +398,11 @@ runs:
         steps.reuse.outputs.reused != 'true'
       shell: bash
       env:
-        AZURELINUX_IMAGE: ${{ steps.guest-versions.outputs.azurelinux-image }}
         AZURELINUX_VERSION: ${{ steps.guest-versions.outputs.azurelinux-version }}
       run: >-
-        docker build
+        python3 scripts/nvx_tools/container_images.py build
         --file docker/Dockerfile
         --target azurelinux-initramfs-artifacts
-        --build-arg AZURELINUX_IMAGE="${AZURELINUX_IMAGE}"
         --build-arg AZURELINUX_VERSION="${AZURELINUX_VERSION}"
         --output type=local,dest=build
         .
@@ -433,7 +431,7 @@ runs:
         steps.reuse.outputs.reused != 'true'
       shell: bash
       run: >-
-        docker build
+        python3 scripts/nvx_tools/container_images.py build
         --file docker/Dockerfile
         --target ubuntu-distro-layer-artifacts
         --output type=local,dest=build

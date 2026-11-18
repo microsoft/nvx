@@ -1,0 +1,69 @@
+name: Set up container registry
+description: Authenticate a trusted Docker job to an optional ACR mirror with Azure OIDC
+
+inputs:
+  registry-prefix:
+    description: ACR login server and repository prefix
+    required: true
+  client-id:
+    description: Client ID of a federated identity with pull-only registry access
+    required: true
+  tenant-id:
+    description: Microsoft Entra tenant of the federated identity
+    required: true
+  subscription-id:
+    description: Subscription containing the registry
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Validate registry configuration
+      shell: bash
+      env:
+        REGISTRY_PREFIX: ${{ inputs.registry-prefix }}
+      run: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import os
+        import sys
+
+        sys.path.insert(0, "scripts")
+        from nvx_tools.container_images import mirror_prefix
+
+        mirror_prefix(os.environ["REGISTRY_PREFIX"])
+        PY
+
+    - name: Sign in with the pull-only federated identity
+      uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+      with:
+        client-id: ${{ inputs.client-id }}
+        tenant-id: ${{ inputs.tenant-id }}
+        subscription-id: ${{ inputs.subscription-id }}
+
+    - name: Configure job-scoped Docker credentials
+      shell: bash
+      env:
+        REGISTRY_PREFIX: ${{ inputs.registry-prefix }}
+      run: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import os
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        sys.path.insert(0, "scripts")
+        from nvx_tools.container_images import mirror_prefix
+        from scripts.setup.azure.nvx_azure import linux_images
+
+        prefix = os.environ["REGISTRY_PREFIX"]
+        server, _ = mirror_prefix(prefix)
+        token = linux_images.azure_cli_token("https://containerregistry.azure.net")
+        refresh = linux_images.refresh_token(server, token)
+        directory = tempfile.mkdtemp(prefix="nvx-docker-", dir=os.environ["RUNNER_TEMP"])
+        linux_images.docker_login(server, refresh, Path(directory))
+        with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
+            print(f"DOCKER_CONFIG={directory}", file=output)
+            print(f"NVX_IMAGE_REGISTRY={prefix}", file=output)
+        PY

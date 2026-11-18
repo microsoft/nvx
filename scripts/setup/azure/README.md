@@ -15,6 +15,7 @@ Do not maintain a second copy of the runner setup or its tool versions here.
 | `nvx_azure/linux_bootstrap.py` | Validate Azure instance identity, refresh the compute snapshot, prepare the attached disk and backend, derive a runner name, and register using managed identity and Key Vault. |
 | `nvx_azure/linux_firewall.py` | Block the dedicated runner account from Azure instance metadata with a verified, reboot-persistent IPv4 owner rule. |
 | `nvx_azure/linux_disk.py` | Find an Azure managed disk by LUN, preserve recognized ext4 data, and initialize only a blank or owned incomplete disk. |
+| `nvx_azure/linux_images.py` | Check pinned image digests in ACR and import missing images server-side before runner registration, without Docker or Azure CLI on the guest. |
 | `nvx_azure/linux_mshv.py` | Optional Azure Linux 3 Dom0 boot preparation and post-boot verification. This differs from `../setup-linux.sh`, which requires an MSHV kernel that is already running. |
 | `nvx_azure/windows_stage.py` | Run from Custom Script: verify and unpack the package, configure OpenSSH, and hand bootstrap to an independent SYSTEM task. |
 | `nvx_azure/windows_bootstrap.py` | Validate instance identity; set up the disk, WHP/Hyper-V features, reboot continuation, and the Network Service runner. |
@@ -24,6 +25,7 @@ Do not maintain a second copy of the runner setup or its tool versions here.
 | `windows/vmss-bootstrap.ps1` | Custom Script entry shim: protect the bootstrap directory, install the pinned Python, verify the package, and run `windows-stage`. |
 | `windows/firewall.ps1`, `windows/openssh.ps1`, `windows/storage.ps1`, `windows/system.ps1` | Adapters that run the cmdlets a Python controller names, taking a JSON request and returning a JSON result. |
 | `build_package.py` | Validate configuration and generate deterministic guest payloads, hashes, and a partial VMSS model patch without accessing Azure or GitHub. |
+| `nvx_tools/container_images.py` (packaged from `scripts/nvx_tools/`) | Shared pin discovery, image-reference validation, and custom-registry Docker build arguments; the public path leaves Dockerfile image defaults alone. |
 
 `cli.py` takes one command, which names the step that it runs:
 
@@ -207,6 +209,175 @@ The secret must contain a GitHub credential authorized to request runner
 registration tokens for the configured repository. These adapters target
 Azure public cloud and GitHub.com.
 
+## Container registry mirrors
+
+A Linux configuration can add this optional object, replacing the example
+resource ID with an existing Azure Container Registry:
+
+```json
+"containerRegistry": {
+  "resourceId": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/example/providers/Microsoft.ContainerRegistry/registries/exampleacr",
+  "repositoryPrefix": "nvx"
+}
+```
+
+The packager reads the pinned Debian, Rust, and Azure Linux base images in
+[`docker/Dockerfile`](../../../docker/Dockerfile) and the ShellCheck and shfmt
+images in [check-quality](../../../.github/actions/check-quality/action.yml).
+The shared [image resolver](../../nvx_tools/container_images.py) also supplies
+the Docker build consumers, so a Dockerfile pin change reaches both the
+inventory and the custom-registry build. It checks the Azure Linux package
+lock and source manifest against that pin.
+The packager records the exact digests in `container-images.json`. Root
+resolves the configured resource's actual `loginServer` from Azure, including
+DNL-suffixed hostnames, even when every image already exists. It checks each
+digest in that registry at VM provisioning, imports only missing
+manifests, waits for completion, and checks their digests again before
+registering the runner. Imports preserve multi-platform manifests, create no
+mutable tags, and never pull upstream images onto the VM. Another instance
+importing the same image must still produce the expected digest; permission
+errors and unsuccessful or timed-out imports stop registration. Import
+polling and concurrent-import verification share one 20-minute deadline per
+image; verification refreshes its pull bearer after waiting.
+
+The VM's system-assigned identity needs the
+[`Container Registry Data Importer and Data Reader` role](https://learn.microsoft.com/en-us/azure/container-registry/container-registry-rbac-built-in-roles-overview)
+on that registry. Scope this grant to the registry, not the subscription.
+It is a provisioning permission, not a credential for jobs. For example,
+an administrator can grant it once before creating instances:
+
+```powershell
+az role assignment create --assignee-object-id <vmss-identity-principal-id> `
+    --assignee-principal-type ServicePrincipal `
+    --role "Container Registry Data Importer and Data Reader" `
+    --scope <registry-resource-id>
+```
+
+Network-restricted registries must allow trusted services for server-side
+imports, and the VM must reach the registry's data endpoint. See
+[ACR image imports](https://learn.microsoft.com/en-us/azure/container-registry/container-registry-import-images).
+
+The bootstrap passes `--image-registry exampleacr.azurecr.io/nvx` to the generic
+Linux runner setup, which persists `NVX_IMAGE_REGISTRY` in the runner service.
+NVX's Docker build commands, the guest-artifact action, and the shell-linter
+action then replace only image locations, never their digests:
+
+```text
+debian:12-slim@sha256:<digest>
+  -> exampleacr.azurecr.io/nvx/docker.io/library/debian@sha256:<digest>
+mcr.microsoft.com/azurelinux/base/core@sha256:<digest>
+  -> exampleacr.azurecr.io/nvx/mcr.microsoft.com/azurelinux/base/core@sha256:<digest>
+```
+
+An unset variable preserves the upstream behavior. An invalid or empty override
+fails instead of falling back to a public registry. Azure Linux artifact
+provenance retains the canonical upstream image identity, after checking the
+mirrored digest, so moving identical content does not invalidate its package
+lock. Regenerate the VMSS payload whenever its source pins change.
+
+This setting does **not** install Docker, grant jobs Docker socket access, or
+remove their metadata block. Current backend-runner jobs build natively;
+Docker guest-artifact and quality jobs run on GitHub-hosted runners. A separate
+Docker-capable development or build host can set `NVX_IMAGE_REGISTRY` too, but
+its container client must authenticate to the private registry as its own
+identity. Bootstrap
+does not give jobs its managed-identity or import tokens.
+
+After generating a package with this option, the same sync can be invoked from
+the repository on an authenticated workstation without changing a VM or
+installing Docker:
+
+```powershell
+python -m scripts.setup.azure.nvx_azure.linux_images `
+    --registry-resource-id <registry-resource-id> --repository-prefix nvx `
+    --manifest <package-directory>\container-images.json --dry-run
+python -m scripts.setup.azure.nvx_azure.linux_images `
+    --registry-resource-id <registry-resource-id> --repository-prefix nvx `
+    --manifest <package-directory>\container-images.json --azure-cli
+```
+
+`--dry-run` prints repository mappings against the resource ID without network
+access; the login server is resolved only during an authenticated sync.
+Without `--azure-cli`, the sync uses the VM's system-assigned managed identity.
+Add `--docker-login` to authenticate the calling user's Docker client, passing
+the ACR credential on standard input, not in command arguments. This needs
+Docker, but syncing alone does not. Docker credentials expire normally; repeat
+the login for a later development session rather than treating a provisioning
+login as permanent. Use the existing
+deployment template's custom-data/cloud-init hook for the generated payload;
+do not run a second competing runner bootstrap from a script extension.
+
+### Development and test VMs without a runner
+
+Use the images-only mode rather than a runner configuration for a development
+VM. Its JSON configuration is just the inner `containerRegistry` object above,
+with `resourceId` and `repositoryPrefix`. It installs no runner, touches no
+disks or hypervisor configuration, and needs neither a GitHub credential nor
+Key Vault access:
+
+```powershell
+python scripts\setup\azure\build_package.py --images-only `
+    --config <registry-config.json> --base-cloud-init <original-cloud-init.yaml> `
+    --output <new-directory-outside-nvx>
+```
+
+`--base-cloud-init` is optional. When supplied, it must be a `#cloud-config`
+document. Existing settings, files, packages, and commands are preserved; the
+generator refuses a collision with its own file paths. Use the original base
+document when regenerating, not the previously generated output.
+The new root-owned `nvx-container-images.service` runs the same managed-identity
+sync and writes `/etc/profile.d/nvx-container-registry.sh` only after success.
+New login shells inherit the resolved prefix. The service reports
+`NVX_CLOUD_IMAGES_READY=1`; an Azure VM's provisioned state alone is not proof
+that this asynchronous setup succeeded.
+
+An in-place canary can install only this generated image-mirror package and
+unit without replaying the original cloud-init, restarting a runner, or
+reimaging the VM. Stage the complete generated custom data for future
+instances separately; existing VMs do not rerun it on a model update.
+
+### GitHub-hosted Docker jobs
+
+The Docker jobs in `ci.yml` and the scenario-coverage workflow have an explicit,
+optional [registry setup action](../../../.github/actions/setup-container-registry/action.yml).
+Configure these repository variables to enable it:
+
+| Variable | Value |
+| --- | --- |
+| `NVX_IMAGE_REGISTRY` | Actual ACR login server and repository prefix, such as `exampleacr.azurecr.io/nvx` |
+| `NVX_ACR_CLIENT_ID` | Client ID of an Azure identity federated with the trusted GitHub workflow |
+| `NVX_ACR_TENANT_ID` | Its Microsoft Entra tenant ID |
+| `NVX_ACR_SUBSCRIPTION_ID` | The registry's subscription ID |
+
+Use a **separate pull-only identity**, never the VM's importer identity.
+Restrict it to the mirrored repositories with repository-scoped permissions
+where supported, or use a dedicated mirror registry; do not expose unrelated
+private images to a public-repository workflow. Configure its federated
+credential for the intended workflow/ref or protected environment as described
+in [Azure Login with OIDC](https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect).
+This change does not create that identity, grant its roles, or set repository
+variables.
+
+With the registry variable unset, these steps are skipped and the environment
+variable stays unset: public pulls retain their existing defaults. Same-repository
+pull requests and trusted non-PR runs can opt in; fork pull requests deliberately
+retain the public path and receive no private-registry login. A selected custom
+registry with invalid configuration or failed authentication fails the job,
+without falling back to public pulls.
+Each opted-in job obtains fresh credentials with Azure OIDC and keeps Docker's
+credential file under its private `RUNNER_TEMP` directory. No stored registry
+password is needed, and no credentials or Docker access are added to backend
+runner jobs. The guest-artifact action and `nvx.py` use the shared Docker
+wrapper/resolver; the quality action and cloud-agent linter staging retain the
+same image digests when applying the prefix.
+
+The inventory covers the repository's digest-pinned images, not arbitrary
+containers used interactively, Docker's frontend or Buildx helper images, or the
+tag-selected Alpine corresponding-source collector. Those require their own
+registry policy. Mirroring also does not delete old public-image references
+from existing VMs or Docker caches; inspect and remove those only in a separate
+maintenance window. Already running VMs do not consume a newly staged payload.
+
 ## Offline package generation
 
 Install the package requirement and validate an edited configuration:
@@ -236,6 +407,7 @@ It must be new or empty so files from another platform cannot be reused.
 | Output | Role |
 | --- | --- |
 | `cloud-init.yaml` (Linux) | Root-owned Python bootstrap package, generic setup script, tool manifest, private configuration, and startup and metadata-block units. |
+| `container-images.json` (Linux, when `containerRegistry` is configured) | Exact image inventory embedded in cloud-init; the standalone sync accepts the same file. |
 | `custom-data.json`, `sources.tar.xz` (Windows) | Custom Script input with the entry shim and Python pin, and the hash-verified package of configuration, setup sources, Python modules, and adapters. |
 | `extension-command.txt` (Windows) | Command paired with the Windows custom data for a compatible VMSS Custom Script extension. |
 | `model-patch.json`, `manifest.json` | Partial VMSS custom-data patch and exact target, toolchain, size, and hash evidence. |

@@ -35,6 +35,12 @@ def parser() -> argparse.ArgumentParser:
         ),
     ):
         subcommands.add_parser(name, help=summary, description=summary)
+    images = subcommands.add_parser(
+        "linux-sync-images", help="Sync pinned images and configure a development host."
+    )
+    images.add_argument("--config", type=Path, required=True)
+    images.add_argument("--manifest", type=Path, required=True)
+    images.add_argument("--environment-file", type=Path, required=True)
     stage = subcommands.add_parser(
         "windows-stage",
         help="Stage the Windows bootstrap from the Custom Script Extension.",
@@ -70,6 +76,12 @@ def run(arguments: argparse.Namespace) -> int:
         from . import linux_mshv
 
         return 0 if linux_mshv.verify() else 1
+    if command == "linux-sync-images":
+        from . import linux_images
+
+        return linux_images.provision(
+            arguments.config, arguments.manifest, arguments.environment_file
+        )
     if command == "windows-stage":
         from . import windows_stage
 
