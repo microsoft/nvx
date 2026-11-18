@@ -21,8 +21,8 @@
   mapped tip on the same first-parent chain. Positions 127-301 and 303-316 are not yet assigned to
   PRs, and position 302 is a PR18 fixup; see [Commits after the mapped
   tip](#commits-after-the-mapped-tip).
-- Upstream main: `9a875b563d62eaca040137c0227224c9a17e944d` (2026-11-18), the fork base itself;
-  see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
+- Upstream main: `715927303600a54911a836ed6f53dc338e15c05f` (2026-11-18), one commit past the
+  fork base; see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
 ## Upstream status
 
@@ -1204,9 +1204,17 @@ returns nothing, which position 026 makes fallible with `StateUnit::start`.
 
 ### Upstream main past the fork base
 
-Upstream main has no commits past the fork base: as of 2026-11-18, its head is the fork base,
-`9a875b563`. Of the 14 commits that upstream main had past the v7.0 base, `e6b458cc0`, the v7.1
-rebase resolved `9b05d16fd` (microsoft/openvmm#4941) at position 060 and `20582cf41`
+As of 2026-11-18, upstream main is one commit past the fork base: `715927303`
+(microsoft/openvmm#5082) merges the guest-architecture and platform cfgs of 41 files into
+`cfg_select!` blocks and formats them. It conflicts with the pin in 12 hunks of 10 files, each at
+a cfg that it rewrites beside code that the chain adds or changes: `underhill_core`'s `worker.rs`,
+`membacking`'s `va_mapper.rs`, `openvmm_core`'s `partition.rs` and `worker/dispatch.rs`, the
+`lib.rs` of `openvmm_entry` and `openvmm_resources`, the KVM x86-64, MSHV, and WHP backends, and
+the `virt_backend_tests` VMM tests, which positions 003 through 305 change. The v7.1 rebase
+deferred it, so the next rebase resolves it.
+
+Of the 14 commits that upstream main had past the v7.0 base, `e6b458cc0`, the v7.1 rebase
+resolved `9b05d16fd` (microsoft/openvmm#4941) at position 060 and `20582cf41`
 (microsoft/openvmm#4942) at position 277; see
 [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The other 12 merged with the chain
 without conflicts.
