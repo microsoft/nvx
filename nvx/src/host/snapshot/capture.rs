@@ -82,7 +82,7 @@ pub fn finish_capture(
             "captureUtcNs": time.capture_utc_ns,
             "captureMonotonicNs": time.capture_monotonic_ns,
             "hostClock": time.host_clock.as_str(),
-            "hostId": time.host_id.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "hostId": platform::hex(&time.host_id),
             "bootId": time.boot_id,
             "lineage": time.lineage,
             "cutToAnchorNs": time.cut_to_anchor_ns,

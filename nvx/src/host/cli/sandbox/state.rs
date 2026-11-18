@@ -55,7 +55,7 @@ use crate::protocol::root::{Journal, OverlayMode, RAM_UPPER_CAPS, RootImage};
 use crate::protocol::view::{MachineIdMode, View};
 use crate::uuid::Uuid;
 
-pub(crate) use crate::host::cli::{hex, random_bytes, temporary_path};
+pub(crate) use crate::host::cli::{random_bytes, temporary_path};
 
 #[cfg(test)]
 mod tests;

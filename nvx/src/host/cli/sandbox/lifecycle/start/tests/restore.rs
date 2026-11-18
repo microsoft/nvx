@@ -14,7 +14,6 @@ use crate::guest_restore::{
 use crate::host::artifacts::{
     ArtifactDir, Guest, INITRAMFS_PROVENANCE_NAME, KERNEL_PROVENANCE_NAME, OPENVMM_PROVENANCE_NAME,
 };
-use crate::host::cli::hex;
 use crate::host::cli::run;
 use crate::host::cli::sandbox::lifecycle::{ProvisionConfig, deprovision};
 use crate::host::cli::sandbox::sandbox_network;
@@ -24,6 +23,7 @@ use crate::host::cli::store::StateDir;
 use crate::host::filesystem::{Bind, ExportChild, ExportPlan, Owner};
 use crate::host::network::{Access, NetworkPolicy};
 use crate::host::paths::resolve;
+use crate::host::platform::hex;
 use crate::host::process::{Opened, Process, ProcessRef};
 use crate::host::sandbox::distro::DistroBinding;
 use crate::host::sandbox::layer::{LayerRole, SandboxLayer};

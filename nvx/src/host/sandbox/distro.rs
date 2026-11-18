@@ -47,6 +47,7 @@ use crate::error::{Error, Result};
 use crate::host::artifacts::DISTRO_MANIFEST_SUFFIX;
 use crate::host::network::policy::MAX_JSON_DEPTH;
 use crate::host::network::policy::json::{self, ReadError};
+use crate::host::platform::hex;
 use crate::host::seal::{self, FileKind, FileSeal};
 
 /// The revision of NVX's distro policy, which refuses a distro layer whose manifest lists the
@@ -539,11 +540,7 @@ fn hash_sealed(path: &Path, access: Access<'_>, description: &str) -> Result<(St
     if let Some(field) = before.difference(&after) {
         return Err(changed_while_verified(path, field));
     }
-    let digest = hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let digest = hex(&hasher.finalize());
     Ok((digest, before))
 }
 
