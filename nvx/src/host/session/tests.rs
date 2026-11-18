@@ -913,6 +913,49 @@ fn capture_refuses_invalid_acknowledgements() {
     );
 }
 
+#[test]
+fn a_capture_report_fails_the_capture_and_waiting_for_one_does_not() {
+    // Each report, with the bits that it flips in the request ID, and the failure that it gives.
+    let reports = [
+        (
+            0,
+            Frame::Error {
+                status: 11,
+                category: b"capture-continued",
+            },
+            "the guest agent captured no snapshot: capture-continued (status 11)",
+        ),
+        (
+            0,
+            Frame::Busy,
+            "the guest agent returned an invalid capture report",
+        ),
+        (
+            1,
+            Frame::Error {
+                status: 5,
+                category: b"capture-failed",
+            },
+            "the guest agent returned a mismatched request ID",
+        ),
+    ];
+    for (flipped, report, message) in reports {
+        let (mut session, _) = responding(Box::new(move |_, id| {
+            vec![ready_frame(id, &[]), encode(id ^ flipped, report)]
+        }));
+        let id = session.capture(false, deadline()).unwrap();
+        assert_violation(
+            &session.capture_report(id, deadline()).unwrap_err(),
+            message,
+            message,
+        );
+    }
+    // The guest has not reported yet: the capture may still be taking its snapshot.
+    let mut session = attached(|_, id| ready_frame(id, &[]));
+    let id = session.capture(false, deadline()).unwrap();
+    session.capture_report(id, deadline()).unwrap();
+}
+
 #[cfg(feature = "cli")]
 #[test]
 fn ready_pings_a_restored_clone_and_returns_the_activation_that_its_ready_reports() {

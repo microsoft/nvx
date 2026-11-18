@@ -439,6 +439,10 @@ fn capture_temporary(name: &str) -> bool {
 }
 
 /// Uses authentication and the actual held process, never the capture acknowledgement as exit.
+///
+/// Until the VM exits, which ends the control session, it reads the session too: the guest agent
+/// reports there a capture that took no snapshot, after which the guest runs on, and that report
+/// fails the capture at once.
 fn request_and_wait(
     process: &Process,
     outputs: &VmOutputs,
@@ -450,9 +454,11 @@ fn request_and_wait(
     check_interrupt()?;
     let attached = ControlSession::attach(transport.map_err(error_with_cause)?, capability, until);
     check_interrupt()?;
-    let requested = attached.map_err(control_error)?.capture(false, until);
+    let mut session = attached.map_err(control_error)?;
+    let requested = session.capture(false, until);
     check_interrupt()?;
-    requested.map_err(control_error)?;
+    let request_id = requested.map_err(control_error)?;
+    let mut session = Some(session);
     loop {
         check_interrupt()?;
         let now = Instant::now();
@@ -462,9 +468,20 @@ fn request_and_wait(
                 "capture VM did not exit before its deadline",
             ));
         }
-        let exited = process
-            .wait(until.min(now + RETRY_INTERVAL))
-            .map_err(Exit::from_os_error)?;
+        let step = until.min(now + RETRY_INTERVAL);
+        let wait = match session
+            .as_mut()
+            .map(|session| session.capture_report(request_id, step))
+        {
+            Some(Ok(())) => Instant::now(),
+            Some(Err(error @ SessionError::Protocol(_))) => return Err(control_error(error)),
+            Some(Err(_)) => {
+                session = None;
+                step
+            }
+            None => step,
+        };
+        let exited = process.wait(wait).map_err(Exit::from_os_error)?;
         if let Some(exited) = exited {
             if deadline.passed() {
                 return Err(Exit::error(

@@ -611,6 +611,31 @@ fn a_capture_rejection_stops_its_verified_vm_without_finishing_or_publishing() {
 }
 
 #[test]
+fn a_capture_that_the_guest_reports_took_no_snapshot_fails_at_once_without_finishing() {
+    let fixture = Fixture::new();
+    let error = fixture.capture("continued", "continue", 20).unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::Protocol), "{error:?}");
+    assert_eq!(
+        error.message(),
+        Some(
+            "capture control failed: the guest agent captured no snapshot: capture-continued \
+             (status 11)"
+        )
+    );
+    assert!(matches!(
+        Process::open(&fixture.references()[0]).unwrap(),
+        Opened::Exited(_)
+    ));
+    assert!(fixture.vm_dir().join("launch.json").exists());
+    assert!(!fixture.vm_dir().join(KEY_FILE).exists());
+    assert!(!fixture.vm_dir().join(DESCRIPTION_FILE).exists());
+    assert_eq!(
+        fs::read_dir(fixture.store().entries.dir()).unwrap().count(),
+        0
+    );
+}
+
+#[test]
 fn unjournaled_user_content_is_preserved_before_any_capture_slot_mutation() {
     for entry in [
         "personal.txt",
@@ -827,7 +852,8 @@ fn read_record(stream: &mut (impl Read + Write)) -> (u8, Vec<u8>) {
     (header.record_type, payload)
 }
 
-fn respond(stream: &mut (impl Read + Write), capability: &[u8], refused: bool) {
+fn respond(stream: &mut (impl Read + Write), capability: &[u8], behavior: &Value) {
+    let refused = behavior == "refuse";
     let (kind, payload) = read_record(stream);
     assert_eq!(kind, OUTER_HOST_ATTACH);
     assert_eq!(payload, capability);
@@ -854,6 +880,19 @@ fn respond(stream: &mut (impl Read + Write), capability: &[u8], refused: bool) {
     stream
         .write_all(&encode_outer(OUTER_DATA, &[7; 16], 1, 1, &reply).unwrap())
         .unwrap();
+    if behavior == "continue" {
+        // As nvx-init does once a capture that took no snapshot returns, after the VMM refused or
+        // rolled it back, the guest reports it on the same session, and runs on.
+        let report = Frame::Error {
+            status: 11,
+            category: b"capture-continued",
+        }
+        .encode(request_id)
+        .unwrap();
+        stream
+            .write_all(&encode_outer(OUTER_DATA, &[7; 16], 1, 2, &report).unwrap())
+            .unwrap();
+    }
 }
 
 #[test]
@@ -881,19 +920,23 @@ fn capture_helper() {
         .join("helper.json");
     let recipe: Value = serde_json::from_slice(&fs::read(recipe_path).unwrap()).unwrap();
     let endpoint = recipe["endpoint"].as_str().unwrap();
-    let refused = recipe["behavior"] == "refuse";
+    let behavior = &recipe["behavior"];
+    // A guest that captured no snapshot runs on, and so does its session.
+    let runs_on = behavior == "refuse" || behavior == "continue";
     #[cfg(target_os = "linux")]
-    {
+    let _session = {
         let server = std::os::unix::net::UnixListener::bind(endpoint).unwrap();
         let (mut stream, _) = server.accept().unwrap();
-        respond(&mut stream, &capability, refused);
-    }
+        respond(&mut stream, &capability, behavior);
+        stream
+    };
     #[cfg(windows)]
-    {
+    let _session = {
         let mut server = platform::tests::control_server(endpoint);
         platform::tests::accept_control(&server);
-        respond(&mut server, &capability, refused);
-    }
+        respond(&mut server, &capability, behavior);
+        server
+    };
     let journal: Value = serde_json::from_slice(&fs::read("launch.json").unwrap()).unwrap();
     assert_eq!(journal["process"]["pid"], std::process::id());
     assert_eq!(journal["endpoint"], endpoint);
@@ -906,7 +949,7 @@ fn capture_helper() {
     let manifest: Vec<u8> = serde_json::from_value(recipe["manifest"].clone()).unwrap();
     crate::host::platform::write_private(&Path::new(OPENVMM_DIR).join(MANIFEST_NAME), &manifest)
         .unwrap();
-    if refused {
+    if runs_on {
         thread::sleep(Duration::from_secs(120));
         return;
     }
