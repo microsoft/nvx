@@ -1,8 +1,7 @@
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io;
-use std::net::{SocketAddr, TcpListener};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,6 +15,7 @@ use crate::host::session;
 use crate::host::snapshot::SnapshotManifest;
 use crate::host::spawn::{Launched, VmmCommand, spawn_vm_with_mode};
 use crate::host::transport::HostConnection;
+use crate::host::vm::{Console, VmOutputs};
 use crate::protocol::root::OverlayMode;
 use crate::protocol::v2::{self, Frame, Outcome};
 use crate::protocol::view::{MachineIdMode, View};
@@ -160,6 +160,10 @@ fn check_restored_console(logs: &str, case: &str) -> Result<usize, AnyError> {
     Ok(cold_switches)
 }
 
+/// Restores `NVX_SL77B_LIVE_SNAPSHOT`, the `openvmm/` directory of a platform snapshot of 128 MiB
+/// with a NIC at `10.88.0.2/24` and a disconnected boot console, as `nvx snapshot capture
+/// --memory-mib 128 --net 10.88.0.2/24` captures one on MSHV or WHP, over `NVX_SL77B_LIVE_DISTRO`,
+/// an EROFS distro layer without `/sbin/nvx-ingress`, which the restored workload checks.
 fn run() -> Result<(), AnyError> {
     let grant = std::env::var("NVX_SL77B_LIVE_GRANT")?;
     require(
@@ -171,7 +175,6 @@ fn run() -> Result<(), AnyError> {
         "NVX_SL77B_LIVE_NATIVE",
         "NVX_SL77B_LIVE_SNAPSHOT",
         "NVX_SL77B_LIVE_DISTRO",
-        "NVX_SL77B_LIVE_CONSOLE",
         "NVX_SL77B_LIVE_ROOT",
         "NVX_SL77B_LIVE_RESULT",
         "NVX_SL77B_LIVE_CASE",
@@ -181,21 +184,20 @@ fn run() -> Result<(), AnyError> {
         );
     }
     require(
-        args.len() == 8,
-        "usage: restore VMM SNAPSHOT DISTRO ORIGINAL_CONSOLE ROOT RESULT CASE",
+        args.len() == 7,
+        "usage: restore VMM SNAPSHOT DISTRO ROOT RESULT CASE",
     )?;
     let vmm = PathBuf::from(&args[1]);
     let snapshot = PathBuf::from(&args[2]);
     let distro = PathBuf::from(&args[3]);
-    let original_console = PathBuf::from(&args[4]);
-    let root = PathBuf::from(&args[5]);
-    let result = PathBuf::from(&args[6]);
-    let case = args[7].to_str().ok_or("non-Unicode case")?;
+    let root = PathBuf::from(&args[4]);
+    let result = PathBuf::from(&args[5]);
+    let case = args[6].to_str().ok_or("non-Unicode case")?;
     require(
         matches!(case, "published" | "unpublished" | "missing" | "deadline"),
         "invalid fixture case",
     )?;
-    for path in [&vmm, &snapshot, &distro, &original_console, &root, &result] {
+    for path in [&vmm, &snapshot, &distro, &root, &result] {
         require(path.is_absolute(), "all fixture paths must be absolute")?;
     }
     let manifest = SnapshotManifest::read(&snapshot)?;
@@ -209,45 +211,32 @@ fn run() -> Result<(), AnyError> {
     )?;
     private_directory(&root)?;
     let export = create_export(&root)?;
-    let endpoint = if cfg!(windows) {
-        format!(
-            "//./pipe/openvmm-microvm-sl77b-live-{}-{case}",
-            std::process::id()
+    // The control console and the boot console's listener, which the restore attaches to the
+    // snapshot's disconnected boot console: on Linux, sockets in the snapshot's parent directory,
+    // where OpenVMM requires them, and on Windows, pipes in OpenVMM's console namespace.
+    let (endpoint, console_endpoint) = if cfg!(windows) {
+        let id = std::process::id();
+        (
+            format!("//./pipe/openvmm-microvm-sl77b-live-{id}-{case}"),
+            format!("//./pipe/openvmm-microvm-sl77b-console-{id}-{case}"),
         )
     } else {
-        snapshot
+        let parent = snapshot
             .parent()
-            .ok_or("snapshot has no private namespace parent")?
-            .join(format!("nvxs-{case}"))
-            .to_str()
-            .ok_or("non-Unicode endpoint")?
-            .to_owned()
-    };
-    let address: SocketAddr = fs::read_to_string(&original_console)?.trim().parse()?;
-    require(address.ip().is_loopback(), "console must remain loopback")?;
-    let listener = TcpListener::bind(address)?;
-    listener.set_nonblocking(true)?;
-    let console = root.join("restored-console.log");
-    let console_output = console.clone();
-    let reader = thread::spawn(move || -> io::Result<()> {
-        let by = Instant::now() + Duration::from_secs(30);
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < by => {
-                    thread::sleep(Duration::from_millis(25));
-                }
-                Err(error) => return Err(error),
-            }
+            .ok_or("snapshot has no private namespace parent")?;
+        let socket = |name: String| {
+            parent
+                .join(name)
+                .to_str()
+                .map(str::to_owned)
+                .ok_or("non-Unicode endpoint")
         };
-        stream.set_nonblocking(false)?;
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(console_output)?;
-        io::copy(&mut stream, &mut output)?;
-        Ok(())
-    });
+        (
+            socket(format!("nvxs-{case}"))?,
+            socket(format!("nvxc-{case}"))?,
+        )
+    };
+    let console = root.join("restored-console.log");
     let report = root.join("outcome.json");
     let (_temporary, directory) = super::vm_directory();
     let mut listener = super::ReadyListener::bind(&directory)?;
@@ -336,7 +325,7 @@ fn run() -> Result<(), AnyError> {
         "--mount-child".into(),
         format!("0,{},ro", export.display()).into(),
         "--virtio-console".into(),
-        format!("connect=tcp:{address}").into(),
+        format!("listen={console_endpoint}").into(),
         "--microvm-control-console".into(),
         format!("listen={endpoint}").into(),
         "--microvm-control-auth-stdin".into(),
@@ -373,6 +362,39 @@ fn run() -> Result<(), AnyError> {
         "OWNED_RESTORE_PID={pid} REFERENCE={:?} CASE={case}",
         process.reference()
     );
+    // The listener discards the guest's console output while no client is connected, as the
+    // snapshot's disconnected console does, so the reader connects as soon as OpenVMM listens,
+    // before the fixture waits for the restore-ready event, and reads until the VM closes the
+    // console.
+    let outputs = VmOutputs {
+        log: log_file.clone(),
+        outcome: report.clone(),
+        endpoint: endpoint.clone(),
+        console: Some(console_endpoint),
+    };
+    let reference = process.reference().clone();
+    let console_output = console.clone();
+    let reader = thread::spawn(move || -> io::Result<()> {
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(console_output)?;
+        let by = Instant::now() + Duration::from_secs(30);
+        let mut console = match Console::connect(&outputs, &reference, by) {
+            Ok(console) => console,
+            // A VM that ended before the reader connected left it nothing to read, and its
+            // outcome report tells how it ended.
+            Err(error) if error.kind() == crate::ErrorKind::Exited => return Ok(()),
+            Err(error) => return Err(io::Error::other(error.to_string())),
+        };
+        let mut buffer = [0u8; 4096];
+        loop {
+            match console.read(&mut buffer, None)? {
+                0 => return Ok(()),
+                count => output.write_all(&buffer[..count])?,
+            }
+        }
+    });
     let by = Instant::now() + Duration::from_secs(90);
     let expected_event = b"OPENVMM_RESTORE_READY_V1\n";
     let mut event = Vec::new();
