@@ -8,10 +8,11 @@
   `feature/microvm/release/v6.1` rebase had moved it; see [Upstream status](#upstream-status).
 - Mapped fork tip: `227074dc1e6977649585479daf25515f90acaf9d`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126 and the PR18 fixup at position 302.
-- NVX's pinned OpenVMM revision: `a90c6037d4b28839b266e71fc2d5159008ef7579`, position 313, the head
-  of microsoft/openvmm#5140, whose commit follows position 312, `8bbe042b1`, the head of
-  `feature/microvm/dev`, where microsoft/openvmm#5136 put positions 307-312 after position 306,
-  `c9755a905`, where microsoft/openvmm#5134 put positions 303-306 after position 302, `2807bafcf`,
+- NVX's pinned OpenVMM revision: `6e5303f9457b1d1f2dc45ced689ab09311325f1f`, position 315, the head
+  of microsoft/openvmm#5141, whose commits follow position 313, `a90c6037d`, the head of
+  `feature/microvm/dev`, which microsoft/openvmm#5140 merged after position 312, `8bbe042b1`, where
+  microsoft/openvmm#5136 put positions 307-312 after position 306, `c9755a905`, where
+  microsoft/openvmm#5134 put positions 303-306 after position 302, `2807bafcf`,
   which microsoft/openvmm#5132 merged after position 301, `c7122cd20`, which
   microsoft/openvmm#5131 merged after position 300, `026d35da6`, where microsoft/openvmm#5129 put
   positions 297-300 after position 296, `1b25c5bbc`, the head of the `feature/microvm/release/v7.0`
@@ -25,8 +26,8 @@
   PR10 as positions 016 and 017. Positions 001-015 keep their positions, and v6.1 positions 016-233
   are positions 018-235, 237-239 are 236-238, 244-253 are 239-248, 255-258 are 249-252, 260 is 253,
   272 is 254, and 274-315 are 255-296; see [The v7.0 reorganization](#the-v70-reorganization). The
-  pin is 187 commits past the mapped tip on the same first-parent chain. Positions 127-301 and
-  303-313 are not yet assigned to PRs, and position 302 is a PR18 fixup; see [Commits after the
+  pin is 189 commits past the mapped tip on the same first-parent chain. Positions 127-301 and
+  303-315 are not yet assigned to PRs, and position 302 is a PR18 fixup; see [Commits after the
   mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `2c25662b2af038869f75e86dae25f8f5d21bc23b` (2026-11-16), three commits past the
   fork base; see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -327,7 +328,9 @@ commits change. The v6.1 rebase therefore gives the chain's `SnapshotManifest` u
 `snapshot_id`, which a microVM capture leaves zero, publishes upstream's snapshots through the
 chain's staged publication, and keeps microVMs out of RestoreVM; see [Conflicts of the v6.1
 rebase](#conflicts-of-the-v61-rebase). NVX's pin of the rebase has `nvx`'s reader of a template's
-manifest, which refuses fields that it does not know, accept field 18.
+manifest, which refuses fields that it does not know, accept field 18. Positions 314 and 315 record
+the field map that the two manifests share, and refuse a field 18 that is not a GUID of 16 bytes by
+its field; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 
 | Roadmap PR | Positions | Upstream pull requests, in position order |
 | --- | ---: | --- |
@@ -1422,7 +1425,9 @@ e6b458cc0
   -> restore and start failure tests of virtio-fs and remote devices [310-311]
   -> the queue progress that a failed start keeps documented [312]
   -> microVM snapshot rollback refused outside a snapshot boundary [313]
-  -> a90c6037d (NVX pin)
+  -> snapshot manifest's field map with upstream recorded in the Guide [314]
+  -> malformed snapshot ID refused by its field before the rest of the manifest decodes [315]
+  -> 6e5303f94 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1449,19 +1454,19 @@ NIC an IPv6 identity.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 187 later commits, position
+The NVX pin extends the chain past position 126 without merges. Of its 189 later commits, position
 302 is a PR18 fixup, and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 are the ABI restart
 of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 followed the v5.0
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
-v6.0 reorganization, positions 254-296 followed the v6.1 rebase, and positions 297-313 followed the
+v6.0 reorganization, positions 254-296 followed the v6.1 rebase, and positions 297-315 followed the
 v7.0 reorganization, so they combine none, apart from position 215, which combines v5.1 positions
 222 and 223, and the commits that the v7.0 reorganization folded into them. Each commit's v6.1
 position is its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before
 it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on,
-and positions 297-313 have no earlier position; see
+and positions 297-315 have no earlier position; see
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.1 position counts in
@@ -1660,12 +1665,15 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 311 | `5dac44c33` | - | - | - | - | - | - | chipset_device_worker: test requests to an ended device worker (microsoft/openvmm#5136) |
 | 312 | `8bbe042b1` | - | - | - | - | - | - | vmcore, virtio: say that a failed start keeps its queues' progress (microsoft/openvmm#5136) |
 | 313 | `a90c6037d` | - | - | - | - | - | - | openvmm_core: roll back a microVM snapshot only at its boundary (microsoft/openvmm#5140) |
+| 314 | `383bbc93f` | - | - | - | - | - | - | Guide: record the snapshot manifest's field map with upstream (microsoft/openvmm#5141) |
+| 315 | `6e5303f94` | - | - | - | - | - | - | openvmm_helpers: refuse a malformed snapshot ID by its field (microsoft/openvmm#5141) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
 regrouped, and later fork bases, up to `7d90c4104` for v6.1 positions 270-315, for later commits,
 and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`, upstream main on
-2026-11-17, for positions 307-312, and `2640ad182`, upstream main later that day, for position 313.
+2026-11-17, for positions 307-312, and `2640ad182`, upstream main later that day, for positions
+313-315.
 They name the positions that the commits have now, but the v7.0 reorganization did not check them
 again on `e6b458cc0`, nor did the v6.1 rebase check the earlier ones on `7d90c4104`.
 
@@ -3626,6 +3634,40 @@ three of its files, where it edits or adds beside what upstream main lacks: the 
 module does not exist there, since PR15's position 051 adds it, nor do the microVM VMM tests, which
 position 060 adds, and in the guide its sentence extends the paragraph of position 235. So it
 follows positions 067, 234, and 235, and the positions that they follow, upstream.
+
+Position 314 records the manifest's field map, which microsoft/nvx#1210 settles with upstream, in
+the rule of the Guide's snapshot format page for extending the manifest: a table says that fields
+1-7 of `SnapshotManifest` are those of upstream's manifest, version 1, 8-15 this format's, 16 and
+17 free, 18 the `snapshot_id` of upstream's SaveVM, which microsoft/openvmm#4553 merged, 19 and 20
+reserved upstream for `compatibility_bundle_digest` and `memory_artifacts`, and 21 and later free,
+and the rule asks for the next free field number, never 19 or 20. It also says that the messages of
+the device state in `state.bin` number their fields on their own, such as `virt.x86.VpSavedState`,
+whose fields 21-23 positions 304 and 305 add. It changes no code. It changes a file that PR11's
+positions 029 and 030, PR12's positions 033 and 034, PR13's positions 041 and 046, PR17's positions
+071 and 074, PR18's positions 079 and 083, PR19's positions 087 and 088, PR21's position 101, and
+27 positions that no PR has yet also change, and it changes no line that a mapped PR adds: it
+rewrites one line of the rule that upstream main has and no commit of the chain changes, and three
+that position 226 adds, and adds the rest. Replaying it on upstream main conflicts in the Guide's
+page, whose rule lacks the reservation that position 226 adds. So it follows position 226, and the
+positions that it follows, upstream.
+
+Position 315 has restore decode a manifest's snapshot ID, field 18, alone, after the version and
+the magic, which position 225 decodes alone, and refuse a field 18 of another wire type or length
+than a GUID of 16 bytes as malformed, naming the ID and its field, before it decodes the rest, where
+the decode of the whole manifest refused it only as a manifest that failed to decode. A manifest
+without the field still reads with the zero ID, which stands for none, and a manifest of another
+version still gets `E_SNAPSHOT_VERSION` whatever its field 18 holds. It adds a test of a malformed
+ID and one of a missing ID to the restore tests, and says in the Guide's snapshot format page how
+restore reads them, and that the ID, which the v6.1 rebase gave the manifest from
+microsoft/openvmm#4553, needed no new version. It changes files that PR11's positions 029 and 030,
+PR12's positions 033 and 034, PR13's positions 041 and 046, PR17's positions 069, 071, and 074,
+PR18's positions 079 and 083, PR19's positions 087 and 088, PR21's position 101, and 33 positions
+that no PR has yet, position 314 among them, also change, and it changes no line that a mapped PR
+adds: it rewrites one line of the Guide's snapshot format page that position 225 adds, and adds the
+rest. Replaying it on upstream main conflicts in its three files: `format.rs` does not exist there,
+since PR11's position 029 adds it; its tests in `restore.rs` follow those of position 225 and use
+its `read_errors_with_manifest`; and its sentences in the Guide's page follow one that position 225
+writes. So it follows position 225, and the positions that it follows, upstream.
 
 ## PR summary
 
