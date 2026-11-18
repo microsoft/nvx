@@ -519,7 +519,15 @@ original cause, and converts into the crate's `Error`, whose source it then is:
 `Console::connect`, or `Launched::console`, connects to the boot console of a
 VM launched with a `ConsoleAttachment::Listener`, with the same check of the
 endpoint's server, and reads the console's output and writes its input with
-deadlines. A VM without a console listener is `Unsupported`.
+deadlines. A VM without a console listener is `Unsupported`. A restore may
+attach a listener to a boot console that its capture left disconnected, as
+`nvx snapshot capture` leaves it so that a capture waits for no reader: the
+caller then reads what the restored guest writes to the console, such as a
+panic, an oops, or an out-of-memory kill, also after it restarted, from the
+`VmOutputs` that it saved. That console keeps the captured device's policy and
+discards the guest's output while no client is connected, so a client reads
+what the guest writes once it connected, and the guest never waits for a
+client that went away.
 
 On Linux, the spawned child gets the caller's umask with the owner's bits
 cleared, and the caller's own umask is unchanged. On Windows, it starts without
@@ -550,10 +558,12 @@ what the capture booted with and its capacity; an image that fits the
 placeholder, with its block sizes, and a scratch upper with the dormant
 scratch's geometry, which it reads from the requested disks' metadata; the
 NIC's presence, and its address, which an unnamed address inherits; the boot
-console's captured attachment; and the same backend, CPU profile, and runtime
-identity. Its refusals are `Unsupported`, and a time contract that is not
-eligible at `now` is `Unavailable`. `Snapshot::nic` returns the captured NIC's
-presence and address, never a network policy: each restore supplies its own.
+console's attachment, a listener for a console captured as one, and a listener
+or none for one captured disconnected; and the same backend, CPU profile, and
+runtime identity. Its refusals are `Unsupported`, and a time contract that is
+not eligible at `now` is `Unavailable`. `Snapshot::nic` returns the captured
+NIC's presence and address, never a network policy: each restore supplies its
+own.
 
 `SnapshotManifest::read` reads the `manifest.bin` that OpenVMM wrote for a
 capture, strictly: of the snapshot ID that OpenVMM's SaveVM records, which a

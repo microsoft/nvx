@@ -121,6 +121,15 @@ removes it under its lock. `restore` in
 Ready this way, and `activate` in
 [`guest-workflows`](../nvx/examples/guest-workflows.rs) is the guest's side.
 
+A restore's `config` may attach a `ConsoleAttachment::Listener` to the boot
+console, even when the capture left the console disconnected, as NVX's
+`snapshot capture` does. The program then reads what the restored guest writes
+to its console, such as a panic or an out-of-memory kill of a guest that fails
+once restored, with `Launched::console`, or with `Console::connect` once it
+restarted. A console that the capture left disconnected discards what the
+guest writes while no client is connected, so the program reads what the guest
+writes after it connected, and the guest never waits for it.
+
 ## Reattach after a restart
 
 Dropping a `Launched` closes the handle of the VM's process, not the VM, which

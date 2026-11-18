@@ -949,7 +949,11 @@ fn snapshot_creation_checks_eligibility_and_real_host_time_before_creating_outpu
                 fixture.config.network.as_mut().unwrap().guest_network =
                     Some(Ipv4Cidr::parse("10.43.0.2/24").unwrap())
             }
-            "console" => fixture.config.console = ConsoleAttachment::Listener,
+            "console" => {
+                // A boot console captured as a listener restores only as one.
+                fixture.console_listener();
+                fixture.config.console = ConsoleAttachment::Disconnected;
+            }
             "early" | "expired" => {
                 let mut time = HostTime::now().unwrap();
                 time.host_id[0] ^= 1;
@@ -1293,6 +1297,44 @@ fn snapshot_creation_keeps_captured_console_attachment_and_zero_boot_processor_r
             }
         );
     }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn a_restore_attaches_a_listener_to_a_boot_console_captured_disconnected() {
+    use crate::host::snapshot::tests::RestoreFixture;
+
+    let mut fixture = RestoreFixture::current(false);
+    fixture.config.console = ConsoleAttachment::Listener;
+    let snapshot = fixture.opened();
+    let (_directory, vm) = vm_dir();
+    let prepared = create(&fixture.runtime, &fixture.config, Some(&snapshot), &vm).unwrap();
+    let endpoint = prepared.outputs().console.clone().unwrap();
+    // OpenVMM takes a restore's console socket only beside the snapshot that it restores, here
+    // the restore's view of it, and a console pipe only in its own namespace.
+    if cfg!(windows) {
+        assert!(
+            endpoint.starts_with("//./pipe/openvmm-microvm-"),
+            "{endpoint}"
+        );
+    } else {
+        assert_eq!(Path::new(&endpoint), vm.path().join(CONSOLE));
+    }
+    let argument = |name: &str| {
+        prepared
+            .arguments()
+            .windows(2)
+            .find(|pair| pair[0] == name)
+            .map(|pair| pair[1].clone())
+    };
+    assert_eq!(
+        argument("--restore-snapshot"),
+        Some(vm.path().join(OPENVMM).into_os_string())
+    );
+    assert_eq!(
+        argument("--virtio-console"),
+        Some(OsString::from(format!("listen={endpoint}")))
+    );
 }
 
 #[cfg(any(target_os = "linux", windows))]

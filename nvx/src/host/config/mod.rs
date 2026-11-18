@@ -130,7 +130,9 @@ impl UpperConfig {
 /// Where the output of a VM's boot console goes. The console's device exists either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ConsoleAttachment {
-    /// OpenVMM listens for a client of the console.
+    /// OpenVMM listens for a client of the console, and keeps the guest's output until one
+    /// connects; on a restore of a console that its capture left disconnected, it discards the
+    /// output while no client is connected, as the captured device does.
     Listener,
     /// OpenVMM discards the console's output.
     Disconnected,
