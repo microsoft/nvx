@@ -437,18 +437,21 @@ Only a successful capture whose own VMM exits within `--timeout` (60 whole
 seconds by default) can publish, and prints `Snapshot captured`. The immutable
 named directory contains exactly `key.bin`, `snapshot.json` and `openvmm/`; an
 existing name is never replaced. Capture's own VM directory is then removed. A
-timed-out VM is stopped but its capture is never finished. Other control or
-launch-record failures also stop the command's verified VM without finishing
-it. The next capture command using this store ends and removes an interrupted
-attempt through ordinary launch recovery, without resuming or publishing it.
-Indeterminate recovery retains its evidence and reports an error. Unknown files
-or nonempty unjournaled capture-slot contents are kept for inspection, not
-deleted; an empty launch lock alone is harmless. Known host and OpenVMM atomic
-staging files are recovered only with a valid launch journal. Captures in one
-store serialize, and one that waits for another longer than `--timeout` fails
-with `sandbox-busy`; snapshot locks remain separate from their immutable
-directories. [`snapshot restore`](#snapshot-restore) starts managed sandboxes
-from them.
+timed-out VM is stopped but its capture is never finished. When the guest agent
+reports that the capture took no snapshot, because OpenVMM refused or rolled it
+back and the guest runs on, the command fails at once with `protocol` and the
+reported category, such as `capture-continued`, rather than wait out
+`--timeout`. That and other control or launch-record failures also stop the
+command's verified VM without finishing it. The next capture command using this
+store ends and removes an interrupted attempt through ordinary launch recovery,
+without resuming or publishing it. Indeterminate recovery retains its evidence
+and reports an error. Unknown files or nonempty unjournaled capture-slot
+contents are kept for inspection, not deleted; an empty launch lock alone is
+harmless. Known host and OpenVMM atomic staging files are recovered only with a
+valid launch journal. Captures in one store serialize, and one that waits for
+another longer than `--timeout` fails with `sandbox-busy`; snapshot locks
+remain separate from their immutable directories.
+[`snapshot restore`](#snapshot-restore) starts managed sandboxes from them.
 
 ### `snapshot restore`
 

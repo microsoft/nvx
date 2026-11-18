@@ -189,16 +189,42 @@ impl ControlSession {
     /// Waits until the guest agent acknowledges readiness.
     pub(crate) fn ping(&mut self, deadline: Instant) -> Result<(), SessionError> {
         self.acknowledged(Frame::Ping, "readiness", deadline)
+            .map(|_| ())
     }
 
-    /// Asks nvx-init to capture the VM, killing its executions first when requested.
+    /// Asks nvx-init to capture the VM, killing its executions first when requested, and returns
+    /// the request's ID, which [`capture_report`](Self::capture_report) takes.
     pub(crate) fn capture(
         &mut self,
         kill_executions: bool,
         deadline: Instant,
-    ) -> Result<(), SessionError> {
+    ) -> Result<u64, SessionError> {
         let payload = protocol::encode_capture_payload(kill_executions);
         self.acknowledged(Frame::Capture(&payload), "capture", deadline)
+    }
+
+    /// Waits until `deadline` for the guest agent's report that the capture `request_id`, which it
+    /// acknowledged, took no snapshot, and fails with that report as a protocol error.
+    ///
+    /// The guest agent reports on this session when OpenVMM refused or rolled back the capture,
+    /// and the guest runs on. A capture that took its snapshot ends the VM, and so the session,
+    /// without a report. Returns once `deadline` passes without one.
+    pub(crate) fn capture_report(
+        &mut self,
+        request_id: u64,
+        deadline: Instant,
+    ) -> Result<(), SessionError> {
+        let report = match self.reply(request_id, Some(deadline)) {
+            Err(SessionError::TimedOut) => return Ok(()),
+            report => report?,
+        };
+        Err(SessionError::Protocol(match Frame::decode(&report)?.1 {
+            Frame::Error { status, category } => format!(
+                "the guest agent captured no snapshot: {} (status {status})",
+                error_category(category)
+            ),
+            _ => "the guest agent returned an invalid capture report".to_owned(),
+        }))
     }
 
     /// Asks a restored clone for its Ready, with a `PING`, and returns the guest restore that the
@@ -426,19 +452,19 @@ impl ControlSession {
     }
 
     /// Sends `request` and waits until the guest agent acknowledges `what` with a `READY` of its
-    /// request ID that carries nothing but the protocol version.
+    /// request ID that carries nothing but the protocol version, and returns that request ID.
     fn acknowledged(
         &mut self,
         request: Frame<'_>,
         what: &str,
         deadline: Instant,
-    ) -> Result<(), SessionError> {
+    ) -> Result<u64, SessionError> {
         let request_id = request_id()?;
         self.send(request_id, request, Some(deadline))?;
         let reply = self.receive(Some(deadline))?;
         match Frame::decode(&reply)? {
             (id, frame) if id == request_id && ready(frame)?.is_some_and(<[u8]>::is_empty) => {
-                Ok(())
+                Ok(request_id)
             }
             _ => Err(SessionError::Protocol(format!(
                 "the guest agent did not acknowledge {what}"
