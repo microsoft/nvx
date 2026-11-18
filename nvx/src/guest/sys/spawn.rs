@@ -845,7 +845,7 @@ unsafe fn fail(report: &FileDescriptor, stage: LaunchStage, error: Errno) -> ! {
     bytes[..4].copy_from_slice(&stage.code().to_ne_bytes());
     bytes[4..].copy_from_slice(&(error as i32).to_ne_bytes());
     let _ = signal_mask(nix::libc::SIG_BLOCK, 1 << (nix::libc::SIGPIPE - 1));
-    let _ = write_all(report, &bytes);
+    let _ = report.write_all(&bytes);
     // `nix` has no `_exit`, and `std::process::exit` runs cleanup.
     // SAFETY: the caller guarantees that this is the post-fork child.
     unsafe { nix::libc::_exit(LAUNCH_FAILURE_STATUS) }
@@ -865,21 +865,7 @@ fn write_decimal(descriptor: &FileDescriptor, value: nix::libc::pid_t) -> Result
             break;
         }
     }
-    write_all(descriptor, &bytes[position..])
-}
-
-/// Writes all bytes with direct async-signal-safe calls, retrying interruptions. A write that
-/// makes no progress is `EIO`.
-fn write_all(descriptor: &FileDescriptor, mut bytes: &[u8]) -> Result<(), Errno> {
-    while !bytes.is_empty() {
-        match nix::unistd::write(descriptor.borrowed(), bytes) {
-            Ok(0) => return Err(Errno::EIO),
-            Ok(count) => bytes = &bytes[count..],
-            Err(Errno::EINTR) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
+    descriptor.write_all(&bytes[position..])
 }
 
 #[cfg(test)]
