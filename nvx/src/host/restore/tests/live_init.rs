@@ -192,7 +192,7 @@ fn run() -> Result<(), AnyError> {
     let result = PathBuf::from(&args[6]);
     let case = args[7].to_str().ok_or("non-Unicode case")?;
     require(
-        matches!(case, "published" | "unpublished" | "changed" | "deadline"),
+        matches!(case, "published" | "unpublished" | "missing" | "deadline"),
         "invalid fixture case",
     )?;
     for path in [&vmm, &snapshot, &distro, &original_console, &root, &result] {
@@ -257,7 +257,53 @@ fn run() -> Result<(), AnyError> {
         .write(true)
         .create_new(true)
         .open(&log_file)?;
-    let options: Vec<OsString> = vec![
+    // The clone takes its record, after the workload's identity, from its restore packet, which
+    // OpenVMM seals before the first restored vCPU runs; the missing case hands it none.
+    let published = case != "unpublished";
+    let transaction = TransactionId::from_bytes([0x77; 16]);
+    let record = GuestRestoreRecord::new(
+        Some(RestoreSection { transaction }),
+        Configuration {
+            image: Image::Erofs { uuid: None },
+            upper: Upper::Tmpfs {
+                max_memory_percent: 50,
+            },
+            overlay: OverlayMode::UntrustedLowers,
+            export: Some(Export {
+                kind: ExportKind::Aggregate,
+            }),
+            mappings: 1,
+            network: Some(Network {
+                dns: Some("10.88.0.53".parse()?),
+                publication: if published {
+                    Publication::Published
+                } else {
+                    Publication::Unpublished
+                },
+                proxy: published.then(|| "http://10.88.0.1:3128".to_owned()),
+            }),
+            view: View {
+                hostname: b"restored-573f".to_vec(),
+                machine_id: MachineIdMode::Generated,
+            },
+            resources: ExpectedResources {
+                cpus: 1,
+                memory: 128 << 20,
+            },
+        },
+    )?;
+    let mut activation = Vec::new();
+    activation.extend_from_slice(&1000u32.to_le_bytes());
+    activation.extend_from_slice(&1001u32.to_le_bytes());
+    activation.push(1);
+    activation.extend(record.encode());
+    let activation_record = root.join("activation-record.bin");
+    fs::write(&activation_record, &activation)?;
+    let expected_ready = GuestRestoreReady {
+        transaction: Some(transaction),
+    }
+    .encode();
+    let mut options: Vec<OsString> = vec![
         "--machine".into(),
         "microvm".into(),
         "--microvm-sandbox-block".into(),
@@ -297,6 +343,12 @@ fn run() -> Result<(), AnyError> {
         "--microvm-report".into(),
         report.as_os_str().to_owned(),
     ];
+    if case != "missing" {
+        options.extend([
+            "--restore-activation-record".into(),
+            activation_record.into_os_string(),
+        ]);
+    }
     let mut capability = [0; CAPABILITY_LEN];
     getrandom::fill(&mut capability)?;
     let command = VmmCommand {
@@ -340,11 +392,65 @@ fn run() -> Result<(), AnyError> {
     fs::write(root.join("native-ready.receipt"), &event)?;
     println!("NATIVE_READY_AUTHENTICATED_PID={pid}");
     let native_ready = Instant::now();
+    let expected_status = if case == "missing" {
+        // Without a record in its restore packet, the clone ends at once, before its session.
+        require(
+            process
+                .wait(Instant::now() + Duration::from_secs(40))?
+                .is_some(),
+            "a restore without an activation record did not end its VM",
+        )?;
+        println!("MISSING_RECORD_FATAL");
+        i64::from(crate::protocol::status::GUEST_RESTORE_RECORD)
+    } else {
+        attach_and_check(
+            case,
+            published,
+            &endpoint,
+            &process,
+            &capability,
+            &expected_ready,
+            native_ready,
+            by,
+        )?
+    };
+    reader.join().map_err(|_| "console reader panicked")??;
+    let outcome = crate::host::report::read(&report)?.ok_or("missing native outcome")?;
+    require(
+        outcome.status_code == Some(expected_status) && outcome.teardown_complete == Some(true),
+        format!("wrong restore outcome: {outcome:?}"),
+    )?;
+    let logs = fs::read_to_string(&console)?;
+    let cold_switches = check_restored_console(&logs, case)?;
+    let text = format!(
+        "RESTORE_OK case={case} pid={pid} status={expected_status} cold_switches={cold_switches} teardown=true\n"
+    );
+    fs::write(result, &text)?;
+    print!("{text}");
+    owned.0.take().ok_or("missing owned restore")?.detach();
+    Ok(())
+}
+
+/// Attaches to the restored clone of `case`, whose activation record `published` its listeners
+/// or not, asks for its Ready, which must report `expected_ready`, maps, runs and stops it, or,
+/// in the deadline case, attaches late and never asks, and returns the VM's expected status.
+#[allow(clippy::too_many_arguments)]
+fn attach_and_check(
+    case: &str,
+    published: bool,
+    endpoint: &str,
+    process: &crate::host::process::Process,
+    capability: &[u8; CAPABILITY_LEN],
+    expected_ready: &[u8],
+    native_ready: Instant,
+    by: Instant,
+) -> Result<i64, AnyError> {
+    let pid = process.reference().pid;
     if case == "deadline" {
         thread::sleep(Duration::from_secs(8));
     }
-    let transport = session::connect(&endpoint, pid, process.reference().start_time, by)?;
-    let mut connection = HostConnection::attach(transport, &capability, by)?;
+    let transport = session::connect(endpoint, pid, process.reference().start_time, by)?;
+    let mut connection = HostConnection::attach(transport, capability, by)?;
     println!(
         "RESTORED_HOST_SESSION_EPOCH={}",
         connection
@@ -353,8 +459,9 @@ fn run() -> Result<(), AnyError> {
             .map_or(0, |identity| identity.epoch)
     );
     let attached = Instant::now();
-    let expected_status;
     if case == "deadline" {
+        // The clone applied its record at once, and its deadline, which counts from the restore's
+        // acknowledgement, ends it since its host never asks for its Ready.
         require(
             process
                 .wait(Instant::now() + Duration::from_secs(40))?
@@ -371,91 +478,36 @@ fn run() -> Result<(), AnyError> {
             "ORIGINAL_ACK_DEADLINE_ELAPSED_MS={}",
             native_ready.elapsed().as_millis()
         );
-        expected_status = i64::from(crate::protocol::status::GUEST_RESTORE_DEADLINE);
-    } else {
-        let published = case != "unpublished";
-        let transaction = TransactionId::from_bytes([0x77; 16]);
-        let record = GuestRestoreRecord::new(
-            Some(RestoreSection { transaction }),
-            Configuration {
-                image: Image::Erofs { uuid: None },
-                upper: Upper::Tmpfs {
-                    max_memory_percent: 50,
-                },
-                overlay: OverlayMode::UntrustedLowers,
-                export: Some(Export {
-                    kind: ExportKind::Aggregate,
-                }),
-                mappings: 1,
-                network: Some(Network {
-                    dns: Some("10.88.0.53".parse()?),
-                    publication: if published {
-                        Publication::Published
-                    } else {
-                        Publication::Unpublished
-                    },
-                    proxy: published.then(|| "http://10.88.0.1:3128".to_owned()),
-                }),
-                view: View {
-                    hostname: b"restored-573f".to_vec(),
-                    machine_id: MachineIdMode::Generated,
-                },
-                resources: ExpectedResources {
-                    cpus: 1,
-                    memory: 128 << 20,
-                },
-            },
-        )?;
-        let mut activation = Vec::new();
-        activation.extend_from_slice(&1000u32.to_le_bytes());
-        activation.extend_from_slice(&1001u32.to_le_bytes());
-        activation.push(1);
-        activation.extend(record.encode());
-        fs::write(root.join("activate.bin"), &activation)?;
-        let expected_ready = GuestRestoreReady {
-            transaction: Some(transaction),
-        }
-        .encode();
-        connection.send(&Frame::Activate(&activation).encode(100)?, Some(by))?;
-        ready(&mut connection, 100, &expected_ready, by)?;
-        println!("ACTIVATION_READY_PUBLICATION={published} OWN_DNS=10.88.0.53");
-        if case == "changed" {
-            activation[0] ^= 1;
-            connection.send(&Frame::Activate(&activation).encode(101)?, Some(by))?;
-            require(
-                process
-                    .wait(Instant::now() + Duration::from_secs(15))?
-                    .is_some(),
-                "changed identity replay did not end VM",
-            )?;
-            expected_status = i64::from(crate::protocol::status::GUEST_RESTORE_PROTOCOL);
-            println!("CHANGED_IDENTITY_REPLAY_FATAL");
-        } else {
-            connection.send(
-                &Frame::Exec(&workload("true", WorkloadEnvironment::Default)?).encode(102)?,
-                Some(by),
-            )?;
-            let bytes = connection.receive(Some(by))?;
-            let frame = Frame::decode(&bytes)?;
-            let refusal = Frame::Error {
-                status: 11,
-                category: b"mappings-incomplete",
-            };
-            require(
-                frame == (102, refusal),
-                format!("EXEC bypassed MAPS gate: {frame:?}"),
-            )?;
-            let maps = [HostMap {
-                source: "0".into(),
-                target: "/mnt/restore-map".into(),
-                read_only: true,
-            }];
-            for payload in encode_maps_payloads(&maps, 32768)? {
-                connection.send(&Frame::Maps(&payload).encode(103)?, Some(by))?;
-                ready(&mut connection, 103, &[], by)?;
-            }
-            let script = format!(
-                r#"
+        return Ok(i64::from(crate::protocol::status::GUEST_RESTORE_DEADLINE));
+    }
+    connection.send(&Frame::Ping.encode(100)?, Some(by))?;
+    ready(&mut connection, 100, expected_ready, by)?;
+    println!("ACTIVATION_READY_PUBLICATION={published} OWN_DNS=10.88.0.53");
+    connection.send(
+        &Frame::Exec(&workload("true", WorkloadEnvironment::Default)?).encode(102)?,
+        Some(by),
+    )?;
+    let bytes = connection.receive(Some(by))?;
+    let frame = Frame::decode(&bytes)?;
+    let refusal = Frame::Error {
+        status: 11,
+        category: b"mappings-incomplete",
+    };
+    require(
+        frame == (102, refusal),
+        format!("EXEC bypassed MAPS gate: {frame:?}"),
+    )?;
+    let maps = [HostMap {
+        source: "0".into(),
+        target: "/mnt/restore-map".into(),
+        read_only: true,
+    }];
+    for payload in encode_maps_payloads(&maps, 32768)? {
+        connection.send(&Frame::Maps(&payload).encode(103)?, Some(by))?;
+        ready(&mut connection, 103, &[], by)?;
+    }
+    let script = format!(
+        r#"
 test "$(id -u)" = 1000
 test "$(id -g)" = 1001
 test "$(hostname)" = restored-573f
@@ -489,64 +541,64 @@ cat /etc/machine-id
 printf '\n'
 printf 'REAL_READY_MAPS_EXEC_OK\n'
 "#,
-                u8::from(published),
-                if published {
-                    "http://10.88.0.1:3128"
-                } else {
-                    ""
-                },
-            );
-            let first = execute(
-                &mut connection,
-                104,
-                &script,
-                WorkloadEnvironment::Default,
-                by,
-            )?;
-            print!("{first}");
-            let proxy_script = format!(
-                "test \"$HTTP_PROXY\" = http://exec.example:2; \
-                 test \"${{http_proxy-}}\" = '{}'; printf 'EXEC_PROXY_OVERRIDE_OK\\n'",
-                if published {
-                    "http://10.88.0.1:3128"
-                } else {
-                    ""
-                },
-            );
-            let proxy = execute(
-                &mut connection,
-                105,
-                &proxy_script,
-                WorkloadEnvironment::Layered(&["HTTP_PROXY=http://exec.example:2".to_owned()]),
-                by,
-            )?;
-            print!("{proxy}");
-            let machine = first
-                .lines()
-                .find(|line| line.starts_with("MACHINE_ID="))
-                .ok_or("missing generated machine ID")?
-                .to_owned();
-            for kill in [0, 1] {
-                connection.send(
-                    &Frame::Capture(&[kill]).encode(106 + u64::from(kill))?,
-                    Some(by),
-                )?;
-                let bytes = connection.receive(Some(by))?;
-                let (_, frame) = Frame::decode(&bytes)?;
-                require(
-                    matches!(frame, Frame::Error { status: 95, .. }),
-                    "activated restore accepted capture",
-                )?;
-            }
-            drop(connection);
-            let transport = session::connect(&endpoint, pid, process.reference().start_time, by)?;
-            connection = HostConnection::attach(transport, &capability, by)?;
-            connection.send(&Frame::Activate(&activation).encode(108)?, Some(by))?;
-            ready(&mut connection, 108, &expected_ready, by)?;
-            let replay = execute(
-                &mut connection,
-                109,
-                r#"
+        u8::from(published),
+        if published {
+            "http://10.88.0.1:3128"
+        } else {
+            ""
+        },
+    );
+    let first = execute(
+        &mut connection,
+        104,
+        &script,
+        WorkloadEnvironment::Default,
+        by,
+    )?;
+    print!("{first}");
+    let proxy_script = format!(
+        "test \"$HTTP_PROXY\" = http://exec.example:2; \
+         test \"${{http_proxy-}}\" = '{}'; printf 'EXEC_PROXY_OVERRIDE_OK\\n'",
+        if published {
+            "http://10.88.0.1:3128"
+        } else {
+            ""
+        },
+    );
+    let proxy = execute(
+        &mut connection,
+        105,
+        &proxy_script,
+        WorkloadEnvironment::Layered(&["HTTP_PROXY=http://exec.example:2".to_owned()]),
+        by,
+    )?;
+    print!("{proxy}");
+    let machine = first
+        .lines()
+        .find(|line| line.starts_with("MACHINE_ID="))
+        .ok_or("missing generated machine ID")?
+        .to_owned();
+    for kill in [0, 1] {
+        connection.send(
+            &Frame::Capture(&[kill]).encode(106 + u64::from(kill))?,
+            Some(by),
+        )?;
+        let bytes = connection.receive(Some(by))?;
+        let (_, frame) = Frame::decode(&bytes)?;
+        require(
+            matches!(frame, Frame::Error { status: 95, .. }),
+            "activated restore accepted capture",
+        )?;
+    }
+    drop(connection);
+    let transport = session::connect(endpoint, pid, process.reference().start_time, by)?;
+    connection = HostConnection::attach(transport, capability, by)?;
+    connection.send(&Frame::Ping.encode(108)?, Some(by))?;
+    ready(&mut connection, 108, expected_ready, by)?;
+    let replay = execute(
+        &mut connection,
+        109,
+        r#"
 test "$(cat /tmp/restore-sentinel)" = PRESERVED_573F_UPPER
 test "$(cat /mnt/restore-map/proof)" = CURRENT_573F_HOST_MAP
 printf 'MACHINE_ID='
@@ -554,43 +606,26 @@ cat /etc/machine-id
 printf '\n'
 printf 'RECONNECT_REPLAY_PRESERVED_UPPER_AND_MAPS\n'
 "#,
-                WorkloadEnvironment::Default,
-                by,
-            )?;
-            require(
-                replay.lines().any(|line| line == machine),
-                "retry regenerated the machine ID",
-            )?;
-            print!("{replay}");
-            connection.send(&Frame::Stop.encode(110)?, Some(by))?;
-            let bytes = connection.receive(Some(by))?;
-            let frame = Frame::decode(&bytes)?;
-            require(frame == (110, Frame::Stopped), "STOP not acknowledged")?;
-            require(
-                process
-                    .wait(Instant::now() + Duration::from_secs(30))?
-                    .is_some(),
-                "STOP did not tear down restore",
-            )?;
-            expected_status = 0;
-        }
-    }
-    drop(connection);
-    reader.join().map_err(|_| "console reader panicked")??;
-    let outcome = crate::host::report::read(&report)?.ok_or("missing native outcome")?;
-    require(
-        outcome.status_code == Some(expected_status) && outcome.teardown_complete == Some(true),
-        format!("wrong restore outcome: {outcome:?}"),
+        WorkloadEnvironment::Default,
+        by,
     )?;
-    let logs = fs::read_to_string(&console)?;
-    let cold_switches = check_restored_console(&logs, case)?;
-    let text = format!(
-        "RESTORE_OK case={case} pid={pid} status={expected_status} cold_switches={cold_switches} teardown=true\n"
-    );
-    fs::write(result, &text)?;
-    print!("{text}");
-    owned.0.take().ok_or("missing owned restore")?.detach();
-    Ok(())
+    require(
+        replay.lines().any(|line| line == machine),
+        "retry regenerated the machine ID",
+    )?;
+    print!("{replay}");
+    connection.send(&Frame::Stop.encode(110)?, Some(by))?;
+    let bytes = connection.receive(Some(by))?;
+    let frame = Frame::decode(&bytes)?;
+    require(frame == (110, Frame::Stopped), "STOP not acknowledged")?;
+    require(
+        process
+            .wait(Instant::now() + Duration::from_secs(30))?
+            .is_some(),
+        "STOP did not tear down restore",
+    )?;
+    drop(connection);
+    Ok(0)
 }
 
 #[cfg(unix)]
@@ -639,7 +674,7 @@ fn restored_console_accepts_success_without_a_cold_switch() {
 
 #[test]
 fn restored_console_rejects_a_cold_switch_for_every_case() {
-    for case in ["published", "unpublished", "changed", "deadline"] {
+    for case in ["published", "unpublished", "missing", "deadline"] {
         let error =
             check_restored_console("NVX-INIT-ROOT: switched mappings=1\n", case).unwrap_err();
         assert_eq!(
@@ -662,7 +697,7 @@ fn restored_console_rejects_activation_failure_on_success() {
 
 #[test]
 fn restored_console_allows_expected_activation_failure() {
-    for case in ["changed", "deadline"] {
+    for case in ["missing", "deadline"] {
         assert_eq!(
             check_restored_console("NVX-INIT-ACTIVATION: failed\n", case).unwrap(),
             0

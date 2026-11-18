@@ -40,6 +40,12 @@ pub(crate) const BOOT_CONTRACT_VERSION: u64 = 5;
 /// Version of the control session through which the CLI reaches the bundled guest agent.
 pub(crate) const CONTROL_SESSION_PROTOCOL_VERSION: u64 = 1;
 /// Revision of the control contract that the bundled guest agent serves.
+///
+/// It stayed the same when a restored clone took its guest-restore record from its restore packet
+/// rather than from a request: each mismatched pair fails closed on the wire instead. A guest that
+/// awaits the request refuses the host's request for Ready as an unsupported operation, which the
+/// host reports as an incompatible guest of the snapshot, and a guest whose packet carries no
+/// record ends its VM with the record's status.
 pub(crate) const CONTROL_CONTRACT_REVISION: &str = "nvx-microvm-v2-control-v2";
 /// Version of the restore packet that the bundled guest decodes, which a release must declare. It
 /// must match the guest's decoder and `RESTORE_PACKET_VERSION` in OpenVMM's

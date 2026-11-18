@@ -274,6 +274,13 @@ pub(crate) fn repaired_fixture() -> Repaired {
     capture_repaired(restore(), FakeSystem::new(&Calls::default()))
 }
 
+/// Returns the genuine repaired data of [`repaired_fixture`], whose restore packet carried the
+/// activation record `record`.
+pub(crate) fn repaired_with_record(record: &[u8]) -> Repaired {
+    let restore = restore().with_activation_record(record);
+    capture_repaired(restore, FakeSystem::new(&Calls::default()))
+}
+
 /// Returns the calls of a repair once its memory target is active: the listing of the memory
 /// blocks, whose online ones it counts, the reseed, the drop of the seed, which zeroed it before
 /// the finish, and the finish, with the acknowledgement.
@@ -312,12 +319,16 @@ fn cpu_set(cpus: impl IntoIterator<Item = usize>) -> CpuSet {
 #[test]
 fn a_clone_is_reseeded_then_acknowledged_once_and_reentry_returns_the_same_clone() {
     let calls = Calls::default();
-    let mut repair = repairing(restore(), FakeSystem::new(&calls));
+    let record = [0xa1, 0xa2, 0xa3];
+    let restore = restore().with_activation_record(&record);
+    let mut repair = repairing(restore, FakeSystem::new(&calls));
     let repaired = repair.run().unwrap();
     assert_eq!(repaired.generation_id(), RESTORED);
     assert_eq!(repaired.cpus(), 2);
     assert_eq!(repaired.memory(), 512 * MIB);
     assert!(repaired.acknowledged_at().is_some());
+    // The repaired clone holds the activation record of its restore packet, undecoded.
+    assert_eq!(repaired.activation_record(), Some(&record[..]));
     // The repair dropped the seed, which zeroed it, after the reseed and before the finish.
     let mut expected = vec![Call::OnlineCpus, Call::BlockSize];
     expected.extend(finishing());
@@ -364,6 +375,7 @@ fn an_ungated_restore_is_finished_without_an_acknowledgement() {
     let restore = Restore::to(RESTORED).holding(seed());
     let repaired = capture_repaired(restore, FakeSystem::new(&calls));
     assert_eq!(repaired.acknowledged_at(), None);
+    assert_eq!(repaired.activation_record(), None);
     assert_eq!(
         calls.take().last(),
         Some(&Call::Finish(RestoreFinish::new()))

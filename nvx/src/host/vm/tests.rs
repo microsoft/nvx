@@ -76,6 +76,7 @@ fn the_reserved_names_are_the_documented_ones_and_leave_the_openvmm_prefix_to_op
         DESCRIPTION_FILE,
         CAPTURE_IMAGE,
         CAPTURE_SCRATCH,
+        ACTIVATION_RECORD,
     ];
     assert_eq!(
         names,
@@ -90,6 +91,7 @@ fn the_reserved_names_are_the_documented_ones_and_leave_the_openvmm_prefix_to_op
             "snapshot.json",
             "capture-image.raw",
             "capture-scratch.raw",
+            "activation-record.bin",
         ]
     );
     for name in names {
@@ -1060,6 +1062,98 @@ fn snapshot_creation_never_replaces_existing_outputs_views_or_listeners() {
         assert_eq!(fs::read(&preserved).unwrap(), b"existing");
         assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 1);
     }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn a_restore_supplies_its_guest_s_activation_record_once_in_a_private_file() {
+    use crate::host::snapshot::tests::RestoreFixture;
+
+    let fixture = RestoreFixture::current(false);
+    let snapshot = fixture.opened();
+    let (_directory, vm) = vm_dir();
+    let mut prepared = create(&fixture.runtime, &fixture.config, Some(&snapshot), &vm).unwrap();
+    let before = prepared.arguments().to_vec();
+    // A record of no byte, or past OpenVMM's bound, is refused before anything is created.
+    for length in [0, crate::guest_restore::MAX_RECORD_BYTES + 1] {
+        let error = prepared
+            .supply_activation_record(&vec![7; length])
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{length}: {error}");
+    }
+    let path = vm.path().join(ACTIVATION_RECORD);
+    assert!(!path.exists());
+    assert_eq!(prepared.arguments(), before);
+    // OpenVMM reads the record from the VM directory before any vCPU runs, and seals it in the
+    // restore packet.
+    let record = vec![0xa5; crate::guest_restore::MAX_RECORD_BYTES];
+    prepared.supply_activation_record(&record).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), record);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "{mode:o}");
+    }
+    assert_eq!(
+        argument_values(prepared.arguments(), "--restore-activation-record"),
+        [path.as_os_str()]
+    );
+    assert_eq!(prepared.arguments()[..before.len()], before);
+    // A restore takes one record, and refuses a second without touching the first.
+    let error = prepared.supply_activation_record(b"other").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+    assert_eq!(fs::read(&path).unwrap(), record);
+    drop(prepared);
+    // A record file that an earlier launch left is refused, rather than replaced, and the
+    // launch keeps its arguments.
+    fs::remove_dir_all(vm.path().join(OPENVMM)).unwrap();
+    for name in [crate::host::vm_directory::LOG, RESTORE_READY] {
+        let _ = fs::remove_file(vm.path().join(name));
+    }
+    let mut prepared = create(&fixture.runtime, &fixture.config, Some(&snapshot), &vm).unwrap();
+    let before = prepared.arguments().to_vec();
+    let error = prepared.supply_activation_record(b"later").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+    assert_eq!(fs::read(&path).unwrap(), record);
+    assert_eq!(prepared.arguments(), before);
+    // A cold launch has no restore packet.
+    let (_directory, cold) = vm_dir();
+    let mut prepared = create(&cold_runtime(), &cold_config(), None, &cold).unwrap();
+    let error = prepared.supply_activation_record(b"record").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+    assert!(!cold.path().join(ACTIVATION_RECORD).exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_activation_record_is_readable_by_its_owner_alone_whatever_the_umask() {
+    use crate::host::snapshot::tests::RestoreFixture;
+    use std::os::unix::fs::PermissionsExt;
+    use std::thread;
+
+    let fixture = RestoreFixture::current(false);
+    let snapshot = fixture.opened();
+    let (_directory, vm) = vm_dir();
+    let mut prepared = create(&fixture.runtime, &fixture.config, Some(&snapshot), &vm).unwrap();
+    // A umask that clears even the owner's permission to read what it creates, in a thread of
+    // the test's own, whose umask no other thread shares.
+    thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                nix::sched::unshare(nix::sched::CloneFlags::CLONE_FS).unwrap();
+                nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o477));
+                prepared.supply_activation_record(b"record").unwrap();
+            })
+            .join()
+            .unwrap();
+    });
+    let path = vm.path().join(ACTIVATION_RECORD);
+    assert_eq!(
+        fs::symlink_metadata(&path).unwrap().permissions().mode() & 0o7777,
+        0o600
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"record");
 }
 
 #[cfg(any(target_os = "linux", windows))]

@@ -173,27 +173,30 @@ where
 /// needs none. The caller holds it through this call, which ends the VM when the restore fails,
 /// or fails with an [`Unstopped`] error, after which the caller keeps holding it.
 ///
-/// `activate` sends the guest-restore record's bytes as the first request of the caller's own
-/// protocol with its guest, and returns the guest restore that the guest's Ready reports. The
-/// caller then sends the guest its mappings and workload in that protocol.
-pub fn restore<A>(
+/// The launch supplies the guest-restore record's bytes as the restore's activation record,
+/// which OpenVMM hands the guest in its restore packet, before the first restored vCPU runs.
+/// `ready` asks for the guest's Ready as the first request of the caller's own protocol with its
+/// guest, and returns the guest restore that the guest's Ready reports. The caller then sends
+/// the guest its mappings and workload in that protocol.
+pub fn restore<R>(
     runtime: &Runtime,
     config: &VmConfig,
     snapshot: &Snapshot,
     directory: &Path,
     transaction: TransactionId,
-    activate: A,
+    ready: R,
     deadline: Instant,
 ) -> Result<(Launched, Connection), Box<dyn Error>>
 where
-    A: FnMut(&mut Connection, &[u8], Instant) -> nvx::Result<GuestRestoreReady>,
+    R: FnMut(&mut Connection, Instant) -> nvx::Result<GuestRestoreReady>,
 {
     vm::create_private_dir(directory)?;
     let dir = VmDir::open(directory)?;
-    let prepared = vm::create(runtime, config, Some(snapshot), &dir)?;
+    let mut prepared = vm::create(runtime, config, Some(snapshot), &dir)?;
     let record = prepared.guest_restore_record(transaction)?;
+    prepared.supply_activation_record(&record.encode())?;
     let mut launched = start(prepared)?;
-    match drive(&mut launched, &record, activate, deadline) {
+    match drive(&mut launched, &record, ready, deadline) {
         Ok(connection) => Ok((launched, connection)),
         Err(error) => Err(end(launched, error)),
     }
@@ -204,15 +207,15 @@ where
 /// The restore's machine says what to do next and checks what the caller observed: the
 /// restore-ready event, which only the VM's own process may send, a connection to the VM's
 /// control endpoint, which only it may serve, and the guest's Ready, which must echo the record's
-/// transaction. A lost connection is replaced, with the same record, until the deadline.
-fn drive<A>(
+/// transaction. A lost connection is replaced, and asks for Ready again, until the deadline.
+fn drive<R>(
     launched: &mut Launched,
     record: &GuestRestoreRecord,
-    mut activate: A,
+    mut ready: R,
     deadline: Instant,
 ) -> Result<Connection, Box<dyn Error>>
 where
-    A: FnMut(&mut Connection, &[u8], Instant) -> nvx::Result<GuestRestoreReady>,
+    R: FnMut(&mut Connection, Instant) -> nvx::Result<GuestRestoreReady>,
 {
     let mut machine = RestoreMachine::new(record);
     machine.input(RestoreInput::Spawned(launched.process.reference().clone()));
@@ -257,13 +260,13 @@ where
                     Err(error) => failed(launched, RestorePhase::Connect, error.into()),
                 }
             }
-            RestoreAction::SendActivate(bytes) => {
+            RestoreAction::RequestReady => {
                 let connection = current
                     .as_mut()
-                    .ok_or("a restore activates in its connection")?;
-                match activate(connection, &bytes, deadline) {
+                    .ok_or("a restore asks for Ready in its connection")?;
+                match ready(connection, deadline) {
                     Ok(ready) => RestoreInput::GuestReady(ready),
-                    Err(error) => failed(launched, RestorePhase::Activate, error),
+                    Err(error) => failed(launched, RestorePhase::Ready, error),
                 }
             }
             _ => return Err("the restore asks for an action that this caller doesn't know".into()),

@@ -134,62 +134,68 @@ fn restored() -> (Session<'static>, Peer, Vec<u8>) {
     (session, peer, payload)
 }
 
-fn activate_bytes(session: &mut Session<'_>, peer: &mut Peer, id: u64, payload: &[u8]) -> Vec<u8> {
-    peer.send_v2(id, v2::Frame::Activate(payload));
-    let Event::Data(bytes) = session
-        .next_event()
-        .unwrap_or_else(|_| panic!("activate DATA"))
-    else {
-        panic!("the activate is DATA");
+/// Sends the host's request for Ready, a `PING` of `id`, and returns the request that the session
+/// accepted, once the peer took the credit that it returned.
+fn ping<'b>(
+    session: &mut Session<'_>,
+    peer: &mut Peer,
+    id: u64,
+    bytes: &'b mut Vec<u8>,
+) -> protocol::AppFrame<'b> {
+    peer.send_v2(id, v2::Frame::Ping);
+    let Event::Data(data) = session.next_event().unwrap_or_else(|_| panic!("ping DATA")) else {
+        panic!("the ping is DATA");
     };
-    bytes
+    *bytes = data;
+    let Ok(Request::App(request)) = session.accept_request(bytes) else {
+        panic!("valid ping");
+    };
+    peer.credit();
+    request
 }
 
 #[test]
-fn a_replacement_session_joins_one_activation_and_caches_ready_without_reapplying() {
+fn a_restored_clone_applies_its_record_once_and_answers_each_session_s_request_for_ready() {
     let (mut session, mut peer, payload) = restored();
     let deadline = session.connection.get_ref().deadline.get();
-    let (record, _) = protocol::decode_activate_payload(&payload).unwrap();
+    let (record, _) = protocol::decode_activation_record(&payload).unwrap();
     let ready = crate::guest_restore::GuestRestoreReady::of(&record).encode();
-    let bytes = activate_bytes(&mut session, &mut peer, 61, &payload);
-    let Ok(Request::App(request)) = session.accept_request(&bytes) else {
-        panic!("valid activate");
-    };
-    peer.credit();
+    // The record of the restore packet applies once, before the host asks for Ready.
     let retained = session
-        .activate_with(request, |restored, _, accepted, workload| {
+        .activate_with(|restored, _| {
             assert_eq!(restored.activation.state(), GuestRestoreState::Activating);
             assert_eq!(restored.activation.deadline(), deadline);
-            assert_eq!(accepted, &record);
-            assert_eq!(
-                (workload.uid, workload.gid, workload.create_account),
-                (1000, 1001, true)
-            );
-            peer.reset(2, 4);
-            peer.send_v2(62, v2::Frame::Activate(&payload));
-            Ok("one applied space")
+            Ok(Some("one applied space"))
         })
         .unwrap();
     assert_eq!(retained, Some("one applied space"));
-    assert_eq!(peer.read().0.record_type, OUTER_ACK);
-    peer.credit();
-    peer.app(APP_READY, 62, 0, &ready);
-    assert!(!session.rootless());
-    assert_eq!(session.connection.get_ref().deadline.get(), None);
-    let bytes = activate_bytes(&mut session, &mut peer, 63, &payload);
-    let Ok(Request::App(request)) = session.accept_request(&bytes) else {
-        panic!("valid retry");
-    };
-    peer.credit();
+    assert_eq!(
+        session.activation_state_for_test(),
+        Some(GuestRestoreState::Applied)
+    );
     assert!(
         session
-            .activate_with::<()>(request, |_, _, _, _| panic!(
-                "must not apply or switch twice"
-            ))
+            .activate_with::<()>(|_, _| panic!("must not apply or switch twice"))
             .unwrap()
             .is_none()
     );
-    peer.app(APP_READY, 63, 0, &ready);
+    // Root-dependent work waits for the host's request for Ready, by the same deadline.
+    assert!(session.rootless());
+    assert_eq!(session.connection.get_ref().deadline.get(), deadline);
+    let mut bytes = Vec::new();
+    let request = ping(&mut session, &mut peer, 61, &mut bytes);
+    session.ready(request).unwrap();
+    peer.app(APP_READY, 61, 0, &ready);
+    assert!(!session.rootless());
+    assert_eq!(session.connection.get_ref().deadline.get(), None);
+    // A later session's request gets the same Ready, without applying or switching again.
+    peer.reset(2, 4);
+    assert!(matches!(session.next_event(), Ok(Event::Reset)));
+    session.acknowledge().unwrap();
+    assert_eq!(peer.read().0.record_type, OUTER_ACK);
+    let request = ping(&mut session, &mut peer, 62, &mut bytes);
+    session.ready(request).unwrap();
+    peer.app(APP_READY, 62, 0, &ready);
     session.start_activation().unwrap();
     session.start_activation().unwrap();
     assert_eq!(
@@ -200,13 +206,10 @@ fn a_replacement_session_joins_one_activation_and_caches_ready_without_reapplyin
 
 #[test]
 fn postactivation_capture_stays_refused_without_pending_cleanup() {
-    let (mut session, mut peer, payload) = restored();
+    let (mut session, mut peer, _) = restored();
     let state = session.capture.as_mut().unwrap().restored.as_mut().unwrap();
-    assert!(matches!(
-        state.accept(&payload, Instant::now()).unwrap().0,
-        GuestRestoreAction::Apply(_)
-    ));
     state.activation.complete(Instant::now(), Ok(())).unwrap();
+    state.ready(Instant::now()).unwrap();
     session.start_activation().unwrap();
     for kill in [0, 1] {
         assert!(!queue(&mut session, &mut peer, 71, &[kill], false));
@@ -222,57 +225,11 @@ fn postactivation_capture_stays_refused_without_pending_cleanup() {
 }
 
 #[test]
-fn changed_record_or_workload_bytes_during_application_fail_without_ready() {
-    for changed_identity in [false, true] {
-        let (mut session, mut peer, payload) = restored();
-        let mut changed = payload.clone();
-        if changed_identity {
-            changed[0] ^= 1;
-        } else {
-            let (record, _) = protocol::decode_activate_payload(&payload).unwrap();
-            let mut configuration = record.configuration().clone();
-            configuration.view.hostname = b"changed".to_vec();
-            let record = crate::guest_restore::GuestRestoreRecord::new(
-                record.restore().copied(),
-                configuration,
-            )
-            .unwrap();
-            changed.truncate(9);
-            changed.extend(record.encode());
-        }
-        let bytes = activate_bytes(&mut session, &mut peer, 64, &payload);
-        let Ok(Request::App(request)) = session.accept_request(&bytes) else {
-            panic!("valid activate");
-        };
-        peer.credit();
-        let result = session.activate_with(request, |_, _, _, _| {
-            peer.send_v2(65, v2::Frame::Activate(&changed));
-            Ok(())
-        });
-        assert_eq!(result.err(), Some(Errno::EPROTO));
-        peer.credit();
-        peer.stream.set_nonblocking(true).unwrap();
-        assert_eq!(
-            peer.stream.read(&mut [0]).unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
-        );
-        assert!(session.rootless());
-    }
-}
-
-#[test]
 fn failed_application_never_reports_ready_or_admits_root_dependent_work() {
-    let (mut session, mut peer, payload) = restored();
-    let bytes = activate_bytes(&mut session, &mut peer, 66, &payload);
-    let Ok(Request::App(request)) = session.accept_request(&bytes) else {
-        panic!("valid activate");
-    };
-    peer.credit();
+    let (mut session, mut peer, _) = restored();
     assert_eq!(
         session
-            .activate_with::<()>(request, |_, _, _, _| Err(crate::Error::io(
-                "runtime mounts failed"
-            )))
+            .activate_with::<()>(|_, _| Err(crate::Error::io("runtime mounts failed")))
             .err(),
         Some(Errno::EPROTO)
     );
@@ -292,13 +249,8 @@ fn failed_application_never_reports_ready_or_admits_root_dependent_work() {
 fn a_failed_restored_activation_gives_init_the_status_of_its_class() {
     let (mut session, _peer) = connected(true);
     assert_eq!(session.activation_status(), None);
-    let (mut session, mut peer, payload) = restored();
+    let (mut session, _peer, _) = restored();
     assert_eq!(session.activation_status(), None);
-    let bytes = activate_bytes(&mut session, &mut peer, 68, &payload);
-    let Ok(Request::App(request)) = session.accept_request(&bytes) else {
-        panic!("valid activate");
-    };
-    peer.credit();
     let failure = crate::Error::io("the network settings cannot be applied").with_source(
         crate::guest::restore::ApplyError::Network {
             error: crate::guest::restore::state::apply::NetworkError::Gateway,
@@ -306,53 +258,41 @@ fn a_failed_restored_activation_gives_init_the_status_of_its_class() {
         },
     );
     assert_eq!(
-        session
-            .activate_with::<()>(request, |_, _, _, _| Err(failure))
-            .err(),
+        session.activate_with::<()>(|_, _| Err(failure)).err(),
         Some(Errno::EPROTO)
     );
     assert_eq!(
         session.activation_status(),
         Some(protocol::status::GUEST_RESTORE_NETWORK)
     );
-    // A request while the record applies fails the activation as the protocol's failure.
-    let (mut session, mut peer, payload) = restored();
-    let bytes = activate_bytes(&mut session, &mut peer, 69, &payload);
-    let Ok(Request::App(request)) = session.accept_request(&bytes) else {
-        panic!("valid activate");
-    };
-    peer.credit();
-    let result = session.activate_with(request, |_, _, _, _| {
-        peer.send_v2(70, v2::Frame::Ping);
-        Ok(())
-    });
-    assert_eq!(result.err(), Some(Errno::EPROTO));
-    assert_eq!(
-        session.activation_state_for_test(),
-        Some(GuestRestoreState::Failed)
-    );
-    assert_eq!(
-        session.activation_status(),
-        Some(protocol::status::GUEST_RESTORE_PROTOCOL)
-    );
 }
 
 #[test]
-fn standard_input_while_the_record_applies_fails_the_activation_as_the_protocols_failure() {
-    let (mut session, mut peer, payload) = restored();
-    let bytes = activate_bytes(&mut session, &mut peer, 71, &payload);
-    let Ok(Request::App(request)) = session.accept_request(&bytes) else {
-        panic!("valid activate");
-    };
-    peer.credit();
-    let result = session.activate_with(request, |_, _, _, _| {
-        peer.send_v2(71, v2::Frame::Stdin(b"x"));
-        Ok(())
+fn a_restored_capture_whose_packet_carried_no_record_ends_before_its_session() {
+    let (mut session, mut peer) = connected(true);
+    assert!(queue(&mut session, &mut peer, 72, &[0], false));
+    let result = session.finish_capture_with(|capture, session| {
+        capture.perform_with(
+            |_, _| Ok(()),
+            |id| session.send_app(APP_READY, id, 0, &[]),
+            |_, _, _| {
+                Ok(Captured::Restored(
+                    crate::guest::snapshot::repair::tests::repaired_fixture(),
+                ))
+            },
+        )
     });
     assert_eq!(result.err(), Some(Errno::EPROTO));
+    peer.app(APP_READY, 72, 0, &[]);
+    // The clone took no reset, and acknowledged none: it ends with the record's status.
     assert_eq!(
         session.activation_status(),
-        Some(protocol::status::GUEST_RESTORE_PROTOCOL)
+        Some(protocol::status::GUEST_RESTORE_RECORD)
+    );
+    peer.stream.set_nonblocking(true).unwrap();
+    assert_eq!(
+        peer.stream.read(&mut [0]).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
     );
 }
 
@@ -570,7 +510,9 @@ fn restored_capture_consumes_reset_and_acknowledges_the_existing_connection() {
                 |id| session.send_app(APP_READY, id, 0, &[]),
                 |_, _, _| {
                     Ok(Captured::Restored(
-                        crate::guest::snapshot::repair::tests::repaired_fixture(),
+                        crate::guest::snapshot::repair::tests::repaired_with_record(
+                            &Capture::activation_payload(),
+                        ),
                     ))
                 },
             )

@@ -3772,7 +3772,7 @@ class _FakeSnapshotCli:
                 return self._error(
                     "exited",
                     "OpenVMM exited during startup: guest-exit status 54; restore "
-                    f"failed during Activate: {attribution}",
+                    f"failed during Connect: {attribution}",
                 )
             guest = self._guest(values)
             self.guests[state] = guest
@@ -4248,7 +4248,7 @@ class PublicSnapshotTests(unittest.TestCase):
             "misattributed-guest-failure": (
                 "the zeroed-scratch restore does not attribute its unusable root to the "
                 "request: 'OpenVMM exited during startup: guest-exit status 54; restore "
-                "failed during Activate: Io, attributed to the host'"
+                "failed during Connect: Io, attributed to the host'"
             ),
             "unserialized-restores": (
                 "busy: nvx run --restore-snapshot returned 0, expected 1 "

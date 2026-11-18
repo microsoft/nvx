@@ -214,7 +214,7 @@ fn capture_requests_refuse_unknown_or_mis_sized_flags() {
     target_arch = "x86_64"
 ))]
 #[test]
-fn activate_requests_round_trip_records_and_workload_identity() {
+fn activation_records_round_trip_records_and_workload_identity() {
     let names = [
         "COLD",
         "CLONE",
@@ -230,11 +230,11 @@ fn activate_requests_round_trip_records_and_workload_identity() {
                 gid: 0x0506_0708,
                 create_account,
             };
-            let payload = app::encode_activate_payload(&record, &workload).unwrap();
+            let payload = app::encode_activation_record(&record, &workload).unwrap();
             assert_eq!(payload[..9], [4, 3, 2, 1, 8, 7, 6, 5, flag]);
             assert_eq!(payload[9..], vector.bytes);
             assert_eq!(
-                app::decode_activate_payload(&payload).unwrap(),
+                app::decode_activation_record(&payload).unwrap(),
                 (record.clone(), workload)
             );
         }
@@ -243,26 +243,26 @@ fn activate_requests_round_trip_records_and_workload_identity() {
 
 #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 #[test]
-fn activate_requests_refuse_truncated_or_malformed_payloads() {
+fn activation_records_refuse_truncated_or_malformed_payloads() {
     let record = vector(ACTIVATION_V2, "RECORD", "GPT_DIRECTORY").bytes;
     let prefix = [1, 0, 0, 0, 2, 0, 0, 0, 0];
     let payload = [prefix.as_slice(), &record].concat();
     for length in 0..payload.len() {
-        assert!(app::decode_activate_payload(&payload[..length]).is_err());
+        assert!(app::decode_activation_record(&payload[..length]).is_err());
     }
     for flag in [2, u8::MAX] {
         let mut invalid = payload.clone();
         invalid[8] = flag;
-        assert!(app::decode_activate_payload(&invalid).is_err());
+        assert!(app::decode_activation_record(&invalid).is_err());
     }
     for name in ["VERSION_1", "TRUNCATED_FIELD_VALUE", "TOO_LONG"] {
         let record = vector(ACTIVATION_V2, "INVALID_RECORD", name).bytes;
         let invalid = [prefix.as_slice(), &record].concat();
-        assert!(app::decode_activate_payload(&invalid).is_err(), "{name}");
+        assert!(app::decode_activation_record(&invalid).is_err(), "{name}");
     }
     let mut trailing = payload;
     trailing.push(0);
-    assert!(app::decode_activate_payload(&trailing).is_err());
+    assert!(app::decode_activation_record(&trailing).is_err());
 }
 
 #[cfg(all(
@@ -272,7 +272,7 @@ fn activate_requests_refuse_truncated_or_malformed_payloads() {
     target_arch = "x86_64"
 ))]
 #[test]
-fn activate_workload_ids_match_guest_credential_bounds() {
+fn activation_workload_ids_match_guest_credential_bounds() {
     let record =
         GuestRestoreRecord::decode(&vector(ACTIVATION_V2, "RECORD", "CLONE").bytes).unwrap();
     for (uid, gid) in [(1, u32::MAX - 1), (u32::MAX - 1, 1)] {
@@ -281,9 +281,9 @@ fn activate_workload_ids_match_guest_credential_bounds() {
             gid,
             create_account: false,
         };
-        let payload = app::encode_activate_payload(&record, &workload).unwrap();
+        let payload = app::encode_activation_record(&record, &workload).unwrap();
         assert_eq!(
-            app::decode_activate_payload(&payload).unwrap(),
+            app::decode_activation_record(&payload).unwrap(),
             (record.clone(), workload)
         );
     }
@@ -293,13 +293,13 @@ fn activate_workload_ids_match_guest_credential_bounds() {
             gid,
             create_account: true,
         };
-        assert!(app::encode_activate_payload(&record, &workload).is_err());
+        assert!(app::encode_activation_record(&record, &workload).is_err());
         let mut payload = Vec::new();
         payload.extend_from_slice(&uid.to_le_bytes());
         payload.extend_from_slice(&gid.to_le_bytes());
         payload.push(1);
         payload.extend_from_slice(&record.encode());
-        assert!(app::decode_activate_payload(&payload).is_err());
+        assert!(app::decode_activation_record(&payload).is_err());
     }
 }
 
@@ -835,7 +835,7 @@ fn record_definitions_keep_their_wire_values() {
     assert_eq!(APP_STDOUT, 0x82);
     assert_eq!(APP_STDERR, 0x83);
     #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
-    assert_eq!((APP_CAPTURE, APP_ACTIVATE, APP_EXIT), (7, 8, 0x84));
+    assert_eq!((APP_CAPTURE, APP_EXIT), (7, 0x84));
     assert_eq!(APP_STOPPED, 0x85);
     assert_eq!(APP_ERROR, 0xff);
 }

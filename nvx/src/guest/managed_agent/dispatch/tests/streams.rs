@@ -8,7 +8,6 @@
 use std::os::fd::AsFd;
 use std::time::{Duration, Instant};
 
-use crate::guest::restore::GuestRestoreAction;
 use crate::protocol::v2::{self, Frame, STDIN_WINDOW, VERSION};
 
 use super::*;
@@ -218,7 +217,7 @@ fn version_2_has_no_features_request() {
 }
 
 #[test]
-fn version_2_carries_capture_and_activation_with_their_payloads() {
+fn version_2_carries_capture_and_a_restored_clone_s_ready_with_their_payloads() {
     let config = AgentConfig::for_test();
     let mappings = HostMappings::announced(0);
     let system = TestSystem::new(Paths::default());
@@ -239,22 +238,21 @@ fn version_2_carries_capture_and_activation_with_their_payloads() {
     );
     assert!(harness.stop_v2(3).diagnostics.is_empty());
 
-    // A restored session's activate request gets the READY of version 2, with what Ready
-    // reports about the activation.
+    // A restored session's request for Ready, whose record applied from its restore packet,
+    // gets the READY of version 2, with what Ready reports about the activation.
     let config = AgentConfig::for_test();
     let mappings = HostMappings::announced(0);
-    let (mut capture, payload) = Capture::activation_fixture();
+    let (mut capture, _) = Capture::activation_fixture();
     let restored = capture.restored.as_mut().unwrap();
-    let now = Instant::now();
-    assert!(matches!(
-        restored.accept(&payload, now).unwrap().0,
-        GuestRestoreAction::Apply(_)
-    ));
-    let ready = restored.activation.complete(now, Ok(())).unwrap().encode();
+    let ready = restored
+        .activation
+        .complete(Instant::now(), Ok(()))
+        .unwrap()
+        .encode();
     let system = TestSystem::new(Paths::default());
     let mut harness = Harness::spawn_with_capture(system, config, mappings, Some(capture));
     harness.reset(1, 7);
-    harness.send_v2(4, Frame::Activate(&payload));
+    harness.send_v2(4, Frame::Ping);
     assert_eq!(harness.next_v2(), Reply::Ready(4, ready));
     assert!(harness.stop_v2(5).diagnostics.is_empty());
 }

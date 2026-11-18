@@ -117,7 +117,12 @@ impl LifecycleLock {
     }
 
     pub(crate) fn clear_outputs(&self) -> Result {
-        self.remove_files(&[StateFile::Socket, StateFile::Log, StateFile::Outcome])
+        self.remove_files(&[
+            StateFile::Socket,
+            StateFile::Log,
+            StateFile::Outcome,
+            StateFile::ActivationRecord,
+        ])
     }
 
     fn remove_files(&self, names: &[StateFile]) -> Result {

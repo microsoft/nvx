@@ -1,8 +1,8 @@
 //! The guest restore of a repaired clone, in the caller's process: [`GuestRestore`], the state
-//! machine of the clone's restricted control session, through which the clone takes its
-//! configuration from the host in one Activate, and [`apply`](fn@apply), which activates the
-//! clone's root and workload with that configuration, as the [module](super#guest-restore)
-//! describes.
+//! machine through which the clone takes its configuration from the activation record of its
+//! restore packet and reports Ready on its control session, and [`apply`](fn@apply), which
+//! activates the clone's root and workload with that configuration, as the
+//! [module](super#guest-restore) describes.
 
 pub(crate) mod apply;
 #[cfg(test)]
@@ -15,36 +15,36 @@ use std::time::{Duration, Instant};
 
 use super::Repaired;
 use crate::guest_restore::{
-    ExpectedResources, GuestRestoreError, GuestRestoreReady, GuestRestoreRecord, TransactionId,
+    ExpectedResources, GuestRestoreError, GuestRestoreReady, GuestRestoreRecord,
 };
 
 pub(crate) use self::apply::{Applied, ApplyError, RootTemplate, apply};
 pub use self::apply::{MACHINE_ID_FILE, RESOLVER_FILE};
 
 /// The guest restore of a repaired clone: the state machine, without I/O and independent of
-/// any framing, of the clone's control session, which takes the clone's configuration from the
-/// host in one Activate. It holds no admission fence and makes no system call; see the
-/// [module](super#guest-restore).
+/// any framing, through which the clone takes its configuration from the activation record that
+/// its restore packet carried, and reports Ready on its control session. It holds no admission
+/// fence and makes no system call; see the [module](super#guest-restore).
 ///
-/// The adapter passes it what it receives on the session, each a [`GuestRestoreInput`], through
-/// [`input`](Self::input), and does what the [`GuestRestoreAction`] that it returns says. The
-/// adapter applies the record of the Activate that the guest restore accepted, in its own
-/// space, by the guest restore's [`deadline`](Self::deadline), passes the guest restore what
-/// the session received while the application ran, which came before Ready, then reports the
-/// result through [`complete`](Self::complete), whose Ready answers the Activate and each retry
-/// that [joined](GuestRestoreAction::Join) it, and it reports the start of the sandbox, which
-/// its own order takes once the guest restore is ready, through [`start`](Self::start). The
-/// adapter's loop wakes by the deadline, and [ticks](Self::tick) the guest restore then,
-/// whether input arrives or not, and whether its output drains or not.
+/// The adapter hands it the guest-restore record that the packet's activation record holds, as
+/// soon as the clone runs, through [`accept`](Self::accept), which decodes and validates it,
+/// applies the record in its own space by the guest restore's [`deadline`](Self::deadline), and
+/// reports the result through [`complete`](Self::complete). It passes the guest restore what it
+/// receives on the session, each a [`GuestRestoreInput`], through [`input`](Self::input), and does
+/// what the [`GuestRestoreAction`] that it returns says: the host asks for the clone's Ready,
+/// first in each of its sessions, and the adapter answers with Ready once the record applied.
+/// It reports the start of the sandbox, which its own order takes once the guest restore is
+/// ready, through [`start`](Self::start). The adapter's loop wakes by the deadline, and
+/// [ticks](Self::tick) the guest restore then, whether input arrives or not, and whether its
+/// output drains or not.
 ///
 /// It goes through the [`GuestRestoreState`]s in order, and each takes these inputs:
 ///
-/// | State | Reset | Flow | Activate | Request |
+/// | State | Reset | Flow | Ready | Request |
 /// | --- | --- | --- | --- | --- |
-/// | [`Bootstrap`](GuestRestoreState::Bootstrap) | [`Acknowledge`](GuestRestoreAction::Acknowledge), restricted next | [`Continue`](GuestRestoreAction::Continue) | Fails | Fails |
-/// | [`Restricted`](GuestRestoreState::Restricted) | Fails | [`Continue`](GuestRestoreAction::Continue) | [`Apply`](GuestRestoreAction::Apply), activating next, once its record is valid | Fails |
-/// | [`Activating`](GuestRestoreState::Activating) | Fails | [`Continue`](GuestRestoreAction::Continue) | [`Join`](GuestRestoreAction::Join) if byte-equal | Fails |
-/// | [`Ready`](GuestRestoreState::Ready), [`Started`](GuestRestoreState::Started) | [`Acknowledge`](GuestRestoreAction::Acknowledge), a later session | [`Continue`](GuestRestoreAction::Continue) | [`Ready`](GuestRestoreAction::Ready) if byte-equal | [`Serve`](GuestRestoreAction::Serve) |
+/// | [`Pending`](GuestRestoreState::Pending), [`Activating`](GuestRestoreState::Activating) | [`Acknowledge`](GuestRestoreAction::Acknowledge) | [`Continue`](GuestRestoreAction::Continue) | [`Join`](GuestRestoreAction::Join) | Fails |
+/// | [`Applied`](GuestRestoreState::Applied) | [`Acknowledge`](GuestRestoreAction::Acknowledge) | [`Continue`](GuestRestoreAction::Continue) | [`Ready`](GuestRestoreAction::Ready), ready next | Fails |
+/// | [`Ready`](GuestRestoreState::Ready), [`Started`](GuestRestoreState::Started) | [`Acknowledge`](GuestRestoreAction::Acknowledge) | [`Continue`](GuestRestoreAction::Continue) | [`Ready`](GuestRestoreAction::Ready) | [`Serve`](GuestRestoreAction::Serve) |
 ///
 /// Every failure is final, and leaves the guest restore [failed](GuestRestoreState::Failed): every
 /// later call returns the same [`GuestRestoreFailure`]. The guest restore never starts a process or
@@ -67,11 +67,8 @@ pub use self::apply::{MACHINE_ID_FILE, RESOLVER_FILE};
 ///     Reset,
 ///     /// Bytes that complete no message, such as the start of one.
 ///     Partial,
-///     /// The host's Activate, with its record's bytes.
-///     Activate(Vec<u8>),
-///     /// The host's Activate, whose header announced this many bytes, more than a record has,
-///     /// which the framing refused before it read any of them.
-///     TooLong(usize),
+///     /// The host's request for the clone's Ready.
+///     Ready,
 ///     /// Any other message of the host, such as a part of the mapping table, or the start.
 ///     Other(Vec<u8>),
 /// }
@@ -83,8 +80,8 @@ pub use self::apply::{MACHINE_ID_FILE, RESOLVER_FILE};
 ///     /// agent queued, and returns what the host sent, or `None` once the deadline passed. A
 ///     /// deadline that passed already returns only what the host sent already.
 ///     fn receive(&mut self, deadline: Option<Instant>) -> Option<Received>;
-///     /// Queues the acknowledgement of the session's reset, and abandons the earlier epoch's
-///     /// work.
+///     /// Queues the acknowledgement of the session's reset, and abandons the earlier session's
+///     /// work, the requests for Ready that joined the guest restore included.
 ///     fn acknowledge(&mut self);
 ///     /// Activates the clone's root and workload with the settings of `record` in the agent's
 ///     /// own space, whose waits for the devices end by `deadline`, and keeps them: the identity,
@@ -97,15 +94,33 @@ pub use self::apply::{MACHINE_ID_FILE, RESOLVER_FILE};
 ///         deadline: Option<Instant>,
 ///     ) -> Result<(), Box<dyn Error + Send + Sync>>;
 ///     /// Queues Ready, which reports `ready` beside the agent's own identities, such as its
-///     /// build.
+///     /// build, in answer to each request for Ready of the current session that joined the
+///     /// guest restore, or to the one that the host just sent.
 ///     fn ready(&mut self, ready: GuestRestoreReady);
 ///     /// Serves `message` in the agent's order, as after a cold boot, and returns whether the
 ///     /// host started the sandbox with it.
 ///     fn serve(&mut self, message: Vec<u8>) -> bool;
 /// }
 ///
-/// /// Serves the control session of the clone whose guest restore is `restore`, until it fails.
-/// fn serve(agent: &mut impl Agent, mut restore: GuestRestore) -> Result<(), GuestRestoreFailure> {
+/// /// Activates the clone whose guest restore is `restore` from `record`, the guest-restore
+/// /// record that its restore packet's activation record holds, and serves its control session
+/// /// until it fails.
+/// fn serve(
+///     agent: &mut impl Agent,
+///     mut restore: GuestRestore,
+///     record: Option<&[u8]>,
+/// ) -> Result<(), GuestRestoreFailure> {
+///     // The record is valid, and nothing happened before: the guest restore's side effects start
+///     // here, without waiting for the host. The application waits for the devices until the
+///     // guest restore's deadline at the latest, so that it ends by then.
+///     let record = restore.accept(Instant::now(), record)?;
+///     let applied = agent.activate(&record, restore.deadline());
+///     // A failed application fails the guest restore. Without a request for Ready that joined,
+///     // the guest restore is applied, and awaits the host's.
+///     let ready = restore.complete(Instant::now(), applied)?;
+///     if restore.established().is_some() {
+///         agent.ready(ready);
+///     }
 ///     loop {
 ///         let Some(received) = agent.receive(restore.deadline()) else {
 ///             // The deadline passed, unless the clone is ready, which ends the guest restore.
@@ -114,29 +129,9 @@ pub use self::apply::{MACHINE_ID_FILE, RESOLVER_FILE};
 ///         };
 ///         match restore.input(Instant::now(), input(&received))? {
 ///             GuestRestoreAction::Acknowledge => agent.acknowledge(),
+///             // The agent applies the record before it receives anything, so no request for
+///             // Ready joins the guest restore.
 ///             GuestRestoreAction::Continue | GuestRestoreAction::Join => {}
-///             GuestRestoreAction::Apply(record) => {
-///                 // The record is valid, and nothing happened before: the guest restore's side
-///                 // effects start here. The application waits for the devices until the guest
-///                 // restore's deadline at the latest, so that it ends by then.
-///                 let applied = agent.activate(&record, restore.deadline());
-///                 // What the host sent meanwhile came before Ready: a retry of the Activate,
-///                 // byte for byte, joins the application, and anything else, a reset included,
-///                 // fails the guest restore.
-///                 let mut joined = 0;
-///                 while let Some(received) = agent.receive(Some(Instant::now())) {
-///                     let action = restore.input(Instant::now(), input(&received))?;
-///                     if action == GuestRestoreAction::Join {
-///                         joined += 1;
-///                     }
-///                 }
-///                 // A failed application fails the guest restore.
-///                 let ready = restore.complete(Instant::now(), applied)?;
-///                 // Ready answers the Activate, and each retry that joined its application.
-///                 for _ in 0..=joined {
-///                     agent.ready(ready);
-///                 }
-///             }
 ///             GuestRestoreAction::Ready(ready) => agent.ready(ready),
 ///             // The guest restore serves only another message, once it is ready.
 ///             GuestRestoreAction::Serve => {
@@ -151,36 +146,37 @@ pub use self::apply::{MACHINE_ID_FILE, RESOLVER_FILE};
 /// }
 ///
 /// /// Returns the guest restore's input of `received`.
-/// fn input(received: &Received) -> GuestRestoreInput<'_> {
+/// fn input(received: &Received) -> GuestRestoreInput {
 ///     match received {
 ///         Received::Reset => GuestRestoreInput::Reset,
 ///         Received::Partial => GuestRestoreInput::Flow,
-///         Received::Activate(record) => GuestRestoreInput::Activate(record),
-///         Received::TooLong(length) => GuestRestoreInput::TooLong(*length),
+///         Received::Ready => GuestRestoreInput::Ready,
 ///         Received::Other(_) => GuestRestoreInput::Request,
 ///     }
 /// }
 /// ```
 pub struct GuestRestore {
-    /// The resources that the clone has, as its repair reports them, which the record of an
-    /// Activate must expect.
+    /// The resources that the clone has, as its repair reports them, which the record must
+    /// expect.
     resources: ExpectedResources,
     /// When the guest restore fails unless it is ready, or `None` if no instant is that late.
     deadline: Option<Instant>,
+    /// Whether a request for Ready of the session in progress joined the guest restore before
+    /// the record applied, which [`complete`](Self::complete)'s Ready answers.
+    asked: bool,
     /// Where the guest restore is.
     state: State,
 }
 
 impl GuestRestore {
-    /// Returns the guest restore of the clone that `repaired` describes, in its
-    /// [transport bootstrap](GuestRestoreState::Bootstrap), without holding or changing an
-    /// admission fence.
+    /// Returns the guest restore of the clone that `repaired` describes, which awaits the record
+    /// of its restore packet, without holding or changing an admission fence.
     ///
     /// The guest restore must be ready by its deadline: `timeout`, which the caller chooses, after
     /// the repair acknowledged the restore, as [`Repaired::acknowledged_at`] tells, or after `now`
     /// for a restore that the host did not gate until an acknowledgement, whose repair
-    /// acknowledged nothing. No input or retry extends it. A deadline that no instant can hold
-    /// never passes.
+    /// acknowledged nothing. Nothing extends it. A deadline that no instant can hold never
+    /// passes.
     pub fn new(repaired: &Repaired, timeout: Duration, now: Instant) -> Self {
         let resources = ExpectedResources {
             cpus: repaired.cpus(),
@@ -203,119 +199,133 @@ impl GuestRestore {
         Self {
             resources,
             deadline: start.checked_add(timeout),
-            state: State::Bootstrap,
+            asked: false,
+            state: State::Pending,
         }
+    }
+
+    /// Accepts `record`, at `now`, the bytes of the guest-restore record that the clone's restore
+    /// packet carried, which the adapter takes from the packet's activation record, as
+    /// [`Repaired::activation_record`] returns it, or `None` for a packet that carried none, and
+    /// returns the decoded record, for the adapter to apply in its own space.
+    ///
+    /// It decodes the record with [`GuestRestoreRecord::decode`], which refuses it with
+    /// [`GuestRestoreCause::Record`] unless it is canonical and keeps every limit, checks that it
+    /// is a clone's, with a restore section, or refuses it with [`GuestRestoreCause::Cold`], and
+    /// checks that it expects the resources that the clone has, the CPU count and the memory size
+    /// that its repair reports, or refuses it with [`GuestRestoreCause::Resources`]. Only then
+    /// does it accept it: nothing has a side effect before. A packet without a record fails with
+    /// [`GuestRestoreCause::Missing`], and a second record with [`GuestRestoreCause::Accept`].
+    /// Past its deadline, the guest restore fails with [`GuestRestoreCause::Expired`] instead.
+    pub fn accept(
+        &mut self,
+        now: Instant,
+        record: Option<&[u8]>,
+    ) -> Result<Box<GuestRestoreRecord>, GuestRestoreFailure> {
+        self.check(now)?;
+        if !matches!(self.state, State::Pending) {
+            return Err(self.fail(GuestRestoreCause::Accept));
+        }
+        let Some(record) = record else {
+            return Err(self.fail(GuestRestoreCause::Missing));
+        };
+        let decoded = match GuestRestoreRecord::decode(record) {
+            Ok(decoded) => decoded,
+            Err(error) => return Err(self.fail(GuestRestoreCause::Record(error))),
+        };
+        if decoded.restore().is_none() {
+            return Err(self.fail(GuestRestoreCause::Cold));
+        }
+        let expected = decoded.configuration().resources;
+        if expected != self.resources {
+            let actual = self.resources;
+            return Err(self.fail(GuestRestoreCause::Resources { expected, actual }));
+        }
+        self.state = State::Activating(GuestRestoreReady::of(&decoded));
+        Ok(Box::new(decoded))
     }
 
     /// Takes `input`, which the adapter received at `now` on the clone's control session, and
-    /// returns what the adapter does next, as the [type](Self) tabulates it, or fails the
-    /// guest restore.
+    /// returns what the adapter does next, as the [type](Self) tabulates it, or fails the guest
+    /// restore.
     ///
     /// Until the guest restore is ready, it fails once `now` reaches its deadline, whatever the
-    /// input, with [`GuestRestoreCause::Expired`]. In order, it then takes:
+    /// input, with [`GuestRestoreCause::Expired`]. Otherwise it takes:
     ///
-    /// 1. In the transport bootstrap, the session's reset, which the restore queued: the adapter
-    ///    acknowledges it, and the session is restricted next. Before it, the host can send
-    ///    nothing, so an Activate or another request fails with [`GuestRestoreCause::Request`].
-    /// 2. While restricted, flow control, and one Activate. The guest restore decodes its record
-    ///    with [`GuestRestoreRecord::decode`], which refuses it with [`GuestRestoreCause::Record`]
-    ///    unless it is canonical and keeps every limit, checks that it is a clone's, with a restore
-    ///    section, or refuses it with [`GuestRestoreCause::Cold`], and checks that it expects the
-    ///    resources that the clone has, the CPU count and the memory size that its repair
-    ///    reports, or refuses it with [`GuestRestoreCause::Resources`]. Only then does it accept
-    ///    it, and hand the record to the adapter with [`GuestRestoreAction::Apply`]: nothing has a
-    ///    side effect before. Any other request fails with [`GuestRestoreCause::Request`], and
-    ///    another reset with [`GuestRestoreCause::Reset`].
-    /// 3. While activating, flow control, and retries of the Activate: one of the same
-    ///    transaction, with a byte-equal record, joins the guest restore that runs. Any other
-    ///    Activate fails: one whose record does not decode, or is a cold boot's, with the cause
-    ///    with which the first would have failed, one of another transaction with
-    ///    [`GuestRestoreCause::Transaction`], and any other of the same transaction with
-    ///    [`GuestRestoreCause::Changed`]. A request or a reset fails as while restricted.
-    /// 4. Once ready, or started, everything: a reset starts a later session, which the adapter
-    ///    acknowledges, a byte-equal retry of the Activate gets the cached result, what Ready
-    ///    reports, without activating again, and any other Activate fails as while activating.
-    ///    Every other request goes to the adapter's order, as after a cold boot.
-    ///
-    /// An Activate whose record the adapter's framing refused unread, as longer than a record can
-    /// be, [`GuestRestoreInput::TooLong`], fails as one whose record has that many bytes: in the
-    /// transport bootstrap with [`GuestRestoreCause::Request`], and from then on with
-    /// [`GuestRestoreCause::Record`].
+    /// - flow control, in every state;
+    /// - the session's reset, in every state: the one that the restore queued for the session
+    ///   that the guest attached before the capture, or a later one, such as once the host's
+    ///   attachment ended. The adapter acknowledges it. A reset changes nothing of the record,
+    ///   which came with the restore: it only abandons a request for Ready of the earlier session
+    ///   that joined the guest restore, which the host asks again in the later one;
+    /// - the host's request for Ready, which comes first in each of its sessions: before the
+    ///   record applied, it joins the guest restore, whose completion answers it; once the record
+    ///   applied, it makes the clone ready, and gets what Ready reports; and once the clone is
+    ///   ready, it gets the established Ready, without activating again;
+    /// - any other request, once the clone is ready, which goes to the adapter's order, as after a
+    ///   cold boot. Before, it fails with [`GuestRestoreCause::Request`].
     pub fn input(
         &mut self,
         now: Instant,
-        input: GuestRestoreInput<'_>,
+        input: GuestRestoreInput,
     ) -> Result<GuestRestoreAction, GuestRestoreFailure> {
         self.check(now)?;
-        match (self.state.name(), input) {
+        match (&self.state, input) {
+            (State::Failed(failure), _) => Err(failure.clone()),
             (_, GuestRestoreInput::Flow) => Ok(GuestRestoreAction::Continue),
-            (GuestRestoreState::Bootstrap, GuestRestoreInput::Reset) => {
-                self.state = State::Restricted;
+            (_, GuestRestoreInput::Reset) => {
+                self.asked = false;
                 Ok(GuestRestoreAction::Acknowledge)
             }
-            (GuestRestoreState::Ready | GuestRestoreState::Started, GuestRestoreInput::Reset) => {
-                Ok(GuestRestoreAction::Acknowledge)
+            (State::Pending | State::Activating(_), GuestRestoreInput::Ready) => {
+                self.asked = true;
+                Ok(GuestRestoreAction::Join)
             }
-            (_, GuestRestoreInput::Reset) => Err(self.fail(GuestRestoreCause::Reset)),
-            (GuestRestoreState::Restricted, GuestRestoreInput::Activate(record)) => {
-                self.accept(record)
+            (State::Applied(ready), GuestRestoreInput::Ready) => {
+                let ready = *ready;
+                self.state = State::Ready(ready);
+                Ok(GuestRestoreAction::Ready(ready))
             }
-            (
-                GuestRestoreState::Activating
-                | GuestRestoreState::Ready
-                | GuestRestoreState::Started,
-                GuestRestoreInput::Activate(record),
-            ) => self.retry(record),
-            // A record that long never decodes, so its Activate fails as one whose bytes the
-            // adapter read would, whether the guest restore accepted another or not.
-            (
-                GuestRestoreState::Restricted
-                | GuestRestoreState::Activating
-                | GuestRestoreState::Ready
-                | GuestRestoreState::Started,
-                GuestRestoreInput::TooLong(length),
-            ) => Err(
-                self.fail(GuestRestoreCause::Record(GuestRestoreError::TooLong(
-                    length,
-                ))),
-            ),
-            (GuestRestoreState::Ready | GuestRestoreState::Started, GuestRestoreInput::Request) => {
+            (State::Ready(ready) | State::Started(ready), GuestRestoreInput::Ready) => {
+                Ok(GuestRestoreAction::Ready(*ready))
+            }
+            (State::Ready(_) | State::Started(_), GuestRestoreInput::Request) => {
                 Ok(GuestRestoreAction::Serve)
             }
-            (
-                _,
-                GuestRestoreInput::Activate(_)
-                | GuestRestoreInput::TooLong(_)
-                | GuestRestoreInput::Request,
-            ) => Err(self.fail(GuestRestoreCause::Request)),
+            (_, GuestRestoreInput::Request) => Err(self.fail(GuestRestoreCause::Request)),
         }
     }
 
-    /// Completes the guest restore of the accepted Activate's record at `now`, with the `result` of
-    /// the adapter's application of the record, and returns what Ready reports: that the
-    /// guest restore applied, with the record's transaction ID.
+    /// Completes the guest restore of the accepted record at `now`, with the `result` of the
+    /// adapter's application of the record, and returns what Ready reports: that the guest
+    /// restore applied, with the record's transaction ID.
     ///
-    /// A result that succeeded by the deadline makes the guest restore ready, and the adapter
-    /// reports Ready. A failure, which may have
-    /// applied part of the record, is final, with [`GuestRestoreCause::Failed`], so that no retry
-    /// activates the record again. Past the deadline, the guest restore
-    /// fails with [`GuestRestoreCause::Expired`] instead, whatever the result. Without a guest
-    /// restore that runs, it fails with [`GuestRestoreCause::Completion`].
+    /// A result that succeeded by the deadline makes the guest restore ready, if a request for
+    /// Ready of the session in progress joined it, and the adapter answers that request with
+    /// Ready; otherwise the guest restore is applied, and awaits the host's request, by the same
+    /// deadline. A failure, which may have applied part of the record, is final, with
+    /// [`GuestRestoreCause::Failed`], so that nothing applies the record again. Past the deadline,
+    /// the guest restore fails with [`GuestRestoreCause::Expired`] instead, whatever the result.
+    /// Without an accepted record whose application runs, it fails with
+    /// [`GuestRestoreCause::Completion`].
     pub fn complete(
         &mut self,
         now: Instant,
         result: Result<(), Box<dyn Error + Send + Sync>>,
     ) -> Result<GuestRestoreReady, GuestRestoreFailure> {
         self.check(now)?;
-        let accepted = match &self.state {
-            State::Activating(accepted) => accepted.clone(),
+        let ready = match &self.state {
+            State::Activating(ready) => *ready,
             _ => return Err(self.fail(GuestRestoreCause::Completion)),
         };
         if let Err(error) = result {
             return Err(self.fail(GuestRestoreCause::Failed(error)));
         }
-        let ready = accepted.ready;
-        self.state = State::Ready(accepted);
+        self.state = if self.asked {
+            State::Ready(ready)
+        } else {
+            State::Applied(ready)
+        };
         Ok(ready)
     }
 
@@ -325,12 +335,12 @@ impl GuestRestore {
     /// A start before the guest restore is ready, or a second one, fails with
     /// [`GuestRestoreCause::Start`].
     pub fn start(&mut self) -> Result<(), GuestRestoreFailure> {
-        let accepted = match &self.state {
+        let ready = match &self.state {
             State::Failed(failure) => return Err(failure.clone()),
-            State::Ready(accepted) => accepted.clone(),
+            State::Ready(ready) => *ready,
             _ => return Err(self.fail(GuestRestoreCause::Start)),
         };
-        self.state = State::Started(accepted);
+        self.state = State::Started(ready);
         Ok(())
     }
 
@@ -346,7 +356,7 @@ impl GuestRestore {
     /// late.
     pub fn deadline(&self) -> Option<Instant> {
         match self.state {
-            State::Bootstrap | State::Restricted | State::Activating(_) => self.deadline,
+            State::Pending | State::Activating(_) | State::Applied(_) => self.deadline,
             State::Ready(_) | State::Started(_) | State::Failed(_) => None,
         }
     }
@@ -357,56 +367,13 @@ impl GuestRestore {
     }
 
     /// Returns what Ready reports about the established guest restore, once it is ready: that
-    /// the guest restore applied, with the record's transaction ID, which a later session gets
-    /// without activating again.
+    /// the guest restore applied, with the record's transaction ID, which a later request for
+    /// Ready gets without activating again.
     pub fn established(&self) -> Option<GuestRestoreReady> {
         match &self.state {
-            State::Ready(accepted) | State::Started(accepted) => Some(accepted.ready),
+            State::Ready(ready) | State::Started(ready) => Some(*ready),
             _ => None,
         }
-    }
-
-    /// Accepts the host's first Activate, whose record's bytes are `record`, once it decoded and
-    /// validated it: a clone's record, with a restore section, that expects the clone's resources.
-    fn accept(&mut self, record: &[u8]) -> Result<GuestRestoreAction, GuestRestoreFailure> {
-        let decoded = match GuestRestoreRecord::decode(record) {
-            Ok(decoded) => decoded,
-            Err(error) => return Err(self.fail(GuestRestoreCause::Record(error))),
-        };
-        let Some(restore) = decoded.restore() else {
-            return Err(self.fail(GuestRestoreCause::Cold));
-        };
-        let expected = decoded.configuration().resources;
-        if expected != self.resources {
-            let actual = self.resources;
-            return Err(self.fail(GuestRestoreCause::Resources { expected, actual }));
-        }
-        self.state = State::Activating(Accepted {
-            record: record.into(),
-            transaction: restore.transaction,
-            ready: GuestRestoreReady::of(&decoded),
-        });
-        Ok(GuestRestoreAction::Apply(Box::new(decoded)))
-    }
-
-    /// Takes a retry of the accepted Activate, whose record's bytes are `record`: a byte-equal
-    /// record joins the guest restore that runs, or gets its cached result once it is ready, and
-    /// any other fails the guest restore.
-    fn retry(&mut self, record: &[u8]) -> Result<GuestRestoreAction, GuestRestoreFailure> {
-        let (accepted, ready) = match &self.state {
-            State::Activating(accepted) => (accepted, false),
-            State::Ready(accepted) | State::Started(accepted) => (accepted, true),
-            _ => return Err(self.fail(GuestRestoreCause::Request)),
-        };
-        if *accepted.record == *record {
-            return Ok(if ready {
-                GuestRestoreAction::Ready(accepted.ready)
-            } else {
-                GuestRestoreAction::Join
-            });
-        }
-        let cause = accepted.refusal(record);
-        Err(self.fail(cause))
     }
 
     /// Fails the guest restore with the failure that it already had, or with
@@ -448,10 +415,10 @@ impl fmt::Debug for GuestRestore {
 }
 
 /// What the adapter received on a clone's control session, in the terms of its [`GuestRestore`],
-/// whatever its framing: the session's reset, flow control, the host's Activate, or another
-/// request of the host.
+/// whatever its framing: the session's reset, flow control, the host's request for Ready, or
+/// another request of the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GuestRestoreInput<'a> {
+pub enum GuestRestoreInput {
     /// The control session's reset, an [`Event::Reset`](crate::guest::control::Event::Reset),
     /// which starts the session over: the one that the restore queued for the session that the
     /// guest attached before the capture, or a later one, such as once the host's attachment
@@ -460,15 +427,10 @@ pub enum GuestRestoreInput<'a> {
     /// Flow control, which carries no request: bytes of a message that they do not complete, or
     /// a credit that the adapter returned to its transport's receive window, if it has one.
     Flow,
-    /// The host's Activate, with the bytes of its guest-restore record, the canonical encoding of
-    /// an [`GuestRestoreRecord`].
-    Activate(&'a [u8]),
-    /// The host's Activate, whose record the adapter's framing refused before it took any byte of
-    /// it, since its header announced this many bytes, more than
-    /// [`MAX_RECORD_BYTES`](crate::guest_restore::MAX_RECORD_BYTES): the guest restore takes it as
-    /// an Activate whose record's bytes are that long, which [`GuestRestoreRecord::decode`] refuses
-    /// with [`GuestRestoreError::TooLong`].
-    TooLong(usize),
+    /// The host's request for the clone's Ready, which the host sends first in each of its
+    /// sessions: OpenVMM's broker refuses the guest's records while no host is attached, which the
+    /// guest cannot tell, so the guest answers the host rather than sending Ready unasked.
+    Ready,
     /// Any other request of the host, such as a part of the mapping table, the start of the
     /// sandbox, an execution, or a probe of the adapter's framing.
     Request,
@@ -478,24 +440,18 @@ pub enum GuestRestoreInput<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GuestRestoreAction {
     /// The guest restore took the session's reset: the adapter abandons the work of the earlier
-    /// session, then acknowledges the reset, as
-    /// [`Connection::acknowledge`](crate::guest::control::Connection::acknowledge) does, unless
-    /// its transport acknowledged it already.
+    /// session, a request for Ready that joined the guest restore included, then acknowledges the
+    /// reset, as [`Connection::acknowledge`](crate::guest::control::Connection::acknowledge)
+    /// does, unless its transport acknowledged it already.
     Acknowledge,
     /// The guest restore took the input, which needs nothing more of the adapter.
     Continue,
-    /// The guest restore accepted the host's Activate, whose record decoded and validated, and
-    /// which nothing before had any side effect of: the adapter applies the record in its own
-    /// space, which activates the root and the workload with its settings, passes
-    /// the guest restore what the session received meanwhile, which came before Ready, then reports
-    /// the result to [`GuestRestore::complete`].
-    Apply(Box<GuestRestoreRecord>),
-    /// A retry of the accepted Activate joined the guest restore that runs: what
-    /// [`GuestRestore::complete`] returns answers it too, as the adapter's framing answers each
-    /// request.
+    /// The host's request for Ready came before the record applied, and joined the guest
+    /// restore: what [`GuestRestore::complete`] returns answers it, as the adapter's framing
+    /// answers each request.
     Join,
-    /// A retry of the accepted Activate, once the guest restore is ready: the adapter answers it
-    /// with Ready, which reports this cached result, without activating again.
+    /// The host's request for Ready, once the record applied: the adapter answers it with Ready,
+    /// which reports this result.
     Ready(GuestRestoreReady),
     /// A request once the guest restore is ready: the adapter serves it in its order, as after a
     /// cold boot.
@@ -507,16 +463,15 @@ pub enum GuestRestoreAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum GuestRestoreState {
-    /// The transport bootstrap: the clone awaits the reset of its control session that the
-    /// restore queued, which the adapter acknowledges.
-    Bootstrap,
-    /// The restricted session: it takes only flow control and one Activate.
-    Restricted,
-    /// The adapter applies the accepted Activate's record.
+    /// The guest restore awaits the record of the clone's restore packet.
+    Pending,
+    /// The adapter applies the accepted record.
     Activating,
-    /// Ready, with the mappings pending: the guest restore completed, and
-    /// returned what Ready reports. The host's mapping table, which the record announced, and the
-    /// start of the sandbox follow in the adapter's order, as after a cold boot.
+    /// The record applied, and the guest restore awaits the host's request for Ready.
+    Applied,
+    /// Ready, with the mappings pending: the guest restore completed, and Ready answered the
+    /// host's request. The host's mapping table, which the record announced, and the start of the
+    /// sandbox follow in the adapter's order, as after a cold boot.
     Ready,
     /// The adapter's order started the sandbox.
     Started,
@@ -525,12 +480,12 @@ pub enum GuestRestoreState {
 }
 
 impl fmt::Display for GuestRestoreState {
-    /// Writes the state's name, such as `restricted`.
+    /// Writes the state's name, such as `pending`.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::Bootstrap => "transport bootstrap",
-            Self::Restricted => "restricted",
+            Self::Pending => "pending",
             Self::Activating => "activating",
+            Self::Applied => "applied",
             Self::Ready => "ready",
             Self::Started => "started",
             Self::Failed => "failed",
@@ -544,17 +499,17 @@ impl fmt::Display for GuestRestoreState {
 pub enum GuestRestoreCause {
     /// The deadline passed before the guest restore was ready.
     Expired,
-    /// The session was reset after its bootstrap, before the guest restore was ready.
-    Reset,
-    /// The host sent a request that the state does not take, before the guest restore was ready:
-    /// any before the session's bootstrap, and any but one Activate, and its retries, after it.
+    /// The host sent a request other than its request for Ready before the guest restore was
+    /// ready.
     Request,
-    /// The Activate's record does not decode, or breaks a limit of `nvx::guest_restore`, which
+    /// The clone's restore packet carried no record.
+    Missing,
+    /// The packet's record does not decode, or breaks a limit of `nvx::guest_restore`, which
     /// refused it with this error.
     Record(GuestRestoreError),
-    /// The Activate's record is a cold boot's, without the restore section of a clone's.
+    /// The packet's record is a cold boot's, without the restore section of a clone's.
     Cold,
-    /// The Activate's record expects other resources than the clone has.
+    /// The packet's record expects other resources than the clone has.
     Resources {
         /// The CPU count and the memory size that the record expects.
         expected: ExpectedResources,
@@ -562,21 +517,13 @@ pub enum GuestRestoreCause {
         /// number of its online CPUs, and the size of its online memory blocks.
         actual: ExpectedResources,
     },
-    /// The Activate's record names another transaction than the accepted Activate's.
-    Transaction {
-        /// The transaction of the accepted Activate.
-        accepted: TransactionId,
-        /// The transaction that the retry names.
-        offered: TransactionId,
-    },
-    /// The Activate's record names the accepted Activate's transaction, but is not byte-equal to
-    /// its record.
-    Changed,
     /// The adapter's application of the accepted record failed, wholly or partway, with this
     /// error.
     Failed(Box<dyn Error + Send + Sync>),
-    /// The adapter completed a guest restore that did not run: before the guest restore accepted an
-    /// Activate, or once it completed one.
+    /// The adapter handed the guest restore a record once it had accepted one.
+    Accept,
+    /// The adapter completed a guest restore that did not run: before the guest restore accepted a
+    /// record, or once it completed one.
     Completion,
     /// The adapter's order started the sandbox before the guest restore was ready, or again.
     Start,
@@ -588,30 +535,24 @@ impl fmt::Display for GuestRestoreCause {
             Self::Expired => {
                 formatter.write_str("the deadline passed before the activation was ready")
             }
-            Self::Reset => {
-                formatter.write_str("the session was reset again before the activation was ready")
-            }
             Self::Request => {
                 formatter.write_str("the host sent a request before the activation was ready")
             }
-            Self::Record(error) => write!(formatter, "the Activate's record is refused: {error}"),
-            Self::Cold => formatter
-                .write_str("the Activate's record is a cold boot's, without a restore section"),
+            Self::Missing => formatter.write_str("the restore packet carried no record"),
+            Self::Record(error) => {
+                write!(formatter, "the restore packet's record is refused: {error}")
+            }
+            Self::Cold => formatter.write_str(
+                "the restore packet's record is a cold boot's, without a restore section",
+            ),
             Self::Resources { expected, actual } => write!(
                 formatter,
-                "the Activate's record expects {} CPUs and {} bytes of memory, and the clone has \
-                 {} CPUs and {} bytes",
+                "the restore packet's record expects {} CPUs and {} bytes of memory, and the clone \
+                 has {} CPUs and {} bytes",
                 expected.cpus, expected.memory, actual.cpus, actual.memory
             ),
-            Self::Transaction { accepted, offered } => write!(
-                formatter,
-                "the Activate names the transaction {offered}, after an Activate of the \
-                 transaction {accepted}"
-            ),
-            Self::Changed => formatter.write_str(
-                "the Activate changes the record of the accepted Activate's transaction",
-            ),
             Self::Failed(error) => write!(formatter, "the record's application failed: {error}"),
+            Self::Accept => formatter.write_str("the activation took a record again"),
             Self::Completion => formatter.write_str("an activation that did not run completed"),
             Self::Start => {
                 formatter.write_str("the sandbox started before the activation was ready, or again")
@@ -622,10 +563,9 @@ impl fmt::Display for GuestRestoreCause {
 
 /// Why a [`GuestRestore`] failed, finally: the state in which it failed, and its cause.
 ///
-/// Its `Display` form names both, such as `the activation failed in its restricted state: the
-/// host sent a request before the activation was ready`. A guest restore keeps its failure,
-/// which every later call returns again. The failure has no exit status: the adapter that ends
-/// the VM documents its own.
+/// Its `Display` form names both, such as `the activation failed in its pending state: the
+/// restore packet carried no record`. A guest restore keeps its failure, which every later call
+/// returns again. The failure has no exit status: the adapter that ends the VM documents its own.
 #[derive(Clone, Debug)]
 pub struct GuestRestoreFailure {
     /// The state in which the guest restore failed.
@@ -667,19 +607,20 @@ impl Error for GuestRestoreFailure {
     }
 }
 
-/// Where a [`GuestRestore`] is, with the Activate that it accepted, from the activating state on.
+/// Where a [`GuestRestore`] is, with what Ready reports about its accepted record, from the
+/// activating state on.
 #[derive(Clone, Debug)]
 enum State {
-    /// The transport bootstrap.
-    Bootstrap,
-    /// The restricted session.
-    Restricted,
-    /// The adapter applies the accepted Activate's record.
-    Activating(Accepted),
+    /// The guest restore awaits the packet's record.
+    Pending,
+    /// The adapter applies the accepted record.
+    Activating(GuestRestoreReady),
+    /// The record applied, and the guest restore awaits the host's request for Ready.
+    Applied(GuestRestoreReady),
     /// Ready, with the mappings pending.
-    Ready(Accepted),
+    Ready(GuestRestoreReady),
     /// The adapter's order started the sandbox.
-    Started(Accepted),
+    Started(GuestRestoreReady),
     /// The guest restore failed, finally, with this failure.
     Failed(GuestRestoreFailure),
 }
@@ -688,46 +629,12 @@ impl State {
     /// Returns the state's name.
     fn name(&self) -> GuestRestoreState {
         match self {
-            Self::Bootstrap => GuestRestoreState::Bootstrap,
-            Self::Restricted => GuestRestoreState::Restricted,
+            Self::Pending => GuestRestoreState::Pending,
             Self::Activating(_) => GuestRestoreState::Activating,
+            Self::Applied(_) => GuestRestoreState::Applied,
             Self::Ready(_) => GuestRestoreState::Ready,
             Self::Started(_) => GuestRestoreState::Started,
             Self::Failed(_) => GuestRestoreState::Failed,
-        }
-    }
-}
-
-/// The Activate that a [`GuestRestore`] accepted, against which it checks each retry.
-#[derive(Clone, Debug)]
-struct Accepted {
-    /// The bytes of its record, to which a retry's must be equal.
-    record: Box<[u8]>,
-    /// The transaction that its record names.
-    transaction: TransactionId,
-    /// What Ready reports about its guest restore.
-    ready: GuestRestoreReady,
-}
-
-impl Accepted {
-    /// Returns why a retry whose record's bytes are `record`, which are not the accepted record's,
-    /// is refused: its record does not decode, or is a cold boot's, as the first Activate's would
-    /// have been refused, or it names another transaction, or it changes the record of the same
-    /// one.
-    fn refusal(&self, record: &[u8]) -> GuestRestoreCause {
-        let decoded = match GuestRestoreRecord::decode(record) {
-            Ok(decoded) => decoded,
-            Err(error) => return GuestRestoreCause::Record(error),
-        };
-        match decoded.restore() {
-            None => GuestRestoreCause::Cold,
-            Some(restore) if restore.transaction != self.transaction => {
-                GuestRestoreCause::Transaction {
-                    accepted: self.transaction,
-                    offered: restore.transaction,
-                }
-            }
-            Some(_) => GuestRestoreCause::Changed,
         }
     }
 }

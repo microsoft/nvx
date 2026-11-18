@@ -24,6 +24,7 @@ impl Restore {
             generation_id,
             memory_ranges: Vec::new(),
             network: None,
+            activation: None,
             finished: false,
             seed: None,
         }
@@ -44,6 +45,13 @@ impl Restore {
     /// Returns the restore with the host's input gated until the guest acknowledges it.
     pub(crate) fn gated(mut self) -> Self {
         self.flags |= decoders::PACKET_ACK_REQUIRED;
+        self
+    }
+
+    /// Returns the restore whose packet ends with the activation record `record`.
+    pub(crate) fn with_activation_record(mut self, record: &[u8]) -> Self {
+        self.flags |= decoders::PACKET_ACTIVATION;
+        self.activation = Some(record.to_vec());
         self
     }
 
@@ -588,6 +596,7 @@ fn requests_and_restores_carry_the_abi_values() {
         generation_id: GenerationId::from_bytes([7; GenerationId::LENGTH]),
         memory_ranges: vec![range],
         network: None,
+        activation: None,
         finished: false,
         seed: None,
     };
@@ -614,6 +623,7 @@ fn requests_and_restores_carry_the_abi_values() {
         online_vp_count: 0,
         memory_ranges: Vec::new(),
         network: None,
+        activation: None,
         finished: true,
         ..networked
     };
@@ -679,6 +689,7 @@ fn a_restore_hands_over_its_seed_once_and_formats_none_of_it() {
         generation_id: seed.generation_id(),
         memory_ranges: Vec::new(),
         network: None,
+        activation: None,
         finished: false,
         seed: Some(seed),
     };
@@ -901,6 +912,7 @@ fn capture_in_each_mode() {
     let id = restore.generation_id().to_bytes();
     assert_eq!(id[..], entropy[..GenerationId::LENGTH]);
     assert_eq!(restore.take_seed().map(|seed| *seed.bytes()), Some(entropy));
+    assert_eq!(restore.activation_record(), None);
     assert!(!path.exists() && !holds(Path::new("/run"), secret));
     let request = CaptureRequest::in_memory(ScratchPolicy::Fresh, previous);
     let (outcome, _, adjustments) = capture_with(vec![0], request);
@@ -933,6 +945,16 @@ fn capture_in_each_mode() {
     let (outcome, _, _) = capture_with(vec![0], request);
     assert!(matches!(outcome, CaptureOutcome::Continued), "{outcome:?}");
     assert!(!path.exists());
+
+    // A restore whose packet ends with an activation record hands the record over, undecoded.
+    let record = [0xa1, 0xa2, 0xa3, 0xa4, 0xa5];
+    let request = CaptureRequest::in_memory(ScratchPolicy::Fresh, previous);
+    let (CaptureOutcome::Restored(restore), _, _) =
+        capture_with(restore_input_with(3, &entropy, Some(&record)), request)
+    else {
+        panic!("the capture with an activation record restored nothing");
+    };
+    assert_eq!(restore.activation_record(), Some(&record[..]));
 
     // A kernel that refuses the hold fails the request before it writes the snapshot port, and
     // the failure's event reaches the debug console in a port transaction of its own.

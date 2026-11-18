@@ -34,6 +34,9 @@ pub(crate) enum SessionError {
     Refused(io::Error),
     /// The peer violated the protocol.
     Protocol(String),
+    /// A restored guest refused the request for its Ready as an unsupported operation, as a guest
+    /// that takes its guest-restore record otherwise than from its restore packet does.
+    IncompatibleGuest,
     /// An I/O error occurred.
     Io(io::Error),
 }
@@ -50,6 +53,12 @@ impl fmt::Display for SessionError {
             }
             Self::Refused(error) => write!(formatter, "the control endpoint was refused: {error}"),
             Self::Protocol(message) => formatter.write_str(message),
+            Self::IncompatibleGuest => formatter.write_str(
+                "the restored guest refused the request for its Ready, as a guest that takes its \
+                 guest-restore record otherwise than from its restore packet does: use a guest \
+                 that takes it from the packet, such as the one of this build's release, and \
+                 capture the snapshot again",
+            ),
             Self::Io(error) => write!(formatter, "control I/O failed: {error}"),
         }
     }
@@ -192,19 +201,32 @@ impl ControlSession {
         self.acknowledged(Frame::Capture(&payload), "capture", deadline)
     }
 
-    /// Sends nvx-init's activate message, whose `payload` carries a restore's guest-restore record
-    /// and workload identity, and returns the guest restore that the guest's Ready reports.
-    pub(crate) fn activate(
+    /// Asks a restored clone for its Ready, with a `PING`, and returns the guest restore that the
+    /// guest's Ready reports.
+    ///
+    /// A guest that refuses the request as an unsupported operation takes its guest-restore record
+    /// otherwise than from its restore packet, as a guest that awaits an activate request does,
+    /// which fails with [`SessionError::IncompatibleGuest`].
+    pub(crate) fn ready(
         &mut self,
-        payload: &[u8],
         deadline: Instant,
     ) -> Result<crate::guest_restore::GuestRestoreReady, SessionError> {
         let request_id = request_id()?;
-        self.send(request_id, Frame::Activate(payload), Some(deadline))?;
+        self.send(request_id, Frame::Ping, Some(deadline))?;
         let reply = self.reply(request_id, Some(deadline))?;
-        let ready = ready(Frame::decode(&reply)?.1)?.ok_or_else(|| {
-            SessionError::Protocol("the guest agent did not activate the restore".to_owned())
-        })?;
+        let frame = Frame::decode(&reply)?.1;
+        if let Frame::Error { category, .. } = frame
+            && category == protocol::UNSUPPORTED_OPERATION
+        {
+            return Err(SessionError::IncompatibleGuest);
+        }
+        let ready = ready(frame)?
+            .filter(|ready| !ready.is_empty())
+            .ok_or_else(|| {
+                SessionError::Protocol(
+                    "the guest agent did not report a restored clone's Ready".to_owned(),
+                )
+            })?;
         crate::guest_restore::GuestRestoreReady::decode(ready).map_err(|error| {
             SessionError::Protocol(format!("the guest's Ready is invalid: {error}"))
         })

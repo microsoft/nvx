@@ -4,9 +4,10 @@
 //! control sessions until the guest's Ready, then sends the VM's mapping table and starts its
 //! workload, whose standard input it ends at once, and returns the live [`ControlSession`], of
 //! NVXC version 2, in which the workload's events arrive. The restore-ready client and the
-//! control server must be the VM's held process. Each session carries the same activate message:
-//! the guest-restore record and the workload's identity. A lost session is replaced, in at most
-//! [`MAX_SESSIONS`] sessions in all.
+//! control server must be the VM's held process. The guest took its guest-restore record, and the
+//! workload's identity, from its restore packet, which the launch supplied, so each session only
+//! asks for the guest's Ready. A lost session is replaced, in at most [`MAX_SESSIONS`] sessions in
+//! all.
 //!
 //! Every pending accept, read and write races the step's deadline, the caller's [`Cancel`] and
 //! the VM's verified exit. The restore-ready endpoint and the control endpoint are waited for in
@@ -39,13 +40,13 @@ use super::transport::Transport;
 use super::vm::{Capability, Launched, VmOutputs};
 use crate::ErrorKind;
 use crate::guest_restore::GuestRestoreRecord;
-use crate::protocol::{self, HostMap, workload::WorkloadIdentity};
+use crate::protocol::{self, HostMap};
 
 /// How long a restore may take, from the driver's start to the guest's Ready.
 const READY_BUDGET: Duration = Duration::from_secs(60);
 /// How long the mapping table and the workload's Start may take, from the guest's Ready.
 const START_BUDGET: Duration = Duration::from_secs(30);
-/// The most control sessions in which a restore sends its activate message.
+/// The most control sessions in which a restore asks for the guest's Ready.
 const MAX_SESSIONS: usize = 3;
 /// The longest that a wait goes without checking the caller's cancellation and the VM's exit,
 /// and the pause after a lost session, in which the VMM's console notices the loss and an
@@ -60,10 +61,8 @@ const READY_EVENT: &[u8] = b"OPENVMM_RESTORE_READY_V1\n";
 /// The caller's cancellation of a restore, which the restore observes within [`POLL`] once set.
 pub(crate) type Cancel = AtomicBool;
 
-/// The workload that a restored VM runs, and the identity that it runs as.
+/// The workload that a restored VM runs.
 pub(crate) struct Workload<'a> {
-    /// The identity that the activate message carries, as which nvx-init sets up the workload.
-    pub(crate) identity: WorkloadIdentity,
     /// The workload that Start runs.
     pub(crate) exec: protocol::Workload<'a>,
     /// The nonzero request ID of Start, which the workload's events on the returned session
@@ -135,13 +134,12 @@ pub(crate) fn restore(
         // Dropping the sender, also as a panic unwinds, ends the watcher.
         let (_running, stopped) = mpsc::channel::<()>();
         scope.spawn(|| watch.run(stopped));
-        let session = activate(
+        let session = drive(
             &watch,
             ready.as_mut(),
             outputs,
             capability,
             record,
-            workload,
             deadline,
         )?;
         start(&watch, session, record, workload, maps)
@@ -154,26 +152,16 @@ pub(crate) fn restore(
 }
 
 /// Drives the machine to the guest's Ready, and returns the session in which it came.
-fn activate(
+fn drive(
     watch: &Watch<'_>,
     mut listener: Option<&mut ReadyListener>,
     outputs: &VmOutputs,
     capability: &Capability,
     record: &GuestRestoreRecord,
-    workload: &Workload<'_>,
     deadline: Instant,
 ) -> Result<ControlSession, ControlRestoreError> {
     let mut machine = RestoreMachine::new(record);
     machine.input(RestoreInput::Spawned(watch.process.reference().clone()));
-    let payload =
-        protocol::encode_activate_payload(record, &workload.identity).unwrap_or_else(|error| {
-            machine.input(RestoreInput::OperationFailed {
-                phase: RestorePhase::Activate,
-                evidence: RestoreEvidence::InvalidSettings,
-                source: Some(Box::new(error)),
-            });
-            Vec::new()
-        });
     let mut session = None;
     let mut sessions = 0;
     loop {
@@ -204,10 +192,10 @@ fn activate(
                 });
                 (RestorePhase::Connect, result)
             }
-            RestoreAction::SendActivate(_) => {
-                let attached = session.as_mut().expect("activation follows a connection");
-                let result = attached.activate(&payload, deadline);
-                (RestorePhase::Activate, result.map(RestoreInput::GuestReady))
+            RestoreAction::RequestReady => {
+                let attached = session.as_mut().expect("Ready is asked in a session");
+                let result = attached.ready(deadline);
+                (RestorePhase::Ready, result.map(RestoreInput::GuestReady))
             }
         };
         machine.input(match result {
@@ -463,6 +451,7 @@ impl Watch<'_> {
                 phase,
                 evidence: match error {
                     SessionError::Refused(_) => RestoreEvidence::PeerMismatch,
+                    SessionError::IncompatibleGuest => RestoreEvidence::IncompatibleGuest,
                     SessionError::Protocol(_) | SessionError::AuthenticationFailed => {
                         RestoreEvidence::Malformed
                     }

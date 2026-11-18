@@ -40,14 +40,14 @@ use crate::protocol::{
 };
 
 /// The codes of the requests of NVXC that the fake guest of the fixture's restores serves: the
-/// activate message, the mapping table and the workload's Start, and the end of its standard
+/// request for its Ready, the mapping table and the workload's Start, and the end of its standard
 /// input.
-const ACTIVATE: u8 = 0x08;
-/// See [`ACTIVATE`].
+const PING: u8 = 0x01;
+/// See [`PING`].
 const MAPS: u8 = 0x06;
-/// See [`ACTIVATE`].
+/// See [`PING`].
 const EXEC: u8 = 0x02;
-/// See [`ACTIVATE`].
+/// See [`PING`].
 const STDIN_END: u8 = 0x0a;
 
 /// The fake VMM and guest that the fixture's restores spawn in place of OpenVMM.
@@ -62,8 +62,8 @@ fn name() -> Name {
     Name::try_from("source".to_owned()).unwrap()
 }
 
-/// Returns the activation record of an activate request's `payload`, after the workload's UID,
-/// GID, and account flag.
+/// Returns the guest-restore record of an activation record's `payload`, after the workload's
+/// UID, GID, and account flag.
 fn activation(payload: &[u8]) -> (GuestRestoreRecord, (u32, u32, u8)) {
     let id = |at: usize| u32::from_le_bytes(payload[at..at + 4].try_into().unwrap());
     let record = GuestRestoreRecord::decode(&payload[9..]).unwrap();
@@ -161,15 +161,18 @@ impl Fixture {
         behavior: &str,
     ) -> crate::Result<Launched> {
         let arguments = prepared.arguments().to_vec();
-        let ready = arguments
-            .windows(2)
-            .find(|pair| pair[0] == "--restore-ready-path")
-            .map(|pair| pair[1].to_str().unwrap().to_owned())
-            .unwrap();
+        let option = |name: &str| {
+            arguments
+                .windows(2)
+                .find(|pair| pair[0] == name)
+                .map(|pair| pair[1].to_str().unwrap().to_owned())
+        };
+        let ready = option("--restore-ready-path").unwrap();
         let recipe_path = state_dir.with_extension("json");
         let recipe = json!({
             "endpoint": prepared.outputs().endpoint, "ready": ready, "behavior": behavior,
             "trace": state_dir.with_extension("trace"), "outcome": prepared.outputs().outcome,
+            "activation": option("--restore-activation-record"),
         });
         fs::write(&recipe_path, serde_json::to_vec(&recipe).unwrap()).unwrap();
         let mut spawned = self.spawned.lock().unwrap();
@@ -206,6 +209,12 @@ impl Fixture {
 
     fn spawned(&self) -> Vec<(ProcessRef, Vec<OsString>, bool)> {
         self.spawned.lock().unwrap().clone()
+    }
+
+    /// Returns the guest-restore record and the workload's identity of the activation record that
+    /// the latest start of the state directory `state` handed its guest in its restore packet.
+    fn activation(&self, state: &str) -> (GuestRestoreRecord, (u32, u32, u8)) {
+        activation(&fs::read(self.state(state).join(StateFile::ActivationRecord.name())).unwrap())
     }
 
     /// Returns whether the fake VM `index` has exited, which it waits a few seconds for.
@@ -292,8 +301,10 @@ fn named_snapshots_restore_each_image_format_and_upper_with_their_own_policy_and
         fixture.start("state", config, "ready", 30.0).unwrap();
         let requests = fixture.requests("state");
         let kinds: Vec<u8> = requests.iter().map(|(kind, _)| *kind).collect();
-        assert_eq!(kinds, [ACTIVATE, MAPS, EXEC, STDIN_END]);
-        let (record, identity) = activation(&requests[0].1);
+        // The guest takes its record from its restore packet, and the host asks for its Ready.
+        assert_eq!(kinds, [PING, MAPS, EXEC, STDIN_END]);
+        assert!(requests[0].1.is_empty());
+        let (record, identity) = fixture.activation("state");
         assert_eq!(identity, (1000, 1001, 0));
         let configuration = record.configuration();
         // The restore's own policy gives the guest its DNS server and announces its listeners.
@@ -324,6 +335,13 @@ fn named_snapshots_restore_each_image_format_and_upper_with_their_own_policy_and
         let [(reference, arguments, _)] = &fixture.spawned()[..] else {
             panic!("one VM restores");
         };
+        assert!(arguments.windows(2).any(|pair| {
+            pair[0] == "--restore-activation-record"
+                && Path::new(&pair[1])
+                    == fixture
+                        .state("state")
+                        .join(StateFile::ActivationRecord.name())
+        }));
         assert!(
             arguments
                 .windows(2)
@@ -396,9 +414,9 @@ fn a_one_off_restore_installs_the_network_options_of_run_as_its_own_policy() {
     // The guest learns the DNS server that the policy lets it reach, and announces its listeners,
     // which the policy publishes on host loopback.
     let requests = fixture.requests("state");
-    assert_eq!(requests[0].0, ACTIVATE);
+    assert_eq!(requests[0].0, PING);
     assert_eq!(
-        activation(&requests[0].1).0.configuration().network,
+        fixture.activation("state").0.configuration().network,
         Some(Network {
             dns: Some("10.42.0.1".parse().unwrap()),
             publication: Publication::Published,
@@ -714,8 +732,13 @@ fn deprovision_removes_a_restored_sandboxs_view_only_under_its_snapshots_lock() 
         let snapshot = held.open().unwrap();
         let vm = VmDir::open(&state_dir).unwrap();
         let runtime = &fixture.restore.runtime;
-        drop(vm::create(runtime, &fixture.restore.config, Some(&snapshot), &vm).unwrap());
+        // A start's preparation, which links the view and writes the guest's activation record.
+        let mut prepared =
+            vm::create(runtime, &fixture.restore.config, Some(&snapshot), &vm).unwrap();
+        prepared.supply_activation_record(b"record").unwrap();
+        drop(prepared);
     }
+    assert!(state_dir.join(StateFile::ActivationRecord.name()).exists());
     let source = fixture.source();
     // The record of a restored sandbox, of an EROFS image with an upper in RAM.
     let image = fixture.root.path().join("distro.erofs");
@@ -1003,14 +1026,13 @@ fn serve(stream: &mut (impl Read + Write), capability: &[u8], epoch: u64, recipe
             frame.encode(request_id).unwrap()
         };
         let replies = match kind {
-            ACTIVATE if recipe["behavior"] == "malformed" => vec![ready(&[0])],
+            PING if recipe["behavior"] == "malformed" => vec![ready(&[0])],
             // The guest cannot assemble its root, and powers off with the status of the failure's
             // class, which OpenVMM reports, and then exits with, or reports unreadably.
-            ACTIVATE
-                if matches!(
-                    recipe["behavior"].as_str(),
-                    Some("unusable-root" | "unreadable-report")
-                ) =>
+            PING if matches!(
+                recipe["behavior"].as_str(),
+                Some("unusable-root" | "unreadable-report")
+            ) =>
             {
                 let code = status::GUEST_RESTORE_ROOT;
                 let report = json!({
@@ -1025,9 +1047,15 @@ fn serve(stream: &mut (impl Read + Write), capability: &[u8], epoch: u64, recipe
                 fs::write(recipe["outcome"].as_str().unwrap(), report).unwrap();
                 std::process::exit(code.into());
             }
-            ACTIVATE => vec![ready(
-                &GuestRestoreReady::of(&activation(&payload).0).encode(),
-            )],
+            // The guest took its record from its restore packet, whose activation record the
+            // launch supplied, and reports its transaction to the host's request for Ready.
+            PING => {
+                assert!(payload.is_empty());
+                let record = fs::read(recipe["activation"].as_str().unwrap()).unwrap();
+                vec![ready(
+                    &GuestRestoreReady::of(&activation(&record).0).encode(),
+                )]
+            }
             MAPS => vec![ready(&[])],
             // The workload reads its standard input until its end, which follows the Start,
             // writes its output, then exits, with status 3 if it fails, or SIGTERM ends it.

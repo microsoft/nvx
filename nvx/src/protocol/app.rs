@@ -6,7 +6,8 @@
 //! of their request. `v2` holds version 2, NVXC's only version, which carries every control path
 //! and streams an execution's standard input, output and error. This module holds the codes of
 //! its kinds and its error categories, with which NVX's guest agents and the fake OpenVMM serve
-//! it, and the payloads of the capture and activate requests.
+//! it, the payload of the capture request, and the activation record that NVX's host hands a
+//! restored clone in its restore packet.
 
 #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 use super::array;
@@ -95,9 +96,6 @@ pub(crate) const APP_MAPS: u8 = 6;
 /// Request that nvx-init capture the VM after optionally killing its executions.
 #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) const APP_CAPTURE: u8 = 7;
-/// Request that nvx-init activate a restored VM with its record and workload identity.
-#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
-pub(crate) const APP_ACTIVATE: u8 = 8;
 /// Response that acknowledges a request.
 #[cfg(any(
     feature = "testing",
@@ -134,8 +132,10 @@ pub(crate) const APP_STOPPED: u8 = 0x85;
 ))]
 pub(crate) const APP_ERROR: u8 = 0xff;
 
-/// Error category with which a guest agent refuses a request kind that it does not know.
+/// Error category with which a guest agent refuses a request kind that it does not know, or one
+/// that its state does not take.
 #[cfg(any(
+    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
@@ -213,18 +213,27 @@ pub(crate) fn decode_capture_payload(payload: &[u8]) -> Result<bool, ProtocolErr
     }
 }
 
-/// Encodes the persistent workload identity, then the existing guest-restore record.
+/// The bytes of the workload identity that begins NVX's activation record: the UID and the GID,
+/// each a little-endian `u32`, and the account-creation flag.
+#[cfg(any(
+    feature = "cli",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) const ACTIVATION_IDENTITY_LEN: usize = 9;
+
+/// Encodes the activation record that NVX's host hands a restored clone in its restore packet:
+/// the persistent workload identity, then the existing guest-restore record.
 ///
 /// The prefix is the UID and GID as little-endian `u32`s, then the account-creation flag as
 /// exactly 0 or 1. The remainder is the guest-restore record's unchanged encoding.
 #[cfg(feature = "cli")]
-pub(crate) fn encode_activate_payload(
+pub(crate) fn encode_activation_record(
     record: &GuestRestoreRecord,
     workload: &WorkloadIdentity,
 ) -> Result<Vec<u8>, ProtocolError> {
     check_workload_identity(workload)?;
     let record = record.encode();
-    let mut payload = Vec::with_capacity(9 + record.len());
+    let mut payload = Vec::with_capacity(ACTIVATION_IDENTITY_LEN + record.len());
     payload.extend_from_slice(&workload.uid.to_le_bytes());
     payload.extend_from_slice(&workload.gid.to_le_bytes());
     payload.push(u8::from(workload.create_account));
@@ -232,14 +241,15 @@ pub(crate) fn encode_activate_payload(
     Ok(payload)
 }
 
-/// Decodes the persistent workload identity and the guest-restore record that follows it.
+/// Decodes NVX's activation record: the persistent workload identity and the guest-restore record
+/// that follows it.
 #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
-pub(crate) fn decode_activate_payload(
+pub(crate) fn decode_activation_record(
     payload: &[u8],
 ) -> Result<(GuestRestoreRecord, WorkloadIdentity), ProtocolError> {
     let prefix = payload
-        .get(..9)
-        .ok_or_else(|| violation("the activate request is truncated"))?;
+        .get(..ACTIVATION_IDENTITY_LEN)
+        .ok_or_else(|| violation("the activation record is truncated"))?;
     let workload = WorkloadIdentity {
         uid: u32::from_le_bytes(array(&prefix[..4])),
         gid: u32::from_le_bytes(array(&prefix[4..8])),
@@ -248,14 +258,14 @@ pub(crate) fn decode_activate_payload(
             1 => true,
             _ => {
                 return Err(violation(
-                    "the activate request has an invalid account flag",
+                    "the activation record has an invalid account flag",
                 ));
             }
         },
     };
     check_workload_identity(&workload)?;
-    let record = GuestRestoreRecord::decode(&payload[9..])
-        .map_err(|error| violation(format!("invalid activation record: {error}")))?;
+    let record = GuestRestoreRecord::decode(&payload[ACTIVATION_IDENTITY_LEN..])
+        .map_err(|error| violation(format!("invalid guest-restore record: {error}")))?;
     Ok((record, workload))
 }
 

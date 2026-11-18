@@ -1,10 +1,12 @@
-//! Tests of a clone's fence-free activation, with records that each test builds with
-//! `nvx::guest_restore`, a fake clock, whose instants each test takes after a
-//! base instant, and a fake adapter of a framing of the tests' own, whose transport delivers the
-//! host's bytes when and as a test chooses, and whose output takes nothing.
+//! Tests of a clone's fence-free guest restore, with records that each test builds with
+//! `nvx::guest_restore`, a fake clock, whose instants each test takes after a base instant, and a
+//! fake adapter of a framing of the tests' own, whose transport delivers the host's bytes when and
+//! as a test chooses, and whose output takes nothing.
 
 use super::*;
-use crate::guest_restore::{Configuration, Image, MAX_RECORD_BYTES, RestoreSection, Upper};
+use crate::guest_restore::{
+    Configuration, Image, MAX_RECORD_BYTES, RestoreSection, TransactionId, Upper,
+};
 use crate::protocol::root::OverlayMode;
 use crate::protocol::view::{MachineIdMode, View};
 
@@ -14,12 +16,12 @@ const CPUS: u32 = 2;
 const MEMORY: u64 = 8 << 27;
 /// How long the activation may take after the restore's acknowledgement.
 const TIMEOUT: Duration = Duration::from_secs(10);
-/// The transaction of the host's Activate.
+/// The transaction of the clone's restore.
 const TRANSACTION: TransactionId = TransactionId::from_bytes([0x22; TransactionId::LEN]);
 /// The transaction of another restore.
 const OTHER_TRANSACTION: TransactionId = TransactionId::from_bytes([0x33; TransactionId::LEN]);
-/// The kind of the host's Activate in the tests' framing.
-const ACTIVATE: u8 = 1;
+/// The kind of the host's request for Ready in the tests' framing.
+const READY: u8 = 1;
 /// The kind of any other request of the host in the tests' framing.
 const PING: u8 = 2;
 
@@ -73,53 +75,51 @@ fn clone_record(
     GuestRestoreRecord::new(Some(restore), configuration(hostname, resources)).unwrap()
 }
 
-/// Returns the record of the host's Activate: the clone's restore of [`TRANSACTION`], which
-/// expects the clone's resources.
+/// Returns the record of the clone's restore packet: the clone's restore of [`TRANSACTION`],
+/// which expects the clone's resources.
 fn accepted() -> GuestRestoreRecord {
     clone_record(TRANSACTION, b"clone", resources())
 }
 
-/// Returns the bytes of the record of the host's Activate.
+/// Returns the bytes of the record of the clone's restore packet.
 fn record() -> Vec<u8> {
     accepted().encode()
 }
 
-/// Returns what Ready reports about the activation of the host's Activate.
+/// Returns what Ready reports about the activation of the packet's record.
 fn reported() -> GuestRestoreReady {
     GuestRestoreReady::of(&accepted())
 }
 
-/// Returns the activation, in its transport bootstrap, of the clone whose repair
+/// Returns the activation, which awaits the packet's record, of the clone whose repair
 /// acknowledged its restore at `acknowledged`.
-fn bootstrap(acknowledged: Instant) -> GuestRestore {
+fn pending(acknowledged: Instant) -> GuestRestore {
     GuestRestore::with_resources(resources(), Some(acknowledged), TIMEOUT, acknowledged)
 }
 
-/// Returns the activation of [`bootstrap`] once the session's reset at `at` restricted it.
-fn restricted(at: Instant) -> GuestRestore {
-    let mut activation = bootstrap(at);
-    let action = activation.input(at, GuestRestoreInput::Reset).unwrap();
-    assert_eq!(action, GuestRestoreAction::Acknowledge);
-    assert_eq!(activation.state(), GuestRestoreState::Restricted);
-    activation
-}
-
-/// Returns the activation of [`restricted`] once it accepted the host's Activate at `at`.
+/// Returns the activation of [`pending`] once it accepted the packet's record at `at`.
 fn activating(at: Instant) -> GuestRestore {
-    let mut activation = restricted(at);
-    let action = activation
-        .input(at, GuestRestoreInput::Activate(&record()))
-        .unwrap();
-    assert_eq!(action, GuestRestoreAction::Apply(Box::new(accepted())));
+    let mut activation = pending(at);
+    let record = activation.accept(at, Some(&record())).unwrap();
+    assert_eq!(*record, accepted());
     assert_eq!(activation.state(), GuestRestoreState::Activating);
     activation
 }
 
 /// Returns the activation of [`activating`] once its application of the record completed at
-/// `at`.
-fn ready(at: Instant) -> GuestRestore {
+/// `at`, before the host asked for Ready.
+fn applied(at: Instant) -> GuestRestore {
     let mut activation = activating(at);
     assert_eq!(activation.complete(at, Ok(())).unwrap(), reported());
+    assert_eq!(activation.state(), GuestRestoreState::Applied);
+    activation
+}
+
+/// Returns the activation of [`applied`] once the host asked for Ready at `at`.
+fn ready(at: Instant) -> GuestRestore {
+    let mut activation = applied(at);
+    let action = activation.input(at, GuestRestoreInput::Ready).unwrap();
+    assert_eq!(action, GuestRestoreAction::Ready(reported()));
     assert_eq!(activation.state(), GuestRestoreState::Ready);
     activation
 }
@@ -143,12 +143,11 @@ fn assert_final(activation: &mut GuestRestore, failure: &GuestRestoreFailure, no
     let later = [
         activation.input(now, GuestRestoreInput::Flow).unwrap_err(),
         activation.input(now, GuestRestoreInput::Reset).unwrap_err(),
-        activation
-            .input(now, GuestRestoreInput::Activate(&record))
-            .unwrap_err(),
+        activation.input(now, GuestRestoreInput::Ready).unwrap_err(),
         activation
             .input(now, GuestRestoreInput::Request)
             .unwrap_err(),
+        activation.accept(now, Some(&record)).map(drop).unwrap_err(),
         activation.complete(now, Ok(())).unwrap_err(),
         activation.start().unwrap_err(),
         activation.tick(now).unwrap_err(),
@@ -160,38 +159,36 @@ fn assert_final(activation: &mut GuestRestore, failure: &GuestRestoreFailure, no
 }
 
 #[test]
-fn a_clone_bootstraps_takes_one_activate_and_becomes_ready_without_a_fence() {
+fn a_clone_activates_from_its_packet_before_the_host_asks_and_becomes_ready_without_a_fence() {
     let t0 = Instant::now();
 
-    let mut activation = bootstrap(t0);
-    assert_eq!(activation.state(), GuestRestoreState::Bootstrap);
+    let mut activation = pending(t0);
+    assert_eq!(activation.state(), GuestRestoreState::Pending);
     assert_eq!(activation.deadline(), Some(after(t0, 10)));
-    // Bytes of the session's reset arrive before it completes, and then the reset.
-    let flow = activation.input(after(t0, 1), GuestRestoreInput::Flow);
-    assert_eq!(flow.unwrap(), GuestRestoreAction::Continue);
-    let reset = activation.input(after(t0, 1), GuestRestoreInput::Reset);
-    assert_eq!(reset.unwrap(), GuestRestoreAction::Acknowledge);
-    assert_eq!(activation.state(), GuestRestoreState::Restricted);
-    let flow = activation.input(after(t0, 2), GuestRestoreInput::Flow);
-    assert_eq!(flow.unwrap(), GuestRestoreAction::Continue);
-    // The Activate's record, which the activation decoded, goes to the adapter, which applies it.
-    let action = activation.input(after(t0, 2), GuestRestoreInput::Activate(&record()));
-    assert_eq!(
-        action.unwrap(),
-        GuestRestoreAction::Apply(Box::new(accepted()))
-    );
+    // The packet's record, which the activation decoded, goes back to the adapter, which applies
+    // it, before anything of the session.
+    let record = activation.accept(after(t0, 1), Some(&record())).unwrap();
+    assert_eq!(*record, accepted());
     assert_eq!(activation.state(), GuestRestoreState::Activating);
     assert_eq!(activation.deadline(), Some(after(t0, 10)));
     assert_eq!(activation.established(), None);
-
-    let flow = activation.input(after(t0, 3), GuestRestoreInput::Flow);
-    assert_eq!(flow.unwrap(), GuestRestoreAction::Continue);
-    // Once the application succeeded, Ready reports the activation, with the
-    // record's transaction.
-    let ready = activation.complete(after(t0, 4), Ok(())).unwrap();
+    // Once the application succeeded, the activation awaits the host's request for Ready, by the
+    // same deadline.
+    let ready = activation.complete(after(t0, 2), Ok(())).unwrap();
     assert_eq!(ready, reported());
     assert_eq!(ready.transaction, Some(TRANSACTION));
-
+    assert_eq!(activation.state(), GuestRestoreState::Applied);
+    assert_eq!(activation.deadline(), Some(after(t0, 10)));
+    assert_eq!(activation.established(), None);
+    // The session's reset, which the restore queued, and its flow, change nothing of the record.
+    let reset = activation.input(after(t0, 3), GuestRestoreInput::Reset);
+    assert_eq!(reset.unwrap(), GuestRestoreAction::Acknowledge);
+    let flow = activation.input(after(t0, 3), GuestRestoreInput::Flow);
+    assert_eq!(flow.unwrap(), GuestRestoreAction::Continue);
+    assert_eq!(activation.state(), GuestRestoreState::Applied);
+    // The host's request for Ready makes the clone ready, and gets what Ready reports.
+    let ready = activation.input(after(t0, 4), GuestRestoreInput::Ready);
+    assert_eq!(ready.unwrap(), GuestRestoreAction::Ready(reported()));
     assert_eq!(activation.state(), GuestRestoreState::Ready);
     assert_eq!(activation.established(), Some(reported()));
     // No deadline holds a ready clone: the host's mapping table and its start go to the adapter's
@@ -210,45 +207,76 @@ fn a_clone_bootstraps_takes_one_activate_and_becomes_ready_without_a_fence() {
 }
 
 #[test]
-fn no_request_is_accepted_before_activate() {
+fn a_request_for_ready_before_the_record_applied_joins_the_activation_of_its_session() {
     let t0 = Instant::now();
-    let record = record();
-    // Before the session's bootstrap, the host can send nothing, Activate included; while the
-    // session is restricted, and while the activation runs, nothing but the Activate.
-    let cases: [(Setup, GuestRestoreInput<'_>); 4] = [
-        (bootstrap, GuestRestoreInput::Request),
-        (bootstrap, GuestRestoreInput::Activate(&record)),
-        (restricted, GuestRestoreInput::Request),
-        (activating, GuestRestoreInput::Request),
-    ];
-    for (activation, input) in cases {
+    // A request for Ready while the record awaits acceptance, or applies, joins the activation,
+    // whose completion makes the clone ready, and answers it.
+    let states: [Setup; 2] = [pending, activating];
+    for activation in states {
+        let mut activation = activation(t0);
+        let join = activation.input(after(t0, 1), GuestRestoreInput::Ready);
+        assert_eq!(join.unwrap(), GuestRestoreAction::Join);
+        if activation.state() == GuestRestoreState::Pending {
+            activation.accept(after(t0, 2), Some(&record())).unwrap();
+        }
+        assert_eq!(
+            activation.complete(after(t0, 3), Ok(())).unwrap(),
+            reported()
+        );
+        assert_eq!(activation.state(), GuestRestoreState::Ready);
+        assert_eq!(activation.established(), Some(reported()));
+        assert_eq!(activation.deadline(), None);
+    }
+    // A reset abandons the request of the earlier session, which the host asks again in the
+    // later one: the activation completes applied, and awaits it.
+    let mut activation = activating(t0);
+    let join = activation.input(after(t0, 1), GuestRestoreInput::Ready);
+    assert_eq!(join.unwrap(), GuestRestoreAction::Join);
+    let reset = activation.input(after(t0, 2), GuestRestoreInput::Reset);
+    assert_eq!(reset.unwrap(), GuestRestoreAction::Acknowledge);
+    activation.complete(after(t0, 3), Ok(())).unwrap();
+    assert_eq!(activation.state(), GuestRestoreState::Applied);
+    let ready = activation.input(after(t0, 4), GuestRestoreInput::Ready);
+    assert_eq!(ready.unwrap(), GuestRestoreAction::Ready(reported()));
+}
+
+#[test]
+fn no_other_request_is_accepted_before_ready() {
+    let t0 = Instant::now();
+    // Before the clone is ready, nothing but the host's request for Ready.
+    let states: [Setup; 3] = [pending, activating, applied];
+    for activation in states {
         let mut activation = activation(t0);
         let state = activation.state();
-        let failure = activation.input(after(t0, 1), input).unwrap_err();
-        assert_eq!(failure.state(), state, "{input:?}");
+        let failure = activation
+            .input(after(t0, 1), GuestRestoreInput::Request)
+            .unwrap_err();
+        assert_eq!(failure.state(), state);
         assert!(matches!(failure.cause(), GuestRestoreCause::Request));
         assert_final(&mut activation, &failure, after(t0, 2));
     }
 }
 
 #[test]
-fn a_reset_before_ready_is_final_and_one_after_it_starts_a_later_session() {
+fn resets_start_later_sessions_whose_requests_get_the_same_ready() {
     let t0 = Instant::now();
-    // Only the reset that the restore queued bootstraps the session: another, such as once the
-    // host's attachment ended, fails the activation before it is ready.
-    for activation in [restricted, activating] {
+    // A reset at any point before the clone is ready, such as once the host's attachment ended,
+    // changes nothing of the record, which came with the restore.
+    let states: [Setup; 3] = [pending, activating, applied];
+    for activation in states {
         let mut activation = activation(t0);
         let state = activation.state();
-        let failure = activation
-            .input(after(t0, 1), GuestRestoreInput::Reset)
-            .unwrap_err();
-        assert_eq!(failure.state(), state);
-        assert!(matches!(failure.cause(), GuestRestoreCause::Reset));
-        assert_final(&mut activation, &failure, after(t0, 1));
+        for second in 1..=3 {
+            let reset = activation.input(after(t0, second), GuestRestoreInput::Reset);
+            assert_eq!(reset.unwrap(), GuestRestoreAction::Acknowledge);
+            assert_eq!(activation.state(), state);
+            assert_eq!(activation.deadline(), Some(after(t0, 10)));
+        }
     }
-    // Once the clone is ready, or started, a reset starts a later session, which gets the
-    // established activation and transaction without activating again.
-    for activation in [ready, started] {
+    // Once the clone is ready, or started, each later session gets the established activation and
+    // transaction without activating again.
+    let states: [Setup; 2] = [ready, started];
+    for activation in states {
         let mut activation = activation(t0);
         let state = activation.state();
         for session in 1..=3 {
@@ -257,8 +285,8 @@ fn a_reset_before_ready_is_final_and_one_after_it_starts_a_later_session() {
             assert_eq!(reset.unwrap(), GuestRestoreAction::Acknowledge);
             assert_eq!(activation.state(), state);
             assert_eq!(activation.established(), Some(reported()));
-            let retry = activation.input(now, GuestRestoreInput::Activate(&record()));
-            assert_eq!(retry.unwrap(), GuestRestoreAction::Ready(reported()));
+            let again = activation.input(now, GuestRestoreInput::Ready);
+            assert_eq!(again.unwrap(), GuestRestoreAction::Ready(reported()));
             let request = activation.input(now, GuestRestoreInput::Request);
             assert_eq!(request.unwrap(), GuestRestoreAction::Serve);
         }
@@ -266,131 +294,7 @@ fn a_reset_before_ready_is_final_and_one_after_it_starts_a_later_session() {
 }
 
 #[test]
-fn retries_join_the_running_activation_and_get_its_cached_result() {
-    let t0 = Instant::now();
-
-    let mut activation = activating(t0);
-    // A retry of the same transaction, with a byte-equal record, joins the activation that runs,
-    // whose deadline stays where it was.
-    for second in 1..=3 {
-        let retry = activation.input(after(t0, second), GuestRestoreInput::Activate(&record()));
-        assert_eq!(retry.unwrap(), GuestRestoreAction::Join);
-        assert_eq!(activation.state(), GuestRestoreState::Activating);
-        assert_eq!(activation.deadline(), Some(after(t0, 10)));
-    }
-
-    assert_eq!(
-        activation.complete(after(t0, 4), Ok(())).unwrap(),
-        reported()
-    );
-    // Afterwards, one gets the cached result, before and after the start, without applying the
-    // record again.
-    let retry = activation.input(after(t0, 5), GuestRestoreInput::Activate(&record()));
-    assert_eq!(retry.unwrap(), GuestRestoreAction::Ready(reported()));
-    activation.start().unwrap();
-    let retry = activation.input(after(t0, 6), GuestRestoreInput::Activate(&record()));
-    assert_eq!(retry.unwrap(), GuestRestoreAction::Ready(reported()));
-    assert_eq!(activation.state(), GuestRestoreState::Started);
-}
-
-#[test]
-fn a_changed_record_or_a_new_transaction_is_final() {
-    let t0 = Instant::now();
-    let renamed = clone_record(TRANSACTION, b"renamed", resources()).encode();
-    let other = clone_record(OTHER_TRANSACTION, b"clone", resources()).encode();
-    let cold = GuestRestoreRecord::new(None, configuration(b"clone", resources()))
-        .unwrap()
-        .encode();
-    let whole = record();
-    let truncated = &whole[..whole.len() - 1];
-    let retries: [(&[u8], Expected); 4] = [
-        (&renamed, |cause| {
-            matches!(cause, GuestRestoreCause::Changed)
-        }),
-        (&other, |cause| {
-            matches!(
-                cause,
-                GuestRestoreCause::Transaction {
-                    accepted: TRANSACTION,
-                    offered: OTHER_TRANSACTION,
-                }
-            )
-        }),
-        (&cold, |cause| matches!(cause, GuestRestoreCause::Cold)),
-        (truncated, |cause| {
-            matches!(
-                cause,
-                GuestRestoreCause::Record(GuestRestoreError::Truncated)
-            )
-        }),
-    ];
-    // While the activation runs, and once it is ready or started.
-    let states: [Setup; 3] = [activating, ready, started];
-    for activation in states {
-        for (retry, cause) in retries {
-            let mut activation = activation(t0);
-            let state = activation.state();
-            let failure = activation
-                .input(after(t0, 1), GuestRestoreInput::Activate(retry))
-                .unwrap_err();
-            assert_eq!(failure.state(), state);
-            assert!(cause(failure.cause()), "{state}: {failure}");
-            assert_final(&mut activation, &failure, after(t0, 2));
-        }
-    }
-}
-
-#[test]
-fn an_activate_too_long_to_read_fails_as_a_record_that_long() {
-    let t0 = Instant::now();
-    // In the transport bootstrap, as any Activate.
-
-    let mut activation = bootstrap(t0);
-    let failure = activation
-        .input(
-            after(t0, 1),
-            GuestRestoreInput::TooLong(MAX_RECORD_BYTES + 1),
-        )
-        .unwrap_err();
-    assert_eq!(failure.state(), GuestRestoreState::Bootstrap);
-    assert!(matches!(failure.cause(), GuestRestoreCause::Request));
-    assert_final(&mut activation, &failure, after(t0, 2));
-    // From then on, as an Activate whose record has that many bytes, which no record has: while
-    // restricted, while the activation runs, and once it is ready or started.
-    let states: [Setup; 4] = [restricted, activating, ready, started];
-    for activation in states {
-        for length in [MAX_RECORD_BYTES + 1, usize::MAX] {
-            let mut activation = activation(t0);
-            let state = activation.state();
-            let failure = activation
-                .input(after(t0, 1), GuestRestoreInput::TooLong(length))
-                .unwrap_err();
-            assert_eq!(failure.state(), state);
-            assert!(
-                matches!(
-                    failure.cause(),
-                    GuestRestoreCause::Record(GuestRestoreError::TooLong(long)) if *long == length
-                ),
-                "{state}: {failure}"
-            );
-            assert_final(&mut activation, &failure, after(t0, 2));
-        }
-    }
-    // Past the deadline, before the clone is ready, it fails as every input does.
-
-    let mut activation = restricted(t0);
-    let failure = activation
-        .input(
-            after(t0, 10),
-            GuestRestoreInput::TooLong(MAX_RECORD_BYTES + 1),
-        )
-        .unwrap_err();
-    assert!(matches!(failure.cause(), GuestRestoreCause::Expired));
-    assert_final(&mut activation, &failure, after(t0, 11));
-}
-
-#[test]
-fn a_failed_application_is_final_and_no_retry_applies_the_record_again() {
+fn a_failed_application_is_final_and_nothing_applies_the_record_again() {
     let t0 = Instant::now();
 
     let mut activation = activating(t0);
@@ -406,12 +310,13 @@ fn a_failed_application_is_final_and_no_retry_applies_the_record_again() {
         failure.source().unwrap().to_string(),
         "the root's assembly failed"
     );
-    // A byte-equal retry neither joins nor applies the record again: it gets the failure.
+    // Neither a request for Ready nor the packet's record applies the record again: each gets the
+    // failure.
     assert_final(&mut activation, &failure, after(t0, 2));
 }
 
 #[test]
-fn an_activate_is_decoded_and_validated_before_any_side_effect() {
+fn the_packet_s_record_is_decoded_and_validated_before_any_side_effect() {
     let t0 = Instant::now();
     let mut long = record();
     long.resize(MAX_RECORD_BYTES + 1, 0);
@@ -433,28 +338,29 @@ fn an_activate_is_decoded_and_validated_before_any_side_effect() {
         cpus: CPUS,
         memory: MEMORY + (64 << 20),
     };
-    let cases: [(Vec<u8>, Expected); 8] = [
-        (Vec::new(), |cause| {
+    let cases: [(Option<Vec<u8>>, Expected); 9] = [
+        (None, |cause| matches!(cause, GuestRestoreCause::Missing)),
+        (Some(Vec::new()), |cause| {
             matches!(
                 cause,
                 GuestRestoreCause::Record(GuestRestoreError::Truncated)
             )
         }),
-        (long, |cause| {
+        (Some(long), |cause| {
             matches!(
                 cause,
                 GuestRestoreCause::Record(GuestRestoreError::TooLong(1025))
             )
         }),
-        (version, |cause| {
+        (Some(version), |cause| {
             matches!(
                 cause,
                 GuestRestoreCause::Record(GuestRestoreError::Version(1))
             )
         }),
-        (cold, |cause| matches!(cause, GuestRestoreCause::Cold)),
+        (Some(cold), |cause| matches!(cause, GuestRestoreCause::Cold)),
         (
-            clone_record(TRANSACTION, b"clone", more_cpus).encode(),
+            Some(clone_record(TRANSACTION, b"clone", more_cpus).encode()),
             |cause| {
                 matches!(
                     cause,
@@ -469,72 +375,79 @@ fn an_activate_is_decoded_and_validated_before_any_side_effect() {
             },
         ),
         (
-            clone_record(TRANSACTION, b"clone", less_memory).encode(),
+            Some(clone_record(TRANSACTION, b"clone", less_memory).encode()),
             |cause| matches!(cause, GuestRestoreCause::Resources { expected, .. } if expected.memory == MEMORY - (128 << 20)),
         ),
         (
-            clone_record(TRANSACTION, b"clone", partial_block).encode(),
+            Some(clone_record(TRANSACTION, b"clone", partial_block).encode()),
             |cause| matches!(cause, GuestRestoreCause::Resources { expected, .. } if expected.memory == MEMORY + (64 << 20)),
         ),
         (
-            clone_record(OTHER_TRANSACTION, b"clone", more_cpus).encode(),
+            Some(clone_record(OTHER_TRANSACTION, b"clone", more_cpus).encode()),
             |cause| matches!(cause, GuestRestoreCause::Resources { .. }),
         ),
     ];
     for (bytes, cause) in cases {
-        let mut activation = restricted(t0);
+        let mut activation = pending(t0);
         let failure = activation
-            .input(after(t0, 1), GuestRestoreInput::Activate(&bytes))
+            .accept(after(t0, 1), bytes.as_deref())
             .unwrap_err();
-        assert_eq!(failure.state(), GuestRestoreState::Restricted);
+        assert_eq!(failure.state(), GuestRestoreState::Pending);
         assert!(cause(failure.cause()), "{failure}");
         assert_final(&mut activation, &failure, after(t0, 2));
     }
     // A valid record goes to the adapter exactly as it decodes, and opens nothing yet.
-
-    let mut activation = restricted(t0);
-    let action = activation.input(after(t0, 1), GuestRestoreInput::Activate(&record()));
-    assert_eq!(
-        action.unwrap(),
-        GuestRestoreAction::Apply(Box::new(GuestRestoreRecord::decode(&record()).unwrap()))
-    );
+    let mut activation = pending(t0);
+    let accepted = activation.accept(after(t0, 1), Some(&record())).unwrap();
+    assert_eq!(*accepted, GuestRestoreRecord::decode(&record()).unwrap());
+    assert_eq!(activation.established(), None);
 }
 
 #[test]
-fn the_deadline_starts_at_the_acknowledgement_and_retries_never_extend_it() {
+fn the_deadline_starts_at_the_acknowledgement_and_holds_until_the_host_asks() {
     let t0 = Instant::now();
 
     // The repair acknowledged the restore at `t0`, and the adapter made the activation later.
     let mut activation = GuestRestore::with_resources(resources(), Some(t0), TIMEOUT, after(t0, 3));
     assert_eq!(activation.deadline(), Some(after(t0, 10)));
+    activation.accept(after(t0, 8), Some(&record())).unwrap();
+    activation.complete(after(t0, 9), Ok(())).unwrap();
     activation
-        .input(after(t0, 8), GuestRestoreInput::Reset)
+        .input(after(t0, 9), GuestRestoreInput::Reset)
         .unwrap();
-    let action = activation.input(after(t0, 9), GuestRestoreInput::Activate(&record()));
-    assert_eq!(
-        action.unwrap(),
-        GuestRestoreAction::Apply(Box::new(accepted()))
-    );
     let late = after(t0, 9) + Duration::from_millis(999);
-    let retry = activation.input(late, GuestRestoreInput::Activate(&record()));
-    assert_eq!(retry.unwrap(), GuestRestoreAction::Join);
     activation.tick(late).unwrap();
     assert_eq!(activation.deadline(), Some(after(t0, 10)));
-    // At the deadline, the activation fails, however its application ends after it.
+    // At the deadline, the applied activation of a clone whose host never asked fails.
     let failure = activation.tick(after(t0, 10)).unwrap_err();
-    assert_eq!(failure.state(), GuestRestoreState::Activating);
+    assert_eq!(failure.state(), GuestRestoreState::Applied);
     assert!(matches!(failure.cause(), GuestRestoreCause::Expired));
     assert_final(&mut activation, &failure, after(t0, 11));
-    // An application that completes at the deadline completes too late, as does any input.
-    for complete in [true, false] {
-        let mut activation = activating(t0);
-        let failure = if complete {
-            activation.complete(after(t0, 10), Ok(())).unwrap_err()
-        } else {
-            let retry = GuestRestoreInput::Activate(&record());
-            activation.input(after(t0, 10), retry).unwrap_err()
-        };
-        assert_eq!(failure.state(), GuestRestoreState::Activating);
+    // An application that completes at the deadline completes too late, as a request for Ready
+    // does, and the packet's record accepted at the deadline is too late too.
+    let late: [(Setup, Failing); 3] = [
+        (
+            activating,
+            Box::new(move |activation| activation.complete(after(t0, 10), Ok(())).map(drop)),
+        ),
+        (
+            applied,
+            Box::new(move |activation| {
+                activation
+                    .input(after(t0, 10), GuestRestoreInput::Ready)
+                    .map(drop)
+            }),
+        ),
+        (
+            pending,
+            Box::new(move |activation| activation.accept(after(t0, 10), Some(&record())).map(drop)),
+        ),
+    ];
+    for (activation, fail) in late {
+        let mut activation = activation(t0);
+        let state = activation.state();
+        let failure = fail(&mut activation).unwrap_err();
+        assert_eq!(failure.state(), state);
         assert!(matches!(failure.cause(), GuestRestoreCause::Expired));
         assert_final(&mut activation, &failure, after(t0, 11));
     }
@@ -551,7 +464,7 @@ fn an_ungated_restore_s_deadline_starts_at_the_activation() {
     let failure = activation
         .input(after(t0, 15), GuestRestoreInput::Reset)
         .unwrap_err();
-    assert_eq!(failure.state(), GuestRestoreState::Bootstrap);
+    assert_eq!(failure.state(), GuestRestoreState::Pending);
     assert!(matches!(failure.cause(), GuestRestoreCause::Expired));
     assert_final(&mut activation, &failure, after(t0, 16));
     // A deadline that no instant can hold never passes.
@@ -563,11 +476,22 @@ fn an_ungated_restore_s_deadline_starts_at_the_activation() {
 }
 
 #[test]
-fn out_of_order_completions_and_starts_are_final() {
+fn out_of_order_acceptances_completions_and_starts_are_final() {
     let t0 = Instant::now();
-    // An activation completes only while it runs, and the sandbox starts only once it is ready,
-    // and once.
-    let completions: [Setup; 4] = [bootstrap, restricted, ready, started];
+    // An activation takes one record, completes only while it applies it, and the sandbox starts
+    // only once it is ready, and once.
+    let acceptances: [Setup; 4] = [activating, applied, ready, started];
+    for activation in acceptances {
+        let mut activation = activation(t0);
+        let state = activation.state();
+        let failure = activation
+            .accept(after(t0, 1), Some(&record()))
+            .unwrap_err();
+        assert_eq!(failure.state(), state);
+        assert!(matches!(failure.cause(), GuestRestoreCause::Accept));
+        assert_final(&mut activation, &failure, after(t0, 2));
+    }
+    let completions: [Setup; 4] = [pending, applied, ready, started];
     for activation in completions {
         let mut activation = activation(t0);
         let state = activation.state();
@@ -576,7 +500,7 @@ fn out_of_order_completions_and_starts_are_final() {
         assert!(matches!(failure.cause(), GuestRestoreCause::Completion));
         assert_final(&mut activation, &failure, after(t0, 2));
     }
-    let starts: [Setup; 4] = [bootstrap, restricted, activating, started];
+    let starts: [Setup; 4] = [pending, activating, applied, started];
     for activation in starts {
         let mut activation = activation(t0);
         let state = activation.state();
@@ -608,10 +532,10 @@ enum Reply {
 
 /// An adapter of the tests' framing, which drives an activation as an adapter's loop does: it
 /// takes the host's bytes as its transport delivers them, passes the activation each message
-/// that they complete, and flow control for each byte that completes none, keeps the records
-/// that the activation accepts, whose application the test completes when it chooses, and queues
-/// its replies for an output that takes nothing, as a host that reads nothing leaves it, and
-/// which it never waits for.
+/// that they complete, and flow control for each byte that completes none, counts the requests
+/// for Ready of the current session that joined the activation, and queues its replies for an
+/// output that takes nothing, as a host that reads nothing leaves it, and which it never waits
+/// for.
 struct Adapter {
     /// The activation.
     activation: GuestRestore,
@@ -619,8 +543,8 @@ struct Adapter {
     message: Vec<u8>,
     /// The replies that wait for the output.
     output: Vec<Reply>,
-    /// The records whose application the activation handed over.
-    applied: Vec<GuestRestoreRecord>,
+    /// The requests for Ready of the current session that joined the activation.
+    joined: usize,
 }
 
 impl Adapter {
@@ -630,7 +554,7 @@ impl Adapter {
             activation,
             message: Vec::new(),
             output: Vec::new(),
-            applied: Vec::new(),
+            joined: 0,
         }
     }
 
@@ -655,7 +579,7 @@ impl Adapter {
             let action = if complete {
                 let message = std::mem::take(&mut self.message);
                 let input = match message.as_slice() {
-                    [ACTIVATE, _, _, record @ ..] => GuestRestoreInput::Activate(record),
+                    [READY, ..] => GuestRestoreInput::Ready,
                     _ => GuestRestoreInput::Request,
                 };
                 self.activation.input(now, input)?
@@ -667,14 +591,25 @@ impl Adapter {
         Ok(())
     }
 
-    /// Does what `action` says, except that it leaves an accepted record's application to the
-    /// test.
+    /// Completes the application of the accepted record at `now`, and answers each request for
+    /// Ready that joined it.
+    fn complete(&mut self, now: Instant) -> Result<(), GuestRestoreFailure> {
+        let ready = self.activation.complete(now, Ok(()))?;
+        for _ in 0..std::mem::take(&mut self.joined) {
+            self.output.push(Reply::Ready(ready));
+        }
+        Ok(())
+    }
+
+    /// Does what `action` says.
     fn act(&mut self, action: GuestRestoreAction) {
         match action {
-            GuestRestoreAction::Acknowledge => self.output.push(Reply::Acknowledgement),
-            GuestRestoreAction::Continue | GuestRestoreAction::Join | GuestRestoreAction::Serve => {
+            GuestRestoreAction::Acknowledge => {
+                self.joined = 0;
+                self.output.push(Reply::Acknowledgement);
             }
-            GuestRestoreAction::Apply(record) => self.applied.push(*record),
+            GuestRestoreAction::Join => self.joined += 1,
+            GuestRestoreAction::Continue | GuestRestoreAction::Serve => {}
             GuestRestoreAction::Ready(ready) => self.output.push(Reply::Ready(ready)),
         }
     }
@@ -683,31 +618,29 @@ impl Adapter {
 #[test]
 fn the_deadline_stays_live_under_trickled_input_and_blocked_output() {
     let t0 = Instant::now();
-    let activate = message(ACTIVATE, &record());
-    assert!(activate.len() > 10);
-    // A host that trickles its Activate, a byte a second, never completes it by the deadline:
-    // the byte at the deadline fails the activation, while the output took nothing.
-
-    let mut adapter = Adapter::new(bootstrap(t0));
+    let ready = message(READY, b"");
+    let ping = message(PING, b"");
+    // A host that trickles its request for Ready, a byte a second, never completes it by the
+    // deadline: the byte at the deadline fails the applied activation, while the output took
+    // nothing but the acknowledgement.
+    let mut adapter = Adapter::new(applied(t0));
     adapter.reset(t0).unwrap();
     let mut failure = None;
-    for (second, byte) in (1..).zip(&activate) {
-        if let Err(error) = adapter.receive(after(t0, second), &[*byte]) {
+    for second in 1.. {
+        if let Err(error) = adapter.receive(after(t0, second), &ready[..1]) {
             failure = Some((second, error));
             break;
         }
     }
     let (second, failure) = failure.unwrap();
     assert_eq!(second, 10);
-    assert_eq!(failure.state(), GuestRestoreState::Restricted);
+    assert_eq!(failure.state(), GuestRestoreState::Applied);
     assert!(matches!(failure.cause(), GuestRestoreCause::Expired));
-    assert!(adapter.applied.is_empty());
     assert_eq!(adapter.output, [Reply::Acknowledgement]);
     assert_final(&mut adapter.activation, &failure, after(t0, 11));
     // A host that sends nothing leaves the adapter only its wake at the deadline, which fails the
     // activation as well.
-
-    let mut adapter = Adapter::new(bootstrap(t0));
+    let mut adapter = Adapter::new(applied(t0));
     adapter.reset(after(t0, 1)).unwrap();
     let deadline = adapter.activation.deadline().unwrap();
     assert_eq!(deadline, after(t0, 10));
@@ -716,39 +649,32 @@ fn the_deadline_stays_live_under_trickled_input_and_blocked_output() {
         .tick(deadline - Duration::from_millis(1))
         .unwrap();
     let failure = adapter.activation.tick(deadline).unwrap_err();
-    assert_eq!(failure.state(), GuestRestoreState::Restricted);
+    assert_eq!(failure.state(), GuestRestoreState::Applied);
     assert!(matches!(failure.cause(), GuestRestoreCause::Expired));
     assert_final(&mut adapter.activation, &failure, after(t0, 11));
-    // A host whose Activate arrives at once, and that trickles a retry while the record's
-    // application runs, gets the retry joined, without another application or a later deadline,
-    // and an application that completes after the deadline fails.
-
-    let mut adapter = Adapter::new(bootstrap(t0));
-    adapter.reset(t0).unwrap();
-    adapter.receive(after(t0, 1), &activate).unwrap();
-    assert_eq!(adapter.applied, [accepted()]);
-    for (second, byte) in (2..9).zip(&activate) {
-        adapter.receive(after(t0, second), &[*byte]).unwrap();
-    }
-    adapter.receive(after(t0, 9), &activate[7..]).unwrap();
-    assert_eq!(adapter.applied, [accepted()]);
-    assert_eq!(adapter.activation.deadline(), Some(after(t0, 10)));
-    let failure = adapter
-        .activation
-        .complete(after(t0, 11), Ok(()))
-        .unwrap_err();
-    assert_eq!(failure.state(), GuestRestoreState::Activating);
-    assert!(matches!(failure.cause(), GuestRestoreCause::Expired));
-    assert_eq!(adapter.output, [Reply::Acknowledgement]);
-    assert_final(&mut adapter.activation, &failure, after(t0, 12));
-    // Another message of the framing, whole, while the record's application runs fails the
-    // activation, as it would before the Activate.
-
+    // A host whose request for Ready arrives while the record applies gets one Ready once the
+    // application completes, and a later session's request gets the same Ready.
     let mut adapter = Adapter::new(activating(t0));
-    let failure = adapter
-        .receive(after(t0, 1), &message(PING, b""))
-        .unwrap_err();
-    assert_eq!(failure.state(), GuestRestoreState::Activating);
+    adapter.reset(t0).unwrap();
+    adapter.receive(after(t0, 1), &ready).unwrap();
+    assert_eq!(adapter.joined, 1);
+    adapter.complete(after(t0, 2)).unwrap();
+    adapter.reset(after(t0, 3)).unwrap();
+    adapter.receive(after(t0, 4), &ready).unwrap();
+    assert_eq!(
+        adapter.output,
+        [
+            Reply::Acknowledgement,
+            Reply::Ready(reported()),
+            Reply::Acknowledgement,
+            Reply::Ready(reported()),
+        ]
+    );
+    assert_eq!(adapter.activation.state(), GuestRestoreState::Ready);
+    // Another message of the framing, whole, before the clone is ready fails the activation.
+    let mut adapter = Adapter::new(applied(t0));
+    let failure = adapter.receive(after(t0, 1), &ping).unwrap_err();
+    assert_eq!(failure.state(), GuestRestoreState::Applied);
     assert!(matches!(failure.cause(), GuestRestoreCause::Request));
     assert_final(&mut adapter.activation, &failure, after(t0, 2));
 }
@@ -759,8 +685,6 @@ type Failing = Box<dyn Fn(&mut GuestRestore) -> Result<(), GuestRestoreFailure>>
 #[test]
 fn strict_failures_are_returned_and_never_power_off() {
     let t0 = Instant::now();
-    let renamed = clone_record(TRANSACTION, b"renamed", resources()).encode();
-    let other = clone_record(OTHER_TRANSACTION, b"clone", resources()).encode();
     let cold = GuestRestoreRecord::new(None, configuration(b"clone", resources()))
         .unwrap()
         .encode();
@@ -769,41 +693,29 @@ fn strict_failures_are_returned_and_never_power_off() {
         memory: MEMORY,
     };
     let unexpected = clone_record(TRANSACTION, b"clone", more_cpus).encode();
-    let activate = move |record: Vec<u8>| -> Failing {
-        Box::new(move |activation| {
-            let input = GuestRestoreInput::Activate(&record);
-            activation.input(after(t0, 1), input).map(drop)
-        })
+    let accept = move |record: Option<Vec<u8>>| -> Failing {
+        Box::new(move |activation| activation.accept(after(t0, 1), record.as_deref()).map(drop))
     };
     // Each failure, in a state in which it comes: the activation returns it, keeps it, and changes
     // nothing else. It has no system through which it could power the VM off: the adapter reports
     // the failure, and ends the VM.
-    let failures: [(Setup, Failing); 11] = [
+    let failures: [(Setup, Failing); 10] = [
         (
-            restricted,
+            applied,
             Box::new(move |activation| activation.tick(after(t0, 10))),
         ),
         (
-            activating,
-            Box::new(move |activation| {
-                activation
-                    .input(after(t0, 1), GuestRestoreInput::Reset)
-                    .map(drop)
-            }),
-        ),
-        (
-            restricted,
+            applied,
             Box::new(move |activation| {
                 activation
                     .input(after(t0, 1), GuestRestoreInput::Request)
                     .map(drop)
             }),
         ),
-        (restricted, activate(Vec::new())),
-        (restricted, activate(cold)),
-        (restricted, activate(unexpected)),
-        (ready, activate(other)),
-        (started, activate(renamed)),
+        (pending, accept(None)),
+        (pending, accept(Some(Vec::new()))),
+        (pending, accept(Some(cold))),
+        (pending, accept(Some(unexpected))),
         (
             activating,
             Box::new(move |activation| {
@@ -812,8 +724,9 @@ fn strict_failures_are_returned_and_never_power_off() {
                     .map(drop)
             }),
         ),
+        (ready, accept(Some(record()))),
         (
-            bootstrap,
+            pending,
             Box::new(move |activation| activation.complete(after(t0, 1), Ok(())).map(drop)),
         ),
         (activating, Box::new(|activation| activation.start())),
@@ -833,9 +746,9 @@ fn strict_failures_are_returned_and_never_power_off() {
 #[test]
 fn failures_name_their_state_and_their_cause() {
     let states = [
-        (GuestRestoreState::Bootstrap, "transport bootstrap"),
-        (GuestRestoreState::Restricted, "restricted"),
+        (GuestRestoreState::Pending, "pending"),
         (GuestRestoreState::Activating, "activating"),
+        (GuestRestoreState::Applied, "applied"),
         (GuestRestoreState::Ready, "ready"),
         (GuestRestoreState::Started, "started"),
         (GuestRestoreState::Failed, "failed"),
@@ -849,36 +762,35 @@ fn failures_name_their_state_and_their_cause() {
     };
     let cases = [
         (
-            failure(GuestRestoreState::Bootstrap, GuestRestoreCause::Expired),
-            "the activation failed in its transport bootstrap state: the deadline passed before \
-             the activation was ready",
-        ),
-        (
-            failure(GuestRestoreState::Activating, GuestRestoreCause::Reset),
-            "the activation failed in its activating state: the session was reset again before \
-             the activation was ready",
-        ),
-        (
-            failure(GuestRestoreState::Restricted, GuestRestoreCause::Request),
-            "the activation failed in its restricted state: the host sent a request before the \
+            failure(GuestRestoreState::Applied, GuestRestoreCause::Expired),
+            "the activation failed in its applied state: the deadline passed before the \
              activation was ready",
         ),
         (
+            failure(GuestRestoreState::Applied, GuestRestoreCause::Request),
+            "the activation failed in its applied state: the host sent a request before the \
+             activation was ready",
+        ),
+        (
+            failure(GuestRestoreState::Pending, GuestRestoreCause::Missing),
+            "the activation failed in its pending state: the restore packet carried no record",
+        ),
+        (
             failure(
-                GuestRestoreState::Restricted,
+                GuestRestoreState::Pending,
                 GuestRestoreCause::Record(GuestRestoreError::Truncated),
             ),
-            "the activation failed in its restricted state: the Activate's record is refused: \
+            "the activation failed in its pending state: the restore packet's record is refused: \
              the record ends inside its version or one of its fields",
         ),
         (
-            failure(GuestRestoreState::Restricted, GuestRestoreCause::Cold),
-            "the activation failed in its restricted state: the Activate's record is a cold \
+            failure(GuestRestoreState::Pending, GuestRestoreCause::Cold),
+            "the activation failed in its pending state: the restore packet's record is a cold \
              boot's, without a restore section",
         ),
         (
             failure(
-                GuestRestoreState::Restricted,
+                GuestRestoreState::Pending,
                 GuestRestoreCause::Resources {
                     expected: ExpectedResources {
                         cpus: 4,
@@ -887,25 +799,8 @@ fn failures_name_their_state_and_their_cause() {
                     actual: resources(),
                 },
             ),
-            "the activation failed in its restricted state: the Activate's record expects 4 CPUs \
-             and 2147483648 bytes of memory, and the clone has 2 CPUs and 1073741824 bytes",
-        ),
-        (
-            failure(
-                GuestRestoreState::Ready,
-                GuestRestoreCause::Transaction {
-                    accepted: TRANSACTION,
-                    offered: OTHER_TRANSACTION,
-                },
-            ),
-            "the activation failed in its ready state: the Activate names the transaction \
-             33333333333333333333333333333333, after an Activate of the transaction \
-             22222222222222222222222222222222",
-        ),
-        (
-            failure(GuestRestoreState::Started, GuestRestoreCause::Changed),
-            "the activation failed in its started state: the Activate changes the record of the \
-             accepted Activate's transaction",
+            "the activation failed in its pending state: the restore packet's record expects 4 \
+             CPUs and 2147483648 bytes of memory, and the clone has 2 CPUs and 1073741824 bytes",
         ),
         (
             failure(
@@ -916,13 +811,17 @@ fn failures_name_their_state_and_their_cause() {
              the root's assembly failed",
         ),
         (
-            failure(GuestRestoreState::Restricted, GuestRestoreCause::Completion),
-            "the activation failed in its restricted state: an activation that did not run \
+            failure(GuestRestoreState::Ready, GuestRestoreCause::Accept),
+            "the activation failed in its ready state: the activation took a record again",
+        ),
+        (
+            failure(GuestRestoreState::Pending, GuestRestoreCause::Completion),
+            "the activation failed in its pending state: an activation that did not run \
              completed",
         ),
         (
-            failure(GuestRestoreState::Activating, GuestRestoreCause::Start),
-            "the activation failed in its activating state: the sandbox started before the \
+            failure(GuestRestoreState::Applied, GuestRestoreCause::Start),
+            "the activation failed in its applied state: the sandbox started before the \
              activation was ready, or again",
         ),
     ];
@@ -957,7 +856,7 @@ fn an_activation_debugs_its_state_resources_and_deadline() {
     assert_eq!(
         format!("{activation:?}"),
         format!(
-            "GuestRestore {{ state: Bootstrap, resources: ExpectedResources {{ cpus: 4, memory: \
+            "GuestRestore {{ state: Pending, resources: ExpectedResources {{ cpus: 4, memory: \
              2147483648 }}, deadline: {:?}, .. }}",
             Some(after(t0, 10))
         )

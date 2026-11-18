@@ -12,9 +12,9 @@
 //!   status for each class.
 //! - [`GUEST_RESTORE_DEADLINE`] to [`GUEST_RESTORE_ORDER`], 50 to 58: the failures of a clone's
 //!   guest restore, which follows its repair, one status reserved for each class: the deadline,
-//!   the host's session, the Activate's record and the resources that it expects, the activation
-//!   of the root, of the workload, of the host export, and of the network settings, and the
-//!   guest's own order.
+//!   the host's session, the restore packet's record and the resources that it expects, the
+//!   activation of the root, of the workload, of the host export, and of the network settings,
+//!   and the guest's own order.
 //!
 //! The guest ends the VM with a status after a diagnostic that names the failure, such as a
 //! violation event of the time ABI, or an error line. A status alone does not tell the cause, nor
@@ -54,17 +54,16 @@ pub const REPAIR_RESEED: u8 = 44;
 pub const REPAIR_FINISH: u8 = 45;
 
 /// The clone was not activated before its deadline, which starts at its repair's
-/// acknowledgement.
+/// acknowledgement, as when its host never asked for its Ready.
 pub const GUEST_RESTORE_DEADLINE: u8 = 50;
 /// The host broke the session of a repaired clone's guest restore: before the clone was ready,
-/// it reset the session again, or sent a request before the guest restore, and, before or after,
-/// it sent an Activate of another transaction, or one that changes the accepted record.
+/// it sent a request other than its request for the clone's Ready.
 pub const GUEST_RESTORE_PROTOCOL: u8 = 51;
-/// The Activate's record is refused: it does not decode, breaks a limit, or is a cold boot's,
-/// without the restore section of a clone's.
+/// The restore packet's record is refused: the packet carried none, or it does not decode,
+/// breaks a limit, or is a cold boot's, without the restore section of a clone's.
 pub const GUEST_RESTORE_RECORD: u8 = 52;
-/// The Activate's record expects other resources than the repaired clone has: another number of
-/// online CPUs, or another memory size.
+/// The restore packet's record expects other resources than the repaired clone has: another
+/// number of online CPUs, or another memory size.
 pub const GUEST_RESTORE_RESOURCES: u8 = 53;
 /// The clone's root cannot be activated with the record's settings: its image does not assemble
 /// over its upper, a GPT image's partition table is refused, or its scratch is not fresh.
@@ -78,8 +77,8 @@ pub const GUEST_RESTORE_EXPORT: u8 = 56;
 /// endpoint, or the announcer of the workload's listeners, which its network publishes, cannot
 /// start, or ended.
 pub const GUEST_RESTORE_NETWORK: u8 = 57;
-/// The guest's own order misused the guest restore: it completed a guest restore that did not
-/// run, or started the sandbox before the clone was ready.
+/// The guest's own order misused the guest restore: it took a record twice, completed a guest
+/// restore that did not run, or started the sandbox before the clone was ready.
 pub const GUEST_RESTORE_ORDER: u8 = 58;
 
 /// The time ABI's statuses, from [`TIME_CONFORMANCE`] to [`TIME_REPAIR`].
@@ -105,9 +104,9 @@ pub fn describe(status: u8) -> Option<&'static str> {
         REPAIR_RESEED => "a clone's reseed failed",
         REPAIR_FINISH => "a clone's restore finish failed",
         GUEST_RESTORE_DEADLINE => "a clone was not activated before its deadline",
-        GUEST_RESTORE_PROTOCOL => "the host broke a repaired clone's restricted session",
-        GUEST_RESTORE_RECORD => "a clone's Activate record is refused",
-        GUEST_RESTORE_RESOURCES => "a clone's Activate record expects other resources",
+        GUEST_RESTORE_PROTOCOL => "the host broke a repaired clone's session before Ready",
+        GUEST_RESTORE_RECORD => "a clone's restore packet record is refused",
+        GUEST_RESTORE_RESOURCES => "a clone's restore packet record expects other resources",
         GUEST_RESTORE_ROOT => "a clone's root activation failed",
         GUEST_RESTORE_WORKLOAD => "a clone's workload activation failed",
         GUEST_RESTORE_EXPORT => "a clone's host export cannot be mounted",

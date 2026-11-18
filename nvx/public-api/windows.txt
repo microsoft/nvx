@@ -369,8 +369,7 @@ variant nvx::host::restore::RestoreAction::Connect
 variant nvx::host::restore::RestoreAction::Done
 variant nvx::host::restore::RestoreAction::Fail
 field nvx::host::restore::RestoreAction::Fail::0
-variant nvx::host::restore::RestoreAction::SendActivate
-field nvx::host::restore::RestoreAction::SendActivate::0
+variant nvx::host::restore::RestoreAction::RequestReady
 struct nvx::host::restore::RestoreError
 field nvx::host::restore::RestoreError::attribution
 field nvx::host::restore::RestoreError::evidence
@@ -386,9 +385,10 @@ variant nvx::host::restore::RestoreEvidence::Expired
 variant nvx::host::restore::RestoreEvidence::ForcedKill
 variant nvx::host::restore::RestoreEvidence::ForwardBind
 variant nvx::host::restore::RestoreEvidence::HostFailure
+variant nvx::host::restore::RestoreEvidence::IncompatibleGuest
 variant nvx::host::restore::RestoreEvidence::IncompatibleHost
-variant nvx::host::restore::RestoreEvidence::InvalidActivate
 variant nvx::host::restore::RestoreEvidence::InvalidMappings
+variant nvx::host::restore::RestoreEvidence::InvalidRecord
 variant nvx::host::restore::RestoreEvidence::InvalidSettings
 variant nvx::host::restore::RestoreEvidence::InvalidTargets
 variant nvx::host::restore::RestoreEvidence::Io
@@ -409,7 +409,6 @@ variant nvx::host::restore::RestoreEvidence::UnservableImage
 variant nvx::host::restore::RestoreEvidence::UnusableRoot
 variant nvx::host::restore::RestoreEvidence::UnusableScratch
 enum nvx::host::restore::RestoreInput
-variant nvx::host::restore::RestoreInput::ActivateSent
 variant nvx::host::restore::RestoreInput::Cancelled
 variant nvx::host::restore::RestoreInput::Connected
 variant nvx::host::restore::RestoreInput::Exited
@@ -431,7 +430,6 @@ method nvx::host::restore::RestoreMachine::input
 method nvx::host::restore::RestoreMachine::new
 method nvx::host::restore::RestoreMachine::next_action
 enum nvx::host::restore::RestorePhase
-variant nvx::host::restore::RestorePhase::Activate
 variant nvx::host::restore::RestorePhase::Connect
 variant nvx::host::restore::RestorePhase::Ready
 variant nvx::host::restore::RestorePhase::ReadyEvent
@@ -633,6 +631,7 @@ method nvx::host::vm::Prepared::into_command
 method nvx::host::vm::Prepared::log
 method nvx::host::vm::Prepared::nic
 method nvx::host::vm::Prepared::outputs
+method nvx::host::vm::Prepared::supply_activation_record
 struct nvx::host::vm::SavedVm
 field nvx::host::vm::SavedVm::capability
 field nvx::host::vm::SavedVm::endpoint

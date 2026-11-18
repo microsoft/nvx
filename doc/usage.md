@@ -533,7 +533,7 @@ the restore, such as one that cannot mount its scratch image as its upper, ends
 its VM with the status of the failure's class, which `nvx::protocol::status`
 defines, and the command reports the guest's exit with that evidence, such as
 `OpenVMM exited during startup: guest-exit status 54; restore failed during
-Activate: UnusableRoot, attributed to the request`.
+Connect: UnusableRoot, attributed to the request`.
 
 ### `download`
 

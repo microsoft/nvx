@@ -4,8 +4,8 @@ use crate::guest::init::Runtime;
 use crate::guest::mappings::{Mapper, MappingTable, SourceRoot};
 use crate::guest::sys::{self, Errno, FileDescriptor};
 use crate::protocol::{
-    self, APP_ACTIVATE, APP_CANCEL, APP_CAPTURE, APP_EXEC, APP_MAPS, APP_PING, APP_READY, APP_STOP,
-    APP_STOPPED, INVALID_REQUEST, MAPPINGS_INCOMPLETE, UNSUPPORTED_OPERATION,
+    self, APP_CANCEL, APP_CAPTURE, APP_EXEC, APP_MAPS, APP_PING, APP_READY, APP_STOP, APP_STOPPED,
+    INVALID_REQUEST, MAPPINGS_INCOMPLETE, UNSUPPORTED_OPERATION,
 };
 
 use super::diagnostics;
@@ -204,7 +204,18 @@ fn handle_data(
             return Err(failure.into_error());
         }
     };
-    if session.rootless() && !matches!(request.kind, APP_ACTIVATE | APP_CAPTURE | APP_STOP) {
+    if request.kind == APP_PING && session.has_restored() {
+        // The host's request for a restored clone's Ready, which carries what its guest restore
+        // established, once the record of its restore packet applied.
+        if request.payload.is_empty() {
+            session.ready(request)?;
+        } else {
+            diagnostics::error(system, "ping-payload", request.payload.len() as i32);
+            session.send_error(request.request_id, Errno::EINVAL as i32, INVALID_REQUEST)?;
+        }
+        return Ok(None);
+    }
+    if session.rootless() && !matches!(request.kind, APP_CAPTURE | APP_STOP) {
         session.send_error(
             request.request_id,
             Errno::ENOTSUP as i32,
@@ -214,21 +225,9 @@ fn handle_data(
     }
     let config = restored.as_ref().unwrap_or(config);
     match request.kind {
-        APP_ACTIVATE if session.has_restored() => {
-            if let Some(handoff) = session.activate(request)? {
-                *mappings = HostMappings::layered(handoff.table, handoff.mapper, handoff.export)?;
-                *restored = Some(AgentConfig {
-                    uid: CString::new(handoff.workload.uid.to_string()).expect("decimal UID"),
-                    gid: CString::new(handoff.workload.gid.to_string()).expect("decimal GID"),
-                    user: handoff.user,
-                    home: handoff.home,
-                    restored_proxy: Some(handoff.proxy),
-                });
-            }
-        }
         APP_CAPTURE => {
             if session.queue_capture(request, false)? {
-                return session.finish_capture();
+                return finish_capture(session, restored, mappings);
             }
         }
         APP_PING => {
@@ -277,7 +276,7 @@ fn handle_data(
                 return stopped(system, session, request_id);
             }
             if session.capture_pending() {
-                return session.finish_capture();
+                return finish_capture(session, restored, mappings);
             }
         }
         APP_CANCEL => {
@@ -306,6 +305,30 @@ fn handle_data(
         )?,
     }
     Ok(None)
+}
+
+/// Captures the VM once the session acknowledged the capture request, and, in a clone that a
+/// restore of the capture started, applies the record of its restore packet at once, before the
+/// host asks for Ready, which keeps the clone's space and the account of its mapping table.
+fn finish_capture(
+    session: &mut Session,
+    restored: &mut Option<AgentConfig>,
+    mappings: &mut HostMappings,
+) -> Result<Option<Outcome>, Errno> {
+    let outcome = session.finish_capture()?;
+    if outcome.is_none()
+        && let Some(handoff) = session.activate()?
+    {
+        *mappings = HostMappings::layered(handoff.table, handoff.mapper, handoff.export)?;
+        *restored = Some(AgentConfig {
+            uid: CString::new(handoff.workload.uid.to_string()).expect("decimal UID"),
+            gid: CString::new(handoff.workload.gid.to_string()).expect("decimal GID"),
+            user: handoff.user,
+            home: handoff.home,
+            restored_proxy: Some(handoff.proxy),
+        });
+    }
+    Ok(outcome)
 }
 
 /// Acknowledges the `STOP` of `request_id`, and drains the control terminal before the session

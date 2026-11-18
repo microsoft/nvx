@@ -14,14 +14,13 @@ const ID: u64 = 0x0102_0304_0506_0708;
 
 /// A frame of each kind, and one of each outcome of an execution, with the code of its kind, its
 /// status and its payload, as the protocol defines them, independently of the codec.
-const FRAMES: [(Frame<'static>, u8, i32, &[u8]); 23] = [
+const FRAMES: [(Frame<'static>, u8, i32, &[u8]); 22] = [
     (Frame::Ping, 0x01, 0, b""),
     (Frame::Exec(b"workload"), 0x02, 0, b"workload"),
     (Frame::Stop, 0x03, 0, b""),
     (Frame::Cancel, 0x04, 0, b""),
     (Frame::Maps(b"table"), 0x06, 0, b"table"),
     (Frame::Capture(&[1]), 0x07, 0, &[1]),
-    (Frame::Activate(b"record"), 0x08, 0, b"record"),
     (Frame::Stdin(b"input"), 0x09, 0, b"input"),
     (Frame::StdinEnd, 0x0a, 0, b""),
     (ready(2, b""), 0x81, 0, &[2]),
@@ -174,8 +173,8 @@ fn malformed_frames_are_refused() {
         refused.message(),
         "the control peer sent a frame of another protocol than NVXC version 2"
     );
-    // Unknown kinds, version 1's FEATURES among them.
-    for kind in [0x00, 0x05, 0x0b, 0x80, 0x88, 0xfe] {
+    // Unknown kinds, version 1's FEATURES and the retired activate request among them.
+    for kind in [0x00, 0x05, 0x08, 0x0b, 0x80, 0x88, 0xfe] {
         assert!(Frame::decode(&wire(kind, 0, &[])).is_err(), "{kind:#x}");
     }
     let mut zero = wire(0x01, 0, &[]);
@@ -323,9 +322,10 @@ fn capture_requests_carry_their_flag_unchanged() {
     }
 }
 
-/// The activate exchange crosses version 2 unchanged: the host's activate request reaches the
-/// guest's decoder with its record and workload identity, and the guest's `READY` brings the
-/// host what Ready reports about that record's activation.
+/// A restored clone's exchange crosses unchanged: the host's activation record, which its restore
+/// packet carries, reaches the guest's decoder with its record and workload identity, and the
+/// guest's `READY` in answer to the host's `PING` brings the host what Ready reports about that
+/// record's activation.
 #[cfg(all(
     feature = "cli",
     feature = "guest",
@@ -333,10 +333,10 @@ fn capture_requests_carry_their_flag_unchanged() {
     target_arch = "x86_64"
 ))]
 #[test]
-fn the_activate_exchange_carries_its_payloads_unchanged() {
+fn a_restored_clone_s_activation_record_and_ready_carry_their_payloads_unchanged() {
     use crate::guest_restore::{GuestRestoreReady, GuestRestoreRecord};
     use crate::protocol::workload::WorkloadIdentity;
-    use crate::protocol::{decode_activate_payload, encode_activate_payload};
+    use crate::protocol::{decode_activation_record, encode_activation_record};
 
     let workload = WorkloadIdentity {
         uid: 1000,
@@ -349,13 +349,11 @@ fn the_activate_exchange_carries_its_payloads_unchanged() {
         }
         let name = vector.name;
         let record = GuestRestoreRecord::decode(&vector.bytes).unwrap();
-        let payload = encode_activate_payload(&record, &workload).unwrap();
-        let bytes = Frame::Activate(&payload).encode(ID).unwrap();
-        let Ok((ID, Frame::Activate(carried))) = Frame::decode(&bytes) else {
-            panic!("the ACTIVATE frame of {name} does not decode");
-        };
-        let (applied, identity) = decode_activate_payload(carried).unwrap();
+        let carried = encode_activation_record(&record, &workload).unwrap();
+        let (applied, identity) = decode_activation_record(&carried).unwrap();
         assert_eq!((&applied, identity), (&record, workload), "{name}");
+        let bytes = Frame::Ping.encode(ID).unwrap();
+        assert!(matches!(Frame::decode(&bytes), Ok((ID, Frame::Ping))));
         let reported = GuestRestoreReady::of(&applied).encode();
         let bytes = ready(VERSION, &reported).encode(ID).unwrap();
         let Ok((

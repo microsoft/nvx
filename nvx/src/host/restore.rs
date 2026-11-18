@@ -33,9 +33,7 @@ pub enum RestorePhase {
     ReadyEvent,
     /// Connecting and preparing the caller's verified control session.
     Connect,
-    /// Sending the canonical guest-restore record.
-    Activate,
-    /// Waiting for Ready to echo the guest restore's transaction.
+    /// Asking for the guest's Ready, which must echo the guest restore's transaction.
     Ready,
 }
 
@@ -62,7 +60,10 @@ pub enum RestoreEvidence {
     /// The requested settings cannot be applied.
     InvalidSettings,
     /// The guest-restore record is invalid or the guest refused it.
-    InvalidActivate,
+    InvalidRecord,
+    /// The snapshot's guest takes its guest-restore record otherwise than from its restore
+    /// packet, as a guest whose capture predates that delivery does.
+    IncompatibleGuest,
     /// The requested mappings or export cannot be applied.
     InvalidMappings,
     /// The snapshot cannot serve the requested image.
@@ -109,7 +110,7 @@ impl RestoreEvidence {
         match self {
             Self::InvalidTargets
             | Self::InvalidSettings
-            | Self::InvalidActivate
+            | Self::InvalidRecord
             | Self::InvalidMappings
             | Self::UnservableImage
             | Self::UnusableScratch
@@ -133,7 +134,9 @@ impl RestoreEvidence {
             | Self::LostStatus
             | Self::Reset
             | Self::ForcedKill => Attribution::Unknown,
-            Self::MalformedSnapshot | Self::SnapshotDefect => Attribution::Snapshot,
+            Self::MalformedSnapshot | Self::SnapshotDefect | Self::IncompatibleGuest => {
+                Attribution::Snapshot
+            }
             Self::RepairStatus => Attribution::Repair,
         }
     }
@@ -151,7 +154,7 @@ impl RestoreEvidence {
         Some(match code {
             status::GUEST_RESTORE_DEADLINE => Self::Expired,
             status::GUEST_RESTORE_PROTOCOL | status::GUEST_RESTORE_ORDER => Self::Malformed,
-            status::GUEST_RESTORE_RECORD => Self::InvalidActivate,
+            status::GUEST_RESTORE_RECORD => Self::InvalidRecord,
             status::GUEST_RESTORE_RESOURCES => Self::InvalidTargets,
             status::GUEST_RESTORE_ROOT => Self::UnusableRoot,
             status::GUEST_RESTORE_WORKLOAD | status::GUEST_RESTORE_NETWORK => Self::InvalidSettings,
@@ -257,17 +260,13 @@ pub enum RestoreInput {
     ReadyEvent(Vec<u8>),
     /// The caller prepared a new, peer-verified control session.
     Connected,
-    /// The Activate's write completed; Ready is still pending.
-    ///
-    /// A caller that combines the write and Ready read may supply GuestReady directly instead.
-    ActivateSent,
     /// The control session was lost; the caller decides whether to reconnect.
     SessionLost,
     /// What the guest's Ready reports about the guest restore.
     GuestReady(GuestRestoreReady),
     /// A final operation failure, preserving its explicit phase, evidence and original source.
     OperationFailed {
-        /// The operation's phase, including a write failure after taking SendActivate.
+        /// The operation's phase.
         phase: RestorePhase,
         /// What the caller observed.
         evidence: RestoreEvidence,
@@ -290,8 +289,12 @@ pub enum RestoreAction {
     AwaitReadyEvent,
     /// Prepare a new, peer-verified control session.
     Connect,
-    /// Send these canonical record bytes as the first request of the session and await Ready.
-    SendActivate(Vec<u8>),
+    /// Ask for the guest's Ready, as the first request of the session, and await it.
+    ///
+    /// The guest took its guest-restore record from its restore packet, before the session, so
+    /// the request carries none of it, and a session that replaces a lost one sends nothing
+    /// more.
+    RequestReady,
     /// Ready echoed the expected transaction; no mappings or workload Start were sent.
     Done,
     /// The restore failed; its VM process remains the caller's.
@@ -307,11 +310,9 @@ enum MachineState {
     Event,
     /// Awaiting a verified control session.
     Connect,
-    /// The Activate has not yet been offered to the caller.
-    ActivateQueued,
-    /// The Activate's write or combined write-and-Ready operation is pending.
-    Activate,
-    /// The write completed and Ready is pending.
+    /// The request for Ready has not yet been offered to the caller.
+    ReadyQueued,
+    /// The request for Ready, and the guest's Ready, are pending.
     Ready,
     /// A terminal result was reached.
     Finished,
@@ -323,8 +324,7 @@ impl MachineState {
         match self {
             Self::Spawn | Self::Event => Some(RestorePhase::ReadyEvent),
             Self::Connect => Some(RestorePhase::Connect),
-            Self::ActivateQueued | Self::Activate => Some(RestorePhase::Activate),
-            Self::Ready => Some(RestorePhase::Ready),
+            Self::ReadyQueued | Self::Ready => Some(RestorePhase::Ready),
             Self::Finished => None,
         }
     }
@@ -332,14 +332,14 @@ impl MachineState {
 
 /// The ordered rules of one restore, without I/O, a clock or a retry budget.
 ///
+/// The caller supplies the restore's guest-restore record at its launch, in its restore packet,
+/// as [`Prepared::supply_activation_record`](super::vm::Prepared::supply_activation_record) does.
 /// Feed [`RestoreInput::Spawned`] after launching the VM, then perform the offered actions and
-/// supply their results. Every session receives the same canonical record bytes. A lost
-/// session offers Connect again; the caller may instead cancel or report an expired budget.
-/// Terminal success or failure absorbs later inputs and is offered only once.
+/// supply their results. Every session asks for the guest's Ready, which must echo the record's
+/// transaction. A lost session offers Connect again; the caller may instead cancel or report an
+/// expired budget. Terminal success or failure absorbs later inputs and is offered only once.
 #[derive(Debug)]
 pub struct RestoreMachine {
-    /// The one canonical record sent in every session.
-    encoded: Vec<u8>,
     /// What a successful Ready must report about the guest restore.
     expected: GuestRestoreReady,
     /// Guest execution cannot be ruled out once the caller reports a successful spawn.
@@ -351,13 +351,12 @@ pub struct RestoreMachine {
 }
 
 impl RestoreMachine {
-    /// Latches the record's canonical encoding and expected transaction.
+    /// Latches the record's expected transaction.
     ///
     /// A cold record without a restore transaction queues Fail immediately. A valid restore
     /// waits for Spawned; it never reads a record file or changes its record between sessions.
     pub fn new(record: &GuestRestoreRecord) -> Self {
         let mut machine = Self {
-            encoded: record.encode(),
             expected: GuestRestoreReady::of(record),
             guest_may_have_run: false,
             state: MachineState::Spawn,
@@ -366,7 +365,7 @@ impl RestoreMachine {
         if record.restore().is_none() {
             machine.fail(
                 RestorePhase::ReadyEvent,
-                RestoreEvidence::InvalidActivate,
+                RestoreEvidence::InvalidRecord,
                 Some(Box::new(Error::unsupported(
                     "a restore needs an activation record with a transaction",
                 ))),
@@ -399,13 +398,10 @@ impl RestoreMachine {
                 }
             }
             (MachineState::Connect, RestoreInput::Connected) => {
-                self.state = MachineState::ActivateQueued;
-                self.action = Some(RestoreAction::SendActivate(self.encoded.clone()));
+                self.state = MachineState::ReadyQueued;
+                self.action = Some(RestoreAction::RequestReady);
             }
-            (MachineState::Activate, RestoreInput::ActivateSent) => {
-                self.state = MachineState::Ready;
-            }
-            (MachineState::Activate | MachineState::Ready, RestoreInput::GuestReady(reported)) => {
+            (MachineState::Ready, RestoreInput::GuestReady(reported)) => {
                 if reported == self.expected {
                     self.finish(RestoreAction::Done);
                 } else {
@@ -420,10 +416,7 @@ impl RestoreMachine {
                 }
             }
             (
-                MachineState::Connect
-                | MachineState::ActivateQueued
-                | MachineState::Activate
-                | MachineState::Ready,
+                MachineState::Connect | MachineState::ReadyQueued | MachineState::Ready,
                 RestoreInput::SessionLost,
             ) => {
                 self.state = MachineState::Connect;
@@ -467,12 +460,11 @@ impl RestoreMachine {
 
     /// Takes the next action once, or returns None while awaiting a caller input.
     ///
-    /// Taking SendActivate starts the pending Activate phase. ActivateSent advances to the Ready
-    /// wait; a caller that combines the write and Ready read can report GuestReady directly.
+    /// Taking RequestReady starts the pending Ready phase, which the guest's Ready ends.
     pub fn next_action(&mut self) -> Option<RestoreAction> {
         let action = self.action.take()?;
-        if matches!(&action, RestoreAction::SendActivate(_)) {
-            self.state = MachineState::Activate;
+        if matches!(&action, RestoreAction::RequestReady) {
+            self.state = MachineState::Ready;
         }
         Some(action)
     }

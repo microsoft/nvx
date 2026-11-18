@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use crate::guest::init::{self, Stream};
 use crate::guest::sys::{self, Errno, c_string};
 use crate::protocol::{
-    APP_ACTIVATE, APP_CANCEL, APP_CAPTURE, APP_EXIT, APP_STDERR, APP_STDOUT, APP_STOP, BUSY,
-    CWD_FAILED, GuestExecPayload, LAUNCH_FAILED, OUTER_DATA, v2::STDIN_WINDOW,
+    APP_CANCEL, APP_CAPTURE, APP_EXIT, APP_STDERR, APP_STDOUT, APP_STOP, BUSY, CWD_FAILED,
+    GuestExecPayload, LAUNCH_FAILED, OUTER_DATA, v2::STDIN_WINDOW,
 };
 
 use super::AgentConfig;
@@ -802,12 +802,6 @@ fn handle_control(
                 ExecControl::None
             }
         });
-    }
-    if request.kind == APP_ACTIVATE && session.has_restored() {
-        // The started activation never applies again: an identical retry gets its cached Ready,
-        // and any other fails it, which ends the workload with the session.
-        session.activate(request)?;
-        return Ok(ExecControl::None);
     }
     session.send_error(request.request_id, Errno::EBUSY as i32, BUSY)?;
     Ok(ExecControl::None)

@@ -434,7 +434,7 @@ fn mappings_mount_in_order_and_unblock_workloads_through_dispatch() {
 }
 
 #[test]
-fn init_refuses_activation_without_a_restore_and_keeps_serving() {
+fn init_without_a_restore_answers_a_request_for_ready_as_a_cold_boot_and_keeps_serving() {
     for fresh in [true, false] {
         let config = AgentConfig::for_test();
         let mut mappings = HostMappings::announced(0);
@@ -454,23 +454,21 @@ fn init_refuses_activation_without_a_restore_and_keeps_serving() {
             guest_sequence: 0,
         };
         assert_eq!(harness.read_outer().0.record_type, OUTER_GUEST_ATTACH);
+        // A fresh boot, which has no root, refuses it, and a cold one answers it with a Ready
+        // that reports no guest restore, in each session.
         for epoch in [1, 2] {
             harness.reset(epoch, 7);
-            assert_eq!(
-                harness.request(APP_ACTIVATE, b"misrouted"),
+            let expected = if fresh {
                 response(
                     APP_ERROR,
                     42,
                     Errno::ENOTSUP as i32,
-                    b"unsupported-operation"
+                    b"unsupported-operation",
                 )
-            );
-        }
-        if !fresh {
-            assert_eq!(
-                harness.request(APP_PING, &[]),
+            } else {
                 response(APP_READY, 42, 0, b"")
-            );
+            };
+            assert_eq!(harness.request(APP_PING, &[]), expected);
         }
         let system = harness.stop();
         assert!(system.diagnostics.is_empty());
@@ -481,7 +479,7 @@ fn init_refuses_activation_without_a_restore_and_keeps_serving() {
 #[test]
 fn restored_ready_maps_and_first_exec_share_the_existing_start_transition() -> TestResult {
     use crate::guest::init::Capture;
-    use crate::guest::restore::{GuestRestoreAction, GuestRestoreState};
+    use crate::guest::restore::GuestRestoreState;
     if super::super::tests::isolate_process_test(
         "NVX_RESTORED_DISPATCH_TEST",
         "guest::managed_agent::dispatch::tests::restored_ready_maps_and_first_exec_share_the_existing_start_transition",
@@ -504,12 +502,9 @@ fn restored_ready_maps_and_first_exec_share_the_existing_start_transition() -> T
     );
     let config = AgentConfig::for_test();
     let mut mappings = HostMappings::announced(2);
-    let (mut capture, payload) = Capture::activation_fixture();
+    // The restore's record applied from its restore packet before the session served anything.
+    let (mut capture, _) = Capture::activation_fixture();
     let activation = capture.restored.as_mut().unwrap();
-    assert!(matches!(
-        activation.accept(&payload, std::time::Instant::now())?.0,
-        GuestRestoreAction::Apply(_)
-    ));
     let ready = activation
         .activation
         .complete(std::time::Instant::now(), Ok(()))?
@@ -535,7 +530,7 @@ fn restored_ready_maps_and_first_exec_share_the_existing_start_transition() -> T
     assert_eq!(harness.read_outer().0.record_type, OUTER_GUEST_ATTACH);
     harness.reset(1, 7);
     assert_eq!(
-        harness.request(APP_ACTIVATE, &payload),
+        harness.request(APP_PING, &[]),
         response(APP_READY, 42, 0, &ready)
     );
     let execution = workload_payload(&["/bin/sh", "-c", "printf restored"], None)?;
@@ -555,7 +550,7 @@ fn restored_ready_maps_and_first_exec_share_the_existing_start_transition() -> T
     );
     harness.reset(2, 4);
     assert_eq!(
-        harness.request(APP_ACTIVATE, &payload),
+        harness.request(APP_PING, &[]),
         response(APP_READY, 42, 0, &ready)
     );
     assert_eq!(
@@ -568,25 +563,20 @@ fn restored_ready_maps_and_first_exec_share_the_existing_start_transition() -> T
     Ok(())
 }
 
-/// Starts a restored agent whose activation is ready, activates it with the request that it
-/// accepted, and starts a workload that runs until it is cancelled. Returns the harness, that
-/// request, what Ready reports, and the workload's process.
-fn running_restored_workload(system: TestSystem) -> (Harness, Vec<u8>, Vec<u8>, sys::ProcessId) {
-    use crate::guest::restore::GuestRestoreAction;
+/// Starts a restored agent whose record applied from its restore packet, asks for its Ready, and
+/// starts a workload that runs until it is cancelled. Returns the harness, what Ready reports,
+/// and the workload's process.
+fn running_restored_workload(system: TestSystem) -> (Harness, Vec<u8>, sys::ProcessId) {
     let config = AgentConfig::for_test();
     let mappings = HostMappings::announced(0);
-    let (mut capture, payload) = Capture::activation_fixture();
+    let (mut capture, _) = Capture::activation_fixture();
     let restored = capture.restored.as_mut().unwrap();
     let now = std::time::Instant::now();
-    assert!(matches!(
-        restored.accept(&payload, now).unwrap().0,
-        GuestRestoreAction::Apply(_)
-    ));
     let ready = restored.activation.complete(now, Ok(())).unwrap().encode();
     let mut harness = Harness::spawn_with_capture(system, config, mappings, Some(capture));
     harness.reset(1, 7);
     assert_eq!(
-        harness.request(APP_ACTIVATE, &payload),
+        harness.request(APP_PING, &[]),
         response(APP_READY, 42, 0, &ready)
     );
     let execution = workload_payload(&["/bin/sh", "-c", "echo $$; exec sleep 30"], None).unwrap();
@@ -602,63 +592,37 @@ fn running_restored_workload(system: TestSystem) -> (Harness, Vec<u8>, Vec<u8>, 
     }
     let process = std::str::from_utf8(&output).unwrap().trim_end().parse();
     let process = sys::ProcessId::from_positive(process.unwrap()).unwrap();
-    (harness, payload, ready, process)
+    (harness, ready, process)
 }
 
 #[test]
-fn restored_activation_retries_during_a_workload_get_cached_ready_or_end_the_session() -> TestResult
-{
+fn a_restored_clone_s_request_for_ready_during_a_workload_is_busy_as_a_cold_boot_s() -> TestResult {
     if super::super::tests::isolate_process_test(
         "NVX_RESTORED_RUNNING_ACTIVATION_TEST",
-        "guest::managed_agent::dispatch::tests::restored_activation_retries_during_a_workload_get_cached_ready_or_end_the_session",
+        "guest::managed_agent::dispatch::tests::a_restored_clone_s_request_for_ready_during_a_workload_is_busy_as_a_cold_boot_s",
     ) {
         return Ok(());
     }
     let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
     let (_identical, mut system) = TestSystem::with_direct();
     system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
-    let (mut harness, payload, ready, process) = running_restored_workload(system);
+    let (mut harness, ready, process) = running_restored_workload(system);
+    // While the workload runs, the request is refused as any other is, and the workload runs on.
     assert_eq!(
-        harness.request_all(44, APP_ACTIVATE, &payload),
-        vec![response(APP_READY, 44, 0, &ready)]
+        harness.request_all(44, APP_PING, &[]),
+        vec![response(APP_BUSY, 44, 0, b"")]
     );
     assert!(sys::process_exists(process));
     assert_eq!(
         harness.request_all(43, APP_CANCEL, &[]),
         vec![response(APP_EXIT, 43, 137, b"cancelled")]
     );
-    assert!(harness.stop().diagnostics.is_empty());
-
-    // A changed activation fails the started one, which ends the workload and the session
-    // without a reply.
-    let (_changed, mut system) = TestSystem::with_direct();
-    system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
-    let (mut harness, payload, _, process) = running_restored_workload(system);
-    let (record, _) = protocol::decode_activate_payload(&payload)?;
-    let mut configuration = record.configuration().clone();
-    configuration.view.hostname = b"changed".to_vec();
-    let record =
-        crate::guest_restore::GuestRestoreRecord::new(record.restore().copied(), configuration)?;
-    harness.send(
-        44,
-        APP_ACTIVATE,
-        &[&payload[..9], record.encode().as_slice()].concat(),
-    );
-    harness
-        .host
-        .set_read_timeout(Some(std::time::Duration::from_secs(20)))?;
-    assert_eq!(harness.host.read(&mut [0])?, 0);
-    let (outcome, system) = harness.thread.join().unwrap();
-    assert_eq!(outcome.err(), Some(Errno::EPROTO));
+    // Once it ended, the clone's Ready reports the same activation.
     assert_eq!(
-        system.diagnostics,
-        format!(
-            "NVX-MANAGED-ERROR: stage=data status={}\n",
-            Errno::EPROTO as i32
-        )
-        .as_bytes()
+        harness.request(APP_PING, &[]),
+        response(APP_READY, 42, 0, &ready)
     );
-    assert!(!sys::process_exists(process));
+    assert!(harness.stop().diagnostics.is_empty());
     Ok(())
 }
 
@@ -981,15 +945,15 @@ fn data_validation_diagnostics_preserve_the_c_failure_stage_and_status() {
 
 #[test]
 fn a_request_that_fails_after_validation_reports_the_data_stage() {
-    // A restored agent's activate request passes the validation of its frame, and its record,
-    // which does not decode, then ends the session.
+    // A restored agent's request for Ready passes the validation of its frame, and, while its
+    // record has not applied, which nvx-init's order never lets happen, ends the session.
     let config = AgentConfig::for_test();
     let mappings = HostMappings::announced(0);
     let (capture, _) = Capture::activation_fixture();
     let system = TestSystem::new(Paths::default());
     let mut harness = Harness::spawn_with_capture(system, config, mappings, Some(capture));
     harness.reset(1, 7);
-    let frame = frame(APP_ACTIVATE, 42, b"x");
+    let frame = frame(APP_PING, 42, b"");
     let diagnostics = harness.fail(&encode_outer(OUTER_DATA, &INSTANCE, 1, 8, &frame).unwrap());
     assert_eq!(
         diagnostics,

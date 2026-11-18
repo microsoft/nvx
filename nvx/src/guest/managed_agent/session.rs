@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::guest::init::{self, Capture, CaptureStep, RestoreHandoff, Restored, Runtime};
 use crate::guest::nvxs::{GuestConnection, GuestConnectionError};
-use crate::guest::restore::{GuestRestoreAction, GuestRestoreInput, GuestRestoreState};
+use crate::guest::restore::{GuestRestoreAction, GuestRestoreState};
 use crate::guest::snapshot::{Captured, Disposition};
 use crate::guest::sys::{self, Errno, FileDescriptor, Pollable};
 use crate::protocol::nvxs::{GuestEvent, RecordError, RecordType, SessionError};
@@ -412,6 +412,11 @@ impl<'r> Session<'r> {
                     Ok(Captured::Restored(repaired)) => {
                         capture.restored(repaired);
                         let restored = capture.restored.as_mut().expect("the repair was retained");
+                        // The packet's record comes first, before the session: nothing waits for
+                        // the host, and a clone without a valid record ends at once.
+                        restored
+                            .accept(Instant::now())
+                            .map_err(activation_failure)?;
                         self.descriptor().set_nonblocking()?;
                         self.connection
                             .get_ref()
@@ -448,110 +453,75 @@ impl<'r> Session<'r> {
         result
     }
 
-    /// Runs init's restored space setup or returns its cached activation result.
-    pub(crate) fn activate(
-        &mut self,
-        request: protocol::AppFrame<'_>,
-    ) -> Result<Option<RestoreHandoff>, Errno> {
-        self.activate_with(request, |restored, session, record, workload| {
+    /// Applies the record that the restored clone's guest restore accepted from its restore
+    /// packet, before the host asks for Ready, and returns the space's handoff, or `None` without
+    /// a record to apply.
+    pub(crate) fn activate(&mut self) -> Result<Option<RestoreHandoff>, Errno> {
+        self.activate_with(|restored, session| {
             let runtime = session
                 .connection
                 .get_ref()
                 .runtime
                 .as_ref()
                 .ok_or_else(|| crate::Error::unsupported("activation needs the init runtime"))?;
-            restored.apply(record, workload, |publication, gateway| {
+            restored.apply(|publication, gateway| {
                 runtime.borrow_mut().restore_announcer(publication, gateway)
             })
         })
     }
 
-    /// Keeps one application and its result while replacement sessions join before Ready.
+    /// Applies the accepted record once, with `apply`, and completes the guest restore with its
+    /// result, whose Ready awaits the host's request.
     fn activate_with<R>(
         &mut self,
-        request: protocol::AppFrame<'_>,
-        apply: impl FnOnce(
-            &mut Restored,
-            &mut Self,
-            &crate::guest_restore::GuestRestoreRecord,
-            protocol::workload::WorkloadIdentity,
-        ) -> crate::Result<R>,
+        apply: impl FnOnce(&mut Restored, &mut Self) -> crate::Result<Option<R>>,
     ) -> Result<Option<R>, Errno> {
         let mut capture = self.capture.take().ok_or(Errno::ENOTSUP)?;
         let result = (|| {
-            let restored = capture.restored.as_mut().ok_or(Errno::EPROTO)?;
-            let (action, workload) = restored
-                .accept(request.payload, Instant::now())
-                .map_err(activation_failure)?;
-            let (retained, ready, replies) = match action {
-                GuestRestoreAction::Apply(record) => {
-                    let retained = match apply(restored, self, &record, workload) {
-                        Ok(retained) => retained,
-                        Err(error) => {
-                            init::report_activation(&error);
-                            return Err(activation_failure(
-                                restored
-                                    .activation
-                                    .complete(Instant::now(), Err(error.into()))
-                                    .expect_err("a failed application cannot become ready"),
-                            ));
-                        }
-                    };
-                    let mut replies = vec![request.request_id];
-                    while sys::readable_or_hung_up(&[self.descriptor().borrowed()], 0)?[0] {
-                        match self
-                            .next_event()
-                            .map_err(super::dispatch::report_failure_for_capture)?
-                        {
-                            Event::Reset => {
-                                restored.reset(Instant::now()).map_err(activation_failure)?;
-                                self.acknowledge()?;
-                                replies.clear();
-                            }
-                            Event::Data(bytes) => {
-                                let retry = match self
-                                    .accept_request(&bytes)
-                                    .map_err(DataFailure::into_error)?
-                                {
-                                    Request::App(retry) if retry.kind == protocol::APP_ACTIVATE => {
-                                        retry
-                                    }
-                                    _ => {
-                                        return Err(activation_failure(
-                                            restored
-                                                .activation
-                                                .input(Instant::now(), GuestRestoreInput::Request)
-                                                .expect_err("an activation takes no request yet"),
-                                        ));
-                                    }
-                                };
-                                if !matches!(
-                                    restored
-                                        .accept(retry.payload, Instant::now())
-                                        .map_err(activation_failure)?
-                                        .0,
-                                    GuestRestoreAction::Join
-                                ) {
-                                    return Err(Errno::EPROTO);
-                                }
-                                replies.push(retry.request_id);
-                            }
-                        }
-                    }
-                    let ready = restored
-                        .activation
-                        .complete(Instant::now(), Ok(()))
-                        .map_err(activation_failure)?;
-                    (Some(retained), ready, replies)
-                }
-                GuestRestoreAction::Ready(ready) => (None, ready, vec![request.request_id]),
-                _ => return Err(Errno::EPROTO),
+            let Some(restored) = capture.restored.as_mut() else {
+                return Ok(None);
             };
-            for id in replies {
-                self.send_app(protocol::APP_READY, id, 0, &ready.encode())?;
+            if restored.activation.state() != GuestRestoreState::Activating {
+                return Ok(None);
             }
-            self.connection.get_ref().deadline.set(None);
+            let retained = match apply(restored, self) {
+                Ok(retained) => retained,
+                Err(error) => {
+                    init::report_activation(&error);
+                    return Err(activation_failure(
+                        restored
+                            .activation
+                            .complete(Instant::now(), Err(error.into()))
+                            .expect_err("a failed application cannot become ready"),
+                    ));
+                }
+            };
+            restored
+                .activation
+                .complete(Instant::now(), Ok(()))
+                .map_err(activation_failure)?;
             Ok(retained)
+        })();
+        self.capture = Some(capture);
+        result
+    }
+
+    /// Answers the host's request for Ready, `request`, a `PING`, of the restored clone, with
+    /// Ready, which carries what its guest restore established once the record applied.
+    pub(crate) fn ready(&mut self, request: protocol::AppFrame<'_>) -> Result<(), Errno> {
+        let mut capture = self.capture.take().ok_or(Errno::ENOTSUP)?;
+        let result = (|| {
+            let restored = capture.restored.as_mut().ok_or(Errno::EPROTO)?;
+            match restored.ready(Instant::now()).map_err(activation_failure)? {
+                GuestRestoreAction::Ready(ready) => {
+                    self.send_app(protocol::APP_READY, request.request_id, 0, &ready.encode())?;
+                    self.connection.get_ref().deadline.set(None);
+                    Ok(())
+                }
+                // nvx-init applies the record before it reads the session, so no request for Ready
+                // joins the guest restore.
+                _ => Err(Errno::EPROTO),
+            }
         })();
         self.capture = Some(capture);
         result

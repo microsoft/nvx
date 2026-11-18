@@ -680,11 +680,8 @@ fn restore_machine_at(phase: RestorePhase) -> RestoreMachine {
     machine.input(RestoreInput::Connected);
     assert!(matches!(
         machine.next_action(),
-        Some(RestoreAction::SendActivate(_))
+        Some(RestoreAction::RequestReady)
     ));
-    if phase == RestorePhase::Ready {
-        machine.input(RestoreInput::ActivateSent);
-    }
     machine
 }
 
@@ -697,17 +694,18 @@ fn restore_failure(machine: &mut RestoreMachine) -> RestoreError {
 }
 
 #[test]
-fn restore_machine_resends_canonical_bytes_and_stops_at_ready() {
+fn restore_machine_asks_each_session_for_ready_and_stops_at_ready() {
     let record = restore_record();
     let mut machine = restore_machine_at(RestorePhase::Connect);
+    // The guest took its record from its restore packet, so each session only asks for Ready,
+    // and a lost one is replaced.
     for _ in 0..5 {
         machine.input(RestoreInput::Connected);
-        let Some(RestoreAction::SendActivate(bytes)) = machine.next_action() else {
-            panic!("the session received no activation");
-        };
-        assert_eq!(bytes, record.encode());
+        assert!(matches!(
+            machine.next_action(),
+            Some(RestoreAction::RequestReady)
+        ));
         assert!(machine.next_action().is_none());
-        machine.input(RestoreInput::ActivateSent);
         machine.input(RestoreInput::SessionLost);
         assert!(matches!(
             machine.next_action(),
@@ -717,9 +715,8 @@ fn restore_machine_resends_canonical_bytes_and_stops_at_ready() {
     machine.input(RestoreInput::Connected);
     assert!(matches!(
         machine.next_action(),
-        Some(RestoreAction::SendActivate(_))
+        Some(RestoreAction::RequestReady)
     ));
-    machine.input(RestoreInput::ActivateSent);
     machine.input(RestoreInput::GuestReady(GuestRestoreReady::of(&record)));
     assert!(matches!(machine.next_action(), Some(RestoreAction::Done)));
     machine.input(RestoreInput::SessionLost);
@@ -742,7 +739,7 @@ fn restore_machine_checks_the_transaction_and_refuses_a_cold_record() {
     let cold = GuestRestoreRecord::new(None, restore_record().configuration().clone()).unwrap();
     let error = restore_failure(&mut RestoreMachine::new(&cold));
     assert_eq!(error.phase, RestorePhase::ReadyEvent);
-    assert_eq!(error.evidence, RestoreEvidence::InvalidActivate);
+    assert_eq!(error.evidence, RestoreEvidence::InvalidRecord);
     assert_eq!(error.attribution, Attribution::Request);
     assert!(!error.guest_may_have_run);
     assert!(
@@ -754,11 +751,7 @@ fn restore_machine_checks_the_transaction_and_refuses_a_cold_record() {
 
 #[test]
 fn restore_machine_session_loss_invalidates_each_session_phase() {
-    for phase in [
-        RestorePhase::Connect,
-        RestorePhase::Activate,
-        RestorePhase::Ready,
-    ] {
+    for phase in [RestorePhase::Connect, RestorePhase::Ready] {
         let mut machine = restore_machine_at(phase);
         machine.input(RestoreInput::SessionLost);
         assert!(matches!(
@@ -767,16 +760,17 @@ fn restore_machine_session_loss_invalidates_each_session_phase() {
         ));
         assert!(machine.next_action().is_none());
         machine.input(RestoreInput::Connected);
-        let Some(RestoreAction::SendActivate(bytes)) = machine.next_action() else {
-            panic!("the replacement session received no activation");
-        };
-        assert_eq!(bytes, restore_record().encode());
+        assert!(matches!(
+            machine.next_action(),
+            Some(RestoreAction::RequestReady)
+        ));
         machine.input(RestoreInput::GuestReady(GuestRestoreReady::of(
             &restore_record(),
         )));
         assert!(matches!(machine.next_action(), Some(RestoreAction::Done)));
     }
 
+    // A session lost before the request for Ready was taken replaces the request too.
     let mut machine = restore_machine_at(RestorePhase::Connect);
     machine.input(RestoreInput::Connected);
     machine.input(RestoreInput::SessionLost);
@@ -792,25 +786,24 @@ fn restore_machine_keeps_operation_phase_evidence_and_original_source() {
     for phase in [
         RestorePhase::ReadyEvent,
         RestorePhase::Connect,
-        RestorePhase::Activate,
         RestorePhase::Ready,
     ] {
         let mut machine = restore_machine_at(phase);
         let source = Box::new(io::Error::other("original operation failure"));
         let original: *const io::Error = &*source;
         machine.input(RestoreInput::OperationFailed {
-            phase: RestorePhase::Activate,
+            phase: RestorePhase::Connect,
             evidence: RestoreEvidence::PeerMismatch,
             source: Some(source),
         });
         let error = restore_failure(&mut machine);
-        assert_eq!(error.phase, RestorePhase::Activate);
+        assert_eq!(error.phase, RestorePhase::Connect);
         assert_eq!(error.evidence, RestoreEvidence::PeerMismatch);
         assert_eq!(error.attribution, Attribution::Unknown);
         assert!(error.guest_may_have_run);
         assert_eq!(
             error.message,
-            "restore failed during Activate: PeerMismatch: original operation failure"
+            "restore failed during Connect: PeerMismatch: original operation failure"
         );
         let returned = StdError::source(&error)
             .unwrap()
@@ -819,7 +812,7 @@ fn restore_machine_keeps_operation_phase_evidence_and_original_source() {
         assert!(std::ptr::eq(original, returned));
         assert_eq!(
             error.to_string(),
-            "restore failed during Activate: PeerMismatch"
+            "restore failed during Connect: PeerMismatch"
         );
 
         let mut machine = restore_machine_at(phase);
@@ -842,7 +835,6 @@ fn restore_machine_expiry_cancellation_and_exit_fail_every_pending_phase() {
     for phase in [
         RestorePhase::ReadyEvent,
         RestorePhase::Connect,
-        RestorePhase::Activate,
         RestorePhase::Ready,
     ] {
         for (input, evidence) in [
@@ -881,7 +873,7 @@ fn restore_failures_attribute_the_existing_policy_free_evidence_classes() {
             &[
                 RestoreEvidence::InvalidTargets,
                 RestoreEvidence::InvalidSettings,
-                RestoreEvidence::InvalidActivate,
+                RestoreEvidence::InvalidRecord,
                 RestoreEvidence::InvalidMappings,
                 RestoreEvidence::UnservableImage,
                 RestoreEvidence::UnusableScratch,
@@ -922,6 +914,7 @@ fn restore_failures_attribute_the_existing_policy_free_evidence_classes() {
             &[
                 RestoreEvidence::MalformedSnapshot,
                 RestoreEvidence::SnapshotDefect,
+                RestoreEvidence::IncompatibleGuest,
             ],
             Attribution::Snapshot,
         ),
@@ -930,7 +923,6 @@ fn restore_failures_attribute_the_existing_policy_free_evidence_classes() {
     for phase in [
         RestorePhase::ReadyEvent,
         RestorePhase::Connect,
-        RestorePhase::Activate,
         RestorePhase::Ready,
     ] {
         for (evidence, attribution) in classes {
@@ -973,7 +965,7 @@ fn restore_exit_reports_keep_guest_status_classification_and_actual_details() {
         ),
         (
             status::GUEST_RESTORE_RECORD,
-            RestoreEvidence::InvalidActivate,
+            RestoreEvidence::InvalidRecord,
             Attribution::Request,
         ),
         (
@@ -1005,7 +997,6 @@ fn restore_exit_reports_keep_guest_status_classification_and_actual_details() {
     for phase in [
         RestorePhase::ReadyEvent,
         RestorePhase::Connect,
-        RestorePhase::Activate,
         RestorePhase::Ready,
     ] {
         for category in ["guest-exit", "success"] {
@@ -1062,11 +1053,7 @@ fn restore_guest_execution_possibility_is_false_before_spawn_and_sticky_after_it
     ));
     assert!(!restore_failure(&mut machine).guest_may_have_run);
 
-    for phase in [
-        RestorePhase::Connect,
-        RestorePhase::Activate,
-        RestorePhase::Ready,
-    ] {
+    for phase in [RestorePhase::Connect, RestorePhase::Ready] {
         let mut machine = restore_machine_at(phase);
         machine.input(RestoreInput::SessionLost);
         assert!(matches!(
@@ -1087,22 +1074,22 @@ fn restore_guest_execution_possibility_is_false_before_spawn_and_sticky_after_it
 #[test]
 fn restore_failure_messages_keep_the_original_cause_chain_without_replacing_it() {
     let source = Box::new(
-        Error::io("activation write failed")
+        Error::io("ready request write failed")
             .with_source(Error::io("transport failed").with_source(io::Error::other("root cause"))),
     );
     let original: *const Error = &*source;
     let mut machine = restore_machine_at(RestorePhase::Ready);
     machine.input(RestoreInput::OperationFailed {
-        phase: RestorePhase::Activate,
+        phase: RestorePhase::Ready,
         evidence: RestoreEvidence::Io,
         source: Some(source),
     });
     let error = restore_failure(&mut machine);
     assert_eq!(error.attribution, Attribution::Host);
-    assert!(error.message.contains("activation write failed"));
+    assert!(error.message.contains("ready request write failed"));
     assert!(error.message.contains("transport failed"));
     assert!(error.message.ends_with("root cause"));
-    assert_eq!(error.to_string(), "restore failed during Activate: Io");
+    assert_eq!(error.to_string(), "restore failed during Ready: Io");
     let returned = StdError::source(&error)
         .unwrap()
         .downcast_ref::<Error>()
