@@ -4,6 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::host::paths::{absolute, normalized};
+use crate::host::platform::hex;
 #[cfg(not(windows))]
 use crate::host::platform::{check_store_dir as check_dir, create_store_dir as create_dir};
 #[cfg(windows)]
@@ -78,7 +79,7 @@ impl VmDir {
             let mut bytes = [0u8; 16];
             getrandom::fill(&mut bytes)
                 .map_err(|error| Error::io("cannot draw the name of a pipe").with_source(error))?;
-            let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+            let suffix = hex(&bytes);
             return Ok(format!("//./pipe/{pipe}-{suffix}"));
         }
         self.path

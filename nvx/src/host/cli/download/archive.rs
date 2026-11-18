@@ -19,6 +19,7 @@ use super::system_program;
 use crate::ErrorCode;
 use crate::host::artifacts::CHECKSUMS_NAME;
 use crate::host::cli::{Exit, Result, check_interrupt, io_error};
+use crate::host::platform::hex;
 
 /// The directory beside the package into which `tar` extracts it.
 const EXTRACTION_DIR: &str = "package";
@@ -297,11 +298,7 @@ pub(super) fn sha256_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path).map_err(failed)?;
     let mut hasher = Sha256::new();
     io::copy(&mut file, &mut hasher).map_err(failed)?;
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    Ok(hex(&hasher.finalize()))
 }
 
 /// Returns the error of a release archive that `message` describes.

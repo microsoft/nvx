@@ -10,10 +10,11 @@ use super::OUTCOME_SCHEMA_VERSION;
 use super::directory::os_error;
 use crate::ErrorCode;
 use crate::host::cli::json::{Object, pretty, read_object};
-use crate::host::cli::sandbox::state::{hex, random_bytes, temporary_path};
+use crate::host::cli::sandbox::state::{random_bytes, temporary_path};
 use crate::host::cli::session::{EXIT_CATEGORIES, ExecResult};
 use crate::host::cli::{Exit, Result};
 use crate::host::paths;
+use crate::host::platform;
 
 /// Returns the destination of an outcome report, as `_outcome_destination` does: in a plain
 /// directory, with a file name, and new.
@@ -148,7 +149,7 @@ pub(crate) fn write_exec_outcome(path: &str, result: &ExecResult) -> Result {
             "managed workload returned an unsupported outcome category",
         ));
     }
-    let operation_id = hex(&random_bytes::<16>()?);
+    let operation_id = platform::hex(&random_bytes::<16>()?);
     let report = json!({
         "schema_version": OUTCOME_SCHEMA_VERSION,
         "operation_id": operation_id,

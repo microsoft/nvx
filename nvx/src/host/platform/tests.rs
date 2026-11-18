@@ -191,6 +191,16 @@ fn hexadecimal_text_is_written_in_lowercase_and_read_in_either_case() {
     assert_eq!(parse_hex::<32>(&"cd".repeat(16)), None);
 }
 
+#[test]
+fn bytes_are_returned_as_two_lowercase_digits_each() {
+    assert_eq!(hex(&[0x00, 0x0a, 0xb1, 0xff]), "000ab1ff");
+    assert_eq!(hex(&[]), "");
+    // The text that `write_hex` writes and `parse_hex` reads.
+    let bytes: [u8; 16] = std::array::from_fn(|index| u8::try_from(index * 17).unwrap());
+    assert_eq!(hex(&bytes), "00112233445566778899aabbccddeeff");
+    assert_eq!(parse_hex(&hex(&bytes)), Some(bytes));
+}
+
 #[cfg(any(target_os = "linux", windows))]
 #[test]
 fn the_hosts_identity_and_monotonic_time_are_read() {

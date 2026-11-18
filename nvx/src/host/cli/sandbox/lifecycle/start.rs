@@ -35,7 +35,7 @@ use crate::host::cli::session::{ExecRequest, ExecResult, Session, closes};
 use crate::host::cli::shell::format_command;
 use crate::host::cli::snapshots::Store;
 use crate::host::cli::store::StateFile;
-use crate::host::cli::{Exit, Result, hex, io_error, output, random_bytes};
+use crate::host::cli::{Exit, Result, io_error, output, random_bytes};
 use crate::host::config::{COMMAND_LINE_BUDGET, RootConfig, UpperConfig, VmConfig};
 use crate::host::platform;
 use crate::host::process::KILL_TIMEOUT;
@@ -637,7 +637,7 @@ pub(crate) fn run(
     };
     artifacts.require()?;
     let (config, vm_config) = recorded?;
-    let name = hex(&random_bytes::<16>()?);
+    let name = platform::hex(&random_bytes::<16>()?);
     let path = std::env::temp_dir().join(format!("nvx-sandbox-run-{name}"));
     refuse_own_files(
         Some(("VM directory", &path)),

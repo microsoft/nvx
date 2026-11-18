@@ -34,6 +34,7 @@ use super::identity::opened_file_identity;
 use super::identity::{opened_file_id, status_error};
 use super::private::{CurrentUser, Required, privacy_problem, with_owner_only_attributes};
 use super::{last_error, owned, raw, wide};
+use crate::host::platform::hex;
 
 /// Claims a launch's fresh log, which `file` holds open.
 ///
@@ -219,7 +220,7 @@ pub(super) fn object_name(handle: HANDLE) -> io::Result<Vec<u16>> {
 pub(super) fn local_directory() -> io::Result<Vec<u16>> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(io::Error::other)?;
-    let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let suffix = hex(&bytes);
     let name = wide(format!(r"Local\nvx-namespace-{suffix}"));
     // SAFETY: SetLastError has no preconditions.
     unsafe { SetLastError(ERROR_SUCCESS) };

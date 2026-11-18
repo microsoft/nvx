@@ -344,6 +344,11 @@ pub(crate) fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt
         .try_for_each(|byte| write!(formatter, "{byte:02x}"))
 }
 
+/// Returns `bytes` as lowercase hexadecimal digits, two for each byte.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Parses the identity of a host as OpenVMM reads it: 32 hexadecimal digits, in either case,
 /// between optional braces and surrounding whitespace, ignoring dashes, as in `/etc/machine-id`
 /// and the Windows machine GUID.

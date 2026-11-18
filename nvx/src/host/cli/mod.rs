@@ -85,7 +85,7 @@ fn uuid4_hex() -> Result<String> {
     let mut bytes = random_bytes::<16>()?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Ok(hex(&bytes))
+    Ok(platform::hex(&bytes))
 }
 
 /// Returns `N` random bytes from the operating system.
@@ -95,11 +95,6 @@ pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N]> {
         Exit::error(ErrorCode::Io, format!("cannot read random bytes: {error}"))
     })?;
     Ok(bytes)
-}
-
-/// Returns `bytes` in lowercase hexadecimal.
-pub(crate) fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// The commands, in the order in which usage messages list them.
