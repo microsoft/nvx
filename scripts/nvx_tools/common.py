@@ -15,7 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from http.client import HTTPMessage
 from pathlib import Path, PurePosixPath
@@ -465,6 +465,24 @@ def credential_safe_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(_CrossOriginRedirectHandler)
 
 
+DOWNLOAD_RETRY_SECONDS = 5.0
+DOWNLOAD_RETRY_AFTER_LIMIT_SECONDS = 60.0
+
+
+def _download_retry_delay(error: OSError, attempt: int) -> float:
+    """Return how long to wait after a failed request before the next one:
+    twice as long after each failure, or as long as a rate limit's
+    Retry-After asks, up to a minute."""
+    delay = DOWNLOAD_RETRY_SECONDS * 2 ** (attempt - 1)
+    if isinstance(error, urllib.error.HTTPError):
+        retry_after = (error.headers.get("Retry-After") or "").strip()
+        if retry_after.isdigit():
+            delay = max(
+                delay, min(float(retry_after), DOWNLOAD_RETRY_AFTER_LIMIT_SECONDS)
+            )
+    return delay
+
+
 def download(
     url: str,
     destination: Path,
@@ -473,6 +491,7 @@ def download(
     expected_sha256: str | None = None,
     headers: Mapping[str, str] | None = None,
     opener: urllib.request.OpenerDirector | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     if attempts < 1:
         raise ScriptError("download attempts must be positive")
@@ -515,7 +534,12 @@ def download(
             temporary.unlink(missing_ok=True)
             if attempt == attempts:
                 raise ScriptError(f"failed to download {url}: {error}") from error
-            print(f">> download failed ({attempt}/{attempts}); retrying: {error}")
+            delay = _download_retry_delay(error, attempt)
+            print(
+                f">> download failed ({attempt}/{attempts}); "
+                f"retrying in {delay:g}s: {error}"
+            )
+            sleep(delay)
 
 
 def download_verified(url: str, destination: Path, expected_sha256: str) -> None:
