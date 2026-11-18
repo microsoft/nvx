@@ -50,6 +50,7 @@ from nvx_tools import (  # noqa: E402
     collect_alpine_sources,
     collect_ubuntu_sources,
     common,
+    container_images,
     elf,
     guest_artifact_reuse,
     guest_binaries,
@@ -5965,6 +5966,49 @@ class OpenVMMCiTests(unittest.TestCase):
 
 
 class CiConfigurationTests(unittest.TestCase):
+    def test_custom_registry_login_is_opt_in_for_each_hosted_docker_consumer(self):
+        for name in ("ci.yml", "nvx-scenario-coverage.yml"):
+            document = yaml.safe_load(
+                (BuildConstants.REPO_ROOT / ".github" / "workflows" / name).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertNotIn("NVX_IMAGE_REGISTRY", document.get("env", {}))
+            for job_name, job in document["jobs"].items():
+                steps = job.get("steps", [])
+                consumers = [
+                    index
+                    for index, step in enumerate(steps)
+                    if step.get("uses")
+                    in (
+                        "./.github/actions/check-quality",
+                        "./.github/actions/build-guest-artifacts",
+                    )
+                ]
+                auth = [
+                    index
+                    for index, step in enumerate(steps)
+                    if step.get("uses") == "./.github/actions/setup-container-registry"
+                ]
+                with self.subTest(workflow=name, job=job_name):
+                    if not consumers:
+                        self.assertEqual(auth, [])
+                        continue
+                    self.assertEqual(len(auth), 1)
+                    self.assertLess(auth[0], min(consumers))
+                    setup = steps[auth[0]]
+                    self.assertIn("vars.NVX_IMAGE_REGISTRY != ''", setup["if"])
+                    if name == "ci.yml":
+                        self.assertIn(
+                            "github.event.pull_request.head.repo.full_name == github.repository",
+                            setup["if"],
+                        )
+                    self.assertEqual(
+                        setup["with"]["registry-prefix"],
+                        "${{ vars.NVX_IMAGE_REGISTRY }}",
+                    )
+                    self.assertEqual(job["permissions"]["id-token"], "write")
+
     def test_ci_needs_reference_declared_jobs(self):
         workflow = (
             BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
@@ -6525,10 +6569,9 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertEqual(workflow.count("CARGO_REGISTRY_TOKEN"), 1)
         self.assertEqual(workflow.count("steps.auth.outputs.token"), 1)
 
-    def test_only_the_crate_release_can_request_an_oidc_token(self):
-        # crates.io trusts the OpenID Connect token of ci.yml's jobs in the
-        # crates-io environment, so no other job may request one or deploy
-        # to it.
+    def test_oidc_is_limited_to_crate_release_and_opt_in_registry_jobs(self):
+        # Registry pulls use a separate federation. The crates-io environment
+        # remains exclusive to the crate publisher.
         holders: set[str] = set()
         environments: set[str] = set()
         workflows = BuildConstants.REPO_ROOT / ".github" / "workflows"
@@ -6543,7 +6586,17 @@ class CiConfigurationTests(unittest.TestCase):
                     holders.add(f"{path.name}:{scope}")
                 if "environment" in definition:
                     environments.add(f"{path.name}:{scope}")
-        self.assertEqual(holders, {"ci.yml:crate-release"})
+        self.assertEqual(
+            holders,
+            {
+                "ci.yml:crate-release",
+                "ci.yml:quality",
+                "ci.yml:artifacts",
+                "ci.yml:distro-artifacts",
+                "ci.yml:debug-kernel",
+                "nvx-scenario-coverage.yml:artifacts",
+            },
+        )
         self.assertEqual(environments, {"ci.yml:crate-release"})
 
     def test_crate_checks_run_on_every_os(self):
@@ -9205,7 +9258,8 @@ python3() {
         guarded_steps = [
             step
             for step in steps
-            if "docker build" in step or "uses: actions/cache/save@" in step
+            if "container_images.py build" in step
+            or "uses: actions/cache/save@" in step
         ]
 
         self.assertTrue(guarded_steps)
@@ -9410,7 +9464,8 @@ python3() {
                         continue
                     reusing.add(job_name)
                     self.assertEqual(
-                        job["permissions"], {"actions": "read", "contents": "read"}
+                        job["permissions"],
+                        {"actions": "read", "contents": "read", "id-token": "write"},
                     )
                     # Only pushes and merge groups reuse, since neither can
                     # restore the pull request's caches; pull requests and full
@@ -9487,7 +9542,7 @@ python3() {
         builds = [
             index
             for index, step in enumerate(steps)
-            if "docker build" in str(step.get("run", ""))
+            if "container_images.py build" in str(step.get("run", ""))
             and "debug" not in step["name"]
         ]
 
@@ -14790,6 +14845,236 @@ class AlpineSourceCollectionTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def test_oidc_registry_login_keeps_credentials_out_of_arguments_and_job_environment(
+        self,
+    ):
+        from scripts.setup.azure.nvx_azure import linux_images
+
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "setup-container-registry"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        script = _composite_action_script(
+            action, "Configure job-scoped Docker credentials"
+        )
+        python = script.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "environment"
+            environment = {
+                **os.environ,
+                "REGISTRY_PREFIX": "exampleacr-dnlhash.azurecr.io/nvx",
+                "RUNNER_TEMP": temporary,
+                "GITHUB_ENV": str(output),
+            }
+            previous = Path.cwd()
+            try:
+                os.chdir(BuildConstants.REPO_ROOT)
+                with (
+                    patch.dict(os.environ, environment, clear=True),
+                    patch.object(sys, "path", list(sys.path)),
+                    patch.object(
+                        linux_images, "azure_cli_token", return_value="aad-secret"
+                    ),
+                    patch.object(
+                        linux_images, "refresh_token", return_value="acr-secret"
+                    ),
+                    patch.object(linux_images.common, "run_command") as run,
+                ):
+                    exec(
+                        compile(python, "configure-job-container-registry", "exec"), {}
+                    )
+            finally:
+                os.chdir(previous)
+            arguments = run.call_args.args[0]
+            self.assertNotIn("acr-secret", " ".join(arguments))
+            self.assertEqual(run.call_args.kwargs["stdin"], b"acr-secret\n")
+            values = dict(
+                line.split("=", 1)
+                for line in output.read_text(encoding="utf-8").splitlines()
+            )
+            self.assertEqual(
+                values["NVX_IMAGE_REGISTRY"], "exampleacr-dnlhash.azurecr.io/nvx"
+            )
+            self.assertTrue(Path(values["DOCKER_CONFIG"]).is_relative_to(temporary))
+            self.assertNotIn("secret", output.read_text(encoding="utf-8"))
+
+    def test_quality_action_mirrors_images_but_preserves_local_gate_tools(self):
+        if os.name == "nt":
+            git = shutil.which("git")
+            candidate = Path(git).parent.parent / "bin" / "bash.exe" if git else None
+            bash = (
+                str(candidate)
+                if candidate is not None and candidate.is_file()
+                else None
+            )
+        else:
+            bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("Bash is unavailable")
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "check-quality"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        step = _composite_action_step(action, "Check code quality")
+        tools = cast(dict[str, str], yaml.safe_load(step)[0]["env"])
+        script = _composite_action_script(action, "Check code quality")
+        script = script.split("python -m ruff check", 1)[0]
+        script += 'printf "%s\\n" "$SHELLCHECK" "$SHFMT"\n'
+        for prefix, local in (
+            (None, False),
+            ("exampleacr.azurecr.io/nvx", False),
+            ("exampleacr-dnlhash.azurecr.io/nvx", False),
+            ("exampleacr.azurecr.io/nvx", True),
+            ("", False),
+        ):
+            with self.subTest(prefix=prefix, local=local):
+                environment = {**os.environ, **tools}
+                environment.pop("NVX_IMAGE_REGISTRY", None)
+                if prefix is not None:
+                    environment["NVX_IMAGE_REGISTRY"] = prefix
+                if local:
+                    environment.update(SHELLCHECK="shellcheck", SHFMT="shfmt")
+                result = subprocess.run(
+                    [bash, "-c", script],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+                if prefix == "":
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("NVX_IMAGE_REGISTRY", result.stderr)
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr)
+                if local:
+                    self.assertEqual(
+                        result.stdout.splitlines(), ["shellcheck", "shfmt"]
+                    )
+                elif prefix is not None:
+                    self.assertIn(
+                        f"{prefix}/docker.io/koalaman/shellcheck-alpine@", result.stdout
+                    )
+                    self.assertIn(f"{prefix}/docker.io/mvdan/shfmt@", result.stdout)
+                else:
+                    self.assertNotIn(".azurecr.io", result.stdout)
+
+    def test_guest_artifact_action_uses_the_shared_docker_wrapper(self):
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "build-guest-artifacts"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("scripts/nvx_tools/container_images.py build", action)
+        caller = ["--file", "docker/Dockerfile", "--target", "artifacts", "."]
+        for prefix in (None, "exampleacr.azurecr.io/nvx"):
+            with self.subTest(prefix=prefix):
+                environment = dict(os.environ)
+                environment.pop("NVX_IMAGE_REGISTRY", None)
+                if prefix is not None:
+                    environment["NVX_IMAGE_REGISTRY"] = prefix
+                with (
+                    patch.dict(os.environ, environment, clear=True),
+                    patch.object(
+                        container_images.subprocess,
+                        "run",
+                        return_value=subprocess.CompletedProcess([], 0),
+                    ) as run,
+                ):
+                    self.assertEqual(container_images.main(["build", *caller]), 0)
+                expected = ["docker", "build"]
+                if prefix is not None:
+                    expected += container_images.docker_arguments(
+                        BuildConstants.REPO_ROOT, prefix
+                    )
+                run.assert_called_once_with([*expected, *caller], check=False)
+
+    def test_docker_registry_override_preserves_every_base_image_digest(self):
+        prefix = "exampleacr.azurecr.io/nvx"
+        sources = container_images.docker_pins(BuildConstants.REPO_ROOT)
+        with patch.dict(os.environ, {"NVX_IMAGE_REGISTRY": prefix}):
+            command = [
+                str(part)
+                for part in build.docker_build_command(
+                    build_config.DockerBuildConfig(),
+                    DockerBuildConstants.ALL_GUESTS_TARGET,
+                )
+            ]
+        arguments = {
+            value.split("=", 1)[0]: value.split("=", 1)[1]
+            for flag, value in zip(command, command[1:], strict=False)
+            if flag == "--build-arg"
+        }
+        for name, source in sources.items():
+            with self.subTest(image=name):
+                mirrored = arguments[name]
+                self.assertTrue(mirrored.startswith(prefix + "/"))
+                self.assertEqual(mirrored.split("@")[1], source.split("@")[1])
+        self.assertIn("/docker.io/library/debian@", arguments["DEBIAN_IMAGE"])
+        self.assertIn(
+            "/mcr.microsoft.com/azurelinux/base/core@", arguments["AZURELINUX_IMAGE"]
+        )
+
+    def test_docker_registry_override_rejects_bad_prefixes_and_unpinned_images(self):
+        for prefix in (
+            "",
+            "https://exampleacr.azurecr.io/nvx",
+            "exampleacr.azurecr.io/../other",
+        ):
+            with (
+                self.subTest(prefix=prefix),
+                patch.dict(os.environ, {"NVX_IMAGE_REGISTRY": prefix}),
+                self.assertRaisesRegex(common.ScriptError, "NVX_IMAGE_REGISTRY"),
+            ):
+                build.docker_build_command(
+                    build_config.DockerBuildConfig(), DockerBuildConstants.ALPINE_TARGET
+                )
+        with self.assertRaisesRegex(ValueError, "pinned"):
+            container_images.mirrored_image(
+                "debian:12-slim", "exampleacr.azurecr.io/nvx"
+            )
+
+    def test_dockerfile_pin_changes_reach_inventory_and_custom_consumers_together(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative in (
+                "docker/Dockerfile",
+                ".github/actions/check-quality/action.yml",
+                "SOURCE-MANIFEST.json",
+                "azurelinux/packages.lock.json",
+            ):
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(BuildConstants.REPO_ROOT / relative, target)
+            dockerfile = root / "docker" / "Dockerfile"
+            original = container_images.docker_pins(root)["DEBIAN_IMAGE"]
+            new_pin = original.split("@")[0] + "@sha256:" + "1" * 64
+            dockerfile.write_text(
+                dockerfile.read_text(encoding="utf-8").replace(original, new_pin),
+                encoding="utf-8",
+            )
+            inventory = container_images.pinned_images(root)
+            arguments = container_images.docker_arguments(
+                root, "exampleacr.azurecr.io/nvx"
+            )
+            self.assertIn(
+                container_images.image_reference(new_pin).canonical, inventory
+            )
+            self.assertIn(
+                "DEBIAN_IMAGE=exampleacr.azurecr.io/nvx/"
+                + container_images.image_reference(new_pin).canonical,
+                arguments,
+            )
+            self.assertEqual(container_images.docker_arguments(root, None), [])
+
     def test_build_config_owns_standard_runtime_paths(self):
         config = build_config.BuildConfig()
         alpine = config.initramfs_config("alpine")
@@ -17231,7 +17516,7 @@ class BuildTests(unittest.TestCase):
         # docker/Dockerfile pins, so a toolchain change must miss every cache.
         self.assertEqual(
             action.count("--file docker/Dockerfile"),
-            action.count("docker build"),
+            action.count("container_images.py build"),
         )
         for cache_name in cache_names:
             with self.subTest(cache=cache_name):
@@ -17773,7 +18058,7 @@ class BuildTests(unittest.TestCase):
         self.assertIn("from nvx_tools.azurelinux import input_sha256", azure_stage)
         self.assertIn(
             "'input_sha256': input_sha256(\n"
-            "        image=os.environ['AZURELINUX_IMAGE'],\n"
+            "        image=AzureLinuxBuildConstants.IMAGE,\n"
             "        version=os.environ['AZURELINUX_VERSION'],\n"
             "    ),",
             azure_stage,

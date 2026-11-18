@@ -9,6 +9,7 @@ import json
 import lzma
 import ntpath
 import re
+import sys
 import tarfile
 import uuid
 from collections.abc import Mapping
@@ -20,6 +21,9 @@ import yaml
 ROOT = Path(__file__).resolve().parent
 SETUP = ROOT.parent
 REPO = SETUP.parent.parent
+sys.path.insert(0, str(REPO / "scripts"))
+from nvx_tools import container_images  # noqa: E402
+
 # The stdlib-only guest package. Guests run its commands from their bootstrap
 # directory as ``python -I -B <directory> <command>``: isolated mode keeps
 # environment variables and user site-packages out, and this zipapp-style
@@ -35,6 +39,7 @@ LINUX_MODULES = (
     "linux_bootstrap.py",
     "linux_disk.py",
     "linux_firewall.py",
+    "linux_images.py",
     "linux_mshv.py",
 )
 LINUX_ENTRY_POINT = "/usr/bin/python3 -I -B /opt/nvx-bootstrap"
@@ -90,7 +95,16 @@ class CommonConfig(CommonOptionalConfig):
     runnerNumberOffset: int
 
 
-class LinuxConfig(CommonConfig):
+class ContainerRegistry(TypedDict):
+    resourceId: str
+    repositoryPrefix: str
+
+
+class LinuxOptionalConfig(TypedDict, total=False):
+    containerRegistry: ContainerRegistry
+
+
+class LinuxConfig(CommonConfig, LinuxOptionalConfig):
     os: Literal["linux"]
     backend: str
     kernelMode: str
@@ -119,6 +133,13 @@ class PackageManifest(TypedDict):
     guestFiles: dict[str, str]
 
 
+class ImagePackageManifest(TypedDict):
+    registryResourceId: str
+    customDataBytes: int
+    customDataSha256: str
+    guestFiles: dict[str, str]
+
+
 COMMON_REQUIRED = {
     "os",
     "subscriptionId",
@@ -138,7 +159,7 @@ COMMON_OPTIONAL = {
     "benchmarkRunnerName",
 }
 PLATFORM_FIELDS = {
-    "linux": {"backend", "kernelMode"},
+    "linux": {"backend", "kernelMode", "containerRegistry"},
     "windows": {
         "benchmarkScratchDirectory",
         "sshDefaultShell",
@@ -215,6 +236,32 @@ def windows_path(value: object, name: str) -> str:
         ):
             raise ValueError(f"{name} must not contain reserved DOS device names")
     return ntpath.normpath(value)
+
+
+def container_registry(value: object) -> ContainerRegistry:
+    if not isinstance(value, dict):
+        raise ValueError("containerRegistry must be an object")
+    values = cast(dict[object, object], value)
+    if set(values) != {"resourceId", "repositoryPrefix"}:
+        raise ValueError(
+            "containerRegistry must contain resourceId and repositoryPrefix"
+        )
+    resource_id = container_images.registry_resource_id(
+        text(values["resourceId"], "containerRegistry.resourceId", r"[^\r\n]+")
+    )
+    prefix = container_images.repository_prefix(
+        text(
+            values["repositoryPrefix"],
+            "containerRegistry.repositoryPrefix",
+            r"[^\r\n]+",
+        )
+    )
+    return {"resourceId": resource_id, "repositoryPrefix": prefix}
+
+
+def pinned_container_images() -> tuple[str, ...]:
+    """Read the digests used by the Docker guest builder and shell linters."""
+    return container_images.pinned_images(REPO)
 
 
 def normalize_config(config: object) -> LinuxConfig | WindowsConfig:
@@ -372,6 +419,10 @@ def normalize_config(config: object) -> LinuxConfig | WindowsConfig:
             "runnerDirectory": directory,
             "dataDisk": {"lun": lun, "mountPoint": mount_point},
         }
+        if "containerRegistry" in values:
+            linux_config["containerRegistry"] = container_registry(
+                values["containerRegistry"]
+            )
         return linux_config
     if set(disk) != {"lun", "driveLetter", "temporaryDriveFallback"}:
         raise ValueError(
@@ -466,6 +517,8 @@ def source(path: str) -> bytes:
         location = SETUP / path
     elif path == "rust-toolchain.toml":
         location = REPO / path
+    elif path in ("nvx_tools/__init__.py", "nvx_tools/container_images.py"):
+        location = REPO / "scripts" / path
     elif (
         path.startswith(("linux/", "windows/", GUEST_PACKAGE + "/"))
         and ".." not in Path(path).parts
@@ -522,8 +575,17 @@ def linux_payload(
         "setup-linux.sh": source("setup-linux.sh"),
         "tool-versions.conf": source("tool-versions.conf"),
         "__main__.py": GUEST_ENTRY_POINT,
+        "nvx_tools/__init__.py": source("nvx_tools/__init__.py"),
+        "nvx_tools/container_images.py": source("nvx_tools/container_images.py"),
         **guest_modules(LINUX_MODULES),
     }
+    if "containerRegistry" in config:
+        files["container-images.json"] = (
+            json.dumps(
+                {"format": 1, "images": pinned_container_images()}, sort_keys=True
+            )
+            + "\n"
+        ).encode()
     entries = [
         {
             "path": "/opt/nvx-bootstrap/" + name,
@@ -585,7 +647,103 @@ def linux_payload(
     data = (
         "#cloud-config\n" + yaml.safe_dump(document, sort_keys=False, width=120)
     ).encode()
-    return data, files, {"cloud-init.yaml": data}
+    generated = {"cloud-init.yaml": data}
+    if "containerRegistry" in config:
+        generated["container-images.json"] = files["container-images.json"]
+    return data, files, generated
+
+
+def image_mirror_payload(
+    registry: ContainerRegistry,
+    base: bytes | None = None,
+) -> tuple[bytes, dict[str, bytes]]:
+    files = {
+        ".nvx-image-mirror": b"nvx-image-mirror-v1\n",
+        "config.json": configuration_bytes(registry),
+        "container-images.json": configuration_bytes(
+            {"format": 1, "images": pinned_container_images()}
+        ),
+        "__main__.py": GUEST_ENTRY_POINT,
+        **guest_modules((*COMMON_MODULES, "linux_images.py")),
+        "nvx_tools/__init__.py": source("nvx_tools/__init__.py"),
+        "nvx_tools/container_images.py": source("nvx_tools/container_images.py"),
+    }
+    root = "/opt/nvx-image-mirror"
+    entries = [
+        {
+            "path": root + "/" + name,
+            "owner": "root:root",
+            "permissions": "0600" if name == "config.json" else "0644",
+            "encoding": "gz+b64",
+            "content": base64.b64encode(gzip_bytes(data)).decode(),
+        }
+        for name, data in files.items()
+    ]
+    unit = "nvx-container-images.service"
+    entries.append(
+        {
+            "path": "/etc/systemd/system/" + unit,
+            "owner": "root:root",
+            "permissions": "0644",
+            "content": (
+                "[Unit]\nDescription=Prepare NVX container image mirrors\n"
+                "Wants=network-online.target\nAfter=network-online.target cloud-final.service\n\n"
+                "[Service]\nType=oneshot\nRemainAfterExit=yes\n"
+                f"ExecStart=/usr/bin/python3 -I -B {root} linux-sync-images "
+                f"--config {root}/config.json --manifest {root}/container-images.json "
+                "--environment-file /etc/profile.d/nvx-container-registry.sh\n"
+                "Restart=on-failure\nRestartSec=60\nTimeoutStartSec=2h\n\n"
+                "[Install]\nWantedBy=multi-user.target\n"
+            ),
+        }
+    )
+    document: dict[str, object] = {}
+    if base is not None:
+        if not base.startswith(b"#cloud-config"):
+            raise ValueError("The base payload must be a cloud-config document")
+        try:
+            loaded: object = yaml.safe_load(base)
+        except yaml.YAMLError as error:
+            raise ValueError("The base cloud-config is not valid YAML") from error
+        if not isinstance(loaded, dict):
+            raise ValueError("The base cloud-config must be an object")
+        decoded = cast(dict[object, object], loaded)
+        if any(not isinstance(key, str) for key in decoded):
+            raise ValueError("The base cloud-config keys must be strings")
+        document = cast(dict[str, object], loaded)
+    for key in ("write_files", "runcmd", "packages"):
+        if not isinstance(document.get(key, []), list):
+            raise ValueError(f"The base cloud-config {key} must be a list")
+    previous_files = cast(list[object], document.get("write_files", []))
+    managed_paths = {entry["path"] for entry in entries}
+    for entry in previous_files:
+        if not isinstance(entry, dict):
+            raise ValueError("Each base write_files entry must be an object")
+        path = cast(dict[str, object], entry).get("path")
+        if not isinstance(path, str):
+            raise ValueError("Each base write_files entry must have a path")
+        if path in managed_paths:
+            raise ValueError(
+                "The base cloud-config already defines an image-mirror file"
+            )
+    document["write_files"] = [*previous_files, *entries]
+    packages = cast(list[object], document.get("packages", []))
+    document["packages"] = [
+        *packages,
+        *(name for name in ("ca-certificates", "python3") if name not in packages),
+    ]
+    document["runcmd"] = [
+        *cast(list[object], document.get("runcmd", [])),
+        ["systemctl", "daemon-reload"],
+        ["systemctl", "enable", unit],
+        ["systemctl", "start", "--no-block", unit],
+    ]
+    data = (
+        "#cloud-config\n" + yaml.safe_dump(document, sort_keys=False, width=120)
+    ).encode()
+    if len(data) > 65535:
+        raise ValueError(f"Azure customData exceeds 65,535 decoded bytes: {len(data)}")
+    return data, files
 
 
 def windows_package(files: dict[str, bytes]) -> bytes:
@@ -683,6 +841,16 @@ def build_package(config: object, output: str | Path) -> PackageManifest:
     }
     generated["model-patch.json"] = (json.dumps(patch, indent=2) + "\n").encode()
     generated["manifest.json"] = (json.dumps(manifest, indent=2) + "\n").encode()
+    write_generated_files(output, generated)
+    return manifest
+
+
+def write_generated_files(output: Path, generated: Mapping[str, bytes]) -> None:
+    if output.is_symlink():
+        raise ValueError("Package output must not be a symbolic link")
+    output = output.resolve()
+    if output == REPO or output.is_relative_to(REPO):
+        raise ValueError("Generated packages must be outside the NVX source directory")
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         raise ValueError(f"Package output directory must be empty: {output}")
@@ -700,6 +868,39 @@ def build_package(config: object, output: str | Path) -> PackageManifest:
         finally:
             if temporary.exists():
                 temporary.unlink()
+
+
+def build_image_package(
+    config: object, output: Path, base: Path | None = None
+) -> ImagePackageManifest:
+    registry = container_registry(config)
+    data, files = image_mirror_payload(
+        registry, None if base is None else base.read_bytes()
+    )
+    manifest: ImagePackageManifest = {
+        "registryResourceId": registry["resourceId"],
+        "customDataBytes": len(data),
+        "customDataSha256": hashlib.sha256(data).hexdigest(),
+        "guestFiles": {
+            name: hashlib.sha256(content).hexdigest() for name, content in files.items()
+        },
+    }
+    patch = {
+        "properties": {
+            "virtualMachineProfile": {
+                "osProfile": {"customData": base64.b64encode(data).decode()}
+            }
+        }
+    }
+    write_generated_files(
+        output,
+        {
+            "cloud-init.yaml": data,
+            "container-images.json": files["container-images.json"],
+            "model-patch.json": configuration_bytes(patch),
+            "manifest.json": configuration_bytes(manifest),
+        },
+    )
     return manifest
 
 
@@ -714,12 +915,42 @@ def main() -> None:
     parser.add_argument(
         "--validate-only", action="store_true", help="Validate without generating files"
     )
+    parser.add_argument(
+        "--images-only",
+        action="store_true",
+        help="Add image mirroring to a development VM without installing a runner",
+    )
+    parser.add_argument(
+        "--base-cloud-init",
+        type=Path,
+        help="Preserve and extend this cloud-config document with --images-only",
+    )
     args = parser.parse_args()
     if not args.validate_only and args.output is None:
         parser.error("--output is required unless --validate-only is used")
+    if args.base_cloud_init is not None and not args.images_only:
+        parser.error("--base-cloud-init requires --images-only")
     try:
+        if args.images_only:
+            with args.config.open(encoding="utf-8-sig") as stream:
+                registry = container_registry(
+                    json.load(stream, object_pairs_hook=unique_object)
+                )
+            if args.validate_only:
+                pinned_container_images()
+                print("Valid image-mirror configuration")
+            else:
+                images = build_image_package(
+                    registry, args.output, args.base_cloud_init
+                )
+                print(
+                    f"Built image-mirror package: {images['customDataBytes']} decoded bytes"
+                )
+            return
         config = load_config(args.config)
         if args.validate_only:
+            if config["os"] == "linux" and "containerRegistry" in config:
+                pinned_container_images()
             print(
                 f"Valid {config['os']} configuration; shared Rust release {rust_version()}"
             )

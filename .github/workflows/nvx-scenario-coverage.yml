@@ -33,11 +33,23 @@ jobs:
     if: github.repository == 'microsoft/nvx'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
+
+      - name: Set up container registry
+        if: vars.NVX_IMAGE_REGISTRY != ''
+        uses: ./.github/actions/setup-container-registry
+        with:
+          registry-prefix: ${{ vars.NVX_IMAGE_REGISTRY }}
+          client-id: ${{ vars.NVX_ACR_CLIENT_ID }}
+          tenant-id: ${{ vars.NVX_ACR_TENANT_ID }}
+          subscription-id: ${{ vars.NVX_ACR_SUBSCRIPTION_ID }}
 
       - name: Build guest artifacts
         uses: ./.github/actions/build-guest-artifacts

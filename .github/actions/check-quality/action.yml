@@ -37,6 +37,15 @@ runs:
           mvdan/shfmt@sha256:307d265ffd25ce832899ae17c93ed5062fc3375c514bba8f52cbf52792735c4d
       run: |
         set -euo pipefail
+        if [[ -v NVX_IMAGE_REGISTRY ]]; then
+          if [[ ! "${NVX_IMAGE_REGISTRY}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.azurecr\.io(/[a-z0-9]+([._-][a-z0-9]+)*)+$ ]]; then
+            echo "::error::NVX_IMAGE_REGISTRY must be an ACR server and repository prefix" >&2
+            exit 1
+          fi
+          prefix="${NVX_IMAGE_REGISTRY}/docker.io/"
+          SHELLCHECK="${SHELLCHECK/koalaman\/shellcheck-alpine@/${prefix}koalaman\/shellcheck-alpine@}"
+          SHFMT="${SHFMT/mvdan\/shfmt@/${prefix}mvdan\/shfmt@}"
+        fi
         python -m ruff check scripts .github/specula
         python -m compileall -q .github/specula
         ${SHELLCHECK} --shell=sh \

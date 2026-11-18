@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import TypedDict
 
-from . import ubuntu
+from . import container_images, ubuntu
 from .build_config import (
     BuildConfig,
     DistroLayerBuildConfig,
@@ -1391,10 +1391,18 @@ def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | P
         "--target",
         target,
     ]
+    image_registry = os.environ.get("NVX_IMAGE_REGISTRY")
+    if image_registry is not None:
+        try:
+            command.extend(
+                container_images.docker_arguments(
+                    BuildConstants.REPO_ROOT, image_registry
+                )
+            )
+        except ValueError as error:
+            raise ScriptError(str(error)) from error
     command.extend(
         [
-            "--build-arg",
-            f"AZURELINUX_IMAGE={AzureLinuxBuildConstants.IMAGE}",
             "--build-arg",
             f"AZURELINUX_VERSION={AzureLinuxBuildConstants.VERSION}",
             "--output",

@@ -158,6 +158,14 @@ invocation to update the service; `--check-only` still validates runner state.
 On Windows, an initial `-RunnerOnly` pass may create `_work` for sccache before
 registration; a subsequent named pass accepts that directory but refuses
 unrelated partial runner installations.
+
+Linux runner setup accepts `--image-registry <registry>.azurecr.io/nvx` to
+persist `NVX_IMAGE_REGISTRY` for Docker-capable image consumers, without granting
+the runner Docker access. The Azure bootstrap can first mirror the pinned
+images with its managed identity; see
+[Container registry mirrors](azure/README.md#container-registry-mirrors).
+Pass the same option when validating that runner with `--check-only`.
+
 Rustup bootstrap binaries are versioned and SHA-256 verified before execution;
 Linux provisioning also installs `zstd` for native Actions cache archives.
 Both scripts' runner-only modes install a pinned, SHA-256-verified `sccache`

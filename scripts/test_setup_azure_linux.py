@@ -13,9 +13,11 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
+from email.message import Message
 from pathlib import Path
 from typing import BinaryIO, cast
 from unittest.mock import patch
@@ -27,6 +29,7 @@ from scripts.setup.azure.nvx_azure import (
     linux_bootstrap,
     linux_disk,
     linux_firewall,
+    linux_images,
     linux_mshv,
 )
 from scripts.setup.azure.nvx_azure.common import BootstrapError, Completed, JsonObject
@@ -93,6 +96,17 @@ def linux_config() -> builder.LinuxConfig:
 
 def as_json(config: builder.LinuxConfig) -> JsonObject:
     return cast(JsonObject, json.loads(builder.configuration_bytes(config)))
+
+
+def registry_config() -> builder.ContainerRegistry:
+    return {
+        "resourceId": (
+            "/subscriptions/00000000-0000-0000-0000-000000000000"
+            "/resourceGroups/example/providers/Microsoft.ContainerRegistry"
+            "/registries/exampleacr"
+        ),
+        "repositoryPrefix": "nvx",
+    }
 
 
 def compute_metadata(config: builder.LinuxConfig, instance: int = 7) -> JsonObject:
@@ -577,8 +591,12 @@ class LinuxRegistrationTests(unittest.TestCase):
             with self.subTest(missing=missing):
                 self.check_missing_credential(missing, expected, count)
 
-    def check_bootstrap(self, role: str | None, instance: int) -> None:
+    def check_bootstrap(
+        self, role: str | None, instance: int, *, mirror: bool = False
+    ) -> None:
         config = linux_config()
+        if mirror:
+            config["containerRegistry"] = registry_config()
         if role is not None:
             config["runnerLabels"].append(role)
         if role == "general":
@@ -604,6 +622,14 @@ class LinuxRegistrationTests(unittest.TestCase):
                 events.append("setup" if stdin is None else "register")
             return ok()
 
+        def sync_images(spec: linux_images.RegistrySpec) -> linux_images.Registry:
+            if "restart" not in events:
+                raise AssertionError("registry credential requested before the block")
+            events.append("images")
+            return linux_images.Registry(
+                spec.resource_id, spec.prefix, "exampleacr-dnlhash.azurecr.io"
+            )
+
         commands = Commands(handle)
         with (
             tempfile.TemporaryDirectory() as temporary,
@@ -615,6 +641,11 @@ class LinuxRegistrationTests(unittest.TestCase):
             patch.object(linux_disk, "is_mounted", return_value=True),
             patch.object(linux_bootstrap, "prepare_backend", return_value=True),
             patch.object(linux_bootstrap, "finalize_runner") as finalize,
+            patch.object(
+                linux_images,
+                "sync_images",
+                side_effect=sync_images,
+            ) as sync,
         ):
             config_path = Path(temporary) / "config.json"
             config_path.write_bytes(builder.configuration_bytes(config))
@@ -623,8 +654,19 @@ class LinuxRegistrationTests(unittest.TestCase):
         finalize.assert_called_once_with(Path("/opt/nvx-runner"), config_path)
         self.assertEqual(
             events,
-            ["setup", "restart", "credential", "credential", "credential", "register"],
+            ["setup", "restart"]
+            + (["images"] if mirror else [])
+            + [
+                "credential",
+                "credential",
+                "credential",
+                "register",
+            ],
         )
+        if mirror:
+            sync.assert_called_once_with(linux_images.read_registry(registry_config()))
+        else:
+            sync.assert_not_called()
         self.assertEqual(
             [call for call in commands.calls if call[0] == "systemctl"],
             [
@@ -652,11 +694,382 @@ class LinuxRegistrationTests(unittest.TestCase):
         name = "nvx-linux-8" if instance == 7 else "nvx-linux-10"
         self.assertEqual(registration[registration.index("--runner-name") + 1], name)
         self.assertEqual("--benchmark-runner" in registration, role is not None)
+        if mirror:
+            self.assertNotIn("--image-registry", setups[0][0])
+            self.assertEqual(
+                registration[registration.index("--image-registry") + 1],
+                "exampleacr-dnlhash.azurecr.io/nvx",
+            )
 
     def test_bootstrap_blocks_metadata_before_requesting_credentials(self):
         for role, instance in ((None, 7), ("benchmark", 7), ("general", 9)):
             with self.subTest(role=role):
                 self.check_bootstrap(role, instance)
+
+    def test_registry_sync_precedes_runner_registration_and_exports_the_override(self):
+        self.check_bootstrap(None, 7, mirror=True)
+
+    def test_registry_failure_prevents_runner_registration(self):
+        config = linux_config()
+        config["containerRegistry"] = registry_config()
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(linux_bootstrap, "admin_uid"),
+            patch.object(
+                linux_bootstrap, "refresh_metadata", return_value=("nvx-1", "", False)
+            ),
+            patch.object(linux_disk, "setup"),
+            patch.object(linux_disk, "is_mounted", return_value=True),
+            patch.object(linux_bootstrap, "prepare_backend", return_value=True),
+            patch.object(
+                linux_images, "sync_images", side_effect=BootstrapError("ACR denied")
+            ),
+            patch.object(linux_bootstrap, "run_setup") as setup,
+            patch.object(common, "run_command", Commands(lambda _args, _stdin: ok())),
+            patch.object(common, "registration_token") as registration,
+            self.assertRaisesRegex(BootstrapError, "ACR denied"),
+        ):
+            config_path = Path(temporary) / "config.json"
+            config_path.write_bytes(builder.configuration_bytes(config))
+            linux_bootstrap.bootstrap(config_path)
+        setup.assert_called_once()
+        self.assertNotIn("--runner-name", setup.call_args.args[1])
+        registration.assert_not_called()
+
+
+class RegistryResponse(io.BytesIO):
+    def __init__(
+        self,
+        data: object = None,
+        *,
+        status: int = 200,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        super().__init__(b"" if data is None else json.dumps(data).encode())
+        self.status = status
+        self.headers = dict(headers or {})
+
+
+class LinuxImageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.spec = linux_images.read_registry(registry_config())
+        self.registry = linux_images.Registry(
+            self.spec.resource_id, self.spec.prefix, "exampleacr-dnlhash.azurecr.io"
+        )
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.manifest = Path(self.temporary.name) / "container-images.json"
+        self.manifest.write_text(
+            json.dumps({"format": 1, "images": builder.pinned_container_images()}),
+            encoding="utf-8",
+        )
+        self.images = linux_images.load_images(self.registry, self.manifest)
+
+    def http_error(self, code: int) -> urllib.error.HTTPError:
+        return urllib.error.HTTPError(
+            "https://exampleacr.azurecr.io/v2/example/manifests/sha256:example",
+            code,
+            "test failure",
+            Message(),
+            None,
+        )
+
+    def test_development_host_persists_only_a_successfully_resolved_registry(self):
+        for succeeds in (False, True):
+            with (
+                self.subTest(succeeds=succeeds),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                config = root / "config.json"
+                config.write_text(json.dumps(registry_config()), encoding="utf-8")
+                environment = root / "profile.d" / "nvx-container-registry.sh"
+                environment.parent.mkdir()
+                environment.write_text("unchanged\n", encoding="utf-8")
+                with (
+                    patch.object(
+                        linux_images,
+                        "sync_images",
+                        side_effect=None if succeeds else BootstrapError("ACR denied"),
+                        return_value=self.registry,
+                    ),
+                    contextlib.redirect_stdout(io.StringIO()) as output,
+                ):
+                    if succeeds:
+                        self.assertEqual(
+                            linux_images.provision(config, self.manifest, environment),
+                            0,
+                        )
+                    else:
+                        with self.assertRaisesRegex(BootstrapError, "ACR denied"):
+                            linux_images.provision(config, self.manifest, environment)
+                self.assertEqual(
+                    environment.read_text(encoding="utf-8"),
+                    f"export NVX_IMAGE_REGISTRY={self.registry.image_prefix}\n"
+                    if succeeds
+                    else "unchanged\n",
+                )
+                self.assertEqual(
+                    "NVX_CLOUD_IMAGES_READY=1" in output.getvalue(), succeeds
+                )
+
+    def test_already_present_images_still_validate_resource_and_resolve_dnl_server(
+        self,
+    ):
+        for correct in (True, False):
+            body = {
+                "id": self.spec.resource_id
+                if correct
+                else self.spec.resource_id + "other",
+                "properties": {"loginServer": self.registry.server},
+            }
+            with (
+                self.subTest(correct=correct),
+                patch.object(linux_images, "identity_token", return_value="identity"),
+                patch.object(
+                    linux_images, "open_request", return_value=RegistryResponse(body)
+                ),
+                patch.object(linux_images, "refresh_token", return_value="refresh"),
+                patch.object(linux_images, "pull_token", return_value="pull"),
+                patch.object(
+                    linux_images, "manifest_exists", return_value=True
+                ) as head,
+                patch.object(linux_images, "import_image") as copy,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                if correct:
+                    self.assertEqual(
+                        linux_images.sync_images(self.spec, self.manifest),
+                        self.registry,
+                    )
+                    head.assert_called()
+                else:
+                    with self.assertRaisesRegex(BootstrapError, "configured resource"):
+                        linux_images.sync_images(self.spec, self.manifest)
+                    head.assert_not_called()
+                copy.assert_not_called()
+
+    def test_async_conflict_shares_the_import_deadline_and_refreshes_pull_credentials(
+        self,
+    ):
+        location = (
+            "https://management.azure.com"
+            + self.registry.resource_id
+            + "/operationStatuses/example"
+        )
+        with (
+            patch.object(linux_images, "load_images", return_value=(self.images[0],)),
+            patch.object(linux_images, "resolve_registry", return_value=self.registry),
+            patch.object(linux_images, "identity_token", return_value="identity"),
+            patch.object(linux_images, "refresh_token", return_value="refresh"),
+            patch.object(
+                linux_images,
+                "pull_token",
+                side_effect=("before-import", "after-import", "after-wait"),
+            ) as pull,
+            patch.object(
+                linux_images, "manifest_exists", side_effect=(False, False, True)
+            ) as head,
+            patch.object(
+                linux_images,
+                "open_request",
+                side_effect=(
+                    RegistryResponse(status=202, headers={"Location": location}),
+                    self.http_error(409),
+                ),
+            ),
+            patch.object(linux_images.time, "monotonic", side_effect=(0, 600)),
+            patch.object(common, "sleep") as sleep,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            linux_images.sync_images(self.spec, self.manifest)
+        sleep.assert_called_once_with(10)
+        self.assertEqual(pull.call_count, 3)
+        self.assertEqual(head.call_args_list[-1].args[2], "after-wait")
+
+    def test_sync_imports_only_missing_digests_and_verifies_them(self):
+        output = io.StringIO()
+        with (
+            patch.object(
+                linux_images, "identity_token", return_value="sensitive-identity"
+            ),
+            patch.object(linux_images, "resolve_registry", return_value=self.registry),
+            patch.object(
+                linux_images, "refresh_token", return_value="sensitive-refresh"
+            ),
+            patch.object(linux_images, "pull_token", return_value="sensitive-pull"),
+            patch.object(
+                linux_images,
+                "manifest_exists",
+                side_effect=[True, False, False, True, True, True, True],
+            ),
+            patch.object(linux_images, "import_image") as copy,
+            patch.object(linux_images.time, "monotonic", return_value=100),
+            patch.object(common, "sleep") as sleep,
+            contextlib.redirect_stdout(output),
+        ):
+            resolved = linux_images.sync_images(self.spec, self.manifest)
+        copy.assert_called_once_with(
+            self.registry,
+            self.images[1],
+            "sensitive-identity",
+            1300,
+        )
+        self.assertEqual(resolved, self.registry)
+        sleep.assert_called_once_with(10)
+        self.assertNotIn("sensitive", output.getvalue())
+
+    def test_manifest_lookup_distinguishes_absence_from_auth_or_integrity_errors(self):
+        image = self.images[0]
+        for code in (401, 403, 404, 500):
+            with (
+                self.subTest(code=code),
+                patch.object(
+                    linux_images, "open_request", side_effect=self.http_error(code)
+                ),
+            ):
+                if code == 404:
+                    self.assertFalse(
+                        linux_images.manifest_exists(self.registry, image, "secret")
+                    )
+                else:
+                    with self.assertRaisesRegex(BootstrapError, f"HTTP {code}"):
+                        linux_images.manifest_exists(self.registry, image, "secret")
+        for digest in (image.digest, "sha256:" + "0" * 64):
+            with (
+                self.subTest(digest=digest),
+                patch.object(
+                    linux_images,
+                    "open_request",
+                    return_value=RegistryResponse(
+                        headers={"Docker-Content-Digest": digest}
+                    ),
+                ),
+            ):
+                if digest == image.digest:
+                    self.assertTrue(
+                        linux_images.manifest_exists(self.registry, image, "secret")
+                    )
+                else:
+                    with self.assertRaisesRegex(BootstrapError, "different digest"):
+                        linux_images.manifest_exists(self.registry, image, "secret")
+
+    def test_import_copies_by_digest_without_tags_and_polls_the_operation(self):
+        location = (
+            "https://management.azure.com/subscriptions/"
+            "00000000-0000-0000-0000-000000000000/providers/"
+            "Microsoft.ContainerRegistry/locations/westus/operationStatuses/example"
+        )
+        with (
+            patch.object(
+                linux_images,
+                "open_request",
+                side_effect=(
+                    RegistryResponse(status=202, headers={"Location": location}),
+                    RegistryResponse({"status": "Running"}, status=202),
+                    RegistryResponse({"status": "Succeeded"}),
+                ),
+            ) as request,
+            patch.object(common, "sleep") as sleep,
+        ):
+            linux_images.import_image(
+                self.registry, self.images[0], "secret", float("inf")
+            )
+        body = json.loads(request.call_args_list[0].kwargs["data"])
+        self.assertEqual(
+            body,
+            {
+                "source": {
+                    "registryUri": self.images[0].source_registry,
+                    "sourceImage": (
+                        f"{self.images[0].source_repository}@{self.images[0].digest}"
+                    ),
+                },
+                "untaggedTargetRepositories": [self.images[0].target_repository],
+                "mode": "NoForce",
+            },
+        )
+        sleep.assert_called_once_with(10)
+        self.assertEqual(request.call_args_list[1].args[0], location)
+
+    def test_import_poll_refuses_untrusted_locations_and_terminal_failures(self):
+        for location in (
+            "https://management.azure.com.evil.invalid/subscriptions/example",
+            "http://management.azure.com/subscriptions/example",
+            "https://management.azure.com/subscriptions/other/providers/Microsoft.ContainerRegistry/status",
+        ):
+            with (
+                self.subTest(location=location),
+                patch.object(linux_images, "open_request") as request,
+                self.assertRaisesRegex(BootstrapError, "unexpected operation URL"),
+            ):
+                linux_images.poll_import(
+                    location, self.registry, "secret", float("inf")
+                )
+            request.assert_not_called()
+        location = (
+            "https://management.azure.com"
+            + self.registry.resource_id
+            + "/operationStatuses/example"
+        )
+        for state in ("Failed", "Canceled"):
+            with (
+                self.subTest(state=state),
+                patch.object(
+                    linux_images,
+                    "open_request",
+                    return_value=RegistryResponse({"status": state}),
+                ),
+                self.assertRaisesRegex(BootstrapError, state),
+            ):
+                linux_images.poll_import(
+                    location, self.registry, "secret", float("inf")
+                )
+
+    def test_concurrent_import_conflicts_still_require_the_exact_digest(self):
+        with (
+            patch.object(
+                linux_images, "open_request", side_effect=self.http_error(409)
+            ),
+            patch.object(linux_images, "manifest_exists", side_effect=[False, True]),
+            patch.object(linux_images, "pull_token", return_value="fresh-pull"),
+            patch.object(common, "sleep"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            linux_images.import_image(
+                self.registry, self.images[0], "secret", float("inf")
+            )
+            linux_images.wait_for_manifest(
+                self.registry, self.images[0], "refresh", float("inf")
+            )
+        with (
+            patch.object(linux_images, "manifest_exists", return_value=False),
+            patch.object(linux_images, "pull_token", return_value="fresh-pull"),
+            patch.object(linux_images.time, "monotonic", return_value=21),
+            self.assertRaisesRegex(BootstrapError, "timed out"),
+        ):
+            linux_images.wait_for_manifest(self.registry, self.images[0], "refresh", 20)
+
+    def test_dry_run_does_not_acquire_credentials_or_access_the_network(self):
+        output = io.StringIO()
+        with (
+            patch.object(linux_images, "identity_token") as token,
+            patch.object(linux_images, "open_request") as request,
+            contextlib.redirect_stdout(output),
+        ):
+            result = linux_images.main(
+                [
+                    "--registry-resource-id",
+                    self.registry.resource_id,
+                    "--manifest",
+                    str(self.manifest),
+                    "--dry-run",
+                ]
+            )
+        self.assertEqual(result, 0)
+        self.assertIn(self.images[0].target_repository, output.getvalue())
+        token.assert_not_called()
+        request.assert_not_called()
 
 
 class LinuxBackendTests(unittest.TestCase):

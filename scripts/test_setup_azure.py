@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import lzma
+import os
 import subprocess
 import sys
 import tarfile
@@ -70,6 +71,8 @@ class PackageTests(unittest.TestCase):
                     "setup-linux.sh",
                     "tool-versions.conf",
                     "__main__.py",
+                    "nvx_tools/__init__.py",
+                    "nvx_tools/container_images.py",
                     *modules,
                 },
             )
@@ -171,6 +174,171 @@ class PackageTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(list(root.rglob("__pycache__")), [])
+
+    def test_linux_registry_package_pins_and_exports_its_images(self):
+        config = self.configuration("linux")
+        config["containerRegistry"] = {
+            "resourceId": (
+                "/subscriptions/00000000-0000-0000-0000-000000000000"
+                "/resourceGroups/example/providers/Microsoft.ContainerRegistry"
+                "/registries/exampleacr"
+            ),
+            "repositoryPrefix": "nvx",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = builder.build_package(config, temporary)
+            _, files = self.linux_guest_files(
+                (Path(temporary) / "cloud-init.yaml").read_bytes()
+            )
+            images = (Path(temporary) / "container-images.json").read_bytes()
+        self.assertEqual(files["container-images.json"], images)
+        self.assertEqual(
+            json.loads(images),
+            {"format": 1, "images": list(builder.pinned_container_images())},
+        )
+        self.assertEqual(
+            json.loads(files["config.json"])["containerRegistry"],
+            config["containerRegistry"],
+        )
+        self.assertLessEqual(manifest["customDataBytes"], 65535)
+
+    def test_images_only_preserves_base_configuration_without_installing_a_runner(self):
+        registry: builder.ContainerRegistry = {
+            "resourceId": (
+                "/subscriptions/00000000-0000-0000-0000-000000000000"
+                "/resourceGroups/example/providers/Microsoft.ContainerRegistry"
+                "/registries/exampleacr"
+            ),
+            "repositoryPrefix": "nvx",
+        }
+        original = {
+            "users": [{"name": "developer"}],
+            "packages": ["curl"],
+            "write_files": [{"path": "/opt/existing-setup.sh", "content": "true\n"}],
+            "runcmd": [["sh", "/opt/existing-setup.sh"]],
+        }
+        base = ("#cloud-config\n" + yaml.safe_dump(original)).encode()
+        data, files = builder.image_mirror_payload(registry, base)
+        document = yaml.safe_load(data)
+        self.assertEqual(document["users"], original["users"])
+        self.assertEqual(document["runcmd"][:1], original["runcmd"])
+        self.assertEqual(document["write_files"][:1], original["write_files"])
+        self.assertEqual(document["packages"][:1], original["packages"])
+        self.assertNotIn("setup-linux.sh", files)
+        self.assertNotIn("linux_disk.py", " ".join(files))
+        self.assertNotIn("setup-nvx-github-runner", data.decode())
+        self.assertIn("linux-sync-images", data.decode())
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = builder.build_image_package(registry, Path(temporary))
+            self.assertLessEqual(manifest["customDataBytes"], 65535)
+            self.assertEqual(
+                json.loads((Path(temporary) / "manifest.json").read_text())[
+                    "registryResourceId"
+                ],
+                registry["resourceId"],
+            )
+
+    def test_images_only_refuses_conflicting_files_or_invalid_base_lists(self):
+        registry = builder.container_registry(
+            {
+                "resourceId": (
+                    "/subscriptions/00000000-0000-0000-0000-000000000000"
+                    "/resourceGroups/example/providers/Microsoft.ContainerRegistry"
+                    "/registries/exampleacr"
+                ),
+                "repositoryPrefix": "nvx",
+            }
+        )
+        for document in (
+            {"runcmd": "not-a-list"},
+            {
+                "write_files": [
+                    {"path": "/opt/nvx-image-mirror/config.json", "content": ""}
+                ]
+            },
+            {"write_files": [{"path": ["not-a-path"]}]},
+        ):
+            with self.subTest(document=document), self.assertRaises(ValueError):
+                builder.image_mirror_payload(
+                    registry, ("#cloud-config\n" + yaml.safe_dump(document)).encode()
+                )
+
+    def test_standalone_image_sync_imports_without_the_packager_on_python_path(self):
+        environment = dict(os.environ)
+        environment.pop("PYTHONPATH", None)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.setup.azure.nvx_azure.linux_images",
+                "--help",
+            ],
+            cwd=builder.REPO,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--docker-login", result.stdout)
+
+    def test_registry_configuration_rejects_urls_traversal_and_extra_fields(self):
+        valid = {
+            "resourceId": (
+                "/subscriptions/00000000-0000-0000-0000-000000000000"
+                "/resourceGroups/example/providers/Microsoft.ContainerRegistry"
+                "/registries/exampleacr"
+            ),
+            "repositoryPrefix": "nvx",
+        }
+        for update in (
+            {"resourceId": "https://exampleacr.azurecr.io"},
+            {
+                "resourceId": valid["resourceId"].replace(
+                    "00000000-0000-0000-0000-000000000000",
+                    "0000000-00000-0000-0000-000000000000",
+                )
+            },
+            {"repositoryPrefix": "../other"},
+            {"repositoryPrefix": "nvx\nother"},
+            {"password": "do-not-store"},
+        ):
+            with self.subTest(update=update):
+                config = dict(self.configuration("linux"))
+                config["containerRegistry"] = {**valid, **update}
+                with self.assertRaisesRegex(ValueError, "containerRegistry"):
+                    builder.normalize_config(config)
+        config = dict(self.configuration("windows"))
+        config["containerRegistry"] = valid
+        with self.assertRaisesRegex(ValueError, "Unknown"):
+            builder.normalize_config(config)
+
+    def test_registry_packaging_rejects_an_unpinned_builder_image(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative in (
+                "docker/Dockerfile",
+                ".github/actions/check-quality/action.yml",
+            ):
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(
+                    (builder.REPO / relative).read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            dockerfile = root / "docker" / "Dockerfile"
+            dockerfile.write_text(
+                dockerfile.read_text(encoding="utf-8").replace(
+                    "@sha256:", ":sha256:", 1
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(builder, "REPO", root),
+                self.assertRaisesRegex(ValueError, "pinned"),
+            ):
+                builder.pinned_container_images()
 
     def test_linux_gzip_headers_are_independent_of_builder_platform(self):
         original_compress = gzip.compress

@@ -206,11 +206,14 @@ from pathlib import Path
 
 sys.path.insert(0, '/repo/scripts')
 from nvx_tools.azurelinux import input_sha256
-from nvx_tools.build_constants import GuestRustBuildConstants
+from nvx_tools.build_constants import AzureLinuxBuildConstants, GuestRustBuildConstants
 from nvx_tools.guest_binaries import inspect_guest_binaries
 
 def sha256(path: str) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+if os.environ['AZURELINUX_IMAGE'].rsplit('@', 1)[-1] != AzureLinuxBuildConstants.IMAGE.rsplit('@', 1)[-1]:
+    raise ValueError('the Azure Linux base image must retain its pinned digest')
 
 guest_build = inspect_guest_binaries(Path('/repo/build/guest-binaries'))
 helpers = {}
@@ -231,9 +234,9 @@ manifest = {
     'distribution': 'Azure Linux',
     'version': os.environ['AZURELINUX_VERSION'],
     'architecture': 'x86_64',
-    'image': os.environ['AZURELINUX_IMAGE'],
+    'image': AzureLinuxBuildConstants.IMAGE,
     'input_sha256': input_sha256(
-        image=os.environ['AZURELINUX_IMAGE'],
+        image=AzureLinuxBuildConstants.IMAGE,
         version=os.environ['AZURELINUX_VERSION'],
     ),
     'package_manifest_format': 'azurelinux-v1',

@@ -948,6 +948,7 @@ class ToolManifestReaderTests(unittest.TestCase):
             ("--extra-runner-labels", "pool"),
             ("--repository-url", "https://github.com/microsoft/nvx"),
             ("--runner-directory", "/opt/nvx-runner"),
+            ("--image-registry", "exampleacr.azurecr.io/nvx"),
             ("--runner-token-stdin",),
         )
         development_options = (
@@ -960,6 +961,20 @@ class ToolManifestReaderTests(unittest.TestCase):
             ((), "--backend must be kvm or mshv"),
             (("--backend", "whp"), "--backend must be kvm or mshv"),
             (("--runner-only",), "--backend must be kvm or mshv"),
+            (
+                (
+                    "--runner-only",
+                    "--backend",
+                    "kvm",
+                    "--image-registry",
+                    "bad.invalid/nvx",
+                ),
+                "invalid ACR image registry prefix: bad.invalid/nvx",
+            ),
+            (
+                ("--runner-only", "--backend", "kvm", "--image-registry", ""),
+                "--image-registry requires a nonempty value",
+            ),
             *(
                 (("--backend", "kvm", *option), f"{option[0]} requires --runner-only")
                 for option in runner_options
@@ -1017,6 +1032,16 @@ class ToolManifestReaderTests(unittest.TestCase):
             ),
             (("--backend", "mshv", "--bundle-only", "--guest-bundle", "bundle"), None),
             (("--runner-only", "--backend", "mshv", "--check-only"), None),
+            (
+                (
+                    "--runner-only",
+                    "--backend",
+                    "kvm",
+                    "--image-registry",
+                    "exampleacr.azurecr.io/nvx",
+                ),
+                None,
+            ),
             (
                 ("--runner-only", "--backend", "kvm", "--runner-name", "nvx-1")
                 + ("--benchmark-runner", "--extra-runner-labels", "pool")
