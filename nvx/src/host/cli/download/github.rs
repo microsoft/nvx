@@ -17,6 +17,7 @@ use serde_json::Value;
 
 use super::{Asset, Releases, remove_stale, system_program};
 use crate::ErrorCode;
+use crate::host::cli::sandbox::path_string;
 use crate::host::cli::{Exit, Result, check_interrupt, io_error};
 
 /// The base URL of the GitHub REST API.
@@ -360,13 +361,16 @@ impl Curl {
     fn config(&self, request: &Request<'_>) -> Result<String> {
         let mut lines = vec![
             format!("url = {}", quoted(request.url, "URL")?),
-            format!("output = {}", quoted(&path_text(request.output)?, "path")?),
+            format!(
+                "output = {}",
+                quoted(&path_string(request.output)?, "path")?
+            ),
             // The headers give the status and the redirect of the response, which no `write-out`
             // reports: with one, the `curl` 8.8.0 of some Windows releases fails every HTTPS
             // request with error 43 (curl/curl#13845).
             format!(
                 "dump-header = {}",
-                quoted(&path_text(request.headers)?, "path")?
+                quoted(&path_string(request.headers)?, "path")?
             ),
             format!("header = \"Accept: {}\"", request.accept),
             format!("header = \"X-GitHub-Api-Version: {API_VERSION}\""),
@@ -462,16 +466,6 @@ fn quoted(value: &str, what: &str) -> Result<String> {
         "\"{}\"",
         value.replace('\\', "\\\\").replace('"', "\\\"")
     ))
-}
-
-/// Returns `path` as text, which the configuration of `curl` holds.
-fn path_text(path: &Path) -> Result<String> {
-    path.to_str().map(str::to_owned).ok_or_else(|| {
-        Exit::error(
-            ErrorCode::Unsupported,
-            format!("path is not valid Unicode: {}", path.display()),
-        )
-    })
 }
 
 /// Returns the origin of `url`, its scheme and authority in lowercase, if it has them.
