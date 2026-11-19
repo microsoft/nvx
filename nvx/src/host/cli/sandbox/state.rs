@@ -61,9 +61,9 @@ pub(crate) use crate::host::cli::{random_bytes, temporary_path};
 mod tests;
 
 /// The typed image and upper configuration that provision writes and start reads.
-pub(crate) const CONFIG_FORMAT: u64 = 10;
+const CONFIG_FORMAT: u64 = 10;
 /// Every configuration format that `start` reads.
-pub(crate) const CONFIG_FORMATS: [u64; 1] = [CONFIG_FORMAT];
+const CONFIG_FORMATS: [u64; 1] = [CONFIG_FORMAT];
 /// What messages call a configuration.
 const DESCRIPTION: &str = "sandbox configuration";
 

@@ -13,7 +13,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Returns the error of a transition that still waits for another: Python's `TimeoutError`.
-pub(crate) fn transition_in_progress() -> Exit {
+fn transition_in_progress() -> Exit {
     Exit::error(
         ErrorCode::SandboxBusy,
         "another lifecycle transition of the sandbox is still in progress",

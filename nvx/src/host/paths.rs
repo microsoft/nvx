@@ -29,7 +29,7 @@ use std::path::{Component, MAIN_SEPARATOR_STR, Path, PathBuf, Prefix};
 
 /// Returns the error for an operating-system string, which messages call `what`, that is not
 /// valid Unicode.
-pub(crate) fn not_unicode(what: &str) -> io::Error {
+fn not_unicode(what: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!("{what} is not valid Unicode"),

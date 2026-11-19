@@ -56,7 +56,7 @@ fn create_dir_of_mode(path: &Path, mode: Mode) -> io::Result<()> {
 ///
 /// The checks of ownership and permissions take these types, rather than the raw integers of
 /// [`MetadataExt`], so that a mode passed as a user ID, or a user ID as a mode, fails to compile.
-pub(super) fn owner_and_mode(metadata: &fs::Metadata) -> (Uid, Mode) {
+fn owner_and_mode(metadata: &fs::Metadata) -> (Uid, Mode) {
     (
         Uid::from_raw(metadata.uid()),
         Mode::from_bits_truncate(metadata.mode()),
@@ -102,7 +102,7 @@ pub(crate) fn store_dir_problem(uid: Uid, mode: Mode, euid: Uid) -> Option<Strin
 /// Returns why a directory that the user `uid` owns with the permission bits `mode` is not private
 /// to the user `euid`, if it is not: it must belong to that user, and grant no access to anyone
 /// else.
-pub(crate) fn owner_only_problem(uid: Uid, mode: Mode, euid: Uid) -> Option<String> {
+fn owner_only_problem(uid: Uid, mode: Mode, euid: Uid) -> Option<String> {
     if uid != euid {
         Some(format!(
             "belongs to user {uid}, not to the current user {euid}"
