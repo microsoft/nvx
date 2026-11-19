@@ -34,7 +34,7 @@ are build products or caches and are not part of the tracked source tree. The
 ```text
 nvx/
 |-- .github/                     GitHub automation and Copilot customizations
-|   |-- ISSUE_TEMPLATE/          Bug report and CPU profile request issue forms
+|   |-- ISSUE_TEMPLATE/          Bug report, feature request, and CPU profile request issue forms
 |   |-- actions/                 Reusable local CI actions
 |   |-- agents/                  Copilot custom agents
 |   |-- skills/                  Copilot skills for NVX's own workflows

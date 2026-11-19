@@ -1,0 +1,66 @@
+name: Feature request
+description: >-
+  Propose an NVX feature or enhancement: what it is about, why it matters, and,
+  optionally, how it could be implemented.
+type: Feature
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you request a feature, search the [existing issues](https://github.com/microsoft/nvx/issues?q=is%3Aissue) for a duplicate. Leave credentials, tokens, host names, and other sensitive content out of the request. Never report a security vulnerability in a public issue; report it privately, as [SECURITY.md](https://github.com/microsoft/nvx/blob/dev/SECURITY.md) requires.
+
+        The problem and its use case are enough to start the discussion: a request needs neither a finished design nor a commitment to implement it. Agree its scope, and any design that it needs, with the maintainers before implementing it; they mark a request `feature-accepted` once its scope and design are agreed.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: The part of NVX that the feature concerns; pick the closest one.
+      options:
+        - "area: openvmm"
+        - "area: guest"
+        - "area: kernel"
+        - "area: nvx"
+        - "area: userland"
+        - "area: networking"
+        - "area: snapshot"
+        - "area: ci"
+        - "area: docs"
+        - "area: security"
+    validations:
+      required: true
+  - type: textarea
+    id: about
+    attributes:
+      label: What is this feature about?
+      description: >-
+        The problem or missing capability, and the behavior or outcome that you
+        want instead.
+      placeholder: |
+        Problem:
+        Desired outcome:
+    validations:
+      required: true
+  - type: textarea
+    id: relevance
+    attributes:
+      label: Why is this feature relevant?
+      description: >-
+        The use case, who benefits and how, and the limitations of the existing
+        alternatives or workarounds.
+      placeholder: |
+        Use case:
+        Benefit:
+        Alternatives:
+    validations:
+      required: true
+  - type: textarea
+    id: implementation
+    attributes:
+      label: How could this feature be implemented?
+      description: >-
+        Optionally, a proposed approach, the alternatives that you considered,
+        constraints, or examples. A finished design is not required.
+      placeholder: |
+        Approach:
+        Alternatives:
+        Constraints:
