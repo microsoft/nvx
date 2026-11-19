@@ -58,6 +58,66 @@ with the deploy key and on the hypervisor runners before it merges; see
 Leave the performance histories in `data/*.csv` to CI: successful `dev`
 pushes record their results, and the nightly full run appends them.
 
+## Dependency updates
+
+[Dependabot](../.github/dependabot.yml) proposes version updates for GitHub
+Actions in the workflows and composite actions, Python packages in
+`requirements-dev.txt` and `scripts/setup/azure/requirements.txt`, and Rust
+dependencies in `nvx/Cargo.lock`. The configuration takes effect when it
+reaches `dev`. It checks on Mondays at 09:00 UTC for Actions, 10:00 UTC for
+Python, and 11:00 UTC for Rust, and waits seven days after a routine release
+before proposing it.
+
+Each ecosystem allows one open version-update pull request, three in total.
+Minor and patch updates are grouped within each ecosystem; major updates
+remain separate. An open pull request occupies its ecosystem's slot until
+it closes or merges. Security updates remain enabled and use GitHub's
+separate limits, without the routine-update cooldown. The limit bounds open
+version-update pull requests, not CI runs: follow-up pushes and merge groups
+can run CI again, and Rust dependency updates can rebuild guest artifacts.
+
+Review a bot's release notes, dependency diff, and CI results rather than
+expecting it to fill the [pull request template](../.github/pull_request_template.md).
+For Actions, check the release and commit together as
+[Action references](ci.md#action-references) describes, including the runner
+requirements of a major release. Review references that should move together
+without removing intentional differences between workflows. Rust updates
+are lockfile-only: direct and indirect dependencies may move within the
+existing requirements, but changing those requirements or the minimum
+supported Rust or Python version remains a separate decision.
+
+A maintainer supplies any follow-up commits an update needs, such as fixes
+for new Ruff or Pyright findings, and reruns the affected checks. Do not
+weaken checks merely to accept an update. When a change to CI test wiring
+receives `tests-modified`, add **Changes to existing tests** to the pull
+request body and explain the listed changes, even when only an action
+version changed; see [Changes to existing tests](#changes-to-existing-tests).
+The label calls for review, not an exemption for bot updates. Reviewers
+approve updates and merge them through the [merge queue](ci.md#merge-queue);
+nothing approves or merges them automatically.
+
+A merged change to `nvx/Cargo.lock` can cause the next successful applicable
+nightly full run to publish a new preview version of the `nvx` crate, even
+without a Rust source change; see [crates.io releases](ci.md#cratesio-releases).
+If an update must wait, record the version, reason, and condition for
+reconsidering it in the pull request or a linked issue. Close a deferred
+pull request when appropriate to free its slot, and use an explicit
+Dependabot ignore rule for a deliberate exclusion that must persist.
+
+Dependencies that move with other build inputs stay outside Dependabot:
+
+- Update Rust through the coordinated [Rust toolchain](ci.md#rust-toolchain)
+  process, including runner preparation before moving the pin.
+- Update OpenVMM through [pin promotion](#pin-promotion).
+- Update Docker base images with their related inputs: the Rust builder
+  follows the toolchain pin, and an Azure Linux image change also updates
+  its package lock and source manifest.
+- Update the checksummed setup tools through
+  [Tool versions](../scripts/setup/README.md#tool-versions).
+- Update the shell-linter image pins explicitly in
+  [check-quality](../.github/actions/check-quality/action.yml), with review
+  of the resulting lint changes.
+
 ## Draft or Ready
 
 CI runs for a pull request, whatever its base, when it is opened, reopened,

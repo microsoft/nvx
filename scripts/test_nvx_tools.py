@@ -5965,6 +5965,60 @@ class OpenVMMCiTests(unittest.TestCase):
 
 
 class CiConfigurationTests(unittest.TestCase):
+    def test_dependabot_covers_independent_dependencies_only(self):
+        root = BuildConstants.REPO_ROOT
+        configuration = yaml.safe_load(
+            (root / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+        )
+        entries = configuration["updates"]
+        ecosystems = {entry["package-ecosystem"]: entry for entry in entries}
+        self.assertEqual(len(entries), 3)
+        self.assertEqual(set(ecosystems), {"github-actions", "pip", "cargo"})
+
+        actions = ecosystems["github-actions"]
+        directories = actions["directories"]
+        self.assertIn("/", directories)
+        covered_actions = {
+            path.relative_to(root).as_posix()
+            for directory in directories
+            if directory != "/"
+            for path in root.glob(directory.lstrip("/"))
+            if path.is_dir()
+        }
+        expected_actions = {
+            path.parent.relative_to(root).as_posix()
+            for pattern in ("*/action.yml", "*/action.yaml")
+            for path in (root / ".github" / "actions").glob(pattern)
+        }
+        self.assertTrue(expected_actions)
+        self.assertEqual(covered_actions, expected_actions)
+        self.assertEqual(
+            set(ecosystems["pip"]["directories"]), {"/", "/scripts/setup/azure"}
+        )
+        cargo = ecosystems["cargo"]
+        self.assertEqual(cargo["directory"], "/nvx")
+        self.assertTrue((root / "nvx" / "Cargo.lock").is_file())
+        self.assertEqual(cargo["versioning-strategy"], "lockfile-only")
+
+    def test_dependabot_limits_routine_updates_without_grouping_major_updates(self):
+        configuration = yaml.safe_load(
+            (BuildConstants.REPO_ROOT / ".github" / "dependabot.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        entries = configuration["updates"]
+        self.assertEqual(sum(entry["open-pull-requests-limit"] for entry in entries), 3)
+        for entry in entries:
+            with self.subTest(ecosystem=entry["package-ecosystem"]):
+                self.assertEqual(entry["open-pull-requests-limit"], 1)
+                self.assertEqual(entry["schedule"]["interval"], "weekly")
+                self.assertEqual(entry["cooldown"], {"default-days": 7})
+                self.assertNotIn("target-branch", entry)
+                [group] = entry["groups"].values()
+                self.assertEqual(group["applies-to"], "version-updates")
+                self.assertEqual(group["patterns"], ["*"])
+                self.assertEqual(set(group["update-types"]), {"minor", "patch"})
+
     def test_ci_needs_reference_declared_jobs(self):
         workflow = (
             BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"

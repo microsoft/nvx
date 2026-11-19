@@ -2574,6 +2574,9 @@ repository. Before you move a pin, read the release notes and the changes
 between the two commits, `https://github.com/OWNER/REPO/compare/OLD...NEW`, and
 change the SHA and the comment of each reference that moves together.
 
+Dependabot proposes action updates using these pins. The contributor guide
+describes its [schedule, limits, and review process](contribute.md#dependency-updates).
+
 ## Compilation cache
 
 Every self-hosted runner keeps a persistent
