@@ -27,6 +27,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 import uuid
 import zipfile
@@ -27038,6 +27039,56 @@ class DownloadTests(unittest.TestCase):
 
             self.assertFalse(destination.exists())
             self.assertFalse(destination.with_name("archive.tar.xz.part").exists())
+
+    def test_backs_off_before_retrying_a_failed_request(self):
+        sleep = MagicMock()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "archive.tar.xz"
+            with (
+                patch(
+                    "nvx_tools.common.urllib.request.urlopen",
+                    side_effect=urllib.error.URLError("connection reset"),
+                ) as urlopen,
+                self.assertRaisesRegex(common.ScriptError, "connection reset"),
+            ):
+                common.download(
+                    "https://example.invalid/archive.tar.xz", destination, sleep=sleep
+                )
+
+            self.assertEqual(urlopen.call_count, 3)
+            self.assertEqual(sleep.call_args_list, [call(5.0), call(10.0)])
+            self.assertFalse(destination.exists())
+
+    def test_waits_as_long_as_a_rate_limit_asks_up_to_a_minute(self):
+        payload = b"verified archive"
+        for retry_after, delay in (("30", 30.0), ("3600", 60.0), ("soon", 5.0)):
+            with self.subTest(retry_after=retry_after):
+                headers = http.client.HTTPMessage()
+                headers["Retry-After"] = retry_after
+                limited = urllib.error.HTTPError(
+                    "https://example.invalid/archive.tar.xz",
+                    429,
+                    "Too Many Requests",
+                    headers,
+                    None,
+                )
+                sleep = MagicMock()
+                with tempfile.TemporaryDirectory() as temporary:
+                    destination = Path(temporary) / "archive.tar.xz"
+                    with patch(
+                        "nvx_tools.common.urllib.request.urlopen",
+                        side_effect=[limited, io.BytesIO(payload)],
+                    ):
+                        common.download(
+                            "https://example.invalid/archive.tar.xz",
+                            destination,
+                            expected_sha256=hashlib.sha256(payload).hexdigest(),
+                            sleep=sleep,
+                        )
+
+                    self.assertEqual(destination.read_bytes(), payload)
+                sleep.assert_called_once_with(delay)
 
     def test_replaces_mismatched_cached_archive(self):
         payload = b"verified archive"
