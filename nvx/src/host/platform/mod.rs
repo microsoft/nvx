@@ -95,7 +95,7 @@ pub(crate) fn open_regular(path: &Path) -> io::Result<File> {
 /// Returns `error`, with which an open failed, as the error of a file that is not a regular file if
 /// the open refused one: on Unix, a link, which `O_NOFOLLOW` refuses, or a socket, which an open
 /// that does not wait refuses.
-pub(crate) fn refused_open(error: io::Error) -> io::Error {
+fn refused_open(error: io::Error) -> io::Error {
     #[cfg(unix)]
     if [nix::errno::Errno::ELOOP, nix::errno::Errno::ENXIO]
         .into_iter()

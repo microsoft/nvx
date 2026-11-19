@@ -79,7 +79,7 @@ fn parse_stat(pid: u32, stat: &[u8]) -> io::Result<(&str, u64)> {
 }
 
 /// Returns whether a process has threads besides its main thread.
-pub(crate) fn other_threads_remain(pid: u32) -> io::Result<bool> {
+fn other_threads_remain(pid: u32) -> io::Result<bool> {
     match fs::read_dir(format!("/proc/{pid}/task")) {
         Ok(threads) => Ok(threads.count() > 1),
         Err(error)

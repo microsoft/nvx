@@ -89,7 +89,7 @@ pub(crate) fn own_bytes_read() -> io::Result<u64> {
 /// exit, with `ERROR_ACCESS_DENIED`, which a handle that has terminate access gets only then. It
 /// signals the process only once the process's last thread has exited, so a check of the handle
 /// may not show the exit yet.
-pub(super) fn refused_termination(error: io::Error) -> io::Result<()> {
+fn refused_termination(error: io::Error) -> io::Result<()> {
     if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
         Ok(())
     } else {

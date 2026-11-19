@@ -87,7 +87,7 @@ impl fmt::Debug for Capability {
 }
 
 /// Returns a fresh launch capability, which is never all zero.
-pub(crate) fn generate_capability() -> Result<[u8; CAPABILITY_LEN]> {
+fn generate_capability() -> Result<[u8; CAPABILITY_LEN]> {
     let mut capability = [0u8; CAPABILITY_LEN];
     while capability == [0; CAPABILITY_LEN] {
         getrandom::fill(&mut capability).map_err(|error| {

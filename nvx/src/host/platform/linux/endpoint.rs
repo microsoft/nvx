@@ -332,9 +332,9 @@ pub(crate) fn endpoint_server_pid_until(
 }
 
 /// Blocking Unix-domain stream adapted to the control transport's deadline API.
-pub(super) struct UnixTransport {
+struct UnixTransport {
     /// Connected stream to OpenVMM's control socket.
-    pub(super) stream: UnixStream,
+    stream: UnixStream,
 }
 
 /// Clamps a present socket timeout to the nonzero duration accepted by `std`.
