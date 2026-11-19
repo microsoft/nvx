@@ -25,3 +25,33 @@ fn executables_find_the_release_or_checkout_that_holds_them() {
     assert!(default_dir(&executable("target/release")).is_none());
     assert!(default_dir(&executable("elsewhere")).is_none());
 }
+
+#[test]
+fn executables_find_their_root_in_any_case_only_on_windows() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(root.join(MANIFEST_NAME), "{}").unwrap();
+    for (path, layout) in [
+        ("BIN", Layout::Release),
+        ("Bin", Layout::Release),
+        ("NVX/TARGET/release", Layout::Repository),
+        (
+            "Nvx/Target/x86_64-unknown-linux-musl/debug",
+            Layout::Repository,
+        ),
+    ] {
+        let found = default_dir(&root.join(path).join("nvx"));
+        if cfg!(windows) {
+            let found = found.unwrap().unwrap();
+            assert_eq!(found.layout(), layout, "{path}");
+            assert_eq!(found.root(), absolute(root).unwrap(), "{path}");
+        } else {
+            // A checkout that holds the temporary directory may still be found.
+            let root = absolute(root).unwrap();
+            assert!(
+                found.is_none_or(|found| found.unwrap().root() != root),
+                "{path}"
+            );
+        }
+    }
+}

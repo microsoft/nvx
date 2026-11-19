@@ -4,10 +4,11 @@
 //! The root is the directory that `--root` names, in the layout that its built artifacts reveal,
 //! as [`ArtifactDir::from_dir`] tells a release from a repository checkout. Without `--root`, it
 //! is the release whose `bin/` holds the executable, or the repository checkout whose
-//! `nvx/target/` holds it, each with its `SOURCE-MANIFEST.json`. The `NVX_OPENVMM`
-//! environment variable names an OpenVMM executable to run instead of the root's, such as a test
-//! double.
+//! `nvx/target/` holds it, each with its `SOURCE-MANIFEST.json`. On Windows, whose paths ignore
+//! case, those directory names match in any case. The `NVX_OPENVMM` environment variable names
+//! an OpenVMM executable to run instead of the root's, such as a test double.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use super::args::{Parser, Syntax};
@@ -96,25 +97,41 @@ pub(crate) fn locate(root: Option<&str>) -> Result<Located> {
 
 /// Returns the artifact directory that holds `executable`, if any: the release whose `bin/`
 /// holds it, or the repository checkout whose `nvx/target/` holds it, at any depth below, as
-/// for a build for another target. Either must have its `SOURCE-MANIFEST.json`.
+/// for a build for another target. Either must have its `SOURCE-MANIFEST.json`. On Windows,
+/// `bin`, `nvx`, and `target` match in any case, since the path of the executable keeps the case
+/// in which its caller spelled it.
 fn default_dir(executable: &Path) -> Option<crate::Result<ArtifactDir>> {
     let directory = executable.parent()?;
     let has_manifest = |root: &Path| root.join(MANIFEST_NAME).is_file();
-    if directory.file_name().is_some_and(|name| name == "bin")
+    if directory
+        .file_name()
+        .is_some_and(|name| is_named(name, "bin"))
         && let Some(root) = directory.parent()
         && has_manifest(root)
     {
         return Some(ArtifactDir::release(root));
     }
     let target = directory.ancestors().find(|ancestor| {
-        ancestor.file_name().is_some_and(|name| name == "target")
+        ancestor
+            .file_name()
+            .is_some_and(|name| is_named(name, "target"))
             && ancestor
                 .parent()
                 .and_then(Path::file_name)
-                .is_some_and(|name| name == "nvx")
+                .is_some_and(|name| is_named(name, "nvx"))
     })?;
     let root = target.parent()?.parent()?;
     has_manifest(root).then(|| ArtifactDir::repository(root))
+}
+
+/// Returns whether the path component `name` is `expected`: in any ASCII case on Windows, whose
+/// paths ignore case, and exactly elsewhere.
+fn is_named(name: &OsStr, expected: &str) -> bool {
+    if cfg!(windows) {
+        name.eq_ignore_ascii_case(expected)
+    } else {
+        name == expected
+    }
 }
 
 #[cfg(test)]

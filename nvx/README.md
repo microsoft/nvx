@@ -1373,8 +1373,10 @@ extracted release, with them in `guest/` and `bin/`.
   `guest/initramfs.cpio.gz` is a release, and any other is a checkout.
 - Without `--root`, the root is the release whose `bin/` holds the executable,
   as for a release's `bin/nvx[.exe]`, or the checkout whose `nvx/target/`
-  holds it at any depth, as after `cargo build`. Either must have its
-  `SOURCE-MANIFEST.json`; otherwise the command fails and asks for `--root`.
+  holds it at any depth, as after `cargo build`. On Windows, whose paths ignore
+  case, `bin`, `nvx`, and `target` match in any case, as in a `PATH` entry
+  that ends in `Bin`. Either must have its `SOURCE-MANIFEST.json`; otherwise
+  the command fails and asks for `--root`.
 - The `NVX_OPENVMM` environment variable names an OpenVMM executable to run
   instead of the root's, such as `nvx-fake-openvmm` in tests. A relative path is
   relative to the working directory. A managed `start` refuses it, since the
