@@ -38,7 +38,7 @@ pub const PROCESS_COMMAND_LINE_LIMIT: usize = 32_767;
 
 /// Room for the runtime's files and the VM's output paths, which
 /// [`VmConfig::check_command_line`] keeps.
-pub(crate) const OPENVMM_COMMAND_LINE_RESERVE: usize = 2048;
+const OPENVMM_COMMAND_LINE_RESERVE: usize = 2048;
 
 /// The guest address of a VM's NIC at a cold boot whose configuration names none, in the form
 /// that [`Ipv4Cidr::parse`] reads.
@@ -1204,7 +1204,7 @@ pub(crate) fn reject_container_path(path: &Path, shown: &str) -> Result<()> {
 }
 
 /// The OpenVMM arguments of the inputs that every cold boot names.
-pub(crate) fn boot_arguments(
+fn boot_arguments(
     hypervisor: Hypervisor,
     memory_mib: u64,
     kernel: &Path,
@@ -1336,7 +1336,7 @@ pub fn fit_process_command_line(
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) unless OpenVMM's
 /// `arguments`, which a plan renders, without the program and the rest of the launch, leave
 /// `reserve` code units of [`PROCESS_COMMAND_LINE_LIMIT`] to that rest.
-pub(crate) fn fit_arguments(arguments: &[OsString], reserve: usize) -> Result<()> {
+fn fit_arguments(arguments: &[OsString], reserve: usize) -> Result<()> {
     let held = format!(", with {reserve} held in reserve for the rest of the launch");
     fit(
         "OpenVMM's arguments",
@@ -1362,7 +1362,7 @@ fn fit(subject: &str, length: usize, reserve: usize, held: &str) -> Result<()> {
 
 /// Returns the length in UTF-16 code units of `arguments` on a Windows command line, quoted as
 /// [`process_command_line_units`] quotes them, each with the space before it.
-pub(crate) fn arguments_units(arguments: &[OsString]) -> usize {
+fn arguments_units(arguments: &[OsString]) -> usize {
     arguments
         .iter()
         .map(|argument| argument_units(argument, false))
