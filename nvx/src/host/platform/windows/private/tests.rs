@@ -225,6 +225,60 @@ pub(crate) fn access(path: &Path) -> io::Result<String> {
 }
 
 #[test]
+fn a_security_descriptor_holds_the_owner_and_entries_of_the_object_that_it_was_read_from() {
+    let user = CurrentUser::get().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join("store");
+    assert_eq!(create_store_dir(&store).unwrap(), None);
+    let directory = OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(&store)
+        .unwrap();
+
+    let descriptor = SecurityDescriptor::of(directory.as_raw_handle() as HANDLE).unwrap();
+    let mut owner = ptr::null_mut();
+    let mut present = 0;
+    let mut acl = ptr::null_mut();
+    let mut defaulted = 0;
+    // SAFETY: the descriptor and the output pointers are valid, and the descriptor outlives them.
+    let read = unsafe {
+        GetSecurityDescriptorOwner(descriptor.as_ptr(), &mut owner, &mut defaulted) != 0
+            && GetSecurityDescriptorDacl(
+                descriptor.as_ptr(),
+                &mut present,
+                &mut acl,
+                &mut defaulted,
+            ) != 0
+    };
+    assert!(read, "{}", io::Error::last_os_error());
+    assert!(!owner.is_null() && user.trusts(owner));
+    assert!(present != 0 && !acl.is_null());
+    // A store directory allows the current user alone.
+    assert_eq!(ace_count(acl).unwrap(), 1);
+}
+
+#[test]
+fn a_security_descriptor_is_refused_for_a_handle_without_read_control_access() {
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("record");
+    fs::write(&path, b"").unwrap();
+    let file = OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .open(&path)
+        .unwrap();
+
+    let error = SecurityDescriptor::of(file.as_raw_handle() as HANDLE).err();
+    assert_eq!(
+        error.and_then(|error| error.raw_os_error()),
+        Some(ERROR_ACCESS_DENIED as i32)
+    );
+}
+
+#[test]
 fn vm_directories_must_be_owned_protected_and_allow_only_the_current_user_full_inherited_access() {
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{
