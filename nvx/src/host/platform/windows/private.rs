@@ -238,17 +238,47 @@ pub(crate) fn check_vm_dir(path: &Path) -> io::Result<Option<String>> {
     {
         return Ok(Some("is not a plain directory".to_owned()));
     }
-    let information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
-    let mut len = 0;
-    // SAFETY: an empty buffer asks for the descriptor's length.
-    unsafe { GetKernelObjectSecurity(handle, information, ptr::null_mut(), 0, &mut len) };
-    let mut buffer = vec![0u64; (len as usize).div_ceil(mem::size_of::<u64>())];
-    let descriptor: PSECURITY_DESCRIPTOR = buffer.as_mut_ptr().cast();
-    // SAFETY: the handle has read-control access, and the aligned buffer holds `len` bytes.
-    if unsafe { GetKernelObjectSecurity(handle, information, descriptor, len, &mut len) } == 0 {
-        return Err(io::Error::last_os_error());
+    let descriptor = SecurityDescriptor::of(handle)?;
+    vm_dir_problem(descriptor.as_ptr(), &CurrentUser::get()?)
+}
+
+/// The owner and the access control list of a kernel object, read into a buffer that is aligned
+/// for a security descriptor, which the pointers into the descriptor borrow.
+struct SecurityDescriptor {
+    /// The descriptor's bytes, in units of eight that give them the alignment that it needs.
+    buffer: Vec<u64>,
+}
+
+impl SecurityDescriptor {
+    /// Reads the owner and the discretionary access control list of the object that `handle`
+    /// holds open, which must have read-control access.
+    fn of(handle: HANDLE) -> io::Result<Self> {
+        let information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+        let mut len = 0;
+        // SAFETY: an empty buffer asks for the length that the descriptor needs.
+        unsafe { GetKernelObjectSecurity(handle, information, ptr::null_mut(), 0, &mut len) };
+        let mut buffer = vec![0u64; (len as usize).div_ceil(mem::size_of::<u64>())];
+        // SAFETY: the handle has read-control access, and the aligned buffer holds `len` bytes.
+        if unsafe {
+            GetKernelObjectSecurity(
+                handle,
+                information,
+                buffer.as_mut_ptr().cast(),
+                len,
+                &mut len,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { buffer })
     }
-    vm_dir_problem(descriptor, &CurrentUser::get()?)
+
+    /// Returns the descriptor, whose owner and list lie in the buffer that `self` holds. The
+    /// functions that read it take a mutable pointer, and write nothing through it.
+    fn as_ptr(&self) -> PSECURITY_DESCRIPTOR {
+        self.buffer.as_ptr().cast_mut().cast()
+    }
 }
 
 /// Checks a VM directory's security descriptor against its current-user-only contract.
@@ -283,22 +313,10 @@ fn vm_dir_problem(
             "inherits access control entries from its parent".to_owned(),
         ));
     }
-    let mut size = ACL_SIZE_INFORMATION::default();
-    // SAFETY: the list is valid, and the output holds an ACL_SIZE_INFORMATION.
-    if unsafe {
-        GetAclInformation(
-            acl,
-            (&raw mut size).cast(),
-            mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
-            AclSizeInformation,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
+    let count = ace_count(acl)?;
     let inherited = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
     let mut full_access = false;
-    for index in 0..size.AceCount {
+    for index in 0..count {
         let ace = ace_at(acl, index)?;
         // SAFETY: each entry starts with an ACE_HEADER.
         let header = unsafe { *ace.cast::<ACE_HEADER>() };
@@ -357,16 +375,7 @@ pub(super) fn privacy_problem(
     required: Required,
 ) -> io::Result<Option<String>> {
     let handle = object.as_raw_handle() as HANDLE;
-    let information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
-    let mut len = 0;
-    // SAFETY: an empty buffer asks for the length that the descriptor needs.
-    unsafe { GetKernelObjectSecurity(handle, information, ptr::null_mut(), 0, &mut len) };
-    let mut buffer = vec![0u64; (len as usize).div_ceil(mem::size_of::<u64>())];
-    let descriptor: PSECURITY_DESCRIPTOR = buffer.as_mut_ptr().cast();
-    // SAFETY: the handle has read-control access, and the buffer holds `len` bytes.
-    if unsafe { GetKernelObjectSecurity(handle, information, descriptor, len, &mut len) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    let descriptor = SecurityDescriptor::of(handle)?;
     let mut owner = ptr::null_mut();
     let mut present = 0;
     let mut acl = ptr::null_mut();
@@ -374,8 +383,13 @@ pub(super) fn privacy_problem(
     // SAFETY: the descriptor and the output pointers are valid. The owner and the list point
     // into the descriptor's buffer, which outlives their use.
     let read = unsafe {
-        GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted) != 0
-            && GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted) != 0
+        GetSecurityDescriptorOwner(descriptor.as_ptr(), &mut owner, &mut defaulted) != 0
+            && GetSecurityDescriptorDacl(
+                descriptor.as_ptr(),
+                &mut present,
+                &mut acl,
+                &mut defaulted,
+            ) != 0
     };
     if !read {
         return Err(io::Error::last_os_error());
@@ -387,21 +401,9 @@ pub(super) fn privacy_problem(
     if present == 0 || acl.is_null() {
         return Ok(Some("allows every user".to_owned()));
     }
-    let mut size = ACL_SIZE_INFORMATION::default();
-    // SAFETY: the list is valid, and the output holds an ACL_SIZE_INFORMATION.
-    let sized = unsafe {
-        GetAclInformation(
-            acl,
-            (&raw mut size).cast(),
-            mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
-            AclSizeInformation,
-        )
-    };
-    if sized == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    let count = ace_count(acl)?;
     let mut inherited_by_files = false;
-    for index in 0..size.AceCount {
+    for index in 0..count {
         let ace = ace_at(acl, index)?;
         // SAFETY: every entry starts with its header.
         let header = unsafe { *ace.cast::<ACE_HEADER>() };
@@ -440,6 +442,24 @@ pub(super) fn privacy_problem(
         ));
     }
     Ok(None)
+}
+
+/// Returns the number of entries of the valid access control list `acl`.
+fn ace_count(acl: *const ACL) -> io::Result<u32> {
+    let mut size = ACL_SIZE_INFORMATION::default();
+    // SAFETY: the list is valid, and the output holds an ACL_SIZE_INFORMATION.
+    if unsafe {
+        GetAclInformation(
+            acl,
+            (&raw mut size).cast(),
+            mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(size.AceCount)
 }
 
 /// Returns the entry at `index` of the valid access control list `acl`, or the error of `GetAce`
