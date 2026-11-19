@@ -573,8 +573,8 @@ impl VmConfig {
     /// non-Unicode export child roots, block paths that are not Unicode, hold
     /// disk-option delimiters or
     /// unbalanced brackets, or select a non-raw OpenVMM backend, an invalid authentication timeout,
-    /// kernel text with double quotes or the standalone `--` delimiter, or a complete command line
-    /// beyond the Windows limit.
+    /// kernel text with double quotes or the standalone `--` delimiter, as Linux splits the text at
+    /// whitespace, or a complete command line beyond the Windows limit.
     /// The complete limit check runs on every host, without a reserve.
     pub(crate) fn openvmm_arguments(
         &self,
@@ -699,7 +699,7 @@ impl VmConfig {
     /// NUL-containing argument, a non-Unicode export child root or block path, one that OpenVMM's
     /// disk syntax cannot hold literally, or one whose
     /// extension selects a non-raw backend, kernel text with double quotes or the standalone `--`
-    /// delimiter, or insufficient room for the reserve.
+    /// delimiter, as Linux splits the text at whitespace, or insufficient room for the reserve.
     pub fn check_command_line(&self) -> Result<()> {
         let command_line = self.control_kernel_command_line()?;
         let mut arguments = self.device_arguments()?;
@@ -727,13 +727,17 @@ impl VmConfig {
         fit_arguments(&arguments, OPENVMM_COMMAND_LINE_RESERVE)
     }
 
-    /// Renders a boot's kernel text that OpenVMM's control console accepts.
+    /// Renders a boot's kernel text that OpenVMM's control console accepts: without double quotes
+    /// and without a standalone `--`, which Linux finds between any bytes that [`cmdline::is_space`]
+    /// accepts, such as a vertical tab or the 0xa0 that ends `à`, and after which it would not read
+    /// the devices that OpenVMM appends.
     fn control_kernel_command_line(&self) -> Result<String> {
         let command_line = self.kernel_command_line()?;
         if command_line.contains('"')
             || command_line
-                .split_ascii_whitespace()
-                .any(|token| token == "--")
+                .as_bytes()
+                .split(|&byte| cmdline::is_space(byte))
+                .any(|token| token == b"--")
         {
             return Err(Error::unsupported(
                 "boot.command_line cannot contain double quotes or a standalone -- with the \

@@ -1379,6 +1379,13 @@ fn cold_boot_command_lines_refuse_native_control_console_syntax() {
             ("--", true),
             ("quiet -- init", true),
             ("quiet\t--\r\ninit", true),
+            // Linux also splits at a vertical tab and at the byte 0xa0, which ends U+00A0 and
+            // U+00E0 in UTF-8, but a `--` before such a character ends in the character's first
+            // byte, so it is no delimiter.
+            ("quiet\u{b}--", true),
+            ("quiet\u{a0}--", true),
+            ("quiet \u{e0}--", true),
+            ("quiet\u{a0}--\u{a0}init", false),
             ("nvx_arg='a'", false),
             ("nvx_arg=--", false),
             ("--not-a-delimiter", false),

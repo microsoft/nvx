@@ -89,6 +89,31 @@ fn cold_share_command_lines_fit_the_kernel_budget_to_the_byte() {
 }
 
 #[test]
+fn cold_command_lines_that_hide_the_appended_devices_are_refused() {
+    // Linux ends its parameters at a `--` after a vertical tab or the byte 0xa0, which ends
+    // U+00E0 in UTF-8, as after any whitespace, and would never read the virtio-mmio devices
+    // that OpenVMM appends after the command line.
+    for user in ["quiet -- init", "quiet\u{b}--", "quiet \u{e0}--"] {
+        let options = Options {
+            cmdline: user.to_owned(),
+            ..Options::default()
+        };
+        let rules = options.network.egress_rules().unwrap();
+        assert!(cold_config(&options, &rules).is_err(), "{user:?}");
+    }
+    let options = Options {
+        cmdline: "quiet\u{b}--x".to_owned(),
+        ..Options::default()
+    };
+    let rules = options.network.egress_rules().unwrap();
+    let config = cold_config(&options, &rules).unwrap();
+    assert_eq!(
+        virtio_mmio_devices(effective_command_line(&config).as_bytes()).count(),
+        3
+    );
+}
+
+#[test]
 fn a_console_peer_exit_waits_for_the_owned_child_status() {
     let result = connect_before_exit::<()>(
         "unused",
