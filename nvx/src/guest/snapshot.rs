@@ -577,10 +577,10 @@ pub(super) fn first_blocking(
 }
 
 /// The existing preparation's stage and cause, and whether it owns suppression to undo.
-pub(crate) type PreparationFailure = (CaptureStage, CaptureCause, bool);
+type PreparationFailure = (CaptureStage, CaptureCause, bool);
 
 /// Classifies preparation without changing its suppression ownership.
-pub(super) fn preparation_failure(error: PreCaptureError) -> PreparationFailure {
+fn preparation_failure(error: PreCaptureError) -> PreparationFailure {
     let suppressed = error.holds_suppression();
     let (stage, cause) = match error {
         PreCaptureError::BootChecks(error) => (CaptureStage::BootChecks, CaptureCause::Time(error)),
