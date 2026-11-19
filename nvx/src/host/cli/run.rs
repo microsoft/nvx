@@ -74,6 +74,7 @@ use crate::host::config::{
 use crate::host::filesystem::{
     self, ExportPlan, ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target,
 };
+use crate::host::paths;
 use crate::host::platform::{self, Transport};
 use crate::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
 use crate::host::sandbox::mount::{
@@ -1160,6 +1161,26 @@ fn run_cold(
         options: LaunchOptions::default(),
     };
     let path = std::env::temp_dir().join(format!("nvx-run-{name}"));
+    if let Some(export) = &config.filesystem {
+        for child in &export.children {
+            let vm_path = paths::resolve(&path).map_err(|error| {
+                Exit::error(ErrorCode::Io, format!("cannot resolve the run VM directory {path:?}: {error}"))
+            })?;
+            let shared = paths::resolve(&child.root).map_err(|error| {
+                Exit::error(ErrorCode::Io, format!("cannot resolve the share host path {:?}: {error}", child.root))
+            })?;
+            if shared.starts_with(&vm_path) || vm_path.starts_with(&shared) {
+                return Err(Exit::error(
+                    ErrorCode::Unsupported,
+                    format!(
+                        "run share host path {} overlaps the run's VM directory {}; a share cannot                          expose the run's own files",
+                        shared.display(),
+                        vm_path.display()
+                    ),
+                ));
+            }
+        }
+    }
     if path.try_exists().map_err(Exit::from_os_error)? {
         return Err(Exit::error(
             ErrorCode::Io,
