@@ -117,7 +117,7 @@ pub(crate) struct Rule {
 }
 
 /// Returns an [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) error with `message`.
-pub(crate) fn invalid(message: impl Into<String>) -> Error {
+fn invalid(message: impl Into<String>) -> Error {
     Error::unsupported(message)
 }
 
@@ -192,11 +192,7 @@ fn port(value: PortValue, description: &str) -> Result<u16> {
 
 /// Returns the range of the `port` and optional `endPort` fields of the selector
 /// `description`, which ends at `port` without `endPort`.
-pub(crate) fn port_range(
-    start: PortValue,
-    end: Option<PortValue>,
-    description: &str,
-) -> Result<PortRange> {
+fn port_range(start: PortValue, end: Option<PortValue>, description: &str) -> Result<PortRange> {
     let start = port(start, &format!("{description}.port"))?;
     let end = match end {
         Some(end) => port(end, &format!("{description}.endPort"))?,

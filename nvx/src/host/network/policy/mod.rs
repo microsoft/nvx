@@ -63,10 +63,10 @@ use crate::error::{Error, Result};
 
 /// Largest number of native rules that one action, allow or deny, compiles to: the number of
 /// rules of each action that OpenVMM accepts, [`MAX_RULES`](super::MAX_RULES).
-pub(crate) const MAX_RULES_PER_ACTION: usize = super::MAX_RULES;
+const MAX_RULES_PER_ACTION: usize = super::MAX_RULES;
 
 /// Largest egress policy file, in bytes: 1 MiB.
-pub(crate) const MAX_POLICY_FILE_SIZE: usize = 1024 * 1024;
+const MAX_POLICY_FILE_SIZE: usize = 1024 * 1024;
 
 /// Deepest nesting of arrays and objects in a policy file, the root included. A policy needs six:
 /// the root, an action, a rule, its `to`, a destination, and its `except`.
@@ -131,7 +131,7 @@ pub(crate) fn compile_policy_file(path: &Path) -> Result<CompiledEgressPolicy> {
 /// - repeats a field in an object: `OBJECT has duplicate field "NAME"`, where `OBJECT` is the
 ///   path of the object, or `egress policy` for the root; or
 /// - holds an invalid policy: see [`compile_policy`].
-pub(crate) fn compile_policy_bytes(data: &[u8], path: &Path) -> Result<CompiledEgressPolicy> {
+fn compile_policy_bytes(data: &[u8], path: &Path) -> Result<CompiledEgressPolicy> {
     let path = path.display();
     if data.len() > MAX_POLICY_FILE_SIZE {
         return Err(Error::unsupported(format!(
@@ -169,7 +169,7 @@ pub(crate) fn compile_policy_bytes(data: &[u8], path: &Path) -> Result<CompiledE
 /// path and says why, such as `allow[0].to[1].cidr is not a valid IPv4 or IPv6 CIDR:
 /// "10.0.0.256/8"`, or that an action needs too many native rules, as in `deny emits at most 256
 /// native rules`.
-pub(crate) fn compile_policy(value: &Value) -> Result<CompiledEgressPolicy> {
+fn compile_policy(value: &Value) -> Result<CompiledEgressPolicy> {
     let root = object(value, "egress policy")?;
     root.check_fields(ROOT_FIELDS, "egress policy")?;
     Ok(CompiledEgressPolicy {
