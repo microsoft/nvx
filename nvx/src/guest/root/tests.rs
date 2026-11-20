@@ -3286,6 +3286,62 @@ fn a_root_has_one_aggregate_and_one_that_failed_part_of_the_way_latches_it() {
 }
 
 #[test]
+fn an_aggregate_device_that_fails_to_mount_latches_the_root_and_leaves_nothing_to_unmount() {
+    let guest = Guest::new();
+    let mut root = guest.assemble(&guest.assembly()).unwrap();
+    let rw = Access::ReadWrite;
+    let children = [child("a", "/data/a", rw, ShareKind::Directory)];
+    let mount_point = guest.path("run/nvx/shares");
+    guest
+        .kernel
+        .fail(Operation::Mount, mount_point.clone(), Errno::ENODEV);
+    let error = root.mount_aggregate("all", rw, &children).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::Mount { mount: Mount::Aggregate { tag }, error }
+                if tag == "all" && error.raw_os_error() == Some(Errno::ENODEV as i32)
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "failed to mount the aggregate live share all: {}",
+            os_error(Errno::ENODEV)
+        )
+    );
+    assert!(root.latched);
+    assert!(guest.kernel.moves().is_empty());
+
+    // The failed device is not owned, so a latched root refuses another aggregate, mounts
+    // nothing, and unmounts nothing of it.
+    guest.kernel.restore(Operation::Mount, &mount_point);
+    let mounts = guest.kernel.mounts().len();
+    let error = root.mount_aggregate("all", rw, &children).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::Mapping {
+                error: MappingError::Latched,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(guest.kernel.mounts().len(), mounts);
+    root.teardown().unwrap();
+    assert_eq!(
+        guest.kernel.unmounts(),
+        [
+            guest.text("run/nvx/rootfs"),
+            guest.text("run/nvx/layers/distro"),
+            guest.text("run/nvx/scratch"),
+        ]
+    );
+}
+
+#[test]
 fn a_child_whose_restriction_fails_is_never_attached() {
     let guest = Guest::new();
     let mut root = guest.assemble(&guest.assembly()).unwrap();

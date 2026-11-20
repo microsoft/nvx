@@ -320,14 +320,7 @@ impl Root {
                 });
             }
         }
-        self.mount_at(
-            mount,
-            Some(tag.as_bytes()),
-            &staging,
-            Some(VIRTIOFS),
-            access.flags(),
-            None,
-        )?;
+        self.mount_virtiofs(mount, tag, &staging, access)?;
         let moved = match open_mount_point(&staging) {
             Ok(staged) => {
                 let (kernel, mapper) = self.mapper()?;
@@ -380,25 +373,8 @@ impl Root {
         binds: &[(Mount, Mapping)],
     ) -> Result<(), Error> {
         self.mapper()?;
-        let directory = self.runtime.join(AGGREGATE_DIRECTORY);
-        super::create_directory(&directory).map_err(|error| Error::MountPoint {
-            path: directory.clone(),
-            error,
-        })?;
-        self.mount_at(
-            aggregate,
-            Some(tag.as_bytes()),
-            &directory,
-            Some(VIRTIOFS),
-            access.flags(),
-            None,
-        )?;
-        self.shares.push((aggregate.clone(), directory.clone()));
         // The descriptor of the aggregate's root, which keeps it busy, closes on return.
-        let source = SourceRoot::open(&directory).map_err(|error| Error::MountPoint {
-            path: directory.clone(),
-            error,
-        })?;
+        let source = self.mount_source_root(aggregate, tag, access, AGGREGATE_DIRECTORY)?;
         for (mount, mapping) in binds {
             self.apply_one(&source, mount, mapping)?;
         }
@@ -418,20 +394,45 @@ impl Root {
             path: hostfs,
             error,
         })?;
-        let directory = self.runtime.join(EXPORT_DIRECTORY);
+        self.mount_source_root(export, tag, access, EXPORT_DIRECTORY)
+    }
+
+    /// Mounts the virtio-fs device `tag` at `directory`, restricted as `access` says.
+    fn mount_virtiofs(
+        &mut self,
+        mount: &Mount,
+        tag: &str,
+        directory: &Path,
+        access: Access,
+    ) -> Result<(), Error> {
+        self.mount_at(
+            mount,
+            Some(tag.as_bytes()),
+            directory,
+            Some(VIRTIOFS),
+            access.flags(),
+            None,
+        )
+    }
+
+    /// Creates the `relative` directory of the runtime directory, mounts the virtio-fs device `tag`
+    /// there, owns the mount as `mount` for the teardown, and opens the device's root.
+    ///
+    /// A device whose root fails to open stays mounted, and owned.
+    fn mount_source_root(
+        &mut self,
+        mount: &Mount,
+        tag: &str,
+        access: Access,
+        relative: &str,
+    ) -> Result<SourceRoot, Error> {
+        let directory = self.runtime.join(relative);
         super::create_directory(&directory).map_err(|error| Error::MountPoint {
             path: directory.clone(),
             error,
         })?;
-        self.mount_at(
-            export,
-            Some(tag.as_bytes()),
-            &directory,
-            Some(VIRTIOFS),
-            access.flags(),
-            None,
-        )?;
-        self.shares.push((export.clone(), directory.clone()));
+        self.mount_virtiofs(mount, tag, &directory, access)?;
+        self.shares.push((mount.clone(), directory.clone()));
         SourceRoot::open(&directory).map_err(|error| Error::MountPoint {
             path: directory,
             error,
