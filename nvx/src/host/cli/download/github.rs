@@ -292,7 +292,7 @@ impl Response {
 
 /// The `curl` that requests run.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Curl {
+struct Curl {
     /// The program.
     program: PathBuf,
     /// Whether requests speak HTTPS alone, as every request to GitHub does; tests serve HTTP.
@@ -301,7 +301,7 @@ pub(super) struct Curl {
 
 impl Curl {
     /// Returns the `curl` of the host, which speaks HTTPS alone.
-    pub(super) fn new() -> Self {
+    fn new() -> Self {
         Self {
             program: system_program("curl"),
             https_only: true,

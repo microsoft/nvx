@@ -89,7 +89,7 @@ pub(crate) fn absolute(path: &Path) -> Result<PathBuf> {
 pub(crate) const KERNEL_NAME: &str = "vmlinux";
 /// Suffix of the package manifest that lists the packages of an initramfs.
 #[cfg(feature = "cli")]
-pub(crate) const PACKAGE_MANIFEST_SUFFIX: &str = ".packages.json";
+const PACKAGE_MANIFEST_SUFFIX: &str = ".packages.json";
 /// Suffix of the manifest of a distro layer, which binds the layer's digest and packages.
 #[cfg(feature = "cli")]
 pub(crate) const DISTRO_MANIFEST_SUFFIX: &str = ".manifest.json";

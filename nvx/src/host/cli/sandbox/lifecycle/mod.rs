@@ -59,7 +59,7 @@ pub(crate) const CONFIG_NAME: &str = "config.json";
 /// state directory that open files still keep.
 pub(crate) const LOCK_RETRY_INTERVAL: Duration = RETRY_INTERVAL;
 /// The version of outcome reports.
-pub(crate) const OUTCOME_SCHEMA_VERSION: u64 = 1;
+const OUTCOME_SCHEMA_VERSION: u64 = 1;
 
 /// The options of a launch, besides its images, that `provision` records.
 pub(crate) struct ProvisionConfig<'a> {
