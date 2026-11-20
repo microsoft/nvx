@@ -192,7 +192,7 @@ struct RestoreWorker {
 }
 
 /// Owned resources and mutable counters of the long-running time daemon.
-pub(crate) struct Daemon {
+struct Daemon {
     /// Nonblocking kernel-log stream.
     kmsg: FileDescriptor,
     /// Blocked-signal delivery descriptor.
@@ -841,10 +841,7 @@ pub(crate) fn boot_checker(runtime: &Runtime<'_>, boot: &ColdBoot) -> ! {
 /// identifier is recognized whichever program started the daemon, and atomically publishes the
 /// identifier. The discipline starts from the sample accepted at the monotonic
 /// `last_accepted_ns`, if any.
-pub(crate) fn become_daemon(
-    kmsg: FileDescriptor,
-    last_accepted_ns: Option<i64>,
-) -> Result<Daemon, Errno> {
+fn become_daemon(kmsg: FileDescriptor, last_accepted_ns: Option<i64>) -> Result<Daemon, Errno> {
     let daemon = setup_daemon(kmsg, last_accepted_ns)?;
     sys::set_command_name(DAEMON_NAME)?;
     system::replace_file(
@@ -870,7 +867,7 @@ fn timeout_until(deadline_ns: i64) -> Duration {
 }
 
 /// Runs the kernel watcher, discipline poller, and restore-worker coordinator.
-pub(crate) fn daemon_loop(runtime: &Runtime<'_>, mut daemon: Daemon) -> ! {
+fn daemon_loop(runtime: &Runtime<'_>, mut daemon: Daemon) -> ! {
     loop {
         let worker = daemon.worker;
         let due = daemon.restore.filter(|_| worker.is_none());

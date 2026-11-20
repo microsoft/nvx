@@ -267,7 +267,7 @@ impl Checks {
     }
 
     /// Records one failure under an explicit ABI code.
-    pub(crate) fn fail_code(
+    fn fail_code(
         &mut self,
         runtime: &Runtime<'_>,
         code: ViolationCode,
