@@ -27051,6 +27051,27 @@ class DownloadTests(unittest.TestCase):
             urlopen.assert_not_called()
             self.assertFalse(destination.exists())
 
+    def test_names_the_client_unless_the_caller_does(self):
+        for headers, user_agent in (
+            (None, common.DOWNLOAD_USER_AGENT),
+            ({"Accept": "*/*"}, common.DOWNLOAD_USER_AGENT),
+            ({"User-Agent": "caller"}, "caller"),
+        ):
+            with self.subTest(headers=headers):
+                with tempfile.TemporaryDirectory() as temporary:
+                    with patch(
+                        "nvx_tools.common.urllib.request.urlopen",
+                        return_value=io.BytesIO(b"archive"),
+                    ) as urlopen:
+                        common.download(
+                            "https://example.invalid/archive.tar.xz",
+                            Path(temporary) / "archive.tar.xz",
+                            headers=headers,
+                        )
+
+                request = urlopen.call_args.args[0]
+                self.assertEqual(request.get_header("User-agent"), user_agent)
+
     def test_retries_checksum_mismatch(self):
         payload = b"verified archive"
         expected_sha256 = hashlib.sha256(payload).hexdigest()

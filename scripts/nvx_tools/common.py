@@ -467,6 +467,8 @@ def credential_safe_opener() -> urllib.request.OpenerDirector:
 
 DOWNLOAD_RETRY_SECONDS = 5.0
 DOWNLOAD_RETRY_AFTER_LIMIT_SECONDS = 60.0
+# archive.ubuntu.com answers 403 to urllib's default User-Agent.
+DOWNLOAD_USER_AGENT = "nvx-download"
 
 
 def _download_retry_delay(error: OSError, attempt: int) -> float:
@@ -500,10 +502,8 @@ def download(
     for attempt in range(1, attempts + 1):
         try:
             digest = hashlib.sha256()
-            request = (
-                urllib.request.Request(url, headers=dict(headers))
-                if headers is not None
-                else url
+            request = urllib.request.Request(
+                url, headers={"User-Agent": DOWNLOAD_USER_AGENT, **(headers or {})}
             )
             response_context = (
                 opener.open(request)
