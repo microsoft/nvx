@@ -7,7 +7,7 @@ use std::thread;
 use super::format::{f0, f1};
 use super::support::{
     Arguments, NANOSECONDS_PER_SECOND, TscRate, affinity_cpus, check_cpus_allowed, cycles_to_ns,
-    detect_tsc_rate, format_cpu_list, parse_cpu_list, parse_rate, round_ll,
+    detect_tsc_rate, format_cpu_list, parse_cpu_list, parse_rate, round_ll, setup_failure,
 };
 use crate::guest::parse::parse_u64;
 use crate::guest::status::CommandError;
@@ -503,31 +503,26 @@ pub(super) fn run(
             }
         })
         .map_err(|error| {
-            super::report(
+            setup_failure(
+                b"warp",
+                &[b"sched_getaffinity: ", error.desc().as_bytes()],
                 err,
-                &[
-                    b"nvx-time-probe warp: sched_getaffinity: ",
-                    error.desc().as_bytes(),
-                    b"\n",
-                ],
-            );
-            CommandError::Setup
+            )
         })?;
     check_cpus_allowed(b"warp", &cpus, err)?;
     let rate = detect_tsc_rate(override_hz);
     if rate.hz <= 0.0 {
-        super::report(
+        return Err(setup_failure(
+            b"warp",
+            &[b"unknown TSC rate; pass --tsc-hz"],
             err,
-            &[b"nvx-time-probe warp: unknown TSC rate; pass --tsc-hz\n"],
-        );
-        return Err(CommandError::Setup);
+        ));
     }
     let budget_cycles = (duration_ms as f64 * rate.hz / MILLISECONDS_PER_SECOND) as u64;
     let stall_cycles = (STALL_SECONDS * rate.hz) as u64 + budget_cycles;
     let mut offsets = Vec::new();
     if offsets.try_reserve_exact(PP_MAX_SAMPLES).is_err() {
-        super::report(err, &[b"nvx-time-probe warp: out of memory\n"]);
-        return Err(CommandError::Setup);
+        return Err(setup_failure(b"warp", &[b"out of memory"], err));
     }
     let cpu_text = format_cpu_list(&cpus);
     let expected_pairs = cpus.len() * cpus.len().saturating_sub(1) / 2;
@@ -554,15 +549,14 @@ pub(super) fn run(
             ) {
                 Ok(result) => result,
                 Err(error) => {
-                    super::report(
-                        err,
+                    return Err(setup_failure(
+                        b"warp",
                         &[
-                            format!("nvx-time-probe warp: pair {cpu_a}-{cpu_b}: ").as_bytes(),
+                            format!("pair {cpu_a}-{cpu_b}: ").as_bytes(),
                             error.desc().as_bytes(),
-                            b"\n",
                         ],
-                    );
-                    return Err(CommandError::Setup);
+                        err,
+                    ));
                 }
             };
             summary.add(&result);

@@ -7,7 +7,7 @@ use std::io::Write;
 use super::format::{f0, f1};
 use super::support::{
     Arguments, TscRate, check_cpus_allowed, current_clocksource, cycles_to_ns, detect_tsc_rate,
-    parse_rate,
+    parse_rate, setup_failure,
 };
 use crate::guest::parse::parse_u64;
 use crate::guest::status::CommandError;
@@ -210,29 +210,26 @@ pub(super) fn run(
     // The C probe printed -1 for a CPU that `sched_getcpu` could not report.
     let cpu_label = cpu.map_or(-1, |cpu| cpu as i64);
     if let Err(error) = cpu.and_then(sys::pin_current_thread) {
-        super::report(
-            err,
+        return Err(setup_failure(
+            b"latency",
             &[
-                format!("nvx-time-probe latency: cannot pin to cpu {cpu_label}: ").as_bytes(),
+                format!("cannot pin to cpu {cpu_label}: ").as_bytes(),
                 error.desc().as_bytes(),
-                b"\n",
             ],
-        );
-        return Err(CommandError::Setup);
+            err,
+        ));
     }
     let rate = detect_tsc_rate(override_hz);
     if rate.hz <= 0.0 {
-        super::report(
+        return Err(setup_failure(
+            b"latency",
+            &[b"unknown TSC rate; pass --tsc-hz"],
             err,
-            &[b"nvx-time-probe latency: unknown TSC rate; pass --tsc-hz\n"],
-        );
-        return Err(CommandError::Setup);
+        ));
     }
     let clocksource = current_clocksource();
-    let mut out_of_memory = |_: TryReserveError| {
-        super::report(err, &[b"nvx-time-probe latency: out of memory\n"]);
-        CommandError::Setup
-    };
+    let mut out_of_memory =
+        |_: TryReserveError| setup_failure(b"latency", &[b"out of memory"], err);
     let overhead = bracket_overhead(iterations as usize).map_err(&mut out_of_memory)?;
     let vdso = sys::kernel::has_vdso();
     let _ = writeln!(
