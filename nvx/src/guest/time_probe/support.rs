@@ -166,6 +166,16 @@ pub(super) fn check_cpus_allowed(
     }
 }
 
+/// Prints `nvx-time-probe COMMAND: ` followed by `detail` and a newline, and returns the setup
+/// status, for a measurement that could not run.
+pub(super) fn setup_failure(command: &[u8], detail: &[&[u8]], err: &mut dyn Write) -> CommandError {
+    let mut parts: Vec<&[u8]> = vec![b"nvx-time-probe ", command, b": "];
+    parts.extend_from_slice(detail);
+    parts.push(b"\n");
+    sys::report(err, &parts);
+    CommandError::Setup
+}
+
 /// Parses a CPU list, such as `0-3,6`, that names each CPU below `MAX_CPUS` at most once, into
 /// its CPUs in the list's order.
 pub(super) fn parse_cpu_list(text: &[u8]) -> Option<Vec<usize>> {

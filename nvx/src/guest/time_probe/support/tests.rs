@@ -66,6 +66,14 @@ fn options_take_inline_or_following_values() {
 }
 
 #[test]
+fn setup_failures_print_the_command_and_the_setup_status() {
+    let mut err = Vec::new();
+    let status = setup_failure(b"warp", &[b"pair 0-1: ", b"Invalid argument"], &mut err);
+    assert_eq!(status, CommandError::Setup);
+    assert_eq!(err, b"nvx-time-probe warp: pair 0-1: Invalid argument\n");
+}
+
+#[test]
 fn kernel_numbers_are_read_in_the_kernels_form() {
     assert_eq!(parse_kernel_decimal(b" 2194.843"), Some(2194.843));
     assert_eq!(parse_kernel_decimal(b"    3.000000"), Some(3.0));
