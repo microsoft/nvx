@@ -48,7 +48,7 @@ pub(crate) const SELECT_PACKET: u8 = 0xa5;
 /// Selector requesting the VM generation identifier.
 pub(crate) const SELECT_GENERATION_ID: u8 = 0xa6;
 /// Selector requesting a host time sample.
-pub(crate) const SELECT_TIME_SAMPLE: u8 = 0xa7;
+const SELECT_TIME_SAMPLE: u8 = 0xa7;
 /// Status bit indicating that a restore packet can be read.
 pub(crate) const PORTB_PACKET_AVAILABLE: u8 = 0x02;
 /// Status bit indicating that a generation identifier can be read.
@@ -59,14 +59,14 @@ pub(crate) const PORTB_TIME_WINDOW: u8 = 0x40;
 pub(crate) const SNAPSHOT_ACKNOWLEDGE: u8 = 2;
 
 /// Top-level NVX runtime directory, which also holds the time tools' locks and private records.
-pub(crate) const RUN_DIR: &CStr = c"/run/nvx";
+const RUN_DIR: &CStr = c"/run/nvx";
 /// Time-status directory, which holds only what any process may read: the published state and
 /// the daemon's process identifier, and their temporary files. A runtime may bind it into a
 /// workload's root, where even a workload of user ID 0 must reach no lock that it could hold,
 /// so the locks and private records stay in [`RUN_DIR`].
-pub(crate) const TIME_DIR: &CStr = c"/run/nvx/time";
+const TIME_DIR: &CStr = c"/run/nvx/time";
 /// Published time state file.
-pub(crate) const STATE_PATH: &CStr = c"/run/nvx/time/state";
+const STATE_PATH: &CStr = c"/run/nvx/time/state";
 /// Temporary state file atomically renamed into place.
 const STATE_TEMP_PATH: &CStr = c"/run/nvx/time/.state";
 /// Advisory lock protecting state updates.
@@ -79,7 +79,7 @@ pub(crate) const DAEMON_PID_TEMP_PATH: &CStr = c"/run/nvx/time/daemon.pid.tmp";
 /// the published process identifier is recognized.
 pub(crate) const DAEMON_NAME: &CStr = c"nvx-time";
 /// Saved stall-detector settings during capture/restore.
-pub(crate) const SUPPRESSION_PATH: &CStr = c"/run/nvx/time-suppression";
+const SUPPRESSION_PATH: &CStr = c"/run/nvx/time-suppression";
 /// Advisory lock protecting suppression state.
 const SUPPRESSION_LOCK_PATH: &CStr = c"/run/nvx/time-suppression.lock";
 /// Private restore record consumed by the daemon.
@@ -456,13 +456,7 @@ impl<'a> Runtime<'a> {
     }
 
     /// Emits one serialized violation record to every ABI destination.
-    pub(crate) fn emit_event(
-        &self,
-        code: ViolationCode,
-        source: EventSource,
-        phase: Phase,
-        detail: &[u8],
-    ) {
+    fn emit_event(&self, code: ViolationCode, source: EventSource, phase: Phase, detail: &[u8]) {
         if let Ok(_guard) = self.lock_reports() {
             self.emit_event_unlocked(code, source, phase, detail);
         }
@@ -1045,7 +1039,7 @@ pub(crate) fn select_sample(
 }
 
 /// Steps realtime by a signed nanosecond offset.
-pub(crate) fn step_clock(runtime: &Runtime<'_>, offset_ns: i64) -> Result<(), Errno> {
+fn step_clock(runtime: &Runtime<'_>, offset_ns: i64) -> Result<(), Errno> {
     let (seconds, nanoseconds) = decoders::split_offset(offset_ns);
     runtime
         .ops

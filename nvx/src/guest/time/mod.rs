@@ -68,17 +68,17 @@ use super::status::{CommandError, run_main};
 use super::sys;
 
 /// Nanoseconds in one second.
-pub(crate) const NSEC_PER_SEC: i64 = 1_000_000_000;
+const NSEC_PER_SEC: i64 = 1_000_000_000;
 /// Nanoseconds in one millisecond.
-pub(crate) const NSEC_PER_MSEC: i64 = 1_000_000;
+const NSEC_PER_MSEC: i64 = 1_000_000;
 /// Nanoseconds in one microsecond.
-pub(crate) const NSEC_PER_USEC: i64 = 1_000;
+const NSEC_PER_USEC: i64 = 1_000;
 /// Maximum processor count represented by the time ABI's fixed CPU masks.
 pub(crate) const MAX_CPUS: usize = 64;
 /// Delay between restore readiness and deferred check work.
-pub(crate) const DEFERRED_START_NS: i64 = 150 * NSEC_PER_MSEC;
+const DEFERRED_START_NS: i64 = 150 * NSEC_PER_MSEC;
 /// Deadline after which idle-priority work is promoted.
-pub(crate) const IDLE_BOUND_NS: i64 = 100 * NSEC_PER_MSEC;
+const IDLE_BOUND_NS: i64 = 100 * NSEC_PER_MSEC;
 /// Most arguments that a command line may hold besides `--report-only`, as many as the C
 /// program's fixed argument array.
 const MAX_ARGUMENTS: usize = 32;
@@ -98,7 +98,7 @@ pub(crate) enum Phase {
 
 impl Phase {
     /// Persisted check phases in state-file order.
-    pub(crate) const CHECKS: [Self; 3] = [Self::Boot, Self::Capture, Self::Restore];
+    const CHECKS: [Self; 3] = [Self::Boot, Self::Capture, Self::Restore];
 
     /// Returns the stable lowercase phase token used in output records.
     pub(crate) fn name(self) -> &'static str {
@@ -111,7 +111,7 @@ impl Phase {
     }
 
     /// Returns this phase's position in the three persisted check records.
-    pub(crate) fn check_index(self) -> Option<usize> {
+    fn check_index(self) -> Option<usize> {
         Self::CHECKS.iter().position(|&phase| phase == self)
     }
 }

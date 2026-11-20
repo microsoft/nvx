@@ -5,7 +5,7 @@ use std::fmt::{self, Display, Write as _};
 use super::Phase;
 
 /// Maximum event record length before its terminating newline.
-pub(crate) const EVENT_MAX: usize = 512;
+const EVENT_MAX: usize = 512;
 /// Maximum unescaped detail bytes considered for one event.
 pub(crate) const DETAIL_MAX: usize = 384;
 
