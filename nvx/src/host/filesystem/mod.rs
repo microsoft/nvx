@@ -607,9 +607,7 @@ fn resolve_mapping<'a>(mapping: &Mapping<'a>, reserved: ReservedTargets<'_>) -> 
             path.display()
         ));
     }
-    let metadata = fs::metadata(&canonical).map_err(|error| {
-        Error::unsupported(format!("cannot inspect {}", path.display())).with_source(error)
-    })?;
+    let metadata = fs::metadata(&canonical).map_err(|error| unsupported_inspection(path, error))?;
     if !metadata.is_dir() && !metadata.is_file() {
         return unsupported(format!(
             "{name} entry {} is neither a directory nor a regular file",

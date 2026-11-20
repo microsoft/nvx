@@ -1051,6 +1051,34 @@ fn objects_that_cannot_be_inspected_fail_verification_by_what_the_failure_shows(
     }
 }
 
+/// The failure to inspect a path that the plan reads refuses the request with the path and the
+/// host's cause, whichever check of the exported roots and policy paths reads it.
+#[cfg(feature = "cli")]
+#[test]
+fn inspection_failures_of_the_plan_name_the_path_and_keep_the_cause() {
+    let directory = root();
+    let base = directory.path();
+    let missing = base.join("missing");
+    let refused = |error: Error| {
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+        assert_eq!(
+            error.message(),
+            format!("cannot inspect {}", missing.display())
+        );
+        let source = std::error::Error::source(&error).unwrap();
+        assert_eq!(
+            source.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
+    };
+    refused(unsupported_inspection(
+        &missing,
+        std::io::ErrorKind::NotFound.into(),
+    ));
+    refused(limits::check_root(&missing).unwrap_err());
+    refused(limits::check_policy_paths(base, std::slice::from_ref(&missing), "read").unwrap_err());
+}
+
 /// A recorded plan with a read-only bind in a part of a child that the guest may write, which
 /// only the guest's bind mount would keep read-only, is refused before a guest runs.
 #[cfg(feature = "cli")]
