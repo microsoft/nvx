@@ -3,8 +3,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::hex::hex;
 use crate::host::paths::{absolute, normalized};
-use crate::host::platform::hex;
 #[cfg(not(windows))]
 use crate::host::platform::{check_store_dir as check_dir, create_store_dir as create_dir};
 #[cfg(windows)]

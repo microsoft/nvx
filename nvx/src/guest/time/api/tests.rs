@@ -795,7 +795,7 @@ fn a_packet_read_takes_its_activation_record_before_the_time_sample() {
 
 /// Returns whether a file below `directory` holds `secret`, as bytes or in hexadecimal.
 fn holds(directory: &Path, secret: &[u8]) -> bool {
-    let hex = decoders::format_hex(secret);
+    let hex = crate::hex::hex(secret);
     fs::read_dir(directory).unwrap().any(|entry| {
         let path = entry.unwrap().path();
         if path.is_dir() {

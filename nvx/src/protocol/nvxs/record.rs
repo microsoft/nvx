@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use crate::hex::write_hex;
 use crate::protocol::outer::encode_header;
 use crate::protocol::{
     CAPABILITY_LEN, OUTER_ACK, OUTER_CREDIT, OUTER_DATA, OUTER_ERROR, OUTER_GUEST_ATTACH,
@@ -170,10 +171,7 @@ impl fmt::Display for RecordError {
         match self {
             Self::Magic(magic) => {
                 formatter.write_str("NVXS record has an invalid magic, 0x")?;
-                for byte in magic {
-                    write!(formatter, "{byte:02x}")?;
-                }
-                Ok(())
+                write_hex(formatter, magic)
             }
             Self::Version(version) => {
                 write!(

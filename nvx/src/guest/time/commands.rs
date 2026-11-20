@@ -20,6 +20,7 @@ use crate::guest::GenerationId;
 use crate::guest::parse::parse_decimal;
 use crate::guest::status::CommandError;
 use crate::guest::sys::{self, Port, PortError};
+use crate::hex::parse_hex;
 
 /// The capture requests that `capture` accepts, and writes to the snapshot port: 0 or 1.
 const CAPTURE_REQUESTS: std::ops::RangeInclusive<u64> = 0..=1;
@@ -207,7 +208,7 @@ fn capture_request(arguments: &[&[u8]]) -> Option<CaptureRequest> {
         0 => ScratchPolicy::Fresh,
         _ => ScratchPolicy::Paired,
     };
-    let previous_id = decoders::parse_hex::<GENERATION_ID_SIZE>(previous_id)?;
+    let previous_id = parse_hex::<GENERATION_ID_SIZE>(previous_id)?;
     if entropy_path.contains(&0) {
         return None;
     }

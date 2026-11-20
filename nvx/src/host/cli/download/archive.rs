@@ -17,9 +17,9 @@ use sha2::{Digest, Sha256};
 
 use super::system_program;
 use crate::ErrorCode;
+use crate::hex::hex;
 use crate::host::artifacts::CHECKSUMS_NAME;
 use crate::host::cli::{Exit, Result, check_interrupt, io_error};
-use crate::host::platform::hex;
 
 /// The directory beside the package into which `tar` extracts it.
 const EXTRACTION_DIR: &str = "package";

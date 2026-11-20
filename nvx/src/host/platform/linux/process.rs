@@ -8,7 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::BOOT_ID_PATH;
-use crate::host::platform::{parse_hex, parse_host_id, unless_exited};
+use crate::hex::parse_hex;
+use crate::host::platform::{parse_host_id, unless_exited};
 use crate::host::sys::{self, Errno, PidFd};
 
 /// Returns the start time of a live process, `None` if the process no longer exists, or an error

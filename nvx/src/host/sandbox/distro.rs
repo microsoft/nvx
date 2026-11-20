@@ -44,10 +44,10 @@ use super::layer::SandboxLayer;
 use super::mount::os_error;
 use super::refused;
 use crate::error::{Error, Result};
+use crate::hex::hex;
 use crate::host::artifacts::DISTRO_MANIFEST_SUFFIX;
 use crate::host::network::policy::MAX_JSON_DEPTH;
 use crate::host::network::policy::json::{self, ReadError};
-use crate::host::platform::hex;
 use crate::host::seal::{self, FileKind, FileSeal};
 
 /// The revision of NVX's distro policy, which refuses a distro layer whose manifest lists the

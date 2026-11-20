@@ -162,6 +162,7 @@ mod error;
 #[cfg(any(test, all(feature = "guest", target_os = "linux")))]
 mod gpt;
 pub mod guest_restore;
+mod hex;
 pub mod net;
 pub mod protocol;
 pub mod uuid;

@@ -10,6 +10,7 @@
 
 use super::cmdline::{self, Token};
 use super::{ProtocolError, violation};
+use crate::hex::hex;
 
 /// The longest hostname, in bytes: Linux's `HOST_NAME_MAX`, which the guest's entry applies.
 pub const MAX_HOSTNAME_BYTES: usize = 64;
@@ -54,11 +55,7 @@ pub fn tokens(view: &View) -> Result<[String; 2], ProtocolError> {
             "the view's hostname must be 1 to {MAX_HOSTNAME_BYTES} bytes without a NUL"
         )));
     }
-    let hostname: String = view
-        .hostname
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let hostname = hex(&view.hostname);
     let machine_id = match view.machine_id {
         MachineIdMode::Image => "image",
         MachineIdMode::Generated => "generated",
