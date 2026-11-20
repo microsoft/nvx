@@ -1549,14 +1549,15 @@ status; a restore does none of these, as the second item says.
   lowers, with its DNS server, egress, forwards, and published listeners; a
   snapshot with a NIC needs `--network-profile` with them, and one without
   refuses them.
-- One directory `--mount` is OpenVMM's `--mount`. Several, or a shared file,
-  are the children of an aggregate at `/run/nvx/shares`, whose guest targets
-  must be absolute, must not overlap, and must survive the kernel command line,
-  and on a cold boot, their `nvx_share=` tokens join `--cmdline` within the
-  1024 bytes that OpenVMM leaves to them. `--mount-deny`, `--mount-allow`, and
-  `--mount-write` name host paths, which OpenVMM attributes to the share that
-  holds them, and which must be absolute with an aggregate, unlike those of
-  `sandbox`, which apply to the `--mount` before them.
+- A cold boot binds each `--mount` from the export's aggregate at
+  `/run/nvx/hostfs/root`. The shares' guest targets must be absolute, must not
+  overlap each other or the guest's reserved paths, such as `/run`, and must
+  survive the kernel command line, and their `nvx_share=` tokens join
+  `--cmdline` within the 1024 bytes that OpenVMM leaves to them.
+  `--mount-deny`, `--mount-allow`, and `--mount-write` name host paths, which
+  OpenVMM attributes to the share that holds them, and which must be absolute
+  with several shares, or a shared file, unlike those of `sandbox`, which apply
+  to the `--mount` before them.
 - After OpenVMM exits with a status other than 0 from a cold boot, on a host
   whose CPU no built-in CPU profile serves, it prints guidance to standard
   error: what `--cpu-profile auto` does on that CPU, and, on an Intel or AMD
