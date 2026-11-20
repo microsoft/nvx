@@ -9,9 +9,10 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c928e8dc1e1673a37c83c10fe145f6611a505cec`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126 and the PR18 fixup at position 302.
-- NVX's pinned OpenVMM revision: `b929c2d26709b37340488a3bb052ecbdd4e4d1ef`, position 319, the head
-  of microsoft/openvmm#5170, whose commit follows position 318, `ee647f75c`, the head of
-  `feature/microvm/dev`, where microsoft/openvmm#5168 landed positions 317 and 318 on position 316,
+- NVX's pinned OpenVMM revision: `ccece742e70964ae24058fc26bf36cddd190e5b5`, position 320, the head
+  of microsoft/openvmm#5171, whose commit follows position 319, `b929c2d26`, the head of
+  `feature/microvm/dev`, where microsoft/openvmm#5170 landed position 319 on position 318,
+  `ee647f75c`, where microsoft/openvmm#5168 landed positions 317 and 318 on position 316,
   `85c3698f9`, the head of the `feature/microvm/release/v7.1` branch of microsoft/openvmm. The
   v7.1 rebase moved the 315 commits of `feature/microvm/dev` at NVX's pin before it, `6e5303f94`,
   onto `9a875b563` without dropping any: the 296 of `feature/microvm/release/v7.0` and the 19 that
@@ -19,8 +20,8 @@
   microsoft/openvmm#5136, microsoft/openvmm#5140, and microsoft/openvmm#5141 landed after it. It
   added a fixup at its tip, position 316. Every commit keeps its position, and only positions 060
   and 277, which conflicted with upstream, and position 007, whose context upstream changed, changed
-  their patches; see [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The pin is 193
-  commits past the mapped tip on the same first-parent chain. Positions 127-301 and 303-319 are not
+  their patches; see [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The pin is 194
+  commits past the mapped tip on the same first-parent chain. Positions 127-301 and 303-320 are not
   yet assigned to PRs, position 302 is a PR18 fixup, and position 317 backports upstream's
   microsoft/openvmm#5160, which the next rebase drops; see [Commits after the mapped
   tip](#commits-after-the-mapped-tip).
@@ -1467,7 +1468,8 @@ The physical branch is one first-parent chain:
   -> upstream's EOF for a disconnected named pipe's event query, microsoft/openvmm#5160 [317]
   -> offsets found in I/O regions that end at the top of their address space [318]
   -> chipset devices wired only once their state unit spawns [319]
-  -> b929c2d26 (NVX pin)
+  -> empty buffers skipped in virtio-fs descriptor chains [320]
+  -> ccece742e (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1496,7 +1498,7 @@ position 069 and position 133.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 193 later commits, position
+The NVX pin extends the chain past position 126 without merges. Of its 194 later commits, position
 302 is a PR18 fixup, position 316 is the fixup of the v7.1 rebase, position 317 backports an
 upstream commit, and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
@@ -1505,13 +1507,13 @@ commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 a
 of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 followed the v5.0
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
-v7.0 reorganization, position 316 is the v7.1 rebase's fixup, and positions 317-319 followed the
+v7.0 reorganization, position 316 is the v7.1 rebase's fixup, and positions 317-320 followed the
 v7.1 rebase, so they combine none, apart from position 215, which combines v5.1 positions 222 and
 223, and the commits that the v7.0 reorganization folded into them. Each commit has the position
 that it had in v7.0, since the v7.1 rebase dropped none. Each commit's v6.1 position is its v6.0
 position less seven, the number of commits that the v6.1 rebase dropped before it, and its v6.0
 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and positions
-297-319 have no earlier position; see
+297-320 have no earlier position; see
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.1 position counts in
@@ -1716,13 +1718,14 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 317 | `2a5e77698` | - | - | - | - | - | - | pal_async: treat disconnected pipe event query as EOF (microsoft/openvmm#5160, backported by microsoft/openvmm#5168 from upstream's `0474df224`); the next rebase drops it |
 | 318 | `ee647f75c` | - | - | - | - | - | - | vmotherboard: find offsets in an I/O region that ends at the top (microsoft/openvmm#5168) |
 | 319 | `b929c2d26` | - | - | - | - | - | - | vmotherboard: wire a chipset device only once its unit spawns (microsoft/openvmm#5170) |
+| 320 | `ccece742e` | - | - | - | - | - | - | virtiofs: skip empty buffers in a request's descriptor chain (microsoft/openvmm#5171) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
 regrouped, and later fork bases, up to `7d90c4104` for v6.1 positions 270-315, for later commits,
 and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`, upstream main on
 2026-11-17, for positions 307-312, `2640ad182`, upstream main later that day, for positions
-313-315, and `715927303`, upstream main on 2026-11-18, for positions 317-319.
+313-315, and `715927303`, upstream main on 2026-11-18, for positions 317-320.
 They name the positions that the commits have now, but neither the v7.1 rebase on `9a875b563` nor
 the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the earlier
 ones on `7d90c4104`.
@@ -3758,6 +3761,25 @@ microVM's device loader among them, returns its error, so the microVM behaves as
 main has the defect: the tests fail there without the fix. Replaying it on upstream main applies
 without conflicts, and `vmotherboard` type-checks there with its tests, which pass, so it can go
 upstream on its own.
+
+Position 320 has the payload reader and writer of `virtiofs`, which read a FUSE request from the
+device-readable buffers of a descriptor chain and write its reply into the device-writable ones,
+skip empty buffers (microsoft/nvx#1621), which a driver may place anywhere in a chain, since the
+virtio specification forbids a device to assume any arrangement of descriptors. They moved to the
+next buffer of their direction whether it was empty or not, and once per call, so a call that
+reached an empty buffer in the middle of a request, or of the space for its reply, read or wrote
+nothing, which ended the request or the reply there: a request whose header such a buffer split, or
+that two empty buffers preceded, failed to parse, so the device signalled corruption and completed
+the chain with no reply, arguments, a name, or data after such a buffer failed with `EINVAL` or
+`EIO`, and a reply that reached such a buffer completed the chain with no bytes written. It changes
+code that upstream main has, in a file that PR06's position 010 and PR18's position 081 also change,
+none of the code that either changes, and adds three tests, and the harness helpers that they use,
+in a file that position 167 also changes, none of the code that it changes. It changes nothing that
+a mapped PR adds. NVX's Linux guest posts no empty buffer, since its virtio-fs driver adds a buffer
+for arguments or data only when they hold some, so the microVM behaves as it did. Upstream main has
+the defect: the tests fail there without the fix. Replaying it on upstream main applies without
+conflicts, and `virtiofs` type-checks there with its tests, which pass, so it can go upstream on its
+own.
 
 ## PR summary
 
