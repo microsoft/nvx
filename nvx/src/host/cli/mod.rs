@@ -59,6 +59,7 @@ mod store;
 use std::borrow::Cow;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::Output;
 
 use self::args::{Parser, Receiver, Spec, Stop, Syntax};
 use crate::ErrorCode;
@@ -301,6 +302,16 @@ pub(crate) fn io_message(error: &std::io::Error, path: &Path) -> String {
 /// [`io_message`].
 pub(crate) fn io_error(code: ErrorCode, error: &std::io::Error, path: &Path) -> Exit {
     Exit::error(code, io_message(error, path))
+}
+
+/// Returns what a failed `program` reports in its `output`: the text that it wrote to its
+/// standard error, trimmed, or, when it wrote none, that it exited with its status.
+pub(crate) fn failure_detail(program: &str, output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    match stderr.trim() {
+        "" => format!("{program} exited with {}", output.status),
+        text => text.to_owned(),
+    }
 }
 
 /// Fails with [`Exit::Interrupted`] if Ctrl-C arrived.
