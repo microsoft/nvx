@@ -2308,15 +2308,23 @@ to the script takes effect once it merges into `dev`.
 
 ## Code scanning
 
-GitHub's CodeQL code scanning analyzes the GitHub Actions workflows, the
-Python, and the Rust of the repository with CodeQL's default query suite, on
-pull requests to `dev`, on pushes to it, and weekly. The repository's settings
-configure it, as CodeQL's default setup, so no workflow of the repository
-defines it. Each analysis runs as an `Analyze (actions)`, `Analyze (python)`,
-or `Analyze (rust)` check, and on a pull request, the `CodeQL` check reports
-the new alerts in the code that the pull request changes and links to every
-open alert of its branch. `Required status check` does not wait for them. The
-repository's Security tab lists the alerts, open and closed.
+The [`codeql-analysis.yml`](../.github/workflows/codeql-analysis.yml) workflow
+runs GitHub's CodeQL code scanning, which analyzes the GitHub Actions
+workflows, the Python, and the Rust of the repository with CodeQL's default
+query suite, without building them, on pull requests to `dev` once they are
+ready for review, on pushes to it, on merge groups, daily at 10:00 UTC, and
+on request. Its checkout leaves out the `openvmm` submodule. GitHub refuses
+the results of a workflow while CodeQL's default setup is enabled, so the
+repository's code security settings keep default setup disabled. Each
+analysis uploads its results under the category of its language,
+`/language:actions`, `/language:python`, or `/language:rust`, the categories
+of the default setup that the workflow replaced, so the alerts that default
+setup raised and their dismissals still match. Each analysis runs as an
+`Analyze (actions)`, `Analyze (python)`, or `Analyze (rust)` check, and on a
+pull request, the `CodeQL` check reports the new alerts in the code that the
+pull request changes and links to every open alert of its branch. `Required
+status check` does not wait for them. The repository's Security tab lists the
+alerts, open and closed.
 
 Review each alert, or each group of alerts with one cause, in an issue
 labelled `area: security` that records the evidence, or report a
