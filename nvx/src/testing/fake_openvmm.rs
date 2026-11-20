@@ -104,12 +104,12 @@
 //! `--guest-shutdown-action exit`, without selecting a lifecycle through an OpenVMM flag. Such a command
 //! line takes `--processors` and at most one `--cpu-profile`, shares through one `--mount` or the
 //! children of an aggregate at `/run/nvx/shares`, whose relative policy paths name paths in the
-//! only share, as OpenVMM resolves them, and either boots a guest, with `--memory`, an optional
-//! `--memory-capacity`, an existing `--kernel` and `--initrd`, and `--virtio-console console`, or
-//! restores a snapshot, with `--restore-snapshot`, optional `--restore-processors`,
-//! `--restore-memory`, and `--restore-ready-path`, and at most one `--virtio-console`, `console`
-//! or `none`. It runs no guest: after `fake_boot_delay_ms=MS`, it prints
-//! that it booted or restored the microVM on standard output, writes an outcome report of
+//! only share, as OpenVMM resolves them, and either boots a guest, with `--memory`, an existing
+//! `--kernel` and `--initrd`, and `--virtio-console console`, but no `--memory-capacity`, which
+//! OpenVMM takes only for a capture, or restores a snapshot, with `--restore-snapshot`, optional
+//! `--restore-processors`, `--restore-memory`, and `--restore-ready-path`, and at most one
+//! `--virtio-console`, `console` or `none`. It runs no guest: after `fake_boot_delay_ms=MS`,
+//! it prints that it booted or restored the microVM on standard output, writes an outcome report of
 //! operation `run` if `--microvm-report` asks for one, and exits with 0, or with `STATUS` if the
 //! kernel command line, which such a command line may omit, has `fake_exit_status=STATUS`. A
 //! restore whose snapshot directory does not exist fails with status 1 and writes no report. A
@@ -2009,8 +2009,9 @@ fn run_lifecycle(command_line: &str) -> Result<(Lifecycle, u32), String> {
 /// fake records the command line, and the snapshot directory of a restore.
 ///
 /// A run takes `--processors`, a positive count, and at most one `--cpu-profile`. A cold boot
-/// takes `--memory` and an optional `--memory-capacity`, in MiB, and an existing `--kernel` and
-/// `--initrd`, and records its command line next to the kernel. A restore takes
+/// takes `--memory` in MiB, a `--memory-capacity` in MiB only with `--snapshot-destination`, as
+/// OpenVMM takes it, and an existing `--kernel` and `--initrd`, and records its command line next
+/// to the kernel. A restore takes
 /// `--restore-snapshot`, next to which it records its command line, at most one each of
 /// `--restore-processors`, which cannot exceed `--processors`, `--restore-memory` in MiB, and
 /// `--restore-ready-path`, and none of the options of a cold boot.
@@ -2058,6 +2059,9 @@ fn check_run_boot(
     exactly_once(values, "--memory")?;
     mib("--memory")?;
     mib("--memory-capacity")?;
+    if values.contains_key("--memory-capacity") && !values.contains_key("--snapshot-destination") {
+        return Err("--memory-capacity requires --snapshot-destination".to_owned());
+    }
     let kernel = PathBuf::from(exactly_once(values, "--kernel")?);
     for path in [&kernel, &PathBuf::from(exactly_once(values, "--initrd")?)] {
         if !path.is_file() {

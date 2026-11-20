@@ -180,10 +180,10 @@ pub struct Boot {
     /// builder supplies. It requires exactly one `nvx_sandbox=1` token, as the guest's init splits
     /// the command line.
     pub command_line: String,
-    /// Memory capacity of a cold VM, in MiB, if it reserves more than its boot memory.
-    /// It must be at least [`VmConfig::memory_mib`] and fit a byte count.
-    /// With [`Self::capture`], this must be `None`: use [`CaptureConfig::memory`]'s capacity
-    /// instead, even when the two capacities would match.
+    /// Must be `None`: OpenVMM reserves a memory capacity only for a capture, so a capture's
+    /// capacity is [`CaptureConfig::memory`]'s, and a cold boot without a capture reserves none.
+    /// [`VmConfig::check`] refuses any capacity here, with or without [`Self::capture`], even one
+    /// that matches the capture's.
     pub memory_capacity_mib: Option<u64>,
     /// What a capture of the VM adds, if the VM may be captured.
     pub capture: Option<CaptureConfig>,
@@ -761,9 +761,6 @@ impl VmConfig {
                 .to_string()
                 .into(),
         ];
-        if let Some(capacity) = self.boot.as_ref().and_then(|boot| boot.memory_capacity_mib) {
-            arguments.extend(["--memory-capacity".into(), format!("{capacity}M").into()]);
-        }
         if let RootConfig::Layered(root) = &self.root {
             let scratch = match &root.upper {
                 UpperConfig::Scratch { path, .. } => Some(path),
@@ -829,8 +826,8 @@ impl VmConfig {
     /// without a path, or with a RAM upper whose cap is not 1 to 90 percent; a hostname that is
     /// empty, longer than [`MAX_HOSTNAME_BYTES`], or holds a NUL; an export that
     /// [`ExportPlan::check`] refuses for the root, whose error is the source; a boot's capture
-    /// that [`CaptureConfig::check`] refuses; a boot memory capacity alongside a capture or
-    /// outside the cold boot's bounds; and caller boot tokens that collide with the root's,
+    /// that [`CaptureConfig::check`] refuses; a boot memory capacity, which only a capture
+    /// reserves; and caller boot tokens that collide with the root's,
     /// the view's, `nvx_maps`, or any `virtfs_*` name.
     ///
     /// The NIC's address is checked when it is built, and the network's policy where it is
@@ -865,17 +862,11 @@ impl VmConfig {
             capture.check()?;
         }
         if let Some(boot) = &self.boot {
-            if boot.memory_capacity_mib.is_some() && boot.capture.is_some() {
+            // OpenVMM takes `--memory-capacity` only with `--snapshot-destination`.
+            if boot.memory_capacity_mib.is_some() {
                 return Err(Error::unsupported(
-                    "Boot.memory_capacity_mib must be None with a capture; use \
-                     CaptureConfig.memory.capacity instead",
-                ));
-            }
-            if let Some(capacity) = boot.memory_capacity_mib
-                && (capacity < self.memory_mib || capacity > u64::MAX >> 20)
-            {
-                return Err(Error::unsupported(
-                    "a cold boot's memory capacity must be at least its memory and fit a byte count",
+                    "Boot.memory_capacity_mib must be None, since OpenVMM reserves a memory \
+                     capacity only for a capture; use CaptureConfig.memory.capacity instead",
                 ));
             }
             let guest = cmdline::init_tokens(boot.command_line.as_bytes()).map(|token| Parameter {

@@ -97,7 +97,6 @@ options:
   --memory-mib MEMORY_MIB
                         guest RAM in MiB (default by --guest: alpine 128,
                         ubuntu 512, azurelinux 512; for a restore: 256)
-  --memory-capacity-mib MEMORY_CAPACITY_MIB
   --processors {1,2,4,8}
   --cpu-profile ID      OpenVMM CPU profile: auto (OpenVMM's default) for the
                         built-in profile of the host's CPU, a built-in profile
@@ -200,9 +199,8 @@ const RESTORE_INPUTS: [&str; 11] = [
 /// The options of a cold boot that a restore refuses: its snapshot fixes the guest, the processors,
 /// the CPU profile, and the NIC's address, and its sandbox takes no shares, kernel command line,
 /// outcome report, or dry run.
-const COLD_ONLY: [&str; 13] = [
+const COLD_ONLY: [&str; 12] = [
     "--guest",
-    "--memory-capacity-mib",
     "--processors",
     "--cpu-profile",
     "--mount",
@@ -218,12 +216,11 @@ const COLD_ONLY: [&str; 13] = [
 
 /// The options of `nvx run` but [`RESTORE_INPUTS`], which parse with the defaults of the
 /// former `nvx.py run`.
-const OPTIONS: [Spec; 27] = [
+const OPTIONS: [Spec; 26] = [
     Spec::one("--guest"),
     Spec::one("--hypervisor"),
     Spec::one("--machine"),
     Spec::one("--memory-mib"),
-    Spec::one("--memory-capacity-mib"),
     Spec::one("--processors"),
     Spec::one("--cpu-profile"),
     Spec::one("--mount"),
@@ -272,8 +269,6 @@ pub(crate) struct Options {
     pub(crate) machine: &'static str,
     /// `--memory-mib`, the guest's default if not given.
     pub(crate) memory_mib: Option<u64>,
-    /// `--memory-capacity-mib`.
-    pub(crate) memory_capacity_mib: Option<u64>,
     /// `--processors`, 1 by default.
     pub(crate) processors: u32,
     /// `--cpu-profile`.
@@ -311,7 +306,6 @@ impl Default for Options {
             hypervisor: "auto",
             machine: "microvm",
             memory_mib: None,
-            memory_capacity_mib: None,
             processors: 1,
             cpu_profile: None,
             mounts: Vec::new(),
@@ -358,7 +352,6 @@ impl Receiver for Options {
             "--hypervisor" => self.hypervisor = choice(&text(), &HYPERVISORS)?,
             "--machine" => self.machine = choice(&text(), &MACHINES)?,
             "--memory-mib" => self.memory_mib = Some(memory(&text())?),
-            "--memory-capacity-mib" => self.memory_capacity_mib = Some(memory(&text())?),
             "--processors" => self.processors = processors(&text())?,
             "--cpu-profile" => self.cpu_profile = Some(text()),
             "--mount" => self.mounts.push(text()),
@@ -412,11 +405,6 @@ fn check(options: &Options) -> Result {
     let network = &options.network;
     if !restore && network.net.is_some() != network.network_profile.is_some() {
         return refused("--net and --network-profile must be specified together".to_owned());
-    }
-    if let Some(capacity) = &options.memory_capacity_mib
-        && *capacity < memory_mib(options)
-    {
-        return refused("--memory-capacity-mib cannot be below --memory-mib".to_owned());
     }
     Ok(())
 }
@@ -667,7 +655,7 @@ fn cold_vm_config(
         boot: Some(Boot {
             command_line: guest_tokens::render(&options.cmdline, filesystem.as_ref())
                 .map_err(error_with_cause)?,
-            memory_capacity_mib: options.memory_capacity_mib,
+            memory_capacity_mib: None,
             capture: None,
         }),
         filesystem,

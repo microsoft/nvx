@@ -608,12 +608,12 @@ the `ExportPlan` of the host paths that it exports, if any, the
 boot takes: the caller's own kernel command-line tokens and, for a capture, a
 `CaptureConfig`.
 
-`Boot::memory_capacity_mib` optionally reserves a cold VM's memory capacity,
-at least its boot memory and fitting a byte count. With a capture it must be
-`None`: `CaptureConfig::memory.capacity` alone supplies the capacity.
-`VmConfig::check` and command-line rendering reject setting both with
-`Unsupported`, even if the capacities match, rather than emitting duplicate
-`--memory-capacity` options.
+`Boot::memory_capacity_mib` must be `None`: OpenVMM reserves a memory capacity
+only for a capture, whose capacity `CaptureConfig::memory.capacity` alone
+supplies, and a cold boot without a capture reserves none. `VmConfig::check`
+and command-line rendering reject any `Boot::memory_capacity_mib` with
+`Unsupported`, with or without a capture, even if it matches the capture's,
+rather than emitting a `--memory-capacity` option that OpenVMM refuses.
 
 A root is `Blockless`, the guest's own system from its initramfs, or `Layered`,
 a `LayeredRoot`: the path of an image and its `RootImage`, EROFS or a GPT disk,
@@ -1851,6 +1851,11 @@ intended changes of behavior.
   `snapshot capture --net` gives one. It takes none of the options of a raw
   restore, `--restore-processors`, `--restore-memory-mib`, and
   `--restore-ready-path`, whose values the snapshot and the restore fix.
+- `run` takes no `--memory-capacity-mib`, which `nvx.py run` passed to OpenVMM
+  as `--memory-capacity`: OpenVMM reserves a memory capacity only for a
+  capture, and refuses `--memory-capacity` without `--snapshot-destination`,
+  so every cold boot with it failed. `snapshot capture --memory-capacity-mib`
+  reserves a snapshot's capacity.
 
 ### Test hooks
 
@@ -1869,7 +1874,8 @@ own, and fails with status 1 where OpenVMM would: without
 `--virtio-console console` for a boot console that was on the terminal, and
 with it for any other. Like OpenVMM, it refuses with status 2 a restore with
 `--net`, whose NIC keeps the addressing that its snapshot saved, a cold boot
-with `--network-profile` alone or with `--restore-network-policy`, and a
+with `--network-profile` alone or with `--restore-network-policy`, a cold boot
+with `--memory-capacity` but no `--snapshot-destination`, and a
 restore with `--network-ingress allow` or explicit `--host-loopback allow`
 without `--restore-network-policy`. Kernel
 command-line tokens make it fail: `fake_exit_on_start=STATUS` and

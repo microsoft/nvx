@@ -384,7 +384,6 @@ additions:
 | `--guest azurelinux` | `--initrd .../initramfs-azurelinux.cpio.gz` and a 512 MiB default |
 | `--hypervisor auto` | `--hypervisor kvm` on Linux or `--hypervisor whp` on Windows |
 | `--memory-mib N` | `--memory NM` |
-| `--memory-capacity-mib N` | `--memory-capacity NM` |
 | `--mount` | `--mount-aggregate /run/nvx/hostfs/root`, with one `--mount-child` for each outermost mapped directory and each mapped file outside them, and `--mount-write` for a read-write `--mount` inside a read-only one; see [virtio-fs host mapping](#virtio-fs-host-mapping) |
 | `--cmdline TEXT` | `--cmdline` with `TEXT` among the tokens of the guest's view, mode, and shares, which NVX renders |
 | Every cold boot | `--virtio-console listen=ENDPOINT`, whose client, `nvx run`, connects the guest's console, the boot console `hvc1`, to the terminal, and the `--microvm-control-console`, `--microvm-control-auth-stdin`, `--microvm-report`, and `--guest-shutdown-action exit` that every launch of NVX passes |

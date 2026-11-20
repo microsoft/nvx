@@ -27,8 +27,6 @@ const MISMATCHED_MANIFEST: Content = Content::Text(
 const PACKAGELESS_MANIFEST: Content = Content::Text(
     r#"{"format": 1, "artifact": "distro.erofs", "artifact_sha256": "8a475efd5fd711d481a9a19de6d12b88dff0cd81cb8135ffcd5b65b062c7bf04"}"#,
 );
-/// A guest initramfs, which a case adds to the root.
-const INITRAMFS: Content = Content::Text("initramfs\n");
 
 /// A command line that fails a check before it changes anything.
 struct Refusal {
@@ -822,17 +820,6 @@ fn run_refusals() -> Vec<Refusal> {
             &["--state-dir requires --restore-snapshot"],
         ),
         refusal(
-            "run: memory capacity of a restore",
-            "unsupported",
-            run_dry(&[
-                "--restore-snapshot",
-                "{root/snapshot}",
-                "--memory-capacity-mib",
-                "1024",
-            ]),
-            &["--memory-capacity-mib is not accepted for restore"],
-        ),
-        refusal(
             "run: Ubuntu guest of a restore",
             "unsupported",
             run_dry(&["--guest", "ubuntu", "--restore-snapshot", "{root/snapshot}"]),
@@ -849,20 +836,6 @@ fn run_refusals() -> Vec<Refusal> {
             ]),
             &["--guest", "restore"],
         ),
-        refusal(
-            "run: memory capacity below memory",
-            "unsupported",
-            run_dry(&["--memory-mib", "512", "--memory-capacity-mib", "256"]),
-            &["--memory-capacity-mib", "--memory-mib"],
-        ),
-        // The capacity is checked against the memory that the guest boots with by default.
-        refusal(
-            "run: memory capacity below the guest default",
-            "unsupported",
-            run_dry(&["--guest", "ubuntu", "--memory-capacity-mib", "256"]),
-            &["--memory-capacity-mib", "--memory-mib"],
-        )
-        .with_file("build/initramfs-ubuntu.cpio.gz", INITRAMFS),
         // A restore names a snapshot of a store, and no longer a raw OpenVMM snapshot, which it
         // refuses before it reads anything.
         refusal(

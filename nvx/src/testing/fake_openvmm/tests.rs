@@ -153,8 +153,6 @@ fn runs_boot_or_restore_without_a_lifecycle() {
     let boot = run_with(&[
         "--memory",
         "128M",
-        "--memory-capacity",
-        "1024M",
         "--kernel",
         "{dir}/vmlinux",
         "--initrd",
@@ -329,6 +327,11 @@ fn runs_refuse_what_their_boot_or_restore_does_not_take() {
         (
             boot(&["--memory-capacity", "2"]),
             "--memory-capacity must be given in MiB",
+        ),
+        // As OpenVMM does, only a capture reserves a memory capacity.
+        (
+            boot(&["--memory-capacity", "1024M"]),
+            "--memory-capacity requires --snapshot-destination",
         ),
         (
             boot(&["--cpu-profile", "host", "--cpu-profile", "auto"]),

@@ -132,7 +132,6 @@ nvx/target/release/nvx run
     [--hypervisor {auto,whp,kvm,mshv}]
     [--machine {microvm}]
     [--memory-mib MIB]
-    [--memory-capacity-mib MIB]
     [--processors {1,2,4,8}]
     [--cpu-profile ID]
     [--mount GUEST_TARGET,HOST_PATH[,ro|rw]]...
@@ -171,8 +170,7 @@ nvx/target/release/nvx run
 | `--guest {alpine,ubuntu,azurelinux}` | `alpine` | Select Alpine, Ubuntu, or Azure Linux userland with the same NVX kernel. A restore refuses it. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the OpenVMM hypervisor. `auto` chooses WHP on Windows and KVM elsewhere. |
 | `--machine {microvm}` | `microvm` | Select the fixed-topology microVM with shared-status edge interrupts. |
-| `--memory-mib MIB` | guest-specific | Set guest memory in MiB, an ASCII decimal integer from 1 to 17592186044415, without signs, whitespace, or underscores. Defaults to 128 for Alpine, 512 for Ubuntu, and 512 for Azure Linux, and for a restore to 256, as for [`snapshot restore`](#snapshot-restore), which must be a multiple of 128 between the snapshot's boot memory and its capacity. |
-| `--memory-capacity-mib MIB` | none | Reserve an immutable, 128 MiB-aligned RAM capacity for a fresh microVM snapshot, in the range of `--memory-mib`. A restore refuses it. |
+| `--memory-mib MIB` | guest-specific | Set guest memory in MiB, an ASCII decimal integer from 1 to 17592186044415, without signs, whitespace, or underscores. Defaults to 128 for Alpine, 512 for Ubuntu, and 512 for Azure Linux, and for a restore to 256, as for [`snapshot restore`](#snapshot-restore), which must be a multiple of 128 between the snapshot's boot memory and its capacity. A cold boot reserves no memory capacity: OpenVMM reserves one only for a capture, as [`snapshot capture`](#snapshot-capture) describes. |
 | `--processors {1,2,4,8}` | `1` | Select the microVM processor count, written as one of the choices. A restore refuses it: its VM keeps the processors that the snapshot had online. |
 | `--cpu-profile ID` | `auto` | Select the guest's [CPU profile](#cpu-profiles): `auto` for the built-in profile of the host's CPU, which falls back with a warning to a development profile derived from this host on an Intel or AMD CPU that no built-in profile serves, a built-in profile ID, or `host` for that development profile. A restore refuses it: it uses the snapshot's profile. |
 | `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose a host directory, or a single regular host file without its directory, at the guest target: an absolute, canonical path other than `/`, without whitespace, control characters, double quotes, backslashes, `=`, or any UTF-8 byte that Linux treats as whitespace, such as the `0xa0` in `à`. Cold boots also protect the system paths listed below. The mode follows the last comma, so `HOST_PATH` may contain commas when the mode is given. Repeat to expose more directories or files, each with its own target and mode, through an aggregate on the microVM's one virtio-fs device, which the guest binds at their targets. Targets must not overlap, but host paths may: a mapped path inside a mapped directory shares that directory's child, unless it is read-only inside a writable part of it, which is refused; see [virtio-fs host mapping](run.md#virtio-fs-host-mapping). The shares' kernel command-line tokens must fit its 1024-byte budget. An `rw` mapping accepts guest-created symbolic links, which the host never follows. A restore refuses it and the other share options. |
@@ -245,11 +243,10 @@ restore that fails, and 130 after Ctrl-C. `--restore-snapshot` names only a
 snapshot of the store, so `run` refuses a raw OpenVMM snapshot directory
 without reading it. It also refuses a `--state-dir` that exists or lies in the
 store, a workload that `snapshot restore` refuses, and the options that the
-snapshot or its sandbox fixes: `--guest`, `--memory-capacity-mib`,
-`--processors`, `--cpu-profile`, `--net`, the share options,
-`--outcome-report`, `--cmdline`, and `--dry-run`. A cold boot refuses
-`--store-dir`, `--state-dir`, and the restore options. A restore's NIC comes
-from the snapshot: `--net` belongs to the cold boot and to
+snapshot or its sandbox fixes: `--guest`, `--processors`, `--cpu-profile`,
+`--net`, the share options, `--outcome-report`, `--cmdline`, and `--dry-run`.
+A cold boot refuses `--store-dir`, `--state-dir`, and the restore options. A
+restore's NIC comes from the snapshot: `--net` belongs to the cold boot and to
 [`snapshot capture`](#snapshot-capture), which gives a snapshot its NIC. The
 restore of a snapshot without a NIC takes no network options, and that of a
 snapshot with a NIC installs them, with `--network-profile`, as the restore's
