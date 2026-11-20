@@ -80,6 +80,47 @@ fn an_expired_write_deadline_leaves_the_pipe_unchanged() {
     assert_eq!(&bytes, b"on time");
 }
 
+#[test]
+fn write_all_with_retries_interruptions_until_every_byte_is_written() {
+    let mut written = Vec::new();
+    let mut calls = 0;
+    write_all_with(b"abcdef", |remaining| {
+        calls += 1;
+        match calls {
+            1 => Err(Errno::EINTR),
+            2 => {
+                written.extend_from_slice(&remaining[..2]);
+                Ok(2)
+            }
+            _ => {
+                written.extend_from_slice(remaining);
+                Ok(remaining.len())
+            }
+        }
+    })
+    .unwrap();
+    assert_eq!(written, b"abcdef");
+    assert_eq!(calls, 3);
+}
+
+#[test]
+fn write_all_with_ends_on_no_progress_or_another_error_and_writes_nothing_for_no_bytes() {
+    let mut calls = 0;
+    assert_eq!(
+        write_all_with(b"ab", |_| {
+            calls += 1;
+            Ok(0)
+        }),
+        Err(Errno::EIO)
+    );
+    assert_eq!(calls, 1);
+    assert_eq!(
+        write_all_with(b"ab", |_| Err(Errno::EPIPE)),
+        Err(Errno::EPIPE)
+    );
+    write_all_with(b"", |_| unreachable!("no byte remains to write")).unwrap();
+}
+
 /// Creates `path` as a FIFO with `mode`, with which tests stand for a console, and keep their
 /// system calls in this module.
 pub(crate) fn create_fifo(path: &CStr, mode: Mode) -> Result<(), Errno> {

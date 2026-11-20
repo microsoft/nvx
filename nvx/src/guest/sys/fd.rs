@@ -62,23 +62,15 @@ impl FileDescriptor {
     /// Writes every byte, retrying interruptions.
     ///
     /// A write that makes no progress is `EIO`, the status that the agent reports for it.
-    pub(crate) fn write_all(&self, mut bytes: &[u8]) -> Result<(), Errno> {
-        while !bytes.is_empty() {
-            match self.write(bytes) {
-                Ok(0) => return Err(Errno::EIO),
-                Ok(count) => bytes = &bytes[count..],
-                Err(Errno::EINTR) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(())
+    pub(crate) fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
+        write_all_with(bytes, |remaining| self.write(remaining))
     }
 
     /// Writes through a nonblocking pipe or character device by the caller deadline, without
     /// waiting for flow control. Regular files ignore nonblocking mode. Legacy writes are unchanged.
     pub(crate) fn write_all_until(
         &self,
-        mut bytes: &[u8],
+        bytes: &[u8],
         deadline: Option<Instant>,
     ) -> Result<(), Errno> {
         let Some(deadline) = deadline else {
@@ -94,15 +86,10 @@ impl FileDescriptor {
         if !matches!(kind, SFlag::S_IFIFO | SFlag::S_IFCHR) {
             return Err(Errno::EOPNOTSUPP);
         }
-        while !bytes.is_empty() {
+        write_all_with(bytes, |remaining| {
             FileLock::check_deadline(Some(deadline))?;
-            match super::signal::write_without_sigpipe(self, bytes) {
-                Ok(0) => return Err(Errno::EIO),
-                Ok(count) => bytes = &bytes[count..],
-                Err(Errno::EINTR) => {}
-                Err(error) => return Err(error),
-            }
-        }
+            super::signal::write_without_sigpipe(self, remaining)
+        })?;
         FileLock::check_deadline(Some(deadline))
     }
 
@@ -184,6 +171,25 @@ impl FileDescriptor {
     pub(super) fn raw(&self) -> RawFd {
         self.0.as_raw_fd()
     }
+}
+
+/// Writes every byte of `bytes` by calling `write`, which makes one write of the bytes that
+/// remain, and retries interruptions.
+///
+/// A write that makes no progress is `EIO`, the status that the agent reports for it.
+pub(super) fn write_all_with(
+    mut bytes: &[u8],
+    mut write: impl FnMut(&[u8]) -> Result<usize, Errno>,
+) -> Result<(), Errno> {
+    while !bytes.is_empty() {
+        match write(bytes) {
+            Ok(0) => return Err(Errno::EIO),
+            Ok(count) => bytes = &bytes[count..],
+            Err(Errno::EINTR) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 /// Reads through the standard library's I/O traits, so that its buffering and bounding adapters,
