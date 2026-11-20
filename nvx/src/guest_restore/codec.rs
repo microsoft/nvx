@@ -97,6 +97,21 @@ impl Field {
     pub fn from_tag(tag: u8) -> Option<Self> {
         Self::ALL.into_iter().find(|field| field.tag() == tag)
     }
+
+    /// Returns the numbers of bytes that the field's values take, as the
+    /// [module](super#encoding) lists them, or `None` for the proxy endpoint and the hostname,
+    /// whose lengths [`Configuration::check`] limits.
+    const fn lengths(self) -> Option<&'static [usize]> {
+        Some(match self {
+            Self::Restore | Self::ImageIdentity => &[16],
+            Self::Image => &[1, 9],
+            Self::Upper | Self::Mappings => &[2],
+            Self::Overlay | Self::Export | Self::Network | Self::MachineId => &[1],
+            Self::Dns => &[4, 16],
+            Self::Resources => &[12],
+            Self::Proxy | Self::Hostname => return None,
+        })
+    }
 }
 
 impl fmt::Display for Field {
@@ -245,9 +260,10 @@ impl GuestRestoreRecord {
     /// Fails with the first rule that the bytes break, in this order: bytes longer than
     /// [`MAX_RECORD_BYTES`]; bytes that end inside the version; another version than [`VERSION`];
     /// then, field by field, a field whose tag and length end past the bytes, a field with an
-    /// unknown tag, a repeated field, a field out of order, a value that ends past the bytes, and a
-    /// value with another length than its contents take, with a code that the version does not
-    /// define, with a mapping count of 0, or with a proxy endpoint that is
+    /// unknown tag, a repeated field, a field out of order, a value that ends past the bytes, a
+    /// value of a length that no value of its field takes, whatever it holds, and a value with
+    /// another length than its contents take, with a code that the version does not define, with a
+    /// mapping count of 0, or with a proxy endpoint that is
     /// not UTF-8; then a missing field that every record holds, in the order of the tags; then a
     /// DNS server or a proxy without a network; then the first limit that [`Configuration::check`]
     /// finds broken, such as an export without mappings, or mappings without an export. So it reads
@@ -350,9 +366,16 @@ struct Draft {
 }
 
 impl Draft {
-    /// Reads `field`'s value, `bytes`.
+    /// Reads `field`'s value, `bytes`: first its length, which must be one that the field's values
+    /// take, then its contents.
     fn read(&mut self, field: Field, bytes: &[u8]) -> Result<(), GuestRestoreError> {
         let mut value = Value::new(field, bytes);
+        if field
+            .lengths()
+            .is_some_and(|lengths| !lengths.contains(&bytes.len()))
+        {
+            return Err(value.length_error());
+        }
         match field {
             Field::Restore => {
                 let transaction = TransactionId::from_bytes(value.take()?);

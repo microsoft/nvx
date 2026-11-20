@@ -462,11 +462,41 @@ fn values_of_another_length_are_refused() {
 }
 
 #[test]
+fn a_length_that_no_value_of_the_field_takes_is_refused_whatever_the_value_holds() {
+    for code in [0, 3, u8::MAX] {
+        let cases: Vec<(Field, Vec<RawField>, usize)> = vec![
+            (Field::Image, with(cold_fields(), 0x10, &[code, 0]), 2),
+            (Field::Upper, with(cold_fields(), 0x20, &[code]), 1),
+            (Field::Upper, with(cold_fields(), 0x20, &[2, code, 0]), 3),
+            (Field::Overlay, with(cold_fields(), 0x30, &[code, 0]), 2),
+            (
+                Field::Export,
+                with(with_export([1, 0]), 0x40, &[code, 0]),
+                2,
+            ),
+            (Field::Network, with(cold_fields(), 0x50, &[code, 0]), 2),
+            (Field::MachineId, with(cold_fields(), 0x61, &[code, 0]), 2),
+        ];
+        for (field, fields, length) in cases {
+            assert_eq!(
+                decode(&fields),
+                Err(GuestRestoreError::FieldLength(field, length)),
+                "{field} of {length} bytes and code {code}"
+            );
+        }
+    }
+    assert_eq!(
+        decode(&with(with_export([1, 0]), 0x41, &[0, 0, 0])),
+        Err(GuestRestoreError::FieldLength(Field::Mappings, 3))
+    );
+}
+
+#[test]
 fn unknown_codes_are_refused() {
     for code in [0, 3, u8::MAX] {
         let cases = [
             (Field::Image, with(cold_fields(), 0x10, &[code])),
-            (Field::Upper, with(cold_fields(), 0x20, &[code])),
+            (Field::Upper, with(cold_fields(), 0x20, &[code, 50])),
             (Field::Upper, with(cold_fields(), 0x20, &[2, code])),
             (Field::Overlay, with(cold_fields(), 0x30, &[code])),
             (Field::Export, with(with_export([1, 0]), 0x40, &[code])),
