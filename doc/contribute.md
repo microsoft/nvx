@@ -7,8 +7,13 @@ ownership, the layout and expectations of tests, and how OpenVMM changes
 reach NVX.
 Report a bug with the
 [Bug report](https://github.com/microsoft/nvx/issues/new?template=bug-report.yml)
-issue form, and security vulnerabilities as [SECURITY.md](../SECURITY.md)
-describes, never in a public issue.
+issue form, propose a feature or an enhancement with the
+[Feature request](https://github.com/microsoft/nvx/issues/new?template=feature-request.yml)
+issue form, and report security vulnerabilities as
+[SECURITY.md](../SECURITY.md) describes, never in a public issue. A feature
+request needs only the problem and its use case. Agree its scope, and any
+design that it needs, with the maintainers before implementing it; they mark
+a request `feature-accepted` once its scope and design are agreed.
 
 ## Workflow
 
