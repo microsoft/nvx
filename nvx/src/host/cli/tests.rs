@@ -1,4 +1,5 @@
 use super::*;
+use std::process::ExitStatus;
 
 #[test]
 fn messages_print_on_one_line() {
@@ -8,6 +9,37 @@ fn messages_print_on_one_line() {
         "not found: /tmp/\\nerror[unsupported]: openvmm"
     );
     assert_eq!(one_line("a\r\nb\rc"), "a\\r\\nb\\rc");
+}
+
+#[test]
+fn failed_programs_report_their_standard_error_or_their_status() {
+    #[cfg(unix)]
+    fn status(code: i32) -> ExitStatus {
+        std::os::unix::process::ExitStatusExt::from_raw(code << 8)
+    }
+    #[cfg(windows)]
+    fn status(code: i32) -> ExitStatus {
+        std::os::windows::process::ExitStatusExt::from_raw(code as u32)
+    }
+    fn failed(stderr: &[u8]) -> Output {
+        Output {
+            status: status(2),
+            stdout: b"ignored".to_vec(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    assert_eq!(
+        failure_detail("tar", &failed(b"\n  tar: no such file\r\n")),
+        "tar: no such file"
+    );
+    assert_eq!(
+        failure_detail("git", &failed(b"bad \xff byte")),
+        "bad \u{fffd} byte"
+    );
+    let exited = format!("curl exited with {}", status(2));
+    assert_eq!(failure_detail("curl", &failed(b"")), exited);
+    assert_eq!(failure_detail("curl", &failed(b" \r\n\t")), exited);
 }
 
 #[test]

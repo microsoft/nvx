@@ -18,7 +18,7 @@ use serde_json::Value;
 use super::{Asset, Releases, remove_stale, system_program};
 use crate::ErrorCode;
 use crate::host::cli::sandbox::path_string;
-use crate::host::cli::{Exit, Result, check_interrupt, io_error};
+use crate::host::cli::{Exit, Result, check_interrupt, failure_detail, io_error};
 
 /// The base URL of the GitHub REST API.
 const API: &str = "https://api.github.com";
@@ -339,14 +339,9 @@ impl Curl {
         let output = child.wait_with_output().map_err(Exit::from_os_error)?;
         check_interrupt()?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let detail = match stderr.trim() {
-                "" => format!("curl exited with {}", output.status),
-                text => text.to_owned(),
-            };
             return Err(Exit::error(
                 ErrorCode::Unavailable,
-                format!("{context} failed: {detail}"),
+                format!("{context} failed: {}", failure_detail("curl", &output)),
             ));
         }
         read_response(request.headers, request.url)?.ok_or_else(|| {

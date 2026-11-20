@@ -19,7 +19,7 @@ use super::system_program;
 use crate::ErrorCode;
 use crate::hex::hex;
 use crate::host::artifacts::CHECKSUMS_NAME;
-use crate::host::cli::{Exit, Result, check_interrupt, io_error};
+use crate::host::cli::{Exit, Result, check_interrupt, failure_detail, io_error};
 
 /// The directory beside the package into which `tar` extracts it.
 const EXTRACTION_DIR: &str = "package";
@@ -97,13 +97,9 @@ fn tar(directory: &Path, arguments: &[&str]) -> Result<String> {
         })?;
     check_interrupt()?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = match stderr.trim() {
-            "" => format!("tar exited with {}", output.status),
-            text => text.to_owned(),
-        };
         return Err(invalid(format!(
-            "tar cannot read the release archive: {detail}"
+            "tar cannot read the release archive: {}",
+            failure_detail("tar", &output)
         )));
     }
     String::from_utf8(output.stdout)

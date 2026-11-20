@@ -12,7 +12,7 @@ use std::process::{Command, Output, Stdio};
 
 use super::History;
 use crate::ErrorCode;
-use crate::host::cli::{Exit, Result, io_error};
+use crate::host::cli::{Exit, Result, failure_detail, io_error};
 use crate::host::paths;
 
 /// The `git` of a checkout.
@@ -67,11 +67,7 @@ impl History for Git {
             ])
             .map_err(|error| unavailable(&format!("cannot run git: {error}")))?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(match stderr.trim() {
-                "" => unavailable(&format!("git rev-list exited with {}", output.status)),
-                detail => unavailable(detail),
-            });
+            return Err(unavailable(&failure_detail("git rev-list", &output)));
         }
         Ok(String::from_utf8_lossy(&output.stdout)
             .split_whitespace()
