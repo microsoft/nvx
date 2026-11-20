@@ -1672,6 +1672,35 @@ fn creation_rolls_back_its_log_and_never_removes_preexisting_outputs_or_inputs()
 }
 
 #[test]
+fn a_failed_removal_is_added_to_the_error_unless_the_entry_is_gone() {
+    let path = Path::new("created");
+    let original = || Error::unsupported("the original failure");
+    for removal in [Ok(()), Err(io::Error::from(io::ErrorKind::NotFound))] {
+        let error = after_removal(original(), "created VM entry", path, removal);
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert_eq!(error.to_string(), "the original failure");
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    let error = after_removal(
+        original(),
+        "created restore view",
+        path,
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+    );
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the original failure; cannot remove created restore view {}: denied",
+            path.display()
+        )
+    );
+    let source = std::error::Error::source(&error).unwrap();
+    assert_eq!(source.to_string(), "the original failure");
+}
+
+#[test]
 fn the_log_and_inherited_resources_stay_open_without_reopening_their_paths() {
     use std::io::Write;
     let (_directory, vm) = vm_dir();
