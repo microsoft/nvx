@@ -5,20 +5,12 @@ use super::lifecycle::{CONFIG_NAME, LOCK_RETRY_INTERVAL, create_state_directory}
 use crate::ErrorCode;
 use crate::host::cli::deadline::Deadline;
 use crate::host::cli::exec_lock;
-use crate::host::cli::store::{LockedState, StateDir, StateFile};
+use crate::host::cli::store::{LockedState, StateDir, StateFile, transition_in_progress};
 use crate::host::cli::{Exit, Result, io_error};
 use crate::host::platform;
 use crate::host::vm::VmDir;
 use std::io;
 use std::path::{Path, PathBuf};
-
-/// Returns the error of a transition that still waits for another: Python's `TimeoutError`.
-fn transition_in_progress() -> Exit {
-    Exit::error(
-        ErrorCode::SandboxBusy,
-        "another lifecycle transition of the sandbox is still in progress",
-    )
-}
 
 /// The exclusive lock that serializes the lifecycle transitions of a state directory: the
 /// lifecycle lock of its sandbox's store, through which the transition changes the store's
