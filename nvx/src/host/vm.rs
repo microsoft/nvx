@@ -869,44 +869,17 @@ pub fn create(
             drop(log);
             drop(ready);
             for path in created.iter().rev() {
-                if let Err(cleanup) = fs::remove_file(path)
-                    && cleanup.kind() != io::ErrorKind::NotFound
-                {
-                    error = Error::new(
-                        error.kind(),
-                        format!(
-                            "{error}; cannot remove created VM entry {}: {cleanup}",
-                            path.display()
-                        ),
-                    )
-                    .with_source(error);
-                }
+                error = after_removal(error, "created VM entry", path, fs::remove_file(path));
             }
-            if created_view
-                && let Err(cleanup) = fs::remove_dir(&view)
-                && cleanup.kind() != io::ErrorKind::NotFound
-            {
-                error = Error::new(
-                    error.kind(),
-                    format!(
-                        "{error}; cannot remove created restore view {}: {cleanup}",
-                        view.display()
-                    ),
-                )
-                .with_source(error);
+            if created_view {
+                error = after_removal(error, "created restore view", &view, fs::remove_dir(&view));
             }
-            match fs::remove_file(&outputs.log) {
-                Ok(()) => Err(error),
-                Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => Err(error),
-                Err(cleanup) => Err(Error::new(
-                    error.kind(),
-                    format!(
-                        "{error}; cannot remove the created VM log {}: {cleanup}",
-                        outputs.log.display()
-                    ),
-                )
-                .with_source(error)),
-            }
+            Err(after_removal(
+                error,
+                "the created VM log",
+                &outputs.log,
+                fs::remove_file(&outputs.log),
+            ))
         }
     }
 }
@@ -1295,6 +1268,22 @@ fn capture_disk(
         )));
     }
     Ok(actual)
+}
+
+/// Adds to `error` that `what` at `path` could not be removed, unless `removal` succeeded or the
+/// entry was already gone.
+fn after_removal(error: Error, what: &str, path: &Path, removal: io::Result<()>) -> Error {
+    match removal {
+        Err(cleanup) if cleanup.kind() != io::ErrorKind::NotFound => Error::new(
+            error.kind(),
+            format!(
+                "{error}; cannot remove {what} {}: {cleanup}",
+                path.display()
+            ),
+        )
+        .with_source(error),
+        _ => error,
+    }
 }
 
 /// Refuses an existing output entry without opening, replacing, or removing it.
