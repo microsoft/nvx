@@ -9,9 +9,10 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c928e8dc1e1673a37c83c10fe145f6611a505cec`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126 and the PR18 fixup at position 302.
-- NVX's pinned OpenVMM revision: `7747ece2c25a89688809cea9094ec706c55be712`, position 321, the head
-  of microsoft/openvmm#5172, whose commit follows position 320, `ccece742e`, the head of
-  `feature/microvm/dev`, where microsoft/openvmm#5171 landed position 320 on position 319,
+- NVX's pinned OpenVMM revision: `b909d6a206c84ebb6f93ff81eddc03c21a39c0cc`, position 322, the head
+  of microsoft/openvmm#5173, whose commit follows position 321, `7747ece2c`, the head of
+  `feature/microvm/dev`, where microsoft/openvmm#5172 landed position 321 on position 320,
+  `ccece742e`, where microsoft/openvmm#5171 landed position 320 on position 319,
   `b929c2d26`, where microsoft/openvmm#5170 landed position 319 on position 318,
   `ee647f75c`, where microsoft/openvmm#5168 landed positions 317 and 318 on position 316,
   `85c3698f9`, the head of the `feature/microvm/release/v7.1` branch of microsoft/openvmm. The
@@ -21,8 +22,8 @@
   microsoft/openvmm#5136, microsoft/openvmm#5140, and microsoft/openvmm#5141 landed after it. It
   added a fixup at its tip, position 316. Every commit keeps its position, and only positions 060
   and 277, which conflicted with upstream, and position 007, whose context upstream changed, changed
-  their patches; see [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The pin is 195
-  commits past the mapped tip on the same first-parent chain. Positions 127-301 and 303-321 are not
+  their patches; see [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The pin is 196
+  commits past the mapped tip on the same first-parent chain. Positions 127-301 and 303-322 are not
   yet assigned to PRs, position 302 is a PR18 fixup, and position 317 backports upstream's
   microsoft/openvmm#5160, which the next rebase drops; see [Commits after the mapped
   tip](#commits-after-the-mapped-tip).
@@ -1471,7 +1472,8 @@ The physical branch is one first-parent chain:
   -> chipset devices wired only once their state unit spawns [319]
   -> empty buffers skipped in virtio-fs descriptor chains [320]
   -> FUSE data sizes checked before their data is allocated [321]
-  -> 7747ece2c (NVX pin)
+  -> FUSE request lengths too short for their header refused [322]
+  -> b909d6a20 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1500,7 +1502,7 @@ position 069 and position 133.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 195 later commits, position
+The NVX pin extends the chain past position 126 without merges. Of its 196 later commits, position
 302 is a PR18 fixup, position 316 is the fixup of the v7.1 rebase, position 317 backports an
 upstream commit, and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
@@ -1509,13 +1511,13 @@ commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 a
 of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 followed the v5.0
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
-v7.0 reorganization, position 316 is the v7.1 rebase's fixup, and positions 317-321 followed the
+v7.0 reorganization, position 316 is the v7.1 rebase's fixup, and positions 317-322 followed the
 v7.1 rebase, so they combine none, apart from position 215, which combines v5.1 positions 222 and
 223, and the commits that the v7.0 reorganization folded into them. Each commit has the position
 that it had in v7.0, since the v7.1 rebase dropped none. Each commit's v6.1 position is its v6.0
 position less seven, the number of commits that the v6.1 rebase dropped before it, and its v6.0
 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and positions
-297-321 have no earlier position; see
+297-322 have no earlier position; see
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.1 position counts in
@@ -1722,13 +1724,15 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 319 | `b929c2d26` | - | - | - | - | - | - | vmotherboard: wire a chipset device only once its unit spawns (microsoft/openvmm#5170) |
 | 320 | `ccece742e` | - | - | - | - | - | - | virtiofs: skip empty buffers in a request's descriptor chain (microsoft/openvmm#5171) |
 | 321 | `7747ece2c` | - | - | - | - | - | - | fuse: check a request's data size before allocating its data (microsoft/openvmm#5172) |
+| 322 | `b909d6a20` | - | - | - | - | - | - | fuse: refuse a request whose length cannot hold its header (microsoft/openvmm#5173) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
 regrouped, and later fork bases, up to `7d90c4104` for v6.1 positions 270-315, for later commits,
 and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`, upstream main on
 2026-11-17, for positions 307-312, `2640ad182`, upstream main later that day, for positions
-313-315, and `715927303`, upstream main on 2026-11-18, for positions 317-321.
+313-315, `715927303`, upstream main on 2026-11-18, for positions 317-321, and `5cf28492b`, upstream
+main on 2026-11-19, for position 322.
 They name the positions that the commits have now, but neither the v7.1 rebase on `9a875b563` nor
 the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the earlier
 ones on `7d90c4104`.
@@ -3798,6 +3802,22 @@ declares, so the microVM behaves as it did. Upstream main has the defect: withou
 `read_count_past_remaining_data_is_einval` fails there. Replaying it on upstream main applies
 without conflicts, and `fuse` type-checks there with its tests, which pass, so it can go upstream on
 its own.
+
+Position 322 has `Request::read_operation`, with which the `fuse` crate's request decoder decodes a
+request's operation, refuse a request whose header declares a length shorter than the header
+(microsoft/nvx#1607), as it refuses one whose header declares more than the request carries. It
+checked only that upper bound, so a `FUSE_INIT` whose length is below 40 underflowed the size of its
+payload: where overflow checks are on, that panicked and aborted the VMM, and otherwise the length
+wrapped, and the request decoded as `FUSE_INIT` with a payload read past its declared length, while
+any other request with such a length decoded as if its length were valid. It now decodes such a
+request as `Invalid`, which the session fails with `EIO`, and a request whose length holds its
+header decodes as before. It changes code that upstream main has, whose subtraction of the header's
+size came with the extended `FUSE_INIT` payload in microsoft/openvmm#3385, and adds two tests, in a
+file that position 321 also changes, none of the code that it changes. It changes nothing that a
+mapped PR adds. NVX's Linux guest sets each length to the header plus the arguments, so the microVM
+behaves as it did. Upstream main has the defect: the tests fail there without the fix. Replaying it
+on upstream main applies without conflicts, and `fuse` type-checks there with its tests, which pass,
+so it can go upstream on its own.
 
 ## PR summary
 
