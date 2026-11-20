@@ -212,22 +212,11 @@ fn proxy_arguments(
             "guest network {guest_network:?} is not valid"
         )));
     };
-    let mut arguments: Vec<String> = [
-        "--net",
-        guest_network,
-        "--network-profile",
-        "portable",
-        "--network-egress",
-        "deny",
-        "--network-ingress",
-        "deny",
-        "--host-loopback",
-        "deny",
-        "--network-proxy",
-    ]
-    .map(str::to_owned)
-    .to_vec();
-    arguments.push(format!("{gateway}:{}", proxy.port));
+    let mut arguments = template_arguments(guest_network);
+    arguments.extend([
+        "--network-proxy".to_owned(),
+        format!("{gateway}:{}", proxy.port),
+    ]);
     Ok(arguments)
 }
 
