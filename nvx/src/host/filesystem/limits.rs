@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "cli")]
 use super::host_path::is_reparse_point;
 use super::host_path::relative_text;
+#[cfg(feature = "cli")]
+use super::unsupported_inspection;
 use super::{MAX_POLICY_BYTES, MAX_POLICY_PATH_BYTES, MAX_POLICY_PATHS};
 #[cfg(feature = "cli")]
 use crate::error::{Error, Result};
@@ -24,9 +26,8 @@ pub(super) fn check_root(root: &Path) -> Result<()> {
         if !matches!(component, Component::Normal(_)) {
             continue;
         }
-        let metadata = fs::symlink_metadata(&current).map_err(|error| {
-            Error::unsupported(format!("cannot inspect {}", current.display())).with_source(error)
-        })?;
+        let metadata = fs::symlink_metadata(&current)
+            .map_err(|error| unsupported_inspection(&current, error))?;
         if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
             return Err(Error::unsupported(format!(
                 "OpenVMM cannot export {}, because {} is a link or reparse point",
@@ -56,10 +57,8 @@ pub(super) fn check_policy_paths(root: &Path, paths: &[PathBuf], action: &str) -
         let mut current = root.to_path_buf();
         for component in components {
             current.push(component);
-            let metadata = fs::symlink_metadata(&current).map_err(|error| {
-                Error::unsupported(format!("cannot inspect {}", current.display()))
-                    .with_source(error)
-            })?;
+            let metadata = fs::symlink_metadata(&current)
+                .map_err(|error| unsupported_inspection(&current, error))?;
             if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
                 return unsupported(format!(
                     "OpenVMM cannot {action} {}, because {} is a link or reparse point",
