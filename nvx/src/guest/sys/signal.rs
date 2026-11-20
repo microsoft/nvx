@@ -92,15 +92,9 @@ pub(crate) fn write_without_sigpipe(
 /// fails the write without raising `SIGPIPE`, whatever the process's disposition of it.
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn write_standard_error_without_sigpipe(bytes: &[u8]) {
-    let mut remaining = bytes;
-    while !remaining.is_empty() {
-        match without_sigpipe(|| nix::unistd::write(std::io::stderr(), remaining)) {
-            Ok(0) => return,
-            Ok(count) => remaining = &remaining[count..],
-            Err(Errno::EINTR) => {}
-            Err(_) => return,
-        }
-    }
+    let _ = super::fd::write_all_with(bytes, |remaining| {
+        without_sigpipe(|| nix::unistd::write(std::io::stderr(), remaining))
+    });
 }
 
 /// Makes the one `write` system call of `write` with `SIGPIPE` blocked in the calling thread, and

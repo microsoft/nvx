@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use nix::sys::signal::{SigHandler, Signal, kill};
 use nix::unistd::Pid;
 
+use super::fd::write_all_with;
 use super::{Errno, FileDescriptor, Port};
 use crate::guest::parse::parse_decimal;
 
@@ -494,15 +495,9 @@ pub(crate) fn exec(path: &CStr, arguments: &[CString], environment: Option<&[CSt
 
 /// Writes all bytes to standard error and ignores failures.
 pub(crate) fn write_standard_error(bytes: &[u8]) {
-    let mut remaining = bytes;
-    while !remaining.is_empty() {
-        match nix::unistd::write(io::stderr(), remaining) {
-            Ok(0) => return,
-            Ok(count) => remaining = &remaining[count..],
-            Err(Errno::EINTR) => {}
-            Err(_) => return,
-        }
-    }
+    let _ = write_all_with(bytes, |remaining| {
+        nix::unistd::write(io::stderr(), remaining)
+    });
 }
 
 /// Writes `message` to a diagnostic I/O port through a descriptor.
