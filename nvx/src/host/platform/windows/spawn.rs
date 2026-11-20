@@ -27,6 +27,7 @@ use super::process::{ProcessHandle, creation_time};
 use super::{owned, raw, wide};
 use crate::host::platform::check_working_dir;
 use crate::host::platform::inherit::{Inherited, lock_spawns};
+use crate::host::platform::unconfirmed_exit;
 
 /// An OpenVMM process launched by this caller, held through its process handle.
 pub(crate) struct LaunchedProcess {
@@ -60,21 +61,16 @@ impl LaunchedProcess {
     pub(crate) fn terminate_and_wait(self) -> io::Result<()> {
         // SAFETY: CreateProcessW returned the owned handle with full access.
         let termination = if unsafe { TerminateProcess(raw(&self.process), 1) } == 0 {
-            Some(io::Error::last_os_error())
+            Err(io::Error::last_os_error())
         } else {
-            None
+            Ok(())
         };
         // SAFETY: the process handle stays open for the whole wait.
         if unsafe { WaitForSingleObject(raw(&self.process), INFINITE) } == WAIT_OBJECT_0 {
             return Ok(());
         }
         let wait = io::Error::last_os_error();
-        Err(match termination {
-            None => wait,
-            Some(termination) => io::Error::other(format!(
-                "cannot terminate the child: {termination}; cannot wait for its exit: {wait}"
-            )),
-        })
+        Err(unconfirmed_exit(termination, wait))
     }
 
     /// Waits up to `timeout` for the process to exit, and returns its exit status if it has,

@@ -274,12 +274,10 @@ impl Launched {
             let mut child = self.child;
             let termination = child.kill();
             // A refused signal needs no repair when the wait proves the child already exited.
-            child.wait().map(|_| ()).map_err(|wait| match termination {
-                Ok(()) => wait,
-                Err(termination) => io::Error::other(format!(
-                    "cannot terminate the child: {termination}; cannot wait for its exit: {wait}"
-                )),
-            })
+            child
+                .wait()
+                .map(|_| ())
+                .map_err(|wait| platform::unconfirmed_exit(termination, wait))
         }
     }
 

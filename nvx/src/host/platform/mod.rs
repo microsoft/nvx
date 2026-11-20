@@ -309,6 +309,17 @@ fn time_left(deadline: Option<std::time::Instant>) -> io::Result<Option<Duration
     }
 }
 
+/// Returns the error of an owned child whose exit could not be confirmed: `wait`, the failure of
+/// the wait, if `termination` succeeded, and otherwise one error that reports both failures.
+pub(crate) fn unconfirmed_exit(termination: io::Result<()>, wait: io::Error) -> io::Error {
+    match termination {
+        Ok(()) => wait,
+        Err(termination) => io::Error::other(format!(
+            "cannot terminate the child: {termination}; cannot wait for its exit: {wait}"
+        )),
+    }
+}
+
 /// Returns the outcome of ending a held process, given the `result` of signaling it: a failure
 /// stands unless `exited` shows that the process has exited, which needs no ending.
 ///
