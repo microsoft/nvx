@@ -417,11 +417,12 @@ const USAGE_ERRORS: &[UsageError] = &[
         code: "argument-invalid",
         fragments: &["--memory-mib", "\"\u{661}\u{662}\u{668}x\""],
     },
+    // OpenVMM reserves a memory capacity only for a capture, which `snapshot capture` makes.
     UsageError {
-        name: "run: memory capacity not an integer",
-        arguments: &["run", "--memory-capacity-mib", "1e3"],
-        code: "argument-invalid",
-        fragments: &["--memory-capacity-mib", "\"1e3\""],
+        name: "run: memory capacity option removed",
+        arguments: &["run", "--memory-mib", "256", "--memory-capacity-mib", "512"],
+        code: "argument-unrecognized",
+        fragments: &["--memory-capacity-mib", "512"],
     },
     UsageError {
         name: "run: restore memory option removed",
@@ -473,9 +474,9 @@ const USAGE_ERRORS: &[UsageError] = &[
     },
     UsageError {
         name: "run: memory beyond 64 bits of bytes",
-        arguments: &["run", "--memory-capacity-mib", "17592186044416"],
+        arguments: &["run", "--memory-mib", "17592186044416"],
         code: "argument-invalid",
-        fragments: &["--memory-capacity-mib", "between 1 and 17592186044415"],
+        fragments: &["--memory-mib", "between 1 and 17592186044415"],
     },
     UsageError {
         name: "run: processors not an integer",

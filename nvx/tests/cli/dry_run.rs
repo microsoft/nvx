@@ -384,30 +384,13 @@ fn run_dry_runs() -> Vec<DryRun> {
             cold_boot().with("--memory", ["256M"]),
         ),
         dry_run(
-            "run: Ubuntu with memory and capacity",
-            run(&[
-                "--guest",
-                "ubuntu",
-                "--memory-mib",
-                "1024",
-                "--memory-capacity-mib",
-                "2048",
-            ]),
+            "run: Ubuntu with memory",
+            run(&["--guest", "ubuntu", "--memory-mib", "1024"]),
             cold_boot()
                 .with("--memory", ["1024M"])
-                .with("--initrd", ["{root/build/initramfs-ubuntu.cpio.gz}"])
-                .with("--memory-capacity", ["2048M"]),
+                .with("--initrd", ["{root/build/initramfs-ubuntu.cpio.gz}"]),
         )
         .with_file(ubuntu.0, ubuntu.1),
-        dry_run(
-            "run: Azure Linux with the default capacity",
-            run(&["--guest", "azurelinux", "--memory-capacity-mib", "512"]),
-            cold_boot()
-                .with("--memory", ["512M"])
-                .with("--initrd", ["{root/build/initramfs-azurelinux.cpio.gz}"])
-                .with("--memory-capacity", ["512M"]),
-        )
-        .with_file(azure.0, azure.1),
         dry_run(
             "run: last guest",
             run(&["--guest", "ubuntu", "--guest", "azurelinux"]),
@@ -425,8 +408,6 @@ fn run_dry_runs() -> Vec<DryRun> {
                 "microvm",
                 "--memory-mib",
                 "1024",
-                "--memory-capacity-mib",
-                "2048",
                 "--processors",
                 "8",
                 "--cpu-profile",
@@ -440,7 +421,6 @@ fn run_dry_runs() -> Vec<DryRun> {
                 .with("--processors", ["8"])
                 .with("--hypervisor", ["mshv"])
                 .with("--memory", ["1024M"])
-                .with("--memory-capacity", ["2048M"])
                 .with("--cpu-profile", ["intel.alderlake.v1"])
                 .with("--microvm-report", ["{root/reports/openvmm-run.json}"])
                 .with("--cmdline", ["quiet loglevel=3"]),
@@ -463,30 +443,16 @@ fn run_dry_runs() -> Vec<DryRun> {
         // Integers are ASCII decimal digits, and print in their canonical form.
         dry_run(
             "run: leading zeros",
-            run(&[
-                "--memory-mib",
-                "0128",
-                "--memory-capacity-mib",
-                "0256",
-                "--processors",
-                "2",
-            ]),
+            run(&["--memory-mib", "0256", "--processors", "2"]),
             cold_boot()
                 .with("--processors", ["2"])
-                .with("--memory-capacity", ["256M"]),
+                .with("--memory", ["256M"]),
         ),
         // The most MiB whose count of bytes fits in 64 bits, as OpenVMM reads a size of RAM.
         dry_run(
             "run: most memory",
             run(&["--memory-mib", "17592186044415"]),
             cold_boot().with("--memory", ["17592186044415M"]),
-        ),
-        dry_run(
-            "run: equal memory and capacity",
-            run(&["--memory-mib", "512", "--memory-capacity-mib", "512"]),
-            cold_boot()
-                .with("--memory", ["512M"])
-                .with("--memory-capacity", ["512M"]),
         ),
         dry_run(
             "run: last processors",

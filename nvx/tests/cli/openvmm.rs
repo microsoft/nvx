@@ -583,10 +583,7 @@ impl Options {
             console: ConsoleAttachment::Listener,
             boot: Some(Boot {
                 command_line: boot_tokens.join(" "),
-                memory_capacity_mib: old
-                    .values("--memory-capacity")
-                    .first()
-                    .map(|value| value.trim_end_matches('M').parse().unwrap()),
+                memory_capacity_mib: None,
                 capture: None,
             }),
         };

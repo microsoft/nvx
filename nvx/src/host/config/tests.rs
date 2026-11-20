@@ -22,26 +22,30 @@ fn missing(name: &str) -> PathBuf {
     std::env::temp_dir().join("nvx-config-missing").join(name)
 }
 
+// OpenVMM takes `--memory-capacity` only with `--snapshot-destination`, so a cold boot without a
+// capture cannot reserve a capacity, aligned or not.
 #[test]
-fn cold_memory_capacity_is_checked_and_lowered_without_a_capture() {
-    let mut config = cold(blockless());
-    config.boot.as_mut().unwrap().memory_capacity_mib = Some(1024);
-    let arguments = config
-        .openvmm_arguments(
+fn cold_boot_refuses_a_memory_capacity_without_a_capture() {
+    for capacity in [512, 1024, 511, u64::MAX] {
+        let mut config = cold(blockless());
+        config.boot.as_mut().unwrap().memory_capacity_mib = Some(capacity);
+        let arguments = config.openvmm_arguments(
             &runtime(),
             "/control",
             Path::new("/report"),
             Some("/console"),
-        )
-        .unwrap();
-    assert_eq!(values(&arguments, "--memory"), [OsStr::new("512M")]);
-    assert_eq!(
-        values(&arguments, "--memory-capacity"),
-        [OsStr::new("1024M")]
-    );
-    for capacity in [511, u64::MAX] {
-        config.boot.as_mut().unwrap().memory_capacity_mib = Some(capacity);
-        assert_eq!(config.check().unwrap_err().kind(), ErrorKind::Unsupported);
+        );
+        for result in [
+            config.check(),
+            config.check_command_line(),
+            arguments.map(|_| ()),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unsupported, "{capacity}: {error}");
+            for field in ["Boot.memory_capacity_mib", "CaptureConfig.memory.capacity"] {
+                assert!(error.to_string().contains(field), "{error}");
+            }
+        }
     }
 }
 

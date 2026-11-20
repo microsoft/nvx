@@ -161,11 +161,10 @@ fn run_launches() -> Vec<Launch> {
         ),
         launch(
             "run: Ubuntu",
-            run(&["--guest", "ubuntu", "--memory-capacity-mib", "1024"]),
+            run(&["--guest", "ubuntu"]),
             cold_boot()
                 .with("--memory", ["512M"])
-                .with("--initrd", ["{root/build/initramfs-ubuntu.cpio.gz}"])
-                .with("--memory-capacity", ["1024M"]),
+                .with("--initrd", ["{root/build/initramfs-ubuntu.cpio.gz}"]),
             0,
             booted,
         )
@@ -181,14 +180,11 @@ fn run_launches() -> Vec<Launch> {
                 "host",
                 "--memory-mib",
                 "256",
-                "--memory-capacity-mib",
-                "512",
             ]),
             cold_boot()
                 .with("--processors", ["8"])
                 .with("--hypervisor", ["mshv"])
                 .with("--memory", ["256M"])
-                .with("--memory-capacity", ["512M"])
                 .with("--cpu-profile", ["host"]),
             0,
             booted,
