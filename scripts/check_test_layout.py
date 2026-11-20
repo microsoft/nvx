@@ -37,7 +37,7 @@ Python unit tests are the `test_*.py` modules of scripts/,
 .github/specula/tests/, and .github/skills/*/scripts/, and the end-to-end
 scenario drivers are the `*_tests.py` modules of scripts/nvx_tools/. No other
 module imports unittest, pytest, doctest, a `test_*` module, or the
-PowerShell test support of powershell_testing.py.
+test support of powershell_testing.py and nvx_tools_testing.py.
 
 The checks read the files that Git tracks, so stage a new file before you run
 them.
@@ -76,7 +76,9 @@ PYTHON_UNIT_TESTS = re.compile(
     r"/test_[^/]*\.py"
 )
 PYTHON_END_TO_END_TESTS = re.compile(r"scripts/nvx_tools/[^/]*_tests\.py")
-PYTHON_TEST_SUPPORT = frozenset({"scripts/powershell_testing.py"})
+PYTHON_TEST_SUPPORT = frozenset(
+    {"scripts/powershell_testing.py", "scripts/nvx_tools_testing.py"}
+)
 PYTHON_TEST_FRAMEWORKS = frozenset({"doctest", "pytest", "unittest"})
 
 # Attributes that only tests take, and those of them that make a function a

@@ -296,7 +296,7 @@ Python unit tests are the `test_*.py` modules of `scripts/`,
 scenario drivers are the `*_tests.py` modules of `scripts/nvx_tools/`, whose
 guest workloads live in `scripts/nvx_tools/microvm_test_scripts/`. No other
 module imports `unittest`, `pytest`, `doctest`, a `test_*` module, or the
-PowerShell test support of `scripts/powershell_testing.py`.
+test support of `scripts/powershell_testing.py` and `scripts/nvx_tools_testing.py`.
 
 `check_test_layout.py` checks these rules, which check-quality runs. It reads
 the package and target tables of each `Cargo.toml`, whose keys it reads when
