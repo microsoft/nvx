@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use super::*;
+use crate::guest::counter::{ClockState, DeclaredGuestIsa, PublishedRateContext};
 use crate::guest::sys::{ClockAdjustment, ClockDiscipline, FrequencyHold};
 use crate::guest::time::NSEC_PER_MSEC;
 use crate::guest::time::decoders::{HostClock, PACKET_DNS_SIZE};
@@ -13,6 +14,92 @@ use crate::guest::time::state::HostClockStatus;
 use crate::guest::time::system::PORTB_TIME_WINDOW;
 use crate::guest::time::system::tests::{FakeOps, sample_input, sample_tsc};
 use crate::protocol::status;
+
+#[test]
+fn x86_capture_preserves_raw_report_eligibility_and_failure_priority_before_ports() {
+    for (reports, missing) in [
+        (vec![Err(Errno::ENOENT)], true),
+        (vec![Err(Errno::EIO)], true),
+        (
+            vec![Ok(StateReport::default()), Ok(StateReport::default())],
+            false,
+        ),
+        (vec![Ok(StateReport::default()), Err(Errno::EACCES)], false),
+    ] {
+        let mut reports = std::collections::VecDeque::from(reports);
+        let mut reads = 0;
+        let mut ops = FakeOps::new([]);
+        ops.trap_privileged = missing;
+        ops.tsc_hz = Err(Errno::EIO);
+        ops.lapic_hz = Err(Errno::EACCES);
+        ops.grant_error = Some(Errno::EACCES);
+        let mut runtime = Runtime::new(&ops, true);
+        let request = CaptureRequest::in_memory(
+            ScratchPolicy::Fresh,
+            GenerationId::from_bytes([1; GenerationId::LENGTH]),
+        );
+        let error = capture_with_report(&mut runtime, request, || {
+            reads += 1;
+            reports.pop_front().expect("unexpected state read")
+        })
+        .unwrap_err();
+        if missing {
+            assert!(matches!(error, TimeError::StateUnavailable), "{error:?}");
+            assert!(ops.permissions.lock().unwrap().is_empty());
+            assert_eq!(reads, 1);
+        } else {
+            assert!(
+                matches!(&error, TimeError::PortAccess(source) if has_errno(source, Errno::EACCES)),
+                "{error:?}"
+            );
+            assert!(!ops.permissions.lock().unwrap().is_empty());
+            assert_eq!(reads, 2);
+        }
+        assert!(reports.is_empty());
+    }
+}
+
+#[test]
+fn x86_restore_generation_reuses_and_replaces_the_persisted_rate_without_frequency_msr_reads() {
+    use crate::guest::time::model::{CounterReads, CounterSample};
+
+    let mut ops = FakeOps::new([]);
+    ops.tsc_hz = Err(Errno::EIO);
+    ops.lapic_hz = Err(Errno::EACCES);
+    let runtime = Runtime::new(&ops, false);
+    let sample = CounterSample {
+        utc_ns: 1_000_000_000,
+        ticks: 2_400_000_000,
+        pairing_ns: 0,
+    };
+    let reads = CounterReads {
+        before: 2_400_000_000,
+        after: 2_400_000_000,
+        realtime_ns: 2_000_000_000,
+        realtime_ticks: 4_800_000_000,
+        realtime_half_ticks: 0,
+    };
+    for (generation, rate, expected) in [
+        (7, 2_400_000_000_u64, (0, 2_001_000)),
+        (8, 0, (0, 2_001_000)),
+        (9, 3_000_000_000, (-200_000_000, 1_601_000)),
+    ] {
+        let mut state = super::super::state::StateReport::parse(
+            format!("version=1\ntsc_hz={rate}\nlapic_hz=17\n").as_bytes(),
+        )
+        .unwrap();
+        state.generation = generation;
+        load_generation_from(&runtime, || Ok(state));
+        assert_eq!(runtime.generation(), generation as u32);
+        assert_eq!(
+            system::clock_rates(&runtime).unwrap().pair(sample, reads),
+            Ok(expected)
+        );
+    }
+    load_generation_from(&runtime, || Err(Errno::ENOENT));
+    assert_eq!(runtime.generation(), 9);
+    assert_eq!(runtime.counter_hz(), Ok(3_000_000_000));
+}
 
 impl Restore {
     /// Returns an unfinished restore to the new VM generation ID `generation_id`, with nothing to
@@ -574,7 +661,10 @@ fn a_capture_refuses_an_entropy_path_with_a_nul_byte_before_its_transaction() {
         GenerationId::from_bytes([1; GenerationId::LENGTH]),
         PathBuf::from(OsStr::from_bytes(b"restore\0entropy")),
     );
-    let error = capture(&mut runtime, request).unwrap_err();
+    let error = capture_with_report(&mut runtime, request, || {
+        panic!("invalid entropy path must be rejected before the state read")
+    })
+    .unwrap_err();
     assert!(
         matches!(&error, TimeError::EntropyFile { source, .. } if source.kind() == io::ErrorKind::InvalidInput),
         "{error:?}"
@@ -816,7 +906,7 @@ fn capture_in_each_mode() {
     sys::enter_private_mount_namespace().unwrap();
     let _run = sys::TmpfsMount::mount(c"nvx-test", c"/run", c"mode=0755").unwrap();
     system::make_runtime_directories();
-    state_store(&TimeState::default()).unwrap();
+    report_store(&StateReport::default()).unwrap();
     let previous = GenerationId::from_bytes([1; GenerationId::LENGTH]);
     let held = system::lock_portb().unwrap();
     let holder = std::thread::spawn(move || {
@@ -847,11 +937,10 @@ fn capture_in_each_mode() {
             .any(|(port, _)| *port == Port::Snapshot)
     );
     assert!(sys::check_released().is_ok());
-    writeln!(
-        io::stderr(),
-        "FINAL_CAPTURE_PORTB_DEADLINE_REGRESSION_EXERCISED"
-    )
-    .unwrap();
+    // Keep this evidence on real stderr, outside libtest's captured print stream.
+    io::stderr()
+        .write_all(b"FINAL_CAPTURE_PORTB_DEADLINE_REGRESSION_EXERCISED\n")
+        .unwrap();
     let entropy: [u8; Seed::LENGTH] = std::array::from_fn(|index| index as u8 + 2);
     let secret = &entropy[GenerationId::LENGTH..];
     let path = Path::new("/run/nvx/restore-entropy");
@@ -1032,7 +1121,7 @@ fn cold_boot_in_strict_and_report_only_mode() {
     // A strict cold boot stops where enforcing mode stops the VM, without stopping it: it
     // publishes no time state.
     assert_eq!(ops.power.load(Ordering::Relaxed), 0);
-    assert!(state_load().is_err());
+    assert!(report_load().is_err());
     assert_eq!(runtime.take_violation(), None);
     let console = String::from_utf8(ops.console.lock().unwrap().clone()).unwrap();
     assert!(
@@ -1046,7 +1135,24 @@ fn cold_boot_in_strict_and_report_only_mode() {
     let boot = super::cold_boot(&Runtime::new(&ops, true)).unwrap();
     assert!(!boot.synchronized());
     assert_eq!(boot.failures, 1);
-    assert!(!state_load().unwrap().synchronized);
+    assert!(!report_load().unwrap().synchronized);
+    // Failed binding admission may publish zero metadata, never a fabricated Ready clock.
+    let mut ops = FakeOps::new([]);
+    ops.tsc_hz = Err(Errno::EIO);
+    let boot = super::cold_boot(&Runtime::new(&ops, true)).unwrap();
+    assert!(!boot.synchronized());
+    assert_eq!(boot.failures, 1);
+    let report = report_load().unwrap();
+    assert!(!report.synchronized);
+    assert_eq!(
+        report.clock(PublishedRateContext::Uninitialized(
+            DeclaredGuestIsa::X86_64
+        )),
+        Ok(ClockState::Uninitialized)
+    );
+    assert!(report.to_string().contains("\ntsc_hz=0\nlapic_hz=0\n"));
+    let console = String::from_utf8(ops.console.lock().unwrap().clone()).unwrap();
+    assert!(console.contains("G_CONFORMANCE_C12"), "{console}");
     // A sample beyond the bound fails check C12 too.
     let host = HostClock {
         status: HostClockStatus::FreeRunning,
@@ -1090,7 +1196,7 @@ fn cold_boot_in_strict_and_report_only_mode() {
             }),
         ]
     );
-    let state = state_load().unwrap();
+    let state = report_load().unwrap();
     assert!(state.synchronized);
     assert_eq!(
         (state.samples, state.offset_ns, state.uncertainty_ns),
@@ -1123,7 +1229,7 @@ fn cold_boot_in_strict_and_report_only_mode() {
     let ops = FakeOps::new(hooked);
     let boot = super::cold_boot(&Runtime::new(&ops, false).strict()).unwrap();
     assert!(boot.synchronized());
-    assert!(state_load().unwrap().host_test_hooks);
+    assert!(report_load().unwrap().host_test_hooks);
 }
 
 #[test]

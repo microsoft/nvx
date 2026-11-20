@@ -180,6 +180,7 @@ impl Launch<'_> {
             || self.journal.endpoint != saved.endpoint
             || self.journal.capability != saved.capability
             || self.journal.runtime != saved.runtime
+            || self.journal.architecture != saved.architecture
         {
             return Err(Error::other(
                 "the saved VM does not match the launch and its journaled process",

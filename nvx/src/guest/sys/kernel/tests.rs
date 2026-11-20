@@ -3,7 +3,6 @@
 use super::*;
 
 /// Returns the nice value of the process `process`, the 19th field of its procfs `stat` file.
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn nice_of(process: crate::guest::sys::ProcessId) -> i32 {
     let stat = std::fs::read_to_string(format!("/proc/{}/stat", process.raw())).unwrap();
     // The command name, the second field, is in parentheses, and may hold spaces.
@@ -17,7 +16,6 @@ fn the_process_has_a_vdso() {
 }
 
 #[test]
-#[cfg(target_arch = "x86_64")]
 fn a_nice_value_is_set_for_the_named_process() {
     use crate::guest::sys::ProcessId;
     use crate::guest::sys::tests::{CAP_SYS_NICE, holds_capability};

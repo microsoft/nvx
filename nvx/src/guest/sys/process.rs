@@ -1,20 +1,25 @@
 //! Safe process, signal, inherited-descriptor, and standard-stream operations.
 
 use std::ffi::{CStr, CString};
-use std::io::{self, Read, Write};
+#[cfg(target_arch = "x86_64")]
+use std::io::Read;
+use std::io::{self, Write};
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nix::sys::signal::{SigHandler, Signal, kill};
 use nix::unistd::Pid;
 
-use super::{Errno, FileDescriptor, Port};
+#[cfg(target_arch = "x86_64")]
+use super::Port;
+use super::{Errno, FileDescriptor};
 use crate::guest::parse::parse_decimal;
 
 /// Whether this process inherited an ignored SIGPIPE across `exec`.
 static SIGPIPE_IGNORED: AtomicBool = AtomicBool::new(false);
 
 /// Linux's `PF_KTHREAD`, which distinguishes kernel threads from userspace processes.
+#[cfg(any(test, target_arch = "x86_64"))]
 const KERNEL_THREAD: u64 = 0x0020_0000;
 
 /// Runs before Rust's standard runtime changes SIGPIPE to `SIG_IGN`.
@@ -121,6 +126,7 @@ impl ProcessId {
 
     /// Lists live userspace processes in this process's procfs, excluding fully dead processes
     /// and kernel threads. A process that disappears during the walk needs no kill.
+    #[cfg(any(test, target_arch = "x86_64"))]
     pub(crate) fn live_userspace() -> Result<Vec<Self>, Errno> {
         let mut processes = Vec::new();
         for entry in std::fs::read_dir("/proc").map_err(|error| super::errno_of(&error))? {
@@ -203,11 +209,13 @@ pub(crate) fn syscall_process_id() -> u64 {
 }
 
 /// Returns whether `process` exists, which includes a zombie, by sending it no signal.
+#[cfg(any(test, target_arch = "x86_64"))]
 pub(crate) fn process_exists(process: ProcessId) -> bool {
     kill(process.0, None).is_ok()
 }
 
 /// Returns the command name of `process`, which its procfs `comm` file holds with a newline.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn process_name(process: ProcessId) -> Result<Vec<u8>, Errno> {
     let path = super::c_string(format!("/proc/{}/comm", process.0.as_raw()).as_bytes())?;
     let mut descriptor = super::open(
@@ -225,6 +233,7 @@ pub(crate) fn process_name(process: ProcessId) -> Result<Vec<u8>, Errno> {
 /// Reads the state and flags after the last `)` of procfs's stat record: the command may hold
 /// spaces and parentheses. A zombie leader may still have live threads; only a wholly dead
 /// process needs no kill. Kernel threads cannot be killed.
+#[cfg(any(test, target_arch = "x86_64"))]
 fn live_userspace(stat: &[u8]) -> Result<bool, Errno> {
     let end = stat
         .iter()
@@ -331,6 +340,7 @@ pub(crate) fn reap_any_nonblocking() -> Option<ReapedChild> {
 /// Waits for `process`, retrying interruptions.
 ///
 /// libc is used for the same real-time signals as [`reap_any_nonblocking`].
+#[cfg(any(test, target_arch = "x86_64"))]
 pub(crate) fn wait(process: ProcessId) -> Option<ChildStatus> {
     loop {
         let mut status = 0;
@@ -511,6 +521,7 @@ pub(crate) fn write_standard_error(bytes: &[u8]) {
 /// Writes `message` to a diagnostic I/O port through a descriptor.
 ///
 /// A write that stores no byte is `EIO`, the status that the agent reports for it.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn write_port_diagnostic(
     descriptor: &FileDescriptor,
     message: &[u8],
@@ -581,7 +592,6 @@ impl Write for DirectStdout {
 ///
 /// It reads standard input with direct `read` calls, past the standard library's buffer, which
 /// therefore stays empty.
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn discard_standard_input() -> Result<(), Errno> {
     let mut buffer = [0_u8; 512];
     loop {

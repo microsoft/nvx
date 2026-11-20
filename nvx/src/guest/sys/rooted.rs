@@ -238,7 +238,6 @@ pub(crate) fn open_beneath(
     nix::fcntl::openat2(directory.borrowed(), path, how).map(FileDescriptor::from_owned)
 }
 
-#[cfg(target_arch = "x86_64")]
 impl FileDescriptor {
     /// Opens a directory inside this root, following ordinary ancestor links but not a final
     /// link or a magic link. Absolute links and `..` remain inside this root.

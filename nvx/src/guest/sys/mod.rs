@@ -51,6 +51,8 @@
 //! and the processor's interfaces, such as procfs and sysfs paths, OpenVMM's ports, CPUID
 //! leaves, and MSRs, are defined here once, so that the programs name them.
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod aarch64;
 mod clock;
 mod discipline;
 mod entry;
@@ -62,6 +64,7 @@ mod mapping;
 #[cfg(target_arch = "x86_64")]
 mod msr;
 mod poll;
+#[cfg(target_arch = "x86_64")]
 mod port;
 mod process;
 mod rooted;
@@ -72,6 +75,7 @@ mod sock_diag;
 mod socket;
 mod spawn;
 mod terminal;
+mod time_window;
 mod timer;
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod x86;
@@ -82,64 +86,86 @@ use std::os::unix::ffi::OsStringExt;
 
 pub(crate) use nix::errno::Errno;
 pub(crate) use nix::sys::signal::Signal;
-pub(crate) use nix::sys::time::{TimeSpec, TimeValLike};
-
-pub(crate) use clock::{Clock, clock_time, monotonic_ms, sleep_once, sleep_until_monotonic};
 #[cfg(target_arch = "x86_64")]
-pub(crate) use clock::{monotonic_ns, syscall_monotonic_nanoseconds};
+pub(crate) use nix::sys::time::TimeSpec;
+pub(crate) use nix::sys::time::TimeValLike;
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) use aarch64::power_off;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use clock::sleep_once;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use clock::syscall_monotonic_nanoseconds;
+pub(crate) use clock::{Clock, clock_time, monotonic_ms, monotonic_ns, sleep_until_monotonic};
 pub(crate) use discipline::{ClockAdjustment, ClockDiscipline, FrequencyHold, adjust_clock};
 pub(crate) use entry::{
     DEV, DEV_PTS, DEV_SHM, FileSystem, PROC, RUN, SYS, create_devices, file_size, mount_detached,
     restrict_tree, set_hostname,
 };
-#[cfg(target_arch = "x86_64")]
-pub(crate) use fd::close_inherited_descriptors;
 pub(crate) use fd::{
     CreatedFile, FileDescriptor, FileLock, Mode, OpenFlags, create_directory, create_pipe,
-    lock_file, open, page_size, try_lock_directory, unlink,
+    lock_file, open, try_lock_directory,
 };
+#[cfg(target_arch = "x86_64")]
+pub(crate) use fd::{close_inherited_descriptors, page_size, unlink};
 pub(crate) use filesystem::{
-    MountFlags, PATH_MAX, ScratchDirectory, TmpfsMount, check_exists, chmod, chown,
-    enter_private_mount_namespace, mount, mount_id, path_c_string, path_exists, read_file,
+    MountFlags, PATH_MAX, chmod, chown, mount, mount_id, path_c_string, path_exists, read_file,
     read_line, read_number, unmount, write_file, write_number,
 };
+#[cfg(target_arch = "x86_64")]
+pub(crate) use filesystem::{ScratchDirectory, check_exists};
+#[cfg(any(test, target_arch = "x86_64"))]
+pub(crate) use filesystem::{TmpfsMount, enter_private_mount_namespace};
+#[cfg(any(test, target_arch = "x86_64"))]
+pub(crate) use ioctl::reread_partition_table;
 pub(crate) use ioctl::{
-    block_device_size, console_pending, flush_block_buffers, logical_block_size,
-    reread_partition_table, reseed_random,
+    block_device_size, console_pending, flush_block_buffers, logical_block_size, reseed_random,
 };
 pub(crate) use mapping::MemoryMapping;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use msr::{MsrAccess, MsrFile};
 pub(crate) use poll::{Pollable, poll, readable_or_hung_up, ready};
+#[cfg(target_arch = "x86_64")]
 pub(crate) use port::{PORT_DEVICE, Port};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use port::{PortAccess, PortError, check_released, power_off, probe_port};
+pub(crate) use process::discard_standard_input;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use process::process_name;
 pub(crate) use process::set_command_name;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use process::syscall_process_id;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use process::write_port_diagnostic;
 pub(crate) use process::{
     ChildStatus, DirectStdout, ForkResult, ProcessId, Stdout, current_process, detach, exec,
     exit_immediately, fork, ignore_interrupt_and_hangup, is_unreaped, kill_process,
-    kill_process_group, kill_through_pidfd, open_pidfd, process_exists, process_name,
-    reap_any_nonblocking, restore_sigpipe, take_inherited_descriptor, try_wait, wait,
-    write_port_diagnostic, write_standard_error,
+    kill_process_group, kill_through_pidfd, open_pidfd, reap_any_nonblocking, restore_sigpipe,
+    take_inherited_descriptor, try_wait, write_standard_error,
 };
-#[cfg(target_arch = "x86_64")]
-pub(crate) use process::{discard_standard_input, syscall_process_id};
+#[cfg(any(test, target_arch = "x86_64"))]
+pub(crate) use process::{process_exists, wait};
 pub(crate) use rooted::{
     FileKind, FileStatus, MountAttributes, change_mode, create_directory_at, create_file_at,
     detach_mount, file_status, is_whole_file_system, move_mount, open_beneath, open_tree,
     set_mount_attributes, unmount_beneath,
 };
 pub(crate) use scheduler::{
-    AffinityGuard, IdlePriority, SchedulingPolicy, current_affinity, current_cpu, current_thread,
-    pin_current_thread, promote_all_threads, scheduling_policy, set_scheduling_policy,
-    thread_count,
+    AffinityGuard, IdlePriority, pin_current_thread, promote_all_threads, thread_count,
+};
+#[cfg(target_arch = "x86_64")]
+pub(crate) use scheduler::{
+    SchedulingPolicy, current_affinity, current_cpu, current_thread, scheduling_policy,
+    set_scheduling_policy,
 };
 pub(crate) use secret::zeroize;
+#[cfg(any(test, target_arch = "x86_64"))]
+pub(crate) use signal::ChildSignalWait;
 #[cfg(target_arch = "x86_64")]
+pub(crate) use signal::queue_user_signal;
 pub(crate) use signal::write_standard_error_without_sigpipe;
 pub(crate) use signal::{
-    ChildSignalWait, SignalDescriptor, ignore_signals, queue_user_signal, reset_child_signal,
-    write_without_sigpipe,
+    SignalDescriptor, ignore_signals, reset_child_signal, write_without_sigpipe,
 };
 pub(crate) use sock_diag::{
     INET_DIAG_BUFFER_LENGTH, InetDiagMessage, decode_inet_diag_dump, dump_ipv6_tcp_sockets,
@@ -149,6 +175,9 @@ pub(crate) use socket::{UdpSocket, connect_datagram};
 pub(crate) use spawn::reset_signals;
 pub(crate) use spawn::{ChildSpec, PreparedChild, REPORT_LENGTH, configure_announcer, enter_root};
 pub(crate) use terminal::{configure_raw, drain};
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) use time_window::{FinishTimeAccess, TimeAccess, TimeAccessError};
+pub(crate) use time_window::{TimeChannel, TimeWindow};
 pub(crate) use timer::Timer;
 
 /// Returns the process arguments, program name first, as the C strings that `main` received.

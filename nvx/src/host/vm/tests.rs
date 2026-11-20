@@ -136,6 +136,7 @@ fn test_compatibility() -> CompatibilityIdentity {
 fn cold_runtime() -> Runtime {
     let identity = ArtifactIdentity::new("test-runtime").unwrap();
     Runtime {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         openvmm: absolute(Path::new("missing-openvmm")).unwrap(),
         kernel: absolute(Path::new("missing-kernel")).unwrap(),
         initramfs: absolute(Path::new("missing-initramfs")).unwrap(),
@@ -153,6 +154,25 @@ fn cold_runtime() -> Runtime {
         cpu_profile: None,
         windows_breakaway: false,
         options: LaunchOptions::default(),
+    }
+}
+
+#[test]
+fn arm_snapshot_and_growth_requests_fail_before_opening_a_vm_directory() {
+    let (_temporary, dir) = vm_dir();
+    let mut runtime = cold_runtime();
+    runtime.architecture = GuestArchitecture::Aarch64;
+    for capture in [false, true] {
+        let mut config = cold_config();
+        if capture {
+            config.boot = capture_config(&dir).boot;
+        } else {
+            config.boot.as_mut().unwrap().memory_capacity_mib = Some(config.memory_mib + 128);
+        }
+        let error = create(&runtime, &config, None, &dir).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert!(error.to_string().contains("cold boot only"));
+        assert!(!dir.path().join(LOG).exists());
     }
 }
 
@@ -1854,6 +1874,7 @@ fn stand_in_command() -> (PathBuf, Vec<OsString>) {
 fn stand_in(dir: &VmDir) -> Prepared {
     let (program, arguments) = stand_in_command();
     let runtime = Runtime {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         openvmm: program,
         ..cold_runtime()
     };
@@ -1948,6 +1969,7 @@ fn spawn_resolves_relative_runtime_and_block_inputs_outside_the_vm_directory() {
         })
     };
     let runtime = Runtime {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         openvmm: relative.join(&executable),
         kernel: relative.join("kernel"),
         initramfs: relative.join("initramfs"),
@@ -1960,6 +1982,7 @@ fn spawn_resolves_relative_runtime_and_block_inputs_outside_the_vm_directory() {
     let (_directory, vm) = vm_dir();
     let mut prepared = create(&runtime, &config, None, &vm).unwrap();
     let resolved_runtime = Runtime {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         openvmm: inputs.path().join(&executable),
         kernel: inputs.path().join("kernel"),
         initramfs: inputs.path().join("initramfs"),

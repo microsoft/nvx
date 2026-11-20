@@ -26,7 +26,7 @@ use super::decoders::{
     RestorePacket, SAMPLE_SIZE, TimeSample,
 };
 use super::events::{CheckId, DETAIL_MAX, EventSource, ViolationCode, escape_text, format_event};
-use super::state::TimeState;
+use super::state::StateReport;
 use super::system::{self, Runtime, SampleError, clock_ns, cpu_time_ns};
 use super::{DEFERRED_START_NS, IDLE_BOUND_NS, NSEC_PER_MSEC, NSEC_PER_SEC, Phase};
 use crate::guest::parse::{parse_integer, parse_u64};
@@ -529,7 +529,7 @@ fn test_event(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandErr
 /// Parses and re-formats one state fixture.
 fn test_state(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandError> {
     let [path] = exactly(arguments)?;
-    match TimeState::parse(&read_fixture(path)?) {
+    match StateReport::parse(&read_fixture(path)?) {
         Some(state) => write!(out, "{state}"),
         None => writeln!(out, "error"),
     }
@@ -540,7 +540,7 @@ fn test_state(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandErr
 /// Formats status from one state fixture.
 fn test_status(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandError> {
     let [path, mode] = exactly(arguments)?;
-    let state = TimeState::parse(&read_fixture(path)?).ok_or(CommandError::Usage)?;
+    let state = StateReport::parse(&read_fixture(path)?).ok_or(CommandError::Usage)?;
     let _ = out.write_all(state.status_markers(mode == b"report-only").as_bytes());
     let _ = writeln!(out, "ok={}", u8::from(state.checks_ok()));
     Ok(())

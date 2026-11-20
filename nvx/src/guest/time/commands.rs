@@ -1,27 +1,46 @@
 //! `nvx-time`'s commands, which run the time ABI's typed calls or the program's own steps.
 
+#[cfg(target_arch = "x86_64")]
 use std::ffi::OsStr;
 use std::fmt::{Display, Write as _};
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
+#[cfg(target_arch = "x86_64")]
 use std::path::PathBuf;
 
+#[cfg(target_arch = "x86_64")]
+use super::NSEC_PER_USEC;
+#[cfg(target_arch = "x86_64")]
 use super::api::{
     self, CaptureOutcome, CaptureRequest, CpuSet, PreCaptureError, RestoreFinish, ScratchPolicy,
-    TimeAbi, TimeError,
 };
+use super::api::{TimeAbi, TimeError};
 use super::checks::{self, Checks};
+#[cfg(target_arch = "x86_64")]
 use super::cpu_mask::CpuMask;
+#[cfg(target_arch = "x86_64")]
 use super::decoders::{self, GENERATION_ID_SIZE};
 use super::events::CheckId;
-use super::system::{self, PORTB_TIME_WINDOW, Runtime, clock_ns, cpu_time_ns};
-use super::{NSEC_PER_USEC, Phase, USAGE};
+use super::system::{self, PORTB_TIME_WINDOW, Runtime};
+#[cfg(target_arch = "x86_64")]
+use super::system::{clock_ns, cpu_time_ns};
+use super::wire::pair_bound_sample;
+use super::{Phase, USAGE};
+#[cfg(target_arch = "x86_64")]
 use crate::guest::GenerationId;
+#[cfg(target_arch = "x86_64")]
 use crate::guest::parse::parse_decimal;
 use crate::guest::status::CommandError;
-use crate::guest::sys::{self, Port, PortError};
+#[cfg(target_arch = "aarch64")]
+use crate::guest::sys::FinishTimeAccess;
+use crate::guest::sys::{self, TimeAccessError, TimeWindow};
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+#[cfg(target_arch = "aarch64")]
+use aarch64::{cmd_cancel_capture, cmd_capture, cmd_check, cmd_pre_capture, cmd_restore_finish};
 
 /// The capture requests that `capture` accepts, and writes to the snapshot port: 0 or 1.
+#[cfg(target_arch = "x86_64")]
 const CAPTURE_REQUESTS: std::ops::RangeInclusive<u64> = 0..=1;
 
 /// Writes one command diagnostic assembled from raw byte slices.
@@ -37,7 +56,9 @@ fn usage(err: &mut dyn Write, line: &[u8]) -> Result<(), CommandError> {
 
 /// Reports why the thread could not take, or give up, its permission for the time ABI's ports,
 /// such as `nvx-time: ioperm: Operation not permitted`, and fails.
-fn port_failure(err: &mut dyn Write, error: PortError) -> CommandError {
+fn access_failure(err: &mut dyn Write, error: TimeAccessError) -> CommandError {
+    #[cfg(target_arch = "aarch64")]
+    let error = format!("platform time I/O: {}", error.desc());
     report(err, &[format!("nvx-time: {error}\n").as_bytes()]);
     CommandError::Operation
 }
@@ -88,6 +109,7 @@ fn boot_checks_unstarted(runtime: &Runtime<'_>, reason: impl Display) -> Command
 }
 
 /// Runs explicit capture or restore conformance checks.
+#[cfg(target_arch = "x86_64")]
 fn cmd_check(
     runtime: &Runtime<'_>,
     arguments: &[&[u8]],
@@ -132,8 +154,6 @@ fn cmd_check(
         &checks,
         clock_ns(sys::Clock::Monotonic).wrapping_sub(start) / NSEC_PER_USEC,
         cpu_time_ns().wrapping_sub(cpu_start) / NSEC_PER_USEC,
-        0,
-        0,
     );
     if checks.failures == 0 {
         Ok(())
@@ -146,6 +166,7 @@ fn cmd_check(
 /// requires, runs the capture checks, and suppresses the stall detectors before the snapshot.
 /// A preparation that fails leaves the detectors as they were, as far as it can: the snapshot
 /// script cancels only a capture whose preparation succeeded.
+#[cfg(target_arch = "x86_64")]
 fn cmd_pre_capture(abi: TimeAbi, err: &mut dyn Write) -> Result<(), CommandError> {
     abi.pre_capture().map_err(|error| {
         if error.holds_suppression() {
@@ -158,6 +179,7 @@ fn cmd_pre_capture(abi: TimeAbi, err: &mut dyn Write) -> Result<(), CommandError
 /// Reports why the preparation of a capture failed, such as `nvx-time: cannot suppress the stall
 /// detectors: a capture is already pending`, and fails. A violation's event is its only report,
 /// and `run` reports a permission that the thread may still hold once, when the command ends.
+#[cfg(target_arch = "x86_64")]
 fn pre_capture_failure(err: &mut dyn Write, error: PreCaptureError) -> CommandError {
     let reason = match error {
         PreCaptureError::BootChecks(_)
@@ -180,6 +202,7 @@ fn pre_capture_failure(err: &mut dyn Write, error: PreCaptureError) -> CommandEr
 }
 
 /// Cancels capture by restoring saved stall-detector settings.
+#[cfg(target_arch = "x86_64")]
 fn cmd_cancel_capture(abi: TimeAbi, err: &mut dyn Write) -> Result<(), CommandError> {
     abi.cancel_capture().map_err(|detail| {
         report(err, &[b"nvx-time: ", &detail, b"\n"]);
@@ -188,6 +211,7 @@ fn cmd_cancel_capture(abi: TimeAbi, err: &mut dyn Write) -> Result<(), CommandEr
 }
 
 /// Parses a capture request, 0 or 1, as plain decimal.
+#[cfg(target_arch = "x86_64")]
 fn parse_capture_request(text: &[u8]) -> Option<u8> {
     parse_decimal(text)
         .filter(|request| CAPTURE_REQUESTS.contains(request))
@@ -197,6 +221,7 @@ fn parse_capture_request(text: &[u8]) -> Option<u8> {
 /// Reads the request of `capture 0|1 GENERATION_ID ENTROPY_FILE [--finish]`, in the file mode,
 /// in which the restore's entropy goes to `ENTROPY_FILE`, or returns `None` for an invalid
 /// command line.
+#[cfg(target_arch = "x86_64")]
 fn capture_request(arguments: &[&[u8]]) -> Option<CaptureRequest> {
     let (request, previous_id, entropy_path, finish) = match arguments {
         [request, id, path] => (request, id, path, false),
@@ -224,6 +249,7 @@ fn capture_request(arguments: &[&[u8]]) -> Option<CaptureRequest> {
 /// flags, online VP count, range count, and new generation ID, the DNS server of its network
 /// settings, or `-` for none, `1` if they ask the guest to announce its listeners, or else `0`,
 /// and each range's start and length.
+#[cfg(target_arch = "x86_64")]
 fn cmd_capture(
     abi: TimeAbi,
     arguments: &[&[u8]],
@@ -266,6 +292,7 @@ fn cmd_capture(
 
 /// Records new CPUs, acknowledges the restore when asked, and hands repair step 7 to the daemon
 /// or runs it.
+#[cfg(target_arch = "x86_64")]
 fn cmd_restore_finish(
     abi: TimeAbi,
     arguments: &[&[u8]],
@@ -289,8 +316,28 @@ fn cmd_restore_finish(
 }
 
 /// Prints persisted status after waiting for pending checks.
-fn cmd_status(runtime: &Runtime<'_>, out: &mut dyn Write) -> Result<(), CommandError> {
-    let (state, completed) = checks::wait_for_checks(false);
+fn cmd_status(
+    runtime: &Runtime<'_>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<(), CommandError> {
+    status_report(runtime, out, err, || checks::wait_for_checks(false))
+}
+
+/// Prints opaque status markers and succeeds only when the requested checks completed and passed.
+fn status_report(
+    runtime: &Runtime<'_>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    wait: impl FnOnce() -> Result<(super::state::StateReport, bool), sys::Errno>,
+) -> Result<(), CommandError> {
+    let (state, completed) = wait().map_err(|error| {
+        report(
+            err,
+            &[format!("nvx-time: time state is unreadable: {}\n", error.desc()).as_bytes()],
+        );
+        CommandError::Operation
+    })?;
     let _ = out.write_all(state.status_markers(runtime.report_only()).as_bytes());
     if completed && state.checks_ok() {
         Ok(())
@@ -312,9 +359,11 @@ fn cmd_sample(
     })?;
     let taken = {
         let ports = runtime
-            .open_ports()
-            .map_err(|error| port_failure(err, error))?;
-        let status = ports.read_u8(Port::PortbStatus);
+            .open_time_window()
+            .map_err(|error| access_failure(err, error))?;
+        let status = ports
+            .window_status()
+            .map_err(|error| time_failure(err, TimeError::from(error)))?;
         if status & PORTB_TIME_WINDOW == 0 {
             report(
                 err,
@@ -332,7 +381,10 @@ fn cmd_sample(
             );
             CommandError::Operation
         })?;
-        system::take_sample(&ports, runtime.ops)
+        let sample = system::take_sample(&ports, runtime.ops);
+        #[cfg(target_arch = "aarch64")]
+        ports.finish().map_err(|error| access_failure(err, error))?;
+        sample
     };
     let (sample, reads) = taken.map_err(|error| {
         report(err, &[format!("nvx-time: {error}\n").as_bytes()]);
@@ -357,9 +409,9 @@ fn cmd_sample(
         reads.after,
         reads.realtime_ns
     );
-    let pairing = decoders::pair_sample(&sample, &reads, rates);
+    let pairing = pair_bound_sample(&sample, &reads, rates);
     if let Ok((theta, epsilon)) = pairing {
-        let (frequency, limited) = decoders::guest_frequency(host.correction, rates.tsc_hz);
+        let (frequency, limited) = rates.requested_frequency(host.correction);
         let _ = write!(
             line,
             " theta_ns={theta} epsilon_ns={epsilon} frequency={frequency} frequency_limited={}",
@@ -415,17 +467,33 @@ pub(super) fn run(
         (b"capture", arguments) => cmd_capture(abi, arguments, out, err),
         (b"cancel-capture", []) => cmd_cancel_capture(abi, err),
         (b"restore-finish", arguments) => cmd_restore_finish(abi, arguments, err),
-        (b"status", []) => cmd_status(&runtime, out),
+        (b"status", []) => cmd_status(&runtime, out, err),
         (b"sample", []) => cmd_sample(&runtime, out, err),
         (b"generation-id", []) => cmd_generation_id(abi, out, err),
+        #[cfg(target_arch = "x86_64")]
         (b"exhaustive", []) => checks::exhaustive(&runtime, out),
+        #[cfg(target_arch = "aarch64")]
+        (b"exhaustive", []) => {
+            report(
+                err,
+                &[b"nvx-time: ARM exhaustive x86 checks are unsupported\n"],
+            );
+            Err(CommandError::Operation)
+        }
         _ => usage(err, USAGE),
     };
-    match sys::check_released() {
-        Ok(()) => result,
-        Err(error) => Err(port_failure(err, error)),
+    #[cfg(target_arch = "x86_64")]
+    {
+        match sys::check_released() {
+            Ok(()) => result,
+            Err(error) => Err(access_failure(err, error)),
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        result
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests;

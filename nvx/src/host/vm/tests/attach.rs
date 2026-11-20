@@ -32,6 +32,7 @@ fn bind(endpoint: &str) -> Server {
 
 fn saved(vm: &VmDir, process: ProcessRef) -> SavedVm {
     SavedVm {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         vm_dir: vm.clone(),
         endpoint: vm.outputs(false).unwrap().endpoint,
         capability: CREDENTIAL,
@@ -60,7 +61,7 @@ fn verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint
     let launched = RunningVm(spawn(stand_in(&vm)).unwrap());
     let mut saved = saved(&vm, launched.0.process.reference().clone());
     saved.endpoint = "\0not-an-endpoint".to_owned();
-    let process = verify(&saved, &saved.runtime).unwrap();
+    let process = verify(&saved, &saved.runtime, saved.architecture).unwrap();
     assert_eq!(process.reference(), &saved.process);
     assert!(!process.has_exited().unwrap());
     assert!(!format!("{saved:?}").contains(&format!("{CREDENTIAL:?}")));
@@ -68,11 +69,11 @@ fn verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint
     let mut other = saved.runtime.clone();
     other.compatibility = CompatibilityIdentity::new("other-runtime").unwrap();
     saved.process.pid = 0;
-    let error = verify(&saved, &other).unwrap_err();
+    let error = verify(&saved, &other, saved.architecture).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::RuntimeMismatch);
     assert!(error.to_string().contains("compatibility"));
     other.kernel = ArtifactIdentity::new("other-kernel").unwrap();
-    let error = verify(&saved, &other).unwrap_err();
+    let error = verify(&saved, &other, saved.architecture).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::RuntimeMismatch);
     assert!(error.to_string().contains("kernel, compatibility"));
     assert_eq!(
@@ -89,7 +90,7 @@ fn verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint
         .kind(),
         ErrorKind::RuntimeMismatch,
     );
-    let error = verify(&saved, &saved.runtime).unwrap_err();
+    let error = verify(&saved, &saved.runtime, saved.architecture).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Io);
     assert_eq!(
         error
@@ -102,7 +103,7 @@ fn verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint
     );
     saved.process = launched.0.process.reference().clone();
     saved.process.start_time += 1;
-    let error = verify(&saved, &saved.runtime).unwrap_err();
+    let error = verify(&saved, &saved.runtime, saved.architecture).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Exited);
     assert_eq!(
         error
@@ -113,6 +114,31 @@ fn verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint
             .kind(),
         io::ErrorKind::NotFound,
     );
+}
+
+#[test]
+fn a_guest_isa_mismatch_is_refused_before_process_or_endpoint_io() {
+    let (_directory, vm) = vm_dir();
+    let reference = ProcessRef {
+        pid: 0,
+        start_time: 0,
+        boot: BootId::from_bytes([0; 16]),
+    };
+    for (recorded, expected) in [
+        (GuestArchitecture::X86_64, GuestArchitecture::Aarch64),
+        (GuestArchitecture::Aarch64, GuestArchitecture::X86_64),
+    ] {
+        let mut saved = saved(&vm, reference.clone());
+        saved.architecture = recorded;
+        saved.endpoint = "\0must-not-open".to_owned();
+        let mut runtime = cold_runtime();
+        runtime.architecture = expected;
+        let direct = verify(&saved, &runtime.identity, runtime.architecture).unwrap_err();
+        assert_eq!(direct.kind(), ErrorKind::RuntimeMismatch);
+        assert!(direct.to_string().contains("guest architecture"));
+        let attached = attach(&saved, &runtime, Instant::now()).unwrap_err();
+        assert_eq!(attached.kind(), ErrorKind::RuntimeMismatch);
+    }
 }
 
 #[test]
@@ -479,12 +505,14 @@ fn a_saved_vm_runs_until_its_process_exits_and_another_runtime_is_refused_withou
     let (_directory, vm) = vm_dir();
     let mut child = IdleChild::start();
     let saved = saved(&vm, child.reference());
-    let held = verify(&saved, &saved.runtime).unwrap();
+    let held = verify(&saved, &saved.runtime, saved.architecture).unwrap();
     assert!(held.wait(Instant::now()).unwrap().is_none());
     let mut other = saved.runtime.clone();
     other.compatibility = CompatibilityIdentity::new("other-runtime").unwrap();
     assert_eq!(
-        verify(&saved, &other).unwrap_err().kind(),
+        verify(&saved, &other, saved.architecture)
+            .unwrap_err()
+            .kind(),
         ErrorKind::RuntimeMismatch
     );
     assert!(!held.has_exited().unwrap());
@@ -495,7 +523,7 @@ fn a_saved_vm_runs_until_its_process_exits_and_another_runtime_is_refused_withou
             .unwrap()
             .is_some()
     );
-    let error = verify(&saved, &saved.runtime).unwrap_err();
+    let error = verify(&saved, &saved.runtime, saved.architecture).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Exited);
     assert_eq!(
         error
@@ -522,7 +550,7 @@ fn attaching_refuses_an_endpoint_that_another_process_serves_and_keeps_the_vm_an
     assert_eq!(connection.kind(), ConnectionErrorKind::PeerMismatch);
     assert_eq!(io_cause(connection).kind(), io::ErrorKind::PermissionDenied);
     assert!(
-        !verify(&saved, &saved.runtime)
+        !verify(&saved, &saved.runtime, saved.architecture)
             .unwrap()
             .has_exited()
             .unwrap()
@@ -550,7 +578,7 @@ fn attaching_refuses_an_endpoint_that_another_process_serves_and_keeps_the_vm_an
         io::ErrorKind::InvalidInput
     );
     assert!(
-        !verify(&saved, &saved.runtime)
+        !verify(&saved, &saved.runtime, saved.architecture)
             .unwrap()
             .has_exited()
             .unwrap()

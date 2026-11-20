@@ -155,6 +155,7 @@ fn a_cold_vm_is_attached_from_saved_values_and_stopped() {
     let timeout = Duration::from_secs_f64(inputs.timeout_seconds);
     let identity = |digest: &str| ArtifactIdentity::sha256(digest).expect("a SHA-256 digest");
     let runtime = Runtime {
+        architecture: nvx::host::runtime::GuestArchitecture::X86_64,
         openvmm: inputs.openvmm,
         kernel: inputs.kernel,
         initramfs: inputs.initramfs,
@@ -214,6 +215,7 @@ fn a_cold_vm_is_attached_from_saved_values_and_stopped() {
     acknowledged(&mut connection, PING, 1, READY, Instant::now() + timeout);
     drop(connection);
     let saved = SavedVm {
+        architecture: nvx::host::runtime::GuestArchitecture::X86_64,
         vm_dir: dir,
         endpoint: launched.outputs.endpoint.clone(),
         capability: *launched.capability.as_bytes(),

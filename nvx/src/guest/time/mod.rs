@@ -3,8 +3,9 @@
 //!
 //! [`TimeAbi`] runs the cold-boot time step and, separately, starts the time daemon, a process
 //! that the caller supervises; it reads the VM generation ID, with typed results and errors.
-//! Each call holds the permission for OpenVMM's ports only for its port transactions, on the
-//! calling thread, and no call waits for a child that it did not start:
+//! Each call scopes its actual hardware access to its transactions: x86 I/O-port permissions on
+//! the calling thread, or ARM's restricted platform descriptor. No call waits for a child that
+//! it did not start:
 //!
 //! ```no_run
 //! use nvx::guest::time::TimeAbi;
@@ -19,11 +20,12 @@
 //! # }
 //! ```
 //!
-//! The ABI's capture request, which repairs the time of a restore, and the restore's finish are
-//! private: [`snapshot::capture`](crate::guest::snapshot::capture) runs them, and hands the
+//! On x86-64, the ABI's capture request, which repairs the time of a restore, and the restore's
+//! finish are private: `guest::snapshot::capture` runs them, and hands the
 //! restore's fresh entropy to its repair in memory, as an owned
 //! [`Seed`](crate::guest::reseed::Seed), while `nvx-time capture` writes it to a file. `nvx-time`
-//! runs each step through the same calls, and the rest of the ABI itself.
+//! runs each step through the same calls, and the rest of the ABI itself. ARM cold boot does
+//! not admit capture or restore.
 //!
 //! A violation of the ABI stops the VM in enforcing mode, the mode of the command tools, with a
 //! status that `nvx::protocol::status` publishes: 193 for a conformance check, 194 for the time
@@ -44,25 +46,40 @@
 //! decoders, formats, and process structure without the hypervisor.
 
 mod api;
+#[cfg(target_arch = "x86_64")]
 mod checks;
+#[cfg(target_arch = "aarch64")]
+mod checks_aarch64;
+mod checks_shared;
 mod commands;
 mod cpu_mask;
 mod daemon;
+#[cfg(target_arch = "x86_64")]
 mod decoders;
+mod discipline;
 mod events;
+mod model;
 mod state;
 mod system;
+#[cfg(target_arch = "x86_64")]
 mod test_mode;
+mod watcher;
+mod wire;
 
 use std::ffi::CString;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+#[cfg(target_arch = "aarch64")]
+use checks_aarch64 as checks;
+
+#[cfg(target_arch = "x86_64")]
 pub(crate) use api::{
     CaptureOutcome, CaptureRequest, CpuSet, MemoryRange, PreCaptureError, Restore, RestoreFinish,
     ScratchPolicy,
 };
 pub use api::{ColdBoot, TimeAbi, TimeError, Violation};
+pub(crate) use model::Phase;
 
 use super::status::{CommandError, run_main};
 use super::sys;
@@ -83,40 +100,8 @@ pub(crate) const IDLE_BOUND_NS: i64 = 100 * NSEC_PER_MSEC;
 /// program's fixed argument array.
 const MAX_ARGUMENTS: usize = 32;
 
-/// The phase in which a check or event occurs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Phase {
-    /// Initial guest boot.
-    Boot,
-    /// Snapshot capture preparation.
-    Capture,
-    /// Post-snapshot restore repair.
-    Restore,
-    /// Continuous daemon operation.
-    Runtime,
-}
-
-impl Phase {
-    /// Persisted check phases in state-file order.
-    pub(crate) const CHECKS: [Self; 3] = [Self::Boot, Self::Capture, Self::Restore];
-
-    /// Returns the stable lowercase phase token used in output records.
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Boot => "boot",
-            Self::Capture => "capture",
-            Self::Restore => "restore",
-            Self::Runtime => "runtime",
-        }
-    }
-
-    /// Returns this phase's position in the three persisted check records.
-    pub(crate) fn check_index(self) -> Option<usize> {
-        Self::CHECKS.iter().position(|&phase| phase == self)
-    }
-}
-
 /// Byte-exact command help printed for malformed invocations.
+#[cfg(target_arch = "x86_64")]
 const USAGE: &[u8] = br#"usage: nvx-time [--report-only] COMMAND
   boot
   check --phase capture|restore [--new-cpus LIST]
@@ -129,6 +114,15 @@ const USAGE: &[u8] = br#"usage: nvx-time [--report-only] COMMAND
   generation-id
   exhaustive
   test NAME ARGUMENTS...
+"#;
+
+#[cfg(target_arch = "aarch64")]
+/// ARM cold-boot commands; capture, restore and x86 test hooks are not admitted.
+const USAGE: &[u8] = br#"usage: nvx-time [--report-only] COMMAND
+  boot
+  status
+  sample
+  generation-id
 "#;
 
 /// Runs `nvx-time` with the process's arguments. It exits with 0 on success, 1 when a command
@@ -152,15 +146,21 @@ fn run(args: &[CString], out: &mut dyn Write, err: &mut dyn Write) -> Result<(),
             return Err(CommandError::Usage);
         }
     }
-    let Some((&command, rest)) = arguments.split_first() else {
+    let Some((&command, _rest)) = arguments.split_first() else {
         sys::report(err, &[USAGE]);
         return Err(CommandError::Usage);
     };
     if command == b"test" {
-        return test_mode::run(rest, out);
+        #[cfg(target_arch = "x86_64")]
+        return test_mode::run(_rest, out);
+        #[cfg(target_arch = "aarch64")]
+        {
+            sys::report(err, &[b"nvx-time: ARM x86 test hooks are unsupported\n"]);
+            return Err(CommandError::Operation);
+        }
     }
     commands::run(&arguments, report_only, out, err)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests;

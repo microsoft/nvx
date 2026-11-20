@@ -6,16 +6,22 @@ use std::ops::RangeInclusive;
 
 use super::api::RestoreNetwork;
 use super::cpu_mask::CpuMask;
+pub(crate) use super::discipline::plan_correction;
 use super::events::ViolationCode;
-use super::state::HostClockStatus;
-use super::{MAX_CPUS, NSEC_PER_SEC, NSEC_PER_USEC};
+use super::model;
+pub(crate) use super::model::{HostClock, frequency_to_ppb};
+use super::watcher::OWN_RECORD_PREFIX;
+pub(crate) use super::watcher::match_watch_rule;
+use super::wire::{Fields, counter_observations, pairing_error};
+pub(crate) use super::wire::{GuestReads, SAMPLE_SIZE, TimeSample, TimeSampleError};
+use super::{MAX_CPUS, NSEC_PER_SEC};
 use crate::guest::kernel_text::{
     self, ClockEventState, SyslogLine, TickDevice, TickMode, TimerList,
 };
 use crate::guest::parse::parse_decimal;
 use crate::guest::reseed::Seed;
+#[cfg(target_arch = "x86_64")]
 use crate::guest::sys::x86::{CpuidResult, cpuid};
-use crate::guest::sys::{ClockAdjustment, FrequencyHold};
 use crate::protocol::cmdline::{self, Parameter};
 
 /// Fixed restore-packet header length.
@@ -26,8 +32,6 @@ pub(crate) const PACKET_RANGE_SIZE: usize = 16;
 pub(crate) const PACKET_ENTROPY_SIZE: usize = 64;
 // The packet's entropy is decoded straight into a seed.
 const _: () = assert!(PACKET_ENTROPY_SIZE == Seed::LENGTH);
-/// Fixed host time-sample record length.
-pub(crate) const SAMPLE_SIZE: usize = 48;
 /// VM generation identifier length.
 pub(crate) const GENERATION_ID_SIZE: usize = 16;
 
@@ -83,31 +87,10 @@ pub(crate) const PACKET_ACTIVATION_LENGTH_SIZE: usize = 4;
 pub(crate) const PACKET_ACTIVATION_MAX: usize = crate::guest_restore::MAX_RECORD_BYTES;
 /// The online VP counts that a restore packet may give.
 const PACKET_ONLINE_VP_COUNTS: [u8; 5] = [0, 1, 2, 4, 8];
-/// The time-sample version.
-const SAMPLE_VERSION: u8 = 1;
-/// Time-sample flag reserved for host test hooks.
-const SAMPLE_TEST_HOOKS: u8 = 0x08;
-/// The encoding of an unknown bound in a time sample.
-const SAMPLE_UNKNOWN: u32 = u32::MAX;
 /// Maximum signed restore rate deviation, equivalent to 250 ppm.
 const RATE_DEVIATION_LIMIT: i32 = 16_384_000;
-/// One part per million in Linux's frequency correction, which `adjtimex` scales by 2^16.
-const SCALED_PPM: i64 = 1 << 16;
-/// One, in Linux's frequency unit: a million parts per million, scaled by 2^16.
-const SCALED_ONE: i128 = SCALED_PPM as i128 * 1_000_000;
-/// Parts per billion in a part per million.
-const PPB_PER_PPM: i64 = 1000;
-/// Linux's limit of the frequency correction, 500 ppm.
-const FREQUENCY_LIMIT: i64 = 500 * SCALED_PPM;
 /// Hz in a kHz, the unit to which Linux reads the TSC rate from the frequency MSR.
 const HZ_PER_KHZ: u64 = 1000;
-/// The time ABI's bound on the skew between any two processors' TSCs, in nanoseconds, by which a
-/// sample's guest TSC, of the first processor, may lie outside the reading processor's reads.
-const SKEW_BOUND_NS: u64 = 1000;
-/// The most, in parts per million, by which the realtime clock's rate may differ from its
-/// frequency correction's while the kernel slews an offset below the step threshold at the fast
-/// time constant: 128 ms per 2^6 seconds.
-const SLEW_RATE_PPM: i128 = 2000;
 /// Seconds in a day.
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 /// Maximum accepted downtime, inclusive: 365 days, the fixed duration of 31,536,000 seconds
@@ -115,70 +98,10 @@ const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 const DOWNTIME_LIMIT_NS: u64 = 365 * SECONDS_PER_DAY * NSEC_PER_SEC as u64;
 /// kHz in a MHz, which scale the whole MHz of `/proc/cpuinfo`.
 const KHZ_PER_MHZ: u64 = 1000;
-/// Offset magnitude at or above which correction steps the clock.
-const STEP_THRESHOLD_NS: u64 = 128_000_000;
-/// Time constant of the phase-locked loop while the discipline converges.
-const FAST_TIME_CONSTANT: i64 = 4;
-/// Time constant of the phase-locked loop once the discipline has converged.
-const SLOW_TIME_CONSTANT: i64 = 6;
 /// Bytes of a kernel message that a boot-log diagnostic quotes.
 const QUOTED_MESSAGE_MAX: usize = 300;
 /// Bytes of a kernel command-line token that a diagnostic quotes.
 const QUOTED_TOKEN_MAX: usize = 120;
-/// The prefix of the time tools' own kernel-log records, which the watcher ignores.
-const OWN_RECORD_PREFIX: &[u8] = b"NVX-TIME-";
-
-/// Reads the little-endian fields of a binary record in order, and fails with `incomplete` when
-/// the record ends before a field.
-struct Fields<'a, E> {
-    /// The bytes after the fields read so far.
-    rest: &'a [u8],
-    /// The error of a record that ends early.
-    incomplete: E,
-}
-
-impl<'a, E: Copy> Fields<'a, E> {
-    /// Starts reading `record`.
-    const fn new(record: &'a [u8], incomplete: E) -> Self {
-        Self {
-            rest: record,
-            incomplete,
-        }
-    }
-
-    /// Reads the next `N` bytes.
-    fn bytes<const N: usize>(&mut self) -> Result<[u8; N], E> {
-        self.chunk().copied()
-    }
-
-    /// Reads the next `N` bytes, which it borrows from the record rather than copies.
-    fn chunk<const N: usize>(&mut self) -> Result<&'a [u8; N], E> {
-        let (field, rest) = self.rest.split_first_chunk().ok_or(self.incomplete)?;
-        self.rest = rest;
-        Ok(field)
-    }
-
-    /// Reads the next 32-bit field.
-    fn u32(&mut self) -> Result<u32, E> {
-        self.bytes().map(u32::from_le_bytes)
-    }
-
-    /// Reads the next signed 32-bit field.
-    fn i32(&mut self) -> Result<i32, E> {
-        self.bytes().map(i32::from_le_bytes)
-    }
-
-    /// Reads the next 64-bit field.
-    fn u64(&mut self) -> Result<u64, E> {
-        self.bytes().map(u64::from_le_bytes)
-    }
-
-    /// Reads the next signed 64-bit field.
-    fn i64(&mut self) -> Result<i64, E> {
-        self.bytes().map(i64::from_le_bytes)
-    }
-}
-
 /// Why a restore packet is invalid. Its `Display` is the diagnostic that repair reports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PacketError {
@@ -482,169 +405,6 @@ fn parse_dns_server(
     Ok(server)
 }
 
-/// Why a host time sample is invalid. Its `Display` is the sample's diagnostic.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TimeSampleError {
-    /// The sample is shorter than its record.
-    Incomplete,
-    /// The version is not [`SAMPLE_VERSION`].
-    Version(u8),
-    /// The flags set bits other than the test-hook flag, or the reserved byte is not zero.
-    Flags {
-        /// The sample's flags.
-        flags: u8,
-        /// The sample's reserved byte.
-        reserved: u8,
-    },
-    /// The host clock status is not one that the sample defines.
-    Status(u8),
-    /// The UTC time is zero or does not fit the clocks' signed nanoseconds.
-    Utc(u64),
-    /// The sample's guest TSC lies outside the guest's reads of its TSC around the sample's
-    /// latch, by more than the sample's pairing uncertainty and the skew bound allow.
-    Tsc {
-        /// The sample's guest TSC.
-        tsc: u64,
-        /// The guest's TSC before the latch.
-        before: u64,
-        /// The guest's TSC after the latch.
-        after: u64,
-    },
-}
-
-impl Display for TimeSampleError {
-    /// Writes the diagnostic, such as `time sample version is 2`.
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Incomplete => formatter.write_str("time sample is incomplete"),
-            Self::Version(version) => write!(formatter, "time sample version is {version}"),
-            Self::Flags { flags, reserved } => write!(
-                formatter,
-                "time sample flags 0x{flags:02x} or reserved 0x{reserved:02x}"
-            ),
-            Self::Status(status) => write!(formatter, "time sample host status is {status}"),
-            Self::Utc(utc) => write!(formatter, "time sample UTC {utc} is invalid"),
-            Self::Tsc { tsc, before, after } => write!(
-                formatter,
-                "time sample TSC {tsc} is outside the guest's reads {before} to {after}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for TimeSampleError {}
-
-/// The discipline of host UTC that a time sample publishes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct HostClock {
-    /// The status of host UTC.
-    pub(crate) status: HostClockStatus,
-    /// A counter that changes when host UTC steps, the host resumes from a suspension, or the
-    /// guest TSC's offset from the host's changes.
-    pub(crate) disruption: u32,
-    /// How fast host UTC runs against the guest TSC counted at the declared rate, minus one, in
-    /// parts per million scaled by 2^16.
-    pub(crate) correction: i64,
-    /// A bound on the error of `correction`, in parts per million scaled by 2^16, if the host
-    /// knows one.
-    pub(crate) correction_bound: Option<u32>,
-    /// The host time service's bound on the error of host UTC, in microseconds, if it reports
-    /// one.
-    pub(crate) max_error_us: Option<u32>,
-}
-
-impl HostClock {
-    /// Returns the host's bound on the error of host UTC that the guest adds to its own maximum
-    /// error, in microseconds: the time service's while it synchronizes host UTC, and otherwise
-    /// none.
-    pub(crate) fn error_us(&self) -> i64 {
-        match (self.status, self.max_error_us) {
-            (HostClockStatus::Synchronized, Some(error)) => i64::from(error),
-            _ => 0,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// One host time sample: host UTC paired with the guest TSC, and the discipline of host UTC.
-pub(crate) struct TimeSample {
-    /// Sample feature/test flags.
-    pub(crate) flags: u8,
-    /// VM generation associated with the sample.
-    pub(crate) generation: u32,
-    /// Host UTC at the latch, in nanoseconds since the Unix epoch.
-    pub(crate) utc_ns: u64,
-    /// The guest TSC, of the first processor, at the instant of `utc_ns`.
-    pub(crate) tsc: u64,
-    /// The most the instants of `tsc` and `utc_ns` can differ, in nanoseconds.
-    pub(crate) pairing_ns: u32,
-    /// The discipline of host UTC.
-    pub(crate) host: HostClock,
-}
-
-impl TimeSample {
-    /// Decodes and validates the sample record at the start of `bytes`.
-    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, TimeSampleError> {
-        let mut fields = Fields::new(bytes, TimeSampleError::Incomplete);
-        let [version, flags, status, reserved] = fields.bytes()?;
-        let generation = fields.u32()?;
-        let utc_ns = fields.u64()?;
-        let tsc = fields.u64()?;
-        let pairing_ns = fields.u32()?;
-        let disruption = fields.u32()?;
-        let correction = fields.i64()?;
-        let bound = |value: u32| (value != SAMPLE_UNKNOWN).then_some(value);
-        let correction_bound = bound(fields.u32()?);
-        let max_error_us = bound(fields.u32()?);
-        if version != SAMPLE_VERSION {
-            return Err(TimeSampleError::Version(version));
-        }
-        if flags & !SAMPLE_TEST_HOOKS != 0 || reserved != 0 {
-            return Err(TimeSampleError::Flags { flags, reserved });
-        }
-        let status = HostClockStatus::from_byte(status).ok_or(TimeSampleError::Status(status))?;
-        if utc_ns == 0 || i64::try_from(utc_ns).is_err() {
-            return Err(TimeSampleError::Utc(utc_ns));
-        }
-        Ok(Self {
-            flags,
-            generation,
-            utc_ns,
-            tsc,
-            pairing_ns,
-            host: HostClock {
-                status,
-                disruption,
-                correction,
-                correction_bound,
-                max_error_us,
-            },
-        })
-    }
-
-    /// Returns whether the sample carries the test-hook flag, which mirrors the restore packet's:
-    /// host overrides, which only tests make, of the time that it publishes are active.
-    pub(crate) const fn test_hooks(&self) -> bool {
-        self.flags & SAMPLE_TEST_HOOKS != 0
-    }
-}
-
-/// The guest's reads around the latch of one time sample, with which it pairs the sample's
-/// guest TSC with its realtime clock.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct GuestReads {
-    /// The TSC right before the selector write that latched the sample.
-    pub(crate) before: u64,
-    /// The TSC right after the selector write.
-    pub(crate) after: u64,
-    /// The realtime clock, in nanoseconds, read right after the selector write.
-    pub(crate) realtime_ns: i64,
-    /// The TSC at the realtime read: the midpoint of the TSC reads around it.
-    pub(crate) realtime_tsc: u64,
-    /// Half the TSC cycles between the TSC reads around the realtime read.
-    pub(crate) realtime_half_cycles: u64,
-}
-
 /// The rates with which the guest's realtime clock counts its TSC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ClockRates {
@@ -652,27 +412,6 @@ pub(crate) struct ClockRates {
     pub(crate) tsc_hz: u64,
     /// The kernel's frequency correction, in parts per million scaled by 2^16.
     pub(crate) frequency: i64,
-}
-
-/// Divides `numerator` by the positive `denominator`, rounding to the nearest, half away from
-/// zero.
-fn divide_rounded(numerator: i128, denominator: i128) -> i128 {
-    let half = denominator / 2;
-    if numerator >= 0 {
-        (numerator + half) / denominator
-    } else {
-        (numerator - half) / denominator
-    }
-}
-
-/// Divides the nonnegative `numerator` by the positive `denominator`, rounding up.
-fn divide_up(numerator: i128, denominator: i128) -> i128 {
-    (numerator + denominator - 1) / denominator
-}
-
-/// Saturates `value` to an `i64`.
-fn saturate(value: i128) -> i64 {
-    value.clamp(i64::MIN.into(), i64::MAX.into()) as i64
 }
 
 /// Returns the rate at which the kernel counts the TSC for the declared rate `tsc_hz`: Linux
@@ -696,31 +435,15 @@ pub(crate) fn pair_sample(
     reads: &GuestReads,
     rates: ClockRates,
 ) -> Result<(i64, i64), TimeSampleError> {
-    const NSEC: i128 = NSEC_PER_SEC as i128;
-    let tsc_hz = i128::from(rates.tsc_hz.max(1));
-    let kernel_hz = i128::from(kernel_tsc_hz(rates.tsc_hz).max(HZ_PER_KHZ));
-    let pairing = i128::from(sample.pairing_ns);
-    let tolerance = divide_up((pairing + i128::from(SKEW_BOUND_NS)) * tsc_hz, NSEC);
-    let tsc = i128::from(sample.tsc);
-    if tsc < i128::from(reads.before) - tolerance || tsc > i128::from(reads.after) + tolerance {
-        return Err(TimeSampleError::Tsc {
-            tsc: sample.tsc,
-            before: reads.before,
-            after: reads.after,
-        });
-    }
-    // The kernel's correction never exceeds its limit, which bounds the arithmetic.
-    let frequency = i128::from(rates.frequency.clamp(-FREQUENCY_LIMIT, FREQUENCY_LIMIT));
-    let elapsed = divide_rounded((i128::from(reads.realtime_tsc) - tsc) * NSEC, kernel_hz);
-    let extrapolated = elapsed + divide_rounded(elapsed * frequency, SCALED_ONE);
-    let realtime = i128::from(reads.realtime_ns) - extrapolated;
-    let theta = i128::from(sample.utc_ns) - realtime;
-    let local = divide_up(i128::from(reads.realtime_half_cycles) * NSEC, kernel_hz);
-    let slew = divide_up(extrapolated.abs() * SLEW_RATE_PPM, 1_000_000);
-    Ok((
-        saturate(theta),
-        saturate(pairing + i128::from(SKEW_BOUND_NS) + local + slew),
-    ))
+    let (sample, reads) = counter_observations(sample, reads);
+    model::pair_counter_at_rates(
+        sample,
+        reads,
+        rates.tsc_hz.max(1),
+        kernel_tsc_hz(rates.tsc_hz).max(HZ_PER_KHZ),
+        rates.frequency,
+    )
+    .map_err(pairing_error)
 }
 
 /// Returns the frequency correction, in parts per million scaled by 2^16, that runs the wall
@@ -730,15 +453,7 @@ pub(crate) fn pair_sample(
 /// The kernel counts the TSC at `F_k`, the declared rate `F` to the kHz, so the correction is
 /// `(1 + correction) * F_k / F - 1`, rounded to the nearest.
 pub(crate) fn guest_frequency(correction: i64, tsc_hz: u64) -> (i64, bool) {
-    let tsc_hz_wide = i128::from(tsc_hz.max(1));
-    // A correction beyond 100% is beyond the limit too, which bounds the arithmetic.
-    let correction = i128::from(correction).clamp(-SCALED_ONE, SCALED_ONE);
-    let numerator =
-        (SCALED_ONE + correction) * i128::from(kernel_tsc_hz(tsc_hz)) - SCALED_ONE * tsc_hz_wide;
-    let frequency = divide_rounded(numerator, tsc_hz_wide);
-    let limit = i128::from(FREQUENCY_LIMIT);
-    let held = frequency.clamp(-limit, limit);
-    (held as i64, held != frequency)
+    super::model::frequency_for_counter(correction, tsc_hz, kernel_tsc_hz(tsc_hz))
 }
 
 /// Encodes bytes as lowercase hexadecimal without separators.
@@ -761,189 +476,6 @@ pub(crate) fn parse_hex<const N: usize>(text: &[u8]) -> Option<[u8; N]> {
         *byte = u8::try_from(digit(pair[0])? << 4 | digit(pair[1])?).ok()?;
     }
     Some(bytes)
-}
-
-/// Converts Linux scaled-ppm frequency into rounded parts per billion.
-pub(crate) fn frequency_to_ppb(frequency: i64) -> i64 {
-    saturate(divide_rounded(
-        i128::from(frequency) * i128::from(PPB_PER_PPM),
-        i128::from(SCALED_PPM),
-    ))
-}
-
-/// Converts a bound in Linux's scaled-ppm unit into parts per billion, rounded up.
-pub(crate) fn bound_to_ppb(bound: u32) -> u64 {
-    (u64::from(bound) * PPB_PER_PPM as u64).div_ceil(SCALED_PPM as u64)
-}
-
-/// Splits a signed nanosecond offset into whole seconds, rounded toward negative infinity, and
-/// the nonnegative nanoseconds that complete it, as a step of the wall clock takes it.
-pub(crate) fn split_offset(offset_ns: i64) -> (i64, i64) {
-    (
-        offset_ns.div_euclid(NSEC_PER_SEC),
-        offset_ns.rem_euclid(NSEC_PER_SEC),
-    )
-}
-
-/// Rounds nonnegative nanoseconds up to microseconds, saturating.
-fn ceil_us(nanoseconds: i64) -> i64 {
-    nanoseconds.saturating_add(NSEC_PER_USEC - 1) / NSEC_PER_USEC
-}
-
-/// Returns the frequency hold of a wall clock that is `offset` nanoseconds off host UTC, give or
-/// take the uncertainty `epsilon`, with the frequency correction `frequency`, in scaled ppm, and
-/// a host whose UTC is within `host_error_us` microseconds of the reference: the maximum error
-/// adds the host's to the offset and its uncertainty, and the estimated error is the uncertainty.
-pub(crate) fn frequency_hold(
-    offset: u64,
-    epsilon: i64,
-    frequency: i64,
-    host_error_us: i64,
-) -> FrequencyHold {
-    let offset = i64::try_from(offset).unwrap_or(i64::MAX);
-    FrequencyHold {
-        scaled_ppm: frequency,
-        maximum_error_us: ceil_us(offset.saturating_add(epsilon)).saturating_add(host_error_us),
-        estimated_error_us: ceil_us(epsilon),
-    }
-}
-
-/// Selects and parameterizes a step or slew of the wall clock for the offset `theta` and the
-/// uncertainty `epsilon`, both in nanoseconds: a step at or above the step threshold, and
-/// otherwise a slew with the fast or slow time constant, which also holds the frequency
-/// correction `frequency` with error estimates that add `host_error_us`, as [`frequency_hold`]
-/// derives them. A step leaves its caller to hold the frequency after it.
-pub(crate) fn plan_correction(
-    theta: i64,
-    epsilon: i64,
-    fast: bool,
-    frequency: i64,
-    host_error_us: i64,
-) -> ClockAdjustment {
-    let magnitude = theta.unsigned_abs();
-    if magnitude >= STEP_THRESHOLD_NS {
-        let (seconds, nanoseconds) = split_offset(theta);
-        return ClockAdjustment::Step {
-            seconds,
-            nanoseconds,
-        };
-    }
-    ClockAdjustment::Slew {
-        offset_ns: theta,
-        time_constant: if fast {
-            FAST_TIME_CONSTANT
-        } else {
-            SLOW_TIME_CONSTANT
-        },
-        hold: frequency_hold(magnitude, epsilon, frequency, host_error_us),
-    }
-}
-
-/// Kernel-message signature associated with one violation code.
-struct WatchRule {
-    /// Stable ABI violation code.
-    code: ViolationCode,
-    /// Substrings that must all occur.
-    all: &'static [&'static str],
-    /// Alternative substrings of which at least one must occur.
-    any: &'static [&'static str],
-}
-
-/// Ordered kernel-message rules used by the runtime watcher.
-const WATCH_RULES: &[WatchRule] = &[
-    WatchRule {
-        code: ViolationCode::TscUnstable,
-        all: &["Marking TSC unstable due to "],
-        any: &[],
-    },
-    WatchRule {
-        code: ViolationCode::ClocksourceUnstable,
-        all: &[
-            "timekeeping watchdog on CPU",
-            "as unstable because the skew is too large",
-        ],
-        any: &[],
-    },
-    WatchRule {
-        code: ViolationCode::ClocksourceSwitch,
-        all: &["clocksource: Switched to clocksource "],
-        any: &[],
-    },
-    WatchRule {
-        code: ViolationCode::ClocksourceSkew,
-        all: &["clocksource: "],
-        any: &[" ahead of CPU ", " behind CPU "],
-    },
-    WatchRule {
-        code: ViolationCode::TscWarp,
-        all: &[],
-        any: &[
-            "TSC synchronization [CPU#",
-            "cycles TSC warp between CPUs",
-            "TSC warped randomly between CPUs",
-        ],
-    },
-    WatchRule {
-        code: ViolationCode::TscAdjust,
-        all: &["TSC ADJUST"],
-        any: &[],
-    },
-    WatchRule {
-        code: ViolationCode::RcuStall,
-        all: &["rcu: INFO: "],
-        any: &[
-            " detected stalls on CPUs/tasks",
-            " self-detected stall on CPU",
-            " detected expedited stalls",
-        ],
-    },
-    WatchRule {
-        code: ViolationCode::RcuStarved,
-        all: &["rcu: "],
-        any: &[
-            " kthread starved for ",
-            " kthread timer wakeup didn't happen for ",
-        ],
-    },
-    WatchRule {
-        code: ViolationCode::SoftLockup,
-        all: &["watchdog: BUG: soft lockup - CPU#"],
-        any: &[],
-    },
-    WatchRule {
-        code: ViolationCode::HardLockup,
-        all: &["Watchdog detected hard LOCKUP"],
-        any: &[],
-    },
-    WatchRule {
-        code: ViolationCode::HungTask,
-        all: &["INFO: task ", " blocked for more than "],
-        any: &[],
-    },
-    WatchRule {
-        code: ViolationCode::UncheckedMsr,
-        all: &["unchecked MSR access error"],
-        any: &[],
-    },
-    WatchRule {
-        code: ViolationCode::ApicIdMismatch,
-        all: &["APIC ID mismatch"],
-        any: &[],
-    },
-];
-
-/// Returns the first violation code matched by a kernel message.
-pub(crate) fn match_watch_rule(message: &[u8]) -> Option<ViolationCode> {
-    if message.starts_with(OWN_RECORD_PREFIX) {
-        return None;
-    }
-    let contains = |part: &&str| kernel_text::contains(message, part.as_bytes());
-    WATCH_RULES
-        .iter()
-        .find(|rule| {
-            rule.all.iter().all(contains) && (rule.any.is_empty() || rule.any.iter().any(contains))
-        })
-        .map(|rule| rule.code)
 }
 
 /// Accumulated boot-log evidence for check C4, and the boot log's first W+X record.
@@ -1063,6 +595,7 @@ pub(crate) fn explicit_zero_leaf(leaf: u32) -> bool {
 }
 
 /// Validates one CPUID leaf in an exhaustive sparse-range scan.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn exhaustive_leaf_ok(
     leaf: u32,
     value: CpuidResult,
@@ -1313,5 +846,5 @@ pub(crate) fn parse_restore_record(text: &[u8]) -> Option<(u64, CpuMask)> {
     lines.next().is_none().then_some((generation, new_cpus))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests;

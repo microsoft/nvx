@@ -7,7 +7,11 @@ mount_pseudo() {
     mount -t "$1" none "$2" 2>/dev/null ||
         [ "$(stat -f -c %T "$2" 2>/dev/null)" = "$1" ] || {
         echo "NVX-INIT-ERROR: cannot mount $1 on $2" >&2
-        [ -c /dev/port ] || /bin/busybox mknod -m 600 /dev/port c 1 4
+        case "$(/bin/busybox uname -m)" in
+            x86_64)
+                [ -c /dev/port ] || /bin/busybox mknod -m 600 /dev/port c 1 4
+                ;;
+        esac
         /sbin/nvx-exit 1
         while :; do
             sleep 3600

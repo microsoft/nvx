@@ -1,14 +1,18 @@
 //! The fixed cold-boot and restored-space setup of the VM's shared layered root.
 
 use std::ffi::{CString, OsStr};
+#[cfg(target_arch = "x86_64")]
 use std::fmt;
 use std::net::IpAddr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_arch = "x86_64")]
+use std::time::Instant;
 
 use crate::gpt::Expected;
 use crate::guest::mappings::{Access, Mapper, MappingTable, Reserved, SourceRoot, TargetRoot};
+#[cfg(target_arch = "x86_64")]
 use crate::guest::restore::{
     self, Applied, ApplyError, GuestRestore, GuestRestoreAction, GuestRestoreCause,
     GuestRestoreFailure, GuestRestoreInput, GuestRestoreState, RootTemplate,
@@ -17,14 +21,17 @@ use crate::guest::root::{self, Assembly, Device, Root, ShareChild, ShareKind};
 use crate::guest::sys::FileDescriptor;
 use crate::guest::terminal::Terminal;
 use crate::guest::view;
+#[cfg(target_arch = "x86_64")]
 use crate::guest_restore;
 use crate::protocol::cmdline::{self, Token};
 use crate::protocol::export::{EXPORT_DIRECTORY, HostExport};
 use crate::protocol::root::{
     DISTRO_MMIO_BASE, ImageFormat, RootLayout, RootUpper, SCRATCH_MMIO_BASE,
 };
+#[cfg(target_arch = "x86_64")]
+use crate::protocol::status;
 use crate::protocol::view::View;
-use crate::protocol::{self, ProtocolError, status};
+use crate::protocol::{self, ProtocolError};
 use crate::{Error, Result};
 
 mod account;
@@ -323,6 +330,7 @@ fn share_child(value: &[u8]) -> Result<ShareChild> {
 }
 
 /// One repaired clone's guest restore and the space it owns across control epochs.
+#[cfg(target_arch = "x86_64")]
 pub(crate) struct Restored {
     pub(crate) activation: GuestRestore,
     /// The bytes of the activation record of the clone's restore packet, until the guest restore
@@ -341,6 +349,7 @@ pub(crate) struct Restored {
 }
 
 /// The account and open mapping handles handed to the shared dispatcher after activation.
+#[cfg(target_arch = "x86_64")]
 pub(crate) struct RestoreHandoff {
     pub(crate) workload: protocol::workload::WorkloadIdentity,
     pub(crate) user: CString,
@@ -351,6 +360,7 @@ pub(crate) struct RestoreHandoff {
     pub(crate) export: Option<SourceRoot>,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl Restored {
     /// Anchors the guest restore once, even when the next session attaches later, and keeps the
     /// activation record of the clone's restore packet for [`accept`](Self::accept).
@@ -528,6 +538,7 @@ impl Restored {
 /// - [`GUEST_RESTORE_ORDER`](status::GUEST_RESTORE_ORDER): nvx-init's own order accepted a record
 ///   twice, completed a guest restore that did not run, or started the workload before the guest
 ///   restore was ready.
+#[cfg(target_arch = "x86_64")]
 fn class_status(failure: &GuestRestoreFailure) -> u8 {
     match failure.cause() {
         GuestRestoreCause::Expired => status::GUEST_RESTORE_DEADLINE,
@@ -561,6 +572,7 @@ fn class_status(failure: &GuestRestoreFailure) -> u8 {
 /// The failure of a step of a restored space whose class is not the root's, with the status of
 /// its class, which [`class_status`] finds among an application's causes.
 #[derive(Debug)]
+#[cfg(target_arch = "x86_64")]
 struct Classed {
     /// The status of the step's class.
     status: u8,
@@ -568,12 +580,14 @@ struct Classed {
     error: Error,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl fmt::Display for Classed {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.error.fmt(formatter)
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 impl std::error::Error for Classed {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         std::error::Error::source(&self.error)
@@ -581,11 +595,13 @@ impl std::error::Error for Classed {
 }
 
 /// Returns a step's failure with its message, classed with `status`.
+#[cfg(target_arch = "x86_64")]
 fn classed(status: u8) -> impl FnOnce(Error) -> Error {
     move |error| Error::new(error.code(), error.message()).with_source(Classed { status, error })
 }
 
 /// Closes prepared handles before tearing down a space whose setup failed.
+#[cfg(target_arch = "x86_64")]
 fn restore_in_order<T, R>(
     deadline: Option<Instant>,
     apply: impl FnOnce() -> Result<T>,
@@ -625,6 +641,7 @@ fn restore_in_order<T, R>(
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn activation_error(error: impl std::error::Error + Send + Sync + 'static) -> Error {
     Error::io(format!("failed to activate the restored root: {error}")).with_source(error)
 }

@@ -160,6 +160,64 @@ fn run_options(arguments: &[&str]) -> Options {
 }
 
 #[test]
+fn guest_architecture_is_explicit_in_split_and_attached_options() {
+    assert_eq!(Options::default().architecture, GuestArchitecture::X86_64);
+    for arguments in [
+        vec!["--architecture", "aarch64"],
+        vec!["--architecture=aarch64"],
+    ] {
+        assert_eq!(
+            run_options(&arguments).architecture,
+            GuestArchitecture::Aarch64
+        );
+    }
+    let arguments = vec!["--architecture=arm64".to_owned()];
+    assert!(parse(&arguments).is_err());
+}
+
+#[test]
+fn arm_full_command_line_includes_bootstrap_network_export_and_nul_to_the_byte() {
+    let directory = tempfile::tempdir().unwrap();
+    for processors in [1, 8] {
+        for network in [false, true] {
+            let mut options = Options {
+                architecture: GuestArchitecture::Aarch64,
+                processors,
+                cmdline: "x".to_owned(),
+                mounts: vec![format!("/workspace,{},rw", directory.path().display())],
+                ..Options::default()
+            };
+            if network {
+                options.network.net = Some("10.0.0.2/24".to_owned());
+                options.network.network_profile = Some("portable");
+            }
+            let rules = options.network.egress_rules().unwrap();
+            let base = cold_config(&options, &rules).unwrap();
+            let rendered = arm_effective_command_line(&base).unwrap();
+            assert!(rendered.starts_with("earlycon=nvx-mmio,0xd1000000 console=hvc1 "));
+            assert!(rendered.contains(&format!(" nr_cpus={processors} nvx_control_tty=hvc2")));
+            assert!(!rendered.contains("virtio_mmio.device="));
+            assert!(rendered.ends_with(&export_tokens(base.filesystem.as_ref().unwrap())));
+            assert_eq!(rendered.contains(" virtnet_ip="), network);
+            assert_eq!(rendered.contains(" virtnet_ip6="), network);
+            let room = 2048 - rendered.len();
+            for unicode in [false, true] {
+                options.cmdline = if unicode {
+                    "\u{e9}".repeat(room / 2) + &"x".repeat(room % 2)
+                } else {
+                    "x".repeat(room)
+                };
+                let config = cold_config(&options, &rules).unwrap();
+                assert_eq!(arm_effective_command_line(&config).unwrap().len() + 1, 2048);
+                options.cmdline.push('x');
+                let error = cold_config(&options, &rules).unwrap_err();
+                assert!(error.message().unwrap().contains("2048 bytes"), "{error:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn restore_inputs_parse_as_those_of_snapshot_restore() {
     let inputs = [
         "--state-dir",

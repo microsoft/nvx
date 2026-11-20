@@ -52,11 +52,13 @@ from .common import (
 )
 from .guest_binaries import (
     build_guest_binaries,
+    guest_binary_architecture,
     guest_binary_source_files,
     inspect_guest_binaries,
 )
 from .guests import GuestDescriptor, guest_descriptor
-from .kernel_config import check_build_configuration, generate
+from .kernel_config import Assignment, check_build_configuration, generate, parse_config
+from .kernel_features import features_for_architecture
 
 
 class ApkPackage(TypedDict):
@@ -150,6 +152,10 @@ def _assert_hardening_kernel_config(path: Path) -> None:
         KernelBuildConstants.REQUIRED_HARDENING_CONFIG,
         "kernel configuration does not keep runtime code read-only: ",
     )
+    _assert_no_loadable_modules(path)
+
+
+def _assert_no_loadable_modules(path: Path) -> None:
     modules = [
         line
         for line in path.read_text(encoding="utf-8").splitlines()
@@ -183,8 +189,32 @@ def _assert_watchdog_kernel_config(path: Path, *, debug: bool) -> None:
         )
 
 
-def assert_required_kernel_config(path: Path, *, debug: bool = False) -> None:
+def assert_required_kernel_config(
+    path: Path, *, debug: bool = False, architecture: str = "x86_64"
+) -> None:
     """Validate the generated configuration required by the NVX platform."""
+    if architecture == "aarch64":
+        values = parse_config(path.read_text(encoding="utf-8"), str(path))
+        missing: list[str] = []
+        for feature in features_for_architecture(architecture):
+            if debug and feature.name == "production-watchdogs":
+                continue
+            for setting in (*feature.settings, *feature.expects):
+                assignment = Assignment.parse(setting)
+                if assignment is None:
+                    raise ScriptError(f"invalid ARM inventory setting: {setting}")
+                if not assignment.holds(values):
+                    missing.append(setting)
+        if missing:
+            raise ScriptError(
+                "kernel configuration does not meet the ARM inventory: "
+                + ", ".join(missing)
+            )
+        _assert_no_loadable_modules(path)
+        _assert_watchdog_kernel_config(path, debug=debug)
+        return
+    if architecture != "x86_64":
+        raise ScriptError(f"unsupported kernel architecture: {architecture}")
     _assert_direct_boot_kernel_config(path)
     _assert_virtio_console_kernel_config(path)
     _assert_sandbox_kernel_config(path)
@@ -202,11 +232,31 @@ def _require_linux(workflow: str) -> None:
         )
 
 
+def _alpine_minirootfs(architecture: str) -> tuple[str, str, str]:
+    """Return one ISA's pinned archive name, URL, and digest."""
+    if architecture == "x86_64":
+        return (
+            AlpineBuildConstants.MINIROOTFS_NAME,
+            AlpineBuildConstants.MINIROOTFS_URL,
+            AlpineBuildConstants.MINIROOTFS_SHA256,
+        )
+    if architecture == "aarch64":
+        return (
+            AlpineBuildConstants.ARM_MINIROOTFS_NAME,
+            AlpineBuildConstants.ARM_MINIROOTFS_URL,
+            AlpineBuildConstants.ARM_MINIROOTFS_SHA256,
+        )
+    raise ScriptError(f"unsupported Alpine architecture: {architecture}")
+
+
 def _alpine_tarball(config: InitramfsBuildConfig) -> Path:
-    return config.work / AlpineBuildConstants.MINIROOTFS_NAME
+    name, _, _ = _alpine_minirootfs(config.architecture)
+    return config.work / name
 
 
-def _kernel_patch_files() -> tuple[Path, ...]:
+def _kernel_patch_files(architecture: str = "x86_64") -> tuple[Path, ...]:
+    if architecture not in ("x86_64", "aarch64"):
+        raise ScriptError(f"unsupported kernel architecture: {architecture}")
     patches = tuple(
         sorted(
             (BuildConstants.REPO_ROOT / KernelBuildConstants.PATCH_DIRECTORY).glob(
@@ -216,6 +266,11 @@ def _kernel_patch_files() -> tuple[Path, ...]:
     )
     if not patches:
         raise ScriptError("no kernel patches were found")
+    if architecture == "aarch64":
+        patches += tuple(
+            require_file(BuildConstants.REPO_ROOT / path, "ARM kernel patch")
+            for path in KernelBuildConstants.ARM_PATCHES
+        )
     return patches
 
 
@@ -272,33 +327,44 @@ def materialize_kernel_provenance_inputs() -> None:
         print(f">> materialized {relative} from the run head")
 
 
-def _kernel_source_fingerprint() -> str:
-    return json.dumps(
-        {
-            "version": KernelBuildConstants.VERSION,
-            "upstream_url": KernelBuildConstants.URL,
-            "upstream_archive_sha256": KernelBuildConstants.SHA256,
-            "patches": [
-                {
-                    "path": patch.relative_to(BuildConstants.REPO_ROOT).as_posix(),
-                    "sha256": sha256_file(patch),
-                }
-                for patch in _kernel_patch_files()
-            ],
-        },
-        sort_keys=True,
+def _kernel_source_fingerprint(architecture: str = "x86_64") -> str:
+    patches = (
+        _kernel_patch_files(architecture)
+        if architecture != "x86_64"
+        else _kernel_patch_files()
     )
+    inputs: dict[str, object] = {
+        "version": KernelBuildConstants.VERSION,
+        "upstream_url": KernelBuildConstants.URL,
+        "upstream_archive_sha256": KernelBuildConstants.SHA256,
+        "patches": [
+            {
+                "path": patch.relative_to(BuildConstants.REPO_ROOT).as_posix(),
+                "sha256": sha256_file(patch),
+            }
+            for patch in patches
+        ],
+    }
+    if architecture != "x86_64":
+        inputs["architecture"] = architecture
+    return json.dumps(inputs, sort_keys=True)
 
 
 def _kernel_provenance_inputs(
     source_fingerprint: str,
     input_config_sha256: str,
     debug_config_fragment_sha256: str | None = None,
+    *,
+    architecture: str = "x86_64",
 ) -> dict[str, object]:
     inputs: dict[str, object] = {
         "source": json.loads(source_fingerprint),
         "input_config": {
-            "path": KernelBuildConstants.INPUT_CONFIG.as_posix(),
+            "path": (
+                KernelBuildConstants.ARM_INPUT_CONFIG
+                if architecture == "aarch64"
+                else KernelBuildConstants.INPUT_CONFIG
+            ).as_posix(),
             "sha256": input_config_sha256,
         },
     }
@@ -310,8 +376,15 @@ def _kernel_provenance_inputs(
     return inputs
 
 
-def kernel_provenance_inputs() -> dict[str, object]:
+def kernel_provenance_inputs(architecture: str = "x86_64") -> dict[str, object]:
     """Return the current source and input-config identity for a kernel build."""
+    if architecture != "x86_64":
+        config = KernelBuildConfig.for_architecture(architecture)
+        return _kernel_provenance_inputs(
+            _kernel_source_fingerprint(architecture),
+            sha256_file(BuildConstants.REPO_ROOT / config.input_config),
+            architecture=architecture,
+        )
     return _kernel_provenance_inputs(
         _kernel_source_fingerprint(),
         sha256_file(BuildConstants.REPO_ROOT / KernelBuildConstants.INPUT_CONFIG),
@@ -381,13 +454,14 @@ def _initramfs_source_files() -> tuple[Path, ...]:
     )
 
 
-def initramfs_provenance_inputs() -> dict[str, object]:
+def initramfs_provenance_inputs(architecture: str = "x86_64") -> dict[str, object]:
     """Return the current source identity for an initramfs build."""
-    return {
+    _, _, minirootfs_sha256 = _alpine_minirootfs(architecture)
+    inputs: dict[str, object] = {
         "alpine": {
             "version": AlpineBuildConstants.VERSION,
             "branch": AlpineBuildConstants.BRANCH,
-            "minirootfs_sha256": AlpineBuildConstants.MINIROOTFS_SHA256,
+            "minirootfs_sha256": minirootfs_sha256,
         },
         "source_files": [
             {
@@ -397,6 +471,9 @@ def initramfs_provenance_inputs() -> dict[str, object]:
             for path in _initramfs_source_files()
         ],
     }
+    if architecture != "x86_64":
+        inputs["architecture"] = architecture
+    return inputs
 
 
 def record_openvmm_provenance(config: OpenVmmBuildConfig) -> None:
@@ -529,7 +606,7 @@ def build_guest(config: BuildConfig) -> None:
             )
         build_kernel(config.kernel)
         if config.debug_kernel:
-            build_kernel(KernelBuildConfig.debug_variant())
+            build_kernel(KernelBuildConfig.debug_variant(jobs=config.kernel.jobs))
         for guest in config.selected_guests():
             build_initramfs(config.initramfs_config(guest))
         if config.guest == "all":
@@ -554,10 +631,16 @@ def prepare_kernel_source(config: KernelBuildConfig) -> tuple[Path, str]:
     cache = config.cache_directory
     downloads = cache / BuildConstants.DOWNLOAD_DIRECTORY_NAME
     source_parent = cache / KernelBuildConstants.SOURCE_DIRECTORY_NAME
+    if config.architecture == "aarch64":
+        source_parent /= config.architecture
     tarball = downloads / KernelBuildConstants.UPSTREAM_ARCHIVE_NAME
     source = source_parent / KernelBuildConstants.SOURCE_NAME
     stamp = source_parent / KernelBuildConstants.SOURCE_STAMP_NAME
-    fingerprint = _kernel_source_fingerprint()
+    fingerprint = (
+        _kernel_source_fingerprint(config.architecture)
+        if config.architecture != "x86_64"
+        else _kernel_source_fingerprint()
+    )
 
     downloads.mkdir(parents=True, exist_ok=True)
     source_parent.mkdir(parents=True, exist_ok=True)
@@ -572,7 +655,12 @@ def prepare_kernel_source(config: KernelBuildConfig) -> tuple[Path, str]:
         run_checked(["tar", "-xf", tarball, "-C", source_parent])
         if not (source / "Makefile").is_file():
             raise ScriptError(f"Linux archive did not produce {source}")
-        for patch in _kernel_patch_files():
+        patches = (
+            _kernel_patch_files(config.architecture)
+            if config.architecture != "x86_64"
+            else _kernel_patch_files()
+        )
+        for patch in patches:
             print(f">> applying {patch.name}")
             run_checked(
                 ["patch", "--batch", "--forward", "-p1", "-i", patch],
@@ -585,18 +673,15 @@ def prepare_kernel_source(config: KernelBuildConfig) -> tuple[Path, str]:
 def _prepare_alpine_root(config: InitramfsBuildConfig) -> Path:
     config.work.mkdir(parents=True, exist_ok=True)
     tarball = _alpine_tarball(config)
-    download_verified(
-        AlpineBuildConstants.MINIROOTFS_URL,
-        tarball,
-        AlpineBuildConstants.MINIROOTFS_SHA256,
-    )
+    _, url, digest = _alpine_minirootfs(config.architecture)
+    download_verified(url, tarball, digest)
     root = config.work / InitramfsBuildConstants.ROOT_DIRECTORY_NAME
     shutil.rmtree(root, ignore_errors=True)
     root.mkdir(parents=True)
     require_tool("tar")
     run_checked(["tar", "-xzf", tarball, "-C", root])
     print(">> installing sandbox utilities into the Alpine rootfs")
-    _apk_add(root, *AlpineBuildConstants.PACKAGES)
+    _apk_add(root, *AlpineBuildConstants.PACKAGES, architecture=config.architecture)
     resolver = root / "etc" / "resolv.conf"
     resolver.unlink(missing_ok=True)
     resolver.touch()
@@ -612,8 +697,9 @@ def _install(source: Path, destination: Path) -> dict[str, str]:
     }
 
 
-def _apk_add(root: Path, *packages: str) -> None:
-    loader = root / "lib" / "ld-musl-x86_64.so.1"
+def _apk_add(root: Path, *packages: str, architecture: str = "x86_64") -> None:
+    _alpine_minirootfs(architecture)
+    loader = root / "lib" / f"ld-musl-{architecture}.so.1"
     environment = os.environ.copy()
     environment["LD_LIBRARY_PATH"] = f"{root / 'lib'}:{root / 'usr' / 'lib'}"
     host_ca_file = ssl.get_default_verify_paths().cafile
@@ -713,6 +799,7 @@ def _write_apk_manifest(
     root: Path,
     output: Path,
     helpers: dict[str, dict[str, str]],
+    architecture: str = "x86_64",
 ) -> None:
     installed = root / "lib" / "apk" / "db" / "installed"
     packages: list[ApkPackage] = []
@@ -723,6 +810,10 @@ def _write_apk_manifest(
                 fields[line[0]] = line[2:]
         if "P" not in fields:
             continue
+        if architecture == "aarch64" and fields.get("A") not in ("aarch64", "noarch"):
+            raise ScriptError(
+                f"Alpine package {fields['P']} does not match the ARM guest architecture"
+            )
         packages.append(
             {
                 "name": fields["P"],
@@ -746,7 +837,7 @@ def _write_apk_manifest(
                 "format": AlpineBuildConstants.PACKAGE_MANIFEST_VERSION,
                 "alpine_version": AlpineBuildConstants.VERSION,
                 "alpine_branch": AlpineBuildConstants.BRANCH,
-                "architecture": AlpineBuildConstants.ARCHITECTURE,
+                "architecture": architecture,
                 "packages": packages,
                 "helpers": helpers,
             },
@@ -810,11 +901,15 @@ def _install_guest_files(
     prebuilt = os.environ.get(GuestRustBuildConstants.BINARIES_VARIABLE)
     if prebuilt:
         binary_directory = Path(prebuilt)
-        result = inspect_guest_binaries(binary_directory)
+        result = inspect_guest_binaries(
+            binary_directory, architecture=config.architecture
+        )
     else:
         binary_directory = config.work / GuestRustBuildConstants.OUTPUT_DIRECTORY_NAME
-        result = build_guest_binaries(binary_directory)
-    for name in GuestRustBuildConstants.BINARIES:
+        result = build_guest_binaries(
+            binary_directory, architecture=config.architecture
+        )
+    for name in guest_binary_architecture(config.architecture).binaries:
         source = binary_directory / name
         destination = root / "sbin" / name
         shutil.copyfile(source, destination)
@@ -884,7 +979,9 @@ def build_initramfs(config: InitramfsBuildConfig) -> None:
         f"{output.name}{BuildConstants.PACKAGE_MANIFEST_SUFFIX}"
     )
     provenance_inputs = (
-        initramfs_provenance_inputs() if descriptor.name == "alpine" else None
+        initramfs_provenance_inputs(config.architecture)
+        if descriptor.name == "alpine"
+        else None
     )
     provenance_path = output.with_name(InitramfsBuildConstants.PROVENANCE_NAME)
     if provenance_inputs is not None:
@@ -901,7 +998,7 @@ def build_initramfs(config: InitramfsBuildConfig) -> None:
     if descriptor.name == "ubuntu":
         ubuntu.apply_metadata_policy(root)
     else:
-        _write_apk_manifest(root, output, helpers)
+        _write_apk_manifest(root, output, helpers, config.architecture)
     _pack_initramfs(root, output)
     if ubuntu_input_sha256 is not None:
         _write_ubuntu_manifest(root, output, helpers, ubuntu_input_sha256)
@@ -914,7 +1011,7 @@ def build_initramfs(config: InitramfsBuildConfig) -> None:
             raise ScriptError("initramfs source inputs changed during the build")
     if (
         provenance_inputs is not None
-        and initramfs_provenance_inputs() != provenance_inputs
+        and initramfs_provenance_inputs(config.architecture) != provenance_inputs
     ):
         output.unlink(missing_ok=True)
         package_manifest.unlink(missing_ok=True)
@@ -1211,7 +1308,7 @@ def build_kernel(config: KernelBuildConfig) -> None:
     for tool in ("make",):
         require_tool(tool)
     source, source_fingerprint = prepare_kernel_source(config)
-    input_config = BuildConstants.REPO_ROOT / KernelBuildConstants.INPUT_CONFIG
+    input_config = BuildConstants.REPO_ROOT / config.input_config
     input_config_bytes = input_config.read_bytes()
     input_config_sha256 = hashlib.sha256(input_config_bytes).hexdigest()
     fragment = (
@@ -1229,6 +1326,11 @@ def build_kernel(config: KernelBuildConfig) -> None:
         source_fingerprint,
         input_config_sha256,
         fragment_sha256,
+        **(
+            {"architecture": config.architecture}
+            if config.architecture != "x86_64"
+            else {}
+        ),
     )
     build_inputs: dict[str, str] = {
         "source": source_fingerprint,
@@ -1259,29 +1361,43 @@ def build_kernel(config: KernelBuildConfig) -> None:
             ),
             encoding="utf-8",
         )
-    make = ["make", "-C", source, f"O={config.work}"]
+    make = ["make", "-C", source, *config.make_architecture, f"O={config.work}"]
     run_checked([*make, "olddefconfig"])
-    assert_required_kernel_config(kernel_config, debug=config.debug)
+    if config.architecture == "x86_64":
+        assert_required_kernel_config(kernel_config, debug=config.debug)
+    else:
+        assert_required_kernel_config(
+            kernel_config, debug=config.debug, architecture=config.architecture
+        )
     if not config.debug:
         # The debug variant adds its fragment, which the inventory never sets,
         # so only the production configuration must be the inventory's.
-        check_build_configuration(
+        check_inputs = (
             source,
             config.work.with_name(KernelBuildConstants.INVENTORY_WORK_DIRECTORY_NAME),
             kernel_config,
-            BuildConstants.REPO_ROOT / KernelBuildConstants.DERIVED_CONFIG,
+            BuildConstants.REPO_ROOT / config.derived_config,
         )
-    jobs = os.cpu_count() or 1
+        if config.architecture == "x86_64":
+            check_build_configuration(*check_inputs)
+        else:
+            check_build_configuration(*check_inputs, architecture=config.architecture)
+    jobs = config.jobs if config.jobs is not None else os.cpu_count() or 1
     print(f">> building {config.output.name} with {jobs} jobs")
-    run_checked([*make, f"-j{jobs}", KernelBuildConstants.BINARY_NAME])
+    run_checked([*make, f"-j{jobs}", config.make_target])
     config.output.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(config.work / KernelBuildConstants.BINARY_NAME, config.output)
+    shutil.copy2(config.work / config.built_kernel, config.output)
     generated_config = config.output.with_name(f"{config.output.name}.config")
     shutil.copy2(kernel_config, generated_config)
     print(f">> built {config.output}")
 
     if (
-        _kernel_source_fingerprint() != source_fingerprint
+        (
+            _kernel_source_fingerprint(config.architecture)
+            if config.architecture != "x86_64"
+            else _kernel_source_fingerprint()
+        )
+        != source_fingerprint
         or sha256_file(input_config) != input_config_sha256
         or (fragment is not None and sha256_file(fragment) != fragment_sha256)
     ):
@@ -1300,17 +1416,30 @@ def build_kernel(config: KernelBuildConfig) -> None:
     )
 
 
-def _kernel_config_paths() -> tuple[Path, Path]:
+def _kernel_config_paths(architecture: str = "x86_64") -> tuple[Path, Path]:
+    if architecture == "aarch64":
+        return (
+            BuildConstants.REPO_ROOT / KernelBuildConstants.ARM_INPUT_CONFIG,
+            BuildConstants.REPO_ROOT / KernelBuildConstants.ARM_DERIVED_CONFIG,
+        )
+    if architecture != "x86_64":
+        raise ScriptError(f"unsupported kernel architecture: {architecture}")
     return (
         BuildConstants.REPO_ROOT / KernelBuildConstants.INPUT_CONFIG,
         BuildConstants.REPO_ROOT / KernelBuildConstants.DERIVED_CONFIG,
     )
 
 
-def _install_kernel_config(config_text: str, derived_text: str, *, check: bool) -> None:
+def _install_kernel_config(
+    config_text: str, derived_text: str, *, check: bool, architecture: str = "x86_64"
+) -> None:
     """Write the generated configuration and derived record into kernel/, or,
     with `check`, require the checked-in files to equal them."""
-    paths = _kernel_config_paths()
+    paths = (
+        _kernel_config_paths(architecture)
+        if architecture != "x86_64"
+        else _kernel_config_paths()
+    )
     texts = (config_text, derived_text)
     if check:
         stale = [
@@ -1324,7 +1453,10 @@ def _install_kernel_config(config_text: str, derived_text: str, *, check: bool) 
                 + " and ".join(stale)
                 + "; regenerate with `nvx.py kernel-config`"
             )
-        print(">> kernel/config-microvm and its derived record match the inventory")
+        print(
+            f">> {paths[0].relative_to(BuildConstants.REPO_ROOT).as_posix()} "
+            "and its derived record match the inventory"
+        )
         return
     for path, text in zip(paths, texts, strict=True):
         path.write_text(text, encoding="utf-8", newline="\n")
@@ -1338,11 +1470,29 @@ def generate_kernel_config(config: KernelBuildConfig, *, check: bool = False) ->
     _require_linux("kernel-config --native")
     require_tool("make")
     source, _ = prepare_kernel_source(config)
-    generated = generate(
+    inputs = (
         source,
         config.work.with_name(KernelBuildConstants.INVENTORY_WORK_DIRECTORY_NAME),
     )
-    _install_kernel_config(generated.text, generated.record.render(), check=check)
+    generated = (
+        generate(*inputs)
+        if config.architecture == "x86_64"
+        else generate(*inputs, architecture=config.architecture)
+    )
+    _install_kernel_config(
+        generated.text,
+        (
+            generated.record.render()
+            if config.architecture == "x86_64"
+            else generated.record.render(architecture=config.architecture)
+        ),
+        check=check,
+        **(
+            {"architecture": config.architecture}
+            if config.architecture != "x86_64"
+            else {}
+        ),
+    )
 
 
 def generate_docker_kernel_config(
@@ -1391,6 +1541,8 @@ def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | P
         "--target",
         target,
     ]
+    if config.kernel_jobs is not None:
+        command.extend(["--build-arg", f"NVX_KERNEL_JOBS={config.kernel_jobs}"])
     command.extend(
         [
             "--build-arg",

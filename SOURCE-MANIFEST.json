@@ -13,7 +13,12 @@
   },
   "guest_rust": {
     "toolchain": "1.97.1",
-    "target": "x86_64-unknown-linux-musl"
+    "target": "x86_64-unknown-linux-musl",
+    "architectures": {
+      "aarch64": {
+        "target": "aarch64-unknown-linux-musl"
+      }
+    }
   },
   "linux": {
     "version": "6.18.38",
@@ -29,7 +34,25 @@
       "kernel/patches/0003-microvm-virtio-mmio-shared-status.patch",
       "kernel/patches/0004-hvc-push-flip-buffer-under-lock.patch",
       "kernel/patches/0005-sched-charge-at-most-a-second-at-once.patch"
-    ]
+    ],
+    "architectures": {
+      "aarch64": {
+        "source_cache": ".cache/linux/aarch64/linux-6.18.38",
+        "source_archive": "build/sources/linux/aarch64/nvx-linux-source-6.18.38-aarch64.tar.gz",
+        "generated_final_config": "build/aarch64/Image.config",
+        "input_config": "kernel/config-microvm-arm64",
+        "derived_config": "kernel/config-microvm-arm64.derived",
+        "patches": [
+          "kernel/patches/0001-microvm-xe9-earlycon.patch",
+          "kernel/patches/0002-microvm-hvc-xe9.patch",
+          "kernel/patches/0003-microvm-virtio-mmio-shared-status.patch",
+          "kernel/patches/0004-hvc-push-flip-buffer-under-lock.patch",
+          "kernel/patches/0005-sched-charge-at-most-a-second-at-once.patch",
+          "kernel/patches/arm64/0001-nvx-platform-mmio.patch",
+          "kernel/patches/arm64/0002-nvx-shared-status-of.patch"
+        ]
+      }
+    }
   },
   "alpine": {
     "version": "3.24.1",
@@ -37,6 +60,12 @@
     "architecture": "x86_64",
     "minirootfs_url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz",
     "minirootfs_sha256": "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
+    "architectures": {
+      "aarch64": {
+        "minirootfs_url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz",
+        "minirootfs_sha256": "f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259"
+      }
+    },
     "guest_sources": [
       "guest/common",
       "nvx",

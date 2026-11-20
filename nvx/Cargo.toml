@@ -1,6 +1,6 @@
 [package]
 name = "nvx"
-version = "0.2.0-alpha.1"
+version = "0.3.0-alpha.1"
 edition = "2024"
 rust-version = "1.89"
 description = "NVX's library of mechanisms and value types for OpenVMM microVMs: launch, snapshots and restores, verified connections, and the guest's side of capture and guest restore"

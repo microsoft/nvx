@@ -28,6 +28,7 @@ impl CpuMask {
     }
 
     /// Parses the CPUs that a restore brought online: `none`, an empty list, or a CPU list.
+    #[cfg(any(test, target_arch = "x86_64"))]
     pub(crate) fn parse_new(text: &[u8]) -> Option<Self> {
         if text == b"none" {
             Some(Self::EMPTY)

@@ -17,12 +17,15 @@ fn the_reference_space_steps_compile() {
     use std::error::Error;
     use std::net::IpAddr;
     use std::path::Path;
+    #[cfg(target_arch = "x86_64")]
     use std::time::Instant;
 
     use crate::guest::mappings::{Mapper, Reserved, SourceRoot, TargetRoot};
+    #[cfg(target_arch = "x86_64")]
     use crate::guest::restore::{self, Applied, RootTemplate};
     use crate::guest::root::{self, Assembly, Root};
     use crate::guest::view;
+    #[cfg(target_arch = "x86_64")]
     use crate::guest_restore::GuestRestoreRecord;
     use crate::protocol::export::HostExport;
     use crate::protocol::view::View;
@@ -45,6 +48,7 @@ fn the_reference_space_steps_compile() {
         Ok((root, mapper, source))
     };
     // A restore, as `boot::Restored::apply` builds it from the accepted record.
+    #[cfg(target_arch = "x86_64")]
     let _restored = |record: &GuestRestoreRecord,
                      template: &RootTemplate,
                      deadline: Option<Instant>|
@@ -64,6 +68,7 @@ fn the_reference_space_steps_compile() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn restored_sessions_keep_the_deadline_of_the_actual_repair_acknowledgement() {
     let payload = super::super::Capture::activation_payload();
     let repaired = crate::guest::snapshot::repair::tests::repaired_with_record(&payload);
@@ -94,6 +99,7 @@ fn restored_sessions_keep_the_deadline_of_the_actual_repair_acknowledgement() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn restored_resource_steps_finish_before_completion_and_ready() {
     use crate::guest_restore::{GuestRestoreReady, Network, Publication};
     use std::cell::RefCell;
@@ -183,6 +189,7 @@ fn restored_resource_steps_finish_before_completion_and_ready() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn restored_setup_drops_prepared_handles_before_cleanup_and_preserves_both_errors() {
     use std::cell::RefCell;
     struct Handle<'a>(&'a RefCell<Vec<&'static str>>);
@@ -235,6 +242,7 @@ fn restored_setup_drops_prepared_handles_before_cleanup_and_preserves_both_error
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn an_expired_activation_cannot_begin_or_advance_to_another_space_step() {
     assert!(
         restore_in_order::<(), ()>(
@@ -271,6 +279,7 @@ fn an_expired_activation_cannot_begin_or_advance_to_another_space_step() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn a_failed_activation_ends_the_vm_with_the_status_of_its_class() {
     use crate::guest::restore::state::apply::NetworkError;
     use crate::guest_restore::{Configuration, GuestRestoreRecord};

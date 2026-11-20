@@ -128,6 +128,7 @@ each code, which callers of the `nvx` library see in its place.
 
 ```text
 nvx/target/release/nvx run
+    [--architecture {x86_64,aarch64}]
     [--guest {alpine,ubuntu,azurelinux}]
     [--hypervisor {auto,whp,kvm,mshv}]
     [--machine {microvm}]
@@ -168,6 +169,7 @@ nvx/target/release/nvx run
 
 | Option | Default | Description |
 | --- | --- | --- |
+| `--architecture {x86_64,aarch64}` | `x86_64` | Declare guest ISA explicitly; the host never supplies this default. AArch64 initially admits native Windows ARM64/WHP Alpine or Ubuntu cold boots with local ARM products, not release downloads, restore, or memory growth. A restore refuses the option. |
 | `--guest {alpine,ubuntu,azurelinux}` | `alpine` | Select Alpine, Ubuntu, or Azure Linux userland with the same NVX kernel. A restore refuses it. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the OpenVMM hypervisor. `auto` chooses WHP on Windows and KVM elsewhere. |
 | `--machine {microvm}` | `microvm` | Select the fixed-topology microVM with shared-status edge interrupts. |
@@ -1008,10 +1010,10 @@ also fails for an executable stack: a `PT_GNU_STACK` program header with
 ### `check-guest-binaries`
 
 ```text
-python3 scripts/nvx.py check-guest-binaries [--toolchain TOOLCHAIN]
+python3 scripts/nvx.py check-guest-binaries [--toolchain TOOLCHAIN] [--architecture ARCH]
 ```
 
-The Linux-only check command adds the `x86_64-unknown-linux-musl` target to the
+The Linux-only check command adds the selected musl target to the
 Rust toolchain that `--toolchain` names, by default the exact
 `rust-toolchain.toml` pin. It then runs Clippy with warnings denied on every
 target of the `guest` feature, and the feature's musl tests, whose static test
@@ -1019,15 +1021,17 @@ executables run on the host. It ignores an inherited `NVX_GUEST_BINARIES`, so
 that the integration tests run the binaries that Cargo builds from the
 checkout. The `nvx` CI job runs it with the toolchain that its action
 selects, before it builds the binaries.
+`--architecture` selects `x86_64` (the default) or `aarch64`; the latter uses
+`aarch64-unknown-linux-musl`. The host must run the selected ISA's test executables.
 
 ### `build-guest-binaries`
 
 ```text
-python3 scripts/nvx.py build-guest-binaries --output DIRECTORY
+python3 scripts/nvx.py build-guest-binaries --output DIRECTORY [--architecture ARCH]
 ```
 
 The Linux-only build command checks the exact `rust-toolchain.toml` pin and
-builds the ten Rust guest executables for `x86_64-unknown-linux-musl` with one
+builds the selected ISA's Rust guest executables with one
 `cargo build` of the `guest` profile, a fresh target directory, Cargo's locked
 mode, incremental compilation disabled, inherited Cargo profile overrides
 removed, remapped source paths, and no linker build IDs. It then fails unless
@@ -1039,6 +1043,14 @@ for the executables: each source file that rustc read, including the targets of
 watches. Files that the build generates in its own target directory are exempt.
 It runs the static-ELF check and writes `manifest.json` with the source and
 executable SHA-256 digests.
+`--architecture x86_64`, the default, builds all ten programs for
+`x86_64-unknown-linux-musl`. `--architecture aarch64` builds eight for
+`aarch64-unknown-linux-musl`: `nvx-console-pending`, `nvx-reseed`, `nvx-exit`,
+`nvx-device-io`, `nvx-managed-agent`, `nvx-ingress`, `nvx-time`, and `nvx-init`.
+The x86-only raw-memory `nvx-mmio-write` and x86 time probe are not packaged as
+ARM stubs. ELF machine identity must match the selected target as well as being
+static and non-executable-stack. Use separate output directories for each ISA;
+an existing manifest for another target is refused without replacing its files.
 It updates the output of an earlier build in place, adding `nvx-managed-agent`,
 `nvx-ingress`, `nvx-time`, `nvx-time-probe`, and `nvx-init` when that build's
 manifest does not record them and removing the retired `nvx-port-io` executable
@@ -1048,10 +1060,10 @@ when that build's manifest records it, and refuses any other existing
 ### `test-guest-binaries`
 
 ```text
-python3 scripts/nvx.py test-guest-binaries --binaries DIRECTORY
+python3 scripts/nvx.py test-guest-binaries --binaries DIRECTORY [--architecture ARCH]
 ```
 
-The Linux-only test command validates the ten binaries and build manifest,
+The Linux-only test command validates the selected ISA's binaries and build manifest,
 sets `NVX_GUEST_BINARIES`, and runs the musl `guest_tools` integration test
 against that exact directory.
 
@@ -1076,6 +1088,7 @@ python3 scripts/nvx.py build-guest
     [--guest {alpine,ubuntu,azurelinux,all}]
     [--native]
     [--debug-kernel]
+    [--jobs COUNT]
 ```
 
 By default, builds the guest kernel and initramfs with Docker. `--native`
@@ -1085,14 +1098,24 @@ Docker. `--guest all` also builds the Ubuntu EROFS distro layer and the
 sandbox scratch template; see [`build-scratch-template`](#build-scratch-template).
 `--debug-kernel` also builds the CI debug kernel, `build/vmlinux-debug`; see
 [Build](build.md#ci-debug-kernel).
+`--jobs` selects a positive maximum number of kernel build jobs in native
+and Docker production/debug builds. When omitted, the existing CPU-count
+default is unchanged; `--jobs 1` reaches `make -j1`.
 
 ### `build-kernel`
 
 ```console
-python3 scripts/nvx.py build-kernel [--debug]
+python3 scripts/nvx.py build-kernel [--architecture {x86_64,aarch64}] [--debug] [--jobs COUNT]
 ```
 
 Fetches, verifies, patches, and builds the pinned kernel directly on Linux.
+`--jobs` is a positive kernel compilation job limit; omission keeps the
+host CPU-count default.
+The architecture defaults explicitly to `x86_64`. `aarch64` uses `ARCH=arm64`,
+the current shared patch series followed by its ordered ARM platform/OF
+leaves, an architecture-qualified source cache, and the ARM inventory's
+`kernel/config-microvm-arm64` and derived record. It builds the raw
+`arch/arm64/boot/Image` into `build/aarch64/Image`, not an x86 `vmlinux`.
 `--debug` builds the CI debug variant instead of the production kernel. The
 production build also requires its configuration to be the one that the
 kernel feature inventory generates; see
@@ -1101,7 +1124,7 @@ kernel feature inventory generates; see
 ### `kernel-config`
 
 ```console
-python3 scripts/nvx.py kernel-config [--native] [--check]
+python3 scripts/nvx.py kernel-config [--architecture {x86_64,aarch64}] [--native] [--check]
 ```
 
 Generates `kernel/config-microvm` and `kernel/config-microvm.derived` from the
@@ -1111,11 +1134,15 @@ every other symbol. By default it generates them in the Docker build's image,
 whose toolchain builds CI's kernels; `--native` generates them on Linux with
 the host's toolchain. `--check` fails if the checked-in files differ instead of
 writing them. See [Kernel configuration](build.md#kernel-configuration).
+For `--architecture aarch64`, use `--native` with the matching Linux
+toolchain; the ARM inventory and Kconfig tree generate
+`kernel/config-microvm-arm64` and `kernel/config-microvm-arm64.derived`.
+The x86 checked-in inputs and default Docker generation remain unchanged.
 
 ### `check-kernel-config`
 
 ```console
-python3 scripts/nvx.py check-kernel-config
+python3 scripts/nvx.py check-kernel-config [--architecture {x86_64,aarch64}]
 ```
 
 Checks, without a kernel source, that every setting of the kernel feature
@@ -1123,15 +1150,21 @@ inventory holds in `kernel/config-microvm` and that every other symbol that it
 sets is recorded, with the same value, in `kernel/config-microvm.derived`. A
 newly enabled symbol that neither accounts for fails the check, which CI's
 quality job runs on every change and which `verify` runs too.
+An explicit `aarch64` selection checks the ARM inputs against the ARM feature
+binding; it does not interpret x86 configuration files as ARM configuration.
 
 ### `build-initramfs`
 
 ```console
-python3 scripts/nvx.py build-initramfs [--guest {alpine,ubuntu,azurelinux}]
+python3 scripts/nvx.py build-initramfs [--guest {alpine,ubuntu,azurelinux}] [--architecture ARCH]
 ```
 
 Builds the selected initramfs. Alpine and Ubuntu build directly on Linux; Azure
 Linux uses Docker. Alpine is the default.
+`--architecture` defaults to `x86_64`. `aarch64` currently selects native Linux
+Alpine production only, with its separately pinned ARM archive, loader, packages,
+eight Rust programs, and work/output namespace under `build/aarch64/`. An ARM
+selection for another guest is refused before a Docker build starts.
 
 ### `build-distro-layer`
 
@@ -1247,6 +1280,7 @@ python3 scripts/nvx.py build
     [--guest {alpine,ubuntu,azurelinux,all}]
     [--native]
     [--debug-kernel]
+    [--jobs COUNT]
     [--skip-restore]
     [--backend {kvm,mshv,whp}]
 ```
@@ -2039,12 +2073,14 @@ authenticates live or historical Ubuntu source indexes through signed
 python3 scripts/nvx.py create-linux-source-archive
     --config PATH
     --output PATH
+    [--architecture ARCH]
 ```
 
 Creates the deterministic Linux corresponding-source archive from the pinned
 kernel inputs and the generated kernel configuration. `--config` must name an
 existing generated kernel configuration, and `--output` names the archive to
-create.
+create. `--architecture` selects `x86_64` (the default) or `aarch64`, with that
+ISA's pinned source and ordered patch set.
 
 ### `package`
 

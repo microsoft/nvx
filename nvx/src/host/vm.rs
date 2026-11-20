@@ -38,7 +38,7 @@ use crate::host::paths::absolute;
 use crate::host::platform;
 use crate::host::report::{self, Report};
 use crate::host::restore::ReadyListener;
-use crate::host::runtime::{Hypervisor, Runtime, RuntimeIdentity};
+use crate::host::runtime::{GuestArchitecture, Hypervisor, Runtime, RuntimeIdentity};
 use crate::host::snapshot::{CaptureContext, HostTime, Snapshot};
 use crate::host::spawn;
 #[cfg(feature = "cli")]
@@ -103,6 +103,8 @@ pub(crate) fn generate_capability() -> Result<[u8; CAPABILITY_LEN]> {
 /// launch, not one newly generated from the directory. The `Debug` form hides the capability.
 #[derive(Clone)]
 pub struct SavedVm {
+    /// The guest instruction set selected when the VM was launched.
+    pub architecture: GuestArchitecture,
     /// The caller-owned private VM directory.
     pub vm_dir: VmDir,
     /// The control endpoint chosen at launch.
@@ -119,6 +121,7 @@ impl fmt::Debug for SavedVm {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SavedVm")
+            .field("architecture", &self.architecture)
             .field("vm_dir", &self.vm_dir)
             .field("endpoint", &self.endpoint)
             .field("capability", &Capability(self.capability))
@@ -128,14 +131,29 @@ impl fmt::Debug for SavedVm {
     }
 }
 
-/// Checks the saved runtime and process, returning the verified held process.
+/// Checks the saved guest architecture, runtime identity and process, returning the held process.
 ///
 /// Opens no endpoint and reads no runtime artifact. A different runtime is
 /// [`ErrorKind::RuntimeMismatch`](crate::ErrorKind::RuntimeMismatch), whose message names the
-/// differing identity parts. An exited recorded process is [`ErrorKind::Exited`](crate::ErrorKind::Exited),
+/// differing identity parts or guest architectures before any process or endpoint I/O.
+/// An exited recorded process is [`ErrorKind::Exited`](crate::ErrorKind::Exited),
 /// and an indeterminate process check is
 /// [`ErrorKind::Io`](crate::ErrorKind::Io), retaining its original I/O source.
-pub fn verify(saved: &SavedVm, runtime: &RuntimeIdentity) -> Result<Process> {
+pub fn verify(
+    saved: &SavedVm,
+    runtime: &RuntimeIdentity,
+    architecture: GuestArchitecture,
+) -> Result<Process> {
+    if saved.architecture != architecture {
+        return Err(Error::new(
+            crate::ErrorKind::RuntimeMismatch,
+            format!(
+                "the saved VM guest architecture {} does not match the current runtime's {}",
+                saved.architecture.as_str(),
+                architecture.as_str()
+            ),
+        ));
+    }
     if saved.runtime != *runtime {
         let parts: Vec<&str> = saved
             .runtime
@@ -180,7 +198,7 @@ pub struct Attached {
 /// into an [`Error`] gives, and that `ConnectionError` as its source, which tells, for example, a
 /// refused capability. A failure neither signals the VM nor changes the caller's saved values.
 pub fn attach(saved: &SavedVm, runtime: &Runtime, deadline: Instant) -> Result<Attached> {
-    let process = verify(saved, &runtime.identity)?;
+    let process = verify(saved, &runtime.identity, runtime.architecture)?;
     let connection =
         Connection::connect(&saved.endpoint, &saved.process, &saved.capability, deadline)?;
     Ok(Attached {
@@ -198,7 +216,7 @@ pub(crate) fn attach_with_transport(
     deadline: Instant,
     connect: impl FnOnce(&str, &ProcessRef, Instant) -> Result<Box<dyn transport::Transport>>,
 ) -> Result<HostConnection> {
-    verify(saved, &runtime.identity)?;
+    verify(saved, &runtime.identity, runtime.architecture)?;
     let transport = connect(&saved.endpoint, &saved.process, deadline)?;
     Ok(HostConnection::attach(
         transport,
@@ -323,6 +341,8 @@ pub struct VmmCommand {
 /// Dropping a successful preparation closes its files but leaves its output paths to the caller.
 #[derive(Debug)]
 pub struct Prepared {
+    /// The guest instruction set checked for this launch.
+    architecture: GuestArchitecture,
     /// The executable checked during creation.
     program: PathBuf,
     /// The private VM directory of the launch.
@@ -354,6 +374,11 @@ pub struct Prepared {
 }
 
 impl Prepared {
+    /// Returns the explicitly selected guest instruction set.
+    pub fn architecture(&self) -> GuestArchitecture {
+        self.architecture
+    }
+
     /// Returns the effective NIC, or none when the launch attaches no NIC.
     ///
     /// A cold launch resolves an omitted address to
@@ -662,6 +687,19 @@ pub fn create(
     from: Option<&Snapshot>,
     dir: &VmDir,
 ) -> Result<Prepared> {
+    if runtime.architecture == GuestArchitecture::Aarch64
+        && (from.is_some()
+            || config.boot.as_ref().is_some_and(|boot| {
+                boot.capture.is_some()
+                    || boot
+                        .memory_capacity_mib
+                        .is_some_and(|capacity| capacity != config.memory_mib)
+            }))
+    {
+        return Err(Error::unsupported(
+            "AArch64 supports cold boot only; capture, restore, and memory growth are unsupported",
+        ));
+    }
     if let Some(snapshot) = from {
         if config.boot.is_some() {
             return Err(Error::unsupported(
@@ -720,6 +758,7 @@ pub fn create(
         })
     };
     let runtime = Runtime {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         openvmm: resolve(&runtime.openvmm)?,
         kernel: resolve(&runtime.kernel)?,
         initramfs: resolve(&runtime.initramfs)?,
@@ -850,6 +889,7 @@ pub fn create(
     })();
     match checked {
         Ok((capability, arguments, nic, capture_context)) => Ok(Prepared {
+            architecture: runtime.architecture,
             program: runtime.openvmm.clone(),
             dir: dir.clone(),
             working_dir,

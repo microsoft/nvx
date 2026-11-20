@@ -1,6 +1,9 @@
 use proptest::prelude::*;
 
 use super::*;
+use crate::guest::sys::{ClockAdjustment, FrequencyHold};
+use crate::guest::time::model::bound_to_ppb;
+use crate::guest::time::wire::tests::valid_sample;
 use crate::protocol::cmdline::tests::model;
 
 /// A valid packet header without memory ranges, of generation 1.
@@ -83,21 +86,6 @@ fn packets_accept_a_downtime_of_up_to_365_days() {
         with_downtime(u64::MAX).unwrap_err(),
         PacketError::Downtime(u64::MAX)
     );
-}
-
-/// A valid time sample of generation 4, as OpenVMM's `TimeSample::encode` writes it.
-fn valid_sample() -> [u8; SAMPLE_SIZE] {
-    let mut bytes = [0; SAMPLE_SIZE];
-    bytes[..4].copy_from_slice(&[1, 8, 1, 0]);
-    bytes[4..8].copy_from_slice(&4_u32.to_le_bytes());
-    bytes[8..16].copy_from_slice(&1_790_841_600_123_456_789_u64.to_le_bytes());
-    bytes[16..24].copy_from_slice(&123_456_789_u64.to_le_bytes());
-    bytes[24..28].copy_from_slice(&640_u32.to_le_bytes());
-    bytes[28..32].copy_from_slice(&3_u32.to_le_bytes());
-    bytes[32..40].copy_from_slice(&(-6_552_945_i64).to_le_bytes());
-    bytes[40..44].copy_from_slice(&66_u32.to_le_bytes());
-    bytes[44..48].copy_from_slice(&u32::MAX.to_le_bytes());
-    bytes
 }
 
 /// Returns a valid packet header that carries network settings, without memory ranges, of
@@ -274,76 +262,6 @@ fn packets_refuse_activation_records_beyond_the_bounds() {
     }
 }
 
-#[test]
-fn samples_decode_every_field() {
-    assert_eq!(
-        TimeSample::parse(&valid_sample()),
-        Ok(TimeSample {
-            flags: 8,
-            generation: 4,
-            utc_ns: 1_790_841_600_123_456_789,
-            tsc: 123_456_789,
-            pairing_ns: 640,
-            host: HostClock {
-                status: HostClockStatus::Synchronized,
-                disruption: 3,
-                correction: -6_552_945,
-                correction_bound: Some(66),
-                max_error_us: None,
-            },
-        })
-    );
-    assert_eq!(
-        TimeSample::parse(&valid_sample()[..47]),
-        Err(TimeSampleError::Incomplete)
-    );
-}
-
-#[test]
-fn samples_check_their_version_flags_status_and_time() {
-    let mutated = |offset: usize, bytes: &[u8]| {
-        let mut sample = valid_sample();
-        sample[offset..offset + bytes.len()].copy_from_slice(bytes);
-        TimeSample::parse(&sample).unwrap_err().to_string()
-    };
-    assert_eq!(mutated(0, &[2]), "time sample version is 2");
-    assert_eq!(mutated(1, &[1]), "time sample flags 0x01 or reserved 0x00");
-    assert_eq!(mutated(3, &[1]), "time sample flags 0x08 or reserved 0x01");
-    assert_eq!(mutated(2, &[4]), "time sample host status is 4");
-    assert_eq!(mutated(8, &[0; 8]), "time sample UTC 0 is invalid");
-    assert_eq!(
-        mutated(8, &u64::MAX.to_le_bytes()),
-        format!("time sample UTC {} is invalid", u64::MAX)
-    );
-}
-
-#[test]
-fn the_test_hook_flag_reports_host_overrides() {
-    let mut sample = valid_sample();
-    assert!(TimeSample::parse(&sample).unwrap().test_hooks());
-    sample[1] = 0;
-    assert!(!TimeSample::parse(&sample).unwrap().test_hooks());
-}
-
-#[test]
-fn the_host_error_counts_only_while_a_time_service_synchronizes_the_host() {
-    let host = |status, max_error_us| HostClock {
-        status,
-        max_error_us,
-        ..HostClock::default()
-    };
-    assert_eq!(
-        host(HostClockStatus::Synchronized, Some(12_500)).error_us(),
-        12_500
-    );
-    assert_eq!(host(HostClockStatus::Synchronized, None).error_us(), 0);
-    assert_eq!(
-        host(HostClockStatus::FreeRunning, Some(16_000_000)).error_us(),
-        0
-    );
-    assert_eq!(host(HostClockStatus::Unknown, Some(5)).error_us(), 0);
-}
-
 /// A sample of guest TSC 1,000,000 at host UTC 10^18, paired within 500 ns.
 fn paired_sample(tsc: u64) -> TimeSample {
     TimeSample {
@@ -485,56 +403,6 @@ fn generation_ids_are_exact_hexadecimal() {
     assert_eq!(parse_hex::<2>(b"+aff"), None);
     assert_eq!(parse_hex::<2>(b"0agf"), None);
     assert_eq!(format_hex(&[0x0a, 0xff]), "0aff");
-}
-
-#[test]
-fn correction_boundary_matches_the_abi() {
-    assert!(matches!(
-        plan_correction(128_000_000, 10, true, 0, 0),
-        ClockAdjustment::Step { .. }
-    ));
-    assert!(matches!(
-        plan_correction(127_999_999, 10, true, 0, 0),
-        ClockAdjustment::Slew { .. }
-    ));
-    assert_eq!(
-        plan_correction(-1_128_000_000, 0, false, 0, 0),
-        ClockAdjustment::Step {
-            seconds: -2,
-            nanoseconds: 872_000_000,
-        }
-    );
-}
-
-#[test]
-fn a_slew_holds_the_frequency_with_the_host_error() {
-    assert_eq!(
-        plan_correction(-1_500, 2_100, false, 13_107_200, 12_500),
-        ClockAdjustment::Slew {
-            offset_ns: -1_500,
-            time_constant: 6,
-            hold: FrequencyHold {
-                scaled_ppm: 13_107_200,
-                maximum_error_us: 4 + 12_500,
-                estimated_error_us: 3,
-            },
-        }
-    );
-    assert_eq!(
-        frequency_hold(0, 524, -3_673, 0),
-        FrequencyHold {
-            scaled_ppm: -3_673,
-            maximum_error_us: 1,
-            estimated_error_us: 1,
-        }
-    );
-}
-
-#[test]
-fn offsets_split_toward_negative_infinity() {
-    assert_eq!(split_offset(-1), (-1, 999_999_999));
-    assert_eq!(split_offset(1_500_000_000), (1, 500_000_000));
-    assert_eq!(split_offset(i64::MIN), (-9_223_372_037, 145_224_192));
 }
 
 #[test]

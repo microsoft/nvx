@@ -75,7 +75,9 @@ use crate::host::filesystem::{
     self, ExportPlan, ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target,
 };
 use crate::host::platform::{self, Transport};
-use crate::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
+use crate::host::runtime::{
+    ArtifactIdentity, GuestArchitecture, LaunchOptions, Runtime, RuntimeIdentity,
+};
 use crate::host::sandbox::mount::{
     MountAccess, MountKind, MountOwner, POLICY_KINDS, PolicyKind, mount_kind, parse_mount_value,
     require_mount_owner_supported,
@@ -91,6 +93,8 @@ pub(super) const SYNTAX: Syntax = Syntax {
     help: "\
 options:
   -h, --help            show this help message and exit
+  --architecture {x86_64,aarch64}
+                        guest ISA (default: x86_64; never inferred from the host)
   --guest {alpine,ubuntu,azurelinux}
   --hypervisor {auto,whp,kvm,mshv}
   --machine {microvm}
@@ -200,7 +204,8 @@ const RESTORE_INPUTS: [&str; 11] = [
 /// The options of a cold boot that a restore refuses: its snapshot fixes the guest, the processors,
 /// the CPU profile, and the NIC's address, and its sandbox takes no shares, kernel command line,
 /// outcome report, or dry run.
-const COLD_ONLY: [&str; 13] = [
+const COLD_ONLY: [&str; 14] = [
+    "--architecture",
     "--guest",
     "--memory-capacity-mib",
     "--processors",
@@ -218,7 +223,8 @@ const COLD_ONLY: [&str; 13] = [
 
 /// The options of `nvx run` but [`RESTORE_INPUTS`], which parse with the defaults of the
 /// former `nvx.py run`.
-const OPTIONS: [Spec; 27] = [
+const OPTIONS: [Spec; 28] = [
+    Spec::one("--architecture"),
     Spec::one("--guest"),
     Spec::one("--hypervisor"),
     Spec::one("--machine"),
@@ -264,6 +270,8 @@ pub(super) fn options() -> Vec<Spec> {
 /// The parsed options of `nvx run`: the namespace of the former `nvx.py run`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Options {
+    /// Explicit guest ISA, retaining the existing x86-64 default.
+    pub(crate) architecture: GuestArchitecture,
     /// `--guest`, Alpine by default.
     pub(crate) guest: Guest,
     /// `--hypervisor`, `auto` by default.
@@ -307,6 +315,7 @@ pub(crate) struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            architecture: GuestArchitecture::X86_64,
             guest: Guest::Alpine,
             hypervisor: "auto",
             machine: "microvm",
@@ -348,6 +357,12 @@ impl Receiver for Options {
         self.given.push(name);
         let text = || value.unwrap_or_default().to_owned();
         match name {
+            "--architecture" => {
+                self.architecture = match choice(&text(), &["x86_64", "aarch64"])? {
+                    "aarch64" => GuestArchitecture::Aarch64,
+                    _ => GuestArchitecture::X86_64,
+                };
+            }
             "--guest" => {
                 let guest = choice(&text(), &GUESTS)?;
                 self.guest = Guest::ALL
@@ -398,6 +413,24 @@ pub(super) fn parse(arguments: &[String]) -> Result<(Options, Vec<String>)> {
 fn check(options: &Options) -> Result {
     let refused = |message: String| Err(Exit::error(ErrorCode::Unsupported, message));
     let restore = options.restore_snapshot.is_some();
+    if options.architecture == GuestArchitecture::Aarch64 {
+        if !cfg!(all(windows, target_arch = "aarch64")) || hypervisor(options.hypervisor) != "whp" {
+            return refused(
+                "AArch64 cold boot initially supports native Windows ARM64/WHP only".to_owned(),
+            );
+        }
+        if restore
+            || options.guest == Guest::AzureLinux
+            || options
+                .memory_capacity_mib
+                .is_some_and(|capacity| capacity != memory_mib(options))
+        {
+            return refused(
+                "AArch64 supports Alpine/Ubuntu cold boot only; restore and memory growth are unsupported"
+                    .to_owned(),
+            );
+        }
+    }
     for option in &options.given {
         if restore && COLD_ONLY.contains(option) {
             return refused(format!(
@@ -443,14 +476,19 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     // arguments are built again once the artifacts are in place, as a share's kind depends on what
     // its host path holds, which a download may install.
     let refused = cold_preflight(&options, &rules).is_err();
-    let located = locate(root)?;
-    let hold = if refused {
+    let mut located = locate(root)?;
+    located.dir = located.dir.with_architecture(options.architecture)?;
+    let hold = if refused || options.architecture == GuestArchitecture::Aarch64 {
         download::hold(&located)?
     } else {
         download::ensure(&located, Some(options.guest), options.hypervisor)?
     };
     let Located { dir, openvmm } = located;
     require_artifact(&openvmm, "OpenVMM release binary")?;
+    #[cfg(windows)]
+    if options.architecture == GuestArchitecture::Aarch64 {
+        crate::host::artifacts::check_arm64_pe(&openvmm)?;
+    }
     run_cold(dir, openvmm, &options, &rules, hold)
 }
 
@@ -672,7 +710,21 @@ fn cold_vm_config(
         }),
         filesystem,
     };
-    if let Some(export) = &config.filesystem {
+    if options.architecture == GuestArchitecture::Aarch64 {
+        let length = arm_effective_command_line(&config)
+            .map_err(error_with_cause)?
+            .len()
+            + 1;
+        if length > 2048 {
+            return Err(Exit::error(
+                ErrorCode::Unsupported,
+                format!(
+                    "the AArch64 kernel command line needs {length} bytes including platform, \
+                     CPU/control, network/export tokens and the NUL; its limit is 2048 bytes"
+                ),
+            ));
+        }
+    } else if let Some(export) = &config.filesystem {
         let line = config.kernel_command_line().map_err(error_with_cause)?;
         if line.len() + export_tokens(export).len() + 1 > COMMAND_LINE_BUDGET {
             return Err(Exit::error(
@@ -684,6 +736,51 @@ fn cold_vm_config(
     }
     config.check_command_line().map_err(error_with_cause)?;
     Ok(config)
+}
+
+/// Projects the selected VMM's DT boot additions; no x86 device-discovery tokens are appended.
+fn arm_effective_command_line(config: &VmConfig) -> crate::Result<String> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use crate::host::network::{self, Access, HostLoopback};
+
+    let mut line = format!(
+        "earlycon=nvx-mmio,0xd1000000 console=hvc1 reboot=t panic=-1 {} \
+         nr_cpus={} nvx_control_tty=hvc2",
+        config.kernel_command_line()?,
+        config.processors,
+    );
+    if let Some(network) = &config.network {
+        let guest = network.cold_nic()?.guest_network;
+        let mask = u32::MAX << (32 - u32::from(guest.prefix_len()));
+        let gateway = Ipv4Addr::from((u32::from(guest.address()) & mask) + 1);
+        let embed = |address: Ipv4Addr| {
+            Ipv6Addr::from((0xfd00_u128 << 112) | u128::from(u32::from(address)))
+        };
+        line.push_str(&format!(
+            " virtnet_ip={} virtnet_mask={} virtnet_gw={gateway}",
+            guest.address(),
+            Ipv4Addr::from(mask),
+        ));
+        if let Some(server) = network::dns_server(&network.policy, gateway, Some(embed(gateway)))? {
+            line.push_str(&format!(" virtnet_dns={server}"));
+        }
+        line.push_str(&format!(
+            " virtnet_ip6={}/{} virtnet_gw6={}",
+            embed(guest.address()),
+            96 + guest.prefix_len(),
+            embed(gateway),
+        ));
+        if network.policy.ingress == Access::Allow {
+            line.push_str(" virtnet_ingress=allow");
+        } else if network.policy.host_loopback == HostLoopback::Allow {
+            line.push_str(" virtnet_ingress=host-loopback");
+        }
+    }
+    if let Some(export) = &config.filesystem {
+        line.push_str(&export_tokens(export));
+    }
+    Ok(line)
 }
 
 fn remove_vm_directory(dir: &VmDir) -> Result {
@@ -1145,6 +1242,7 @@ fn run_cold(
     // Cold CLI runs neither capture nor reattach; this per-invocation identity is not persisted.
     let identity = ArtifactIdentity::new(format!("unrecorded-run:{name}"))?;
     let runtime = Runtime {
+        architecture: options.architecture,
         openvmm,
         kernel,
         initramfs,

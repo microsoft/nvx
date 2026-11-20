@@ -3,9 +3,13 @@ use std::io::{self, Read, Write};
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
-use crate::guest::init::{self, Capture, CaptureStep, RestoreHandoff, Restored, Runtime};
+use crate::guest::init::Runtime;
+#[cfg(target_arch = "x86_64")]
+use crate::guest::init::{self, Capture, CaptureStep, RestoreHandoff, Restored};
 use crate::guest::nvxs::{GuestConnection, GuestConnectionError};
+#[cfg(target_arch = "x86_64")]
 use crate::guest::restore::{GuestRestoreAction, GuestRestoreState};
+#[cfg(target_arch = "x86_64")]
 use crate::guest::snapshot::{Captured, Disposition};
 use crate::guest::sys::{self, Errno, FileDescriptor, Pollable};
 use crate::protocol::nvxs::{GuestEvent, RecordError, RecordType, SessionError};
@@ -30,6 +34,7 @@ pub(crate) struct Session<'r> {
     /// The guest's NVXS connection on the owned control-console descriptor.
     connection: GuestConnection<Control<'r>>,
     /// Present only for nvx-init, never the old managed agent.
+    #[cfg(target_arch = "x86_64")]
     capture: Option<Capture>,
     /// Error of the connection's latest failure, which a connection that a failure ended reports
     /// again.
@@ -288,22 +293,26 @@ impl<'r> Session<'r> {
                 queue: RefCell::new(Vec::new()),
                 queueing: Cell::new(false),
             }),
+            #[cfg(target_arch = "x86_64")]
             capture: None,
             last_error: None,
         }
     }
 
     /// Enables only init's capture path on this existing session.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn with_capture(mut self, capture: Capture) -> Self {
         self.capture = Some(capture);
         self
     }
 
     /// Whether the serving caller is init rather than the old agent.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn has_capture(&self) -> bool {
         self.capture.is_some()
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn has_restored(&self) -> bool {
         self.capture
             .as_ref()
@@ -311,22 +320,26 @@ impl<'r> Session<'r> {
     }
 
     /// Whether root-dependent requests must remain refused.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn rootless(&self) -> bool {
         self.capture.as_ref().is_some_and(Capture::rootless)
     }
 
     /// Whether execution cleanup must return the accepted capture request.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn capture_pending(&self) -> bool {
         self.capture.as_ref().is_some_and(Capture::pending)
     }
 
     /// The fatal capture status that the PID-1 caller must use.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn capture_status(&self) -> Option<u8> {
         self.capture.as_ref().and_then(Capture::shutdown_status)
     }
 
     /// The status of the failed restored activation's class, which the PID-1 caller uses once
     /// the session has failed, or `None` without a restored activation that failed.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn activation_status(&mut self) -> Option<u8> {
         self.capture
             .as_mut()?
@@ -336,6 +349,7 @@ impl<'r> Session<'r> {
     }
 
     /// Refuses rooted callers before validating the flag or reserving workload cleanup.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn queue_capture(
         &mut self,
         request: protocol::AppFrame<'_>,
@@ -374,11 +388,13 @@ impl<'r> Session<'r> {
     }
 
     /// Calls init's existing repeated sweep, never a host-side process sweep.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn sweep_capture(&self) -> Result<(), Errno> {
         self.capture.as_ref().ok_or(Errno::EPERM)?.sweep()
     }
 
     /// Acknowledges, captures synchronously, and handles the result on this connection.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn finish_capture(&mut self) -> Result<Option<super::dispatch::Outcome>, Errno> {
         self.finish_capture_with(|capture, session| {
             capture.perform(|request_id| session.send_app(protocol::APP_READY, request_id, 0, &[]))
@@ -386,6 +402,7 @@ impl<'r> Session<'r> {
     }
 
     /// Keeps capture state across the operation and the existing session's RESET.
+    #[cfg(target_arch = "x86_64")]
     fn finish_capture_with(
         &mut self,
         operation: impl FnOnce(&mut Capture, &mut Self) -> Result<Option<CaptureStep>, Errno>,
@@ -456,6 +473,7 @@ impl<'r> Session<'r> {
     /// Applies the record that the restored clone's guest restore accepted from its restore
     /// packet, before the host asks for Ready, and returns the space's handoff, or `None` without
     /// a record to apply.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn activate(&mut self) -> Result<Option<RestoreHandoff>, Errno> {
         self.activate_with(|restored, session| {
             let runtime = session
@@ -472,6 +490,7 @@ impl<'r> Session<'r> {
 
     /// Applies the accepted record once, with `apply`, and completes the guest restore with its
     /// result, whose Ready awaits the host's request.
+    #[cfg(target_arch = "x86_64")]
     fn activate_with<R>(
         &mut self,
         apply: impl FnOnce(&mut Restored, &mut Self) -> crate::Result<Option<R>>,
@@ -508,6 +527,7 @@ impl<'r> Session<'r> {
 
     /// Answers the host's request for Ready, `request`, a `PING`, of the restored clone, with
     /// Ready, which carries what its guest restore established once the record applied.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn ready(&mut self, request: protocol::AppFrame<'_>) -> Result<(), Errno> {
         let mut capture = self.capture.take().ok_or(Errno::ENOTSUP)?;
         let result = (|| {
@@ -528,6 +548,7 @@ impl<'r> Session<'r> {
     }
 
     /// Takes the first valid mapped EXEC as the start transition, never starting twice.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn start_activation(&mut self) -> Result<(), Errno> {
         if let Some(restored) = self
             .capture
@@ -615,6 +636,7 @@ impl<'r> Session<'r> {
     pub(crate) fn next_event(&mut self) -> Result<Event, ReceiveFailure> {
         match self.connection.next_event() {
             Ok(GuestEvent::Reset(_)) => {
+                #[cfg(target_arch = "x86_64")]
                 if let Some(capture) = &mut self.capture {
                     capture.reset();
                     if let Some(restored) = &mut capture.restored {
@@ -781,6 +803,7 @@ impl<'r> Session<'r> {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn activation_failure(error: impl std::fmt::Display) -> Errno {
     init::report_activation(error);
     Errno::EPROTO
@@ -869,5 +892,5 @@ fn data_failure(kind: DataFailureKind, status: i32) -> DataFailure {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests;

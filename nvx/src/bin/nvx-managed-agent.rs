@@ -4,14 +4,19 @@
 //! `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME` starts the agent.
 //! See `nvx::guest::managed_agent`.
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn main() -> std::process::ExitCode {
     nvx::guest::managed_agent::main()
 }
 
-// The agent runs only in NVX's x86_64 Linux guests. Elsewhere this stub fails, so that every
-// target that CI checks with `--all-features` still builds.
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+// Unsupported targets fail rather than running a partial agent.
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 fn main() -> std::process::ExitCode {
     std::process::ExitCode::FAILURE
 }

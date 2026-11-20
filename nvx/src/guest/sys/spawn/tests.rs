@@ -21,14 +21,13 @@ pub(crate) const CAP_SETGID: u32 = 6;
 pub(crate) const CAP_SETUID: u32 = 7;
 
 /// Capability to mount, and to enter new namespaces.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const CAP_SYS_ADMIN: u32 = 21;
 
 /// Capability to lower nice values.
-#[cfg(target_arch = "x86_64")]
 pub(crate) const CAP_SYS_NICE: u32 = 23;
 
 /// Capability to override resource limits, and to lower an out-of-memory score adjustment.
-#[cfg(target_arch = "x86_64")]
 pub(crate) const CAP_SYS_RESOURCE: u32 = 24;
 
 /// Returns whether the calling thread's effective set holds `capability`, because tests whose
@@ -196,10 +195,13 @@ fn the_report_writer_is_raised_above_the_standard_streams() {
     ) {
         return;
     }
+    // Ubuntu can use /nonexistent as a real home directory; this target must not exist.
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = sys::path_c_string(&temporary.path().join("missing-executable")).unwrap();
     // With standard input and output closed, the report's pipe takes their numbers, and
     // placing the child's standard output would replace a writer that kept number 1.
     let streams = ClosedStreams::new(&[0, 1]);
-    let mut spec = ChildSpec::new(c"/nonexistent".to_owned(), vec![c"nonexistent".to_owned()]);
+    let mut spec = ChildSpec::new(executable, vec![c"nonexistent".to_owned()]);
     spec.streams[1] = Some(descriptor());
     let outcome = run(spec);
     drop(streams);

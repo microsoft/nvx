@@ -217,6 +217,7 @@ fn version_2_has_no_features_request() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn version_2_carries_capture_and_a_restored_clone_s_ready_with_their_payloads() {
     let config = AgentConfig::for_test();
     let mappings = HostMappings::announced(0);

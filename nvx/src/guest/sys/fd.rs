@@ -386,6 +386,7 @@ impl<'a> CreatedFile<'a> {
     }
 
     /// Closes the file and keeps it, even when closing fails, which it reports.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn keep(mut self) -> Result<(), Errno> {
         self.path = None;
         self.descriptor.take().map_or(Ok(()), FileDescriptor::close)
@@ -425,6 +426,7 @@ pub(crate) fn rename(source: &CStr, destination: &CStr) -> Result<(), Errno> {
 }
 
 /// Returns the host page size when it is a positive power of two.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn page_size() -> Option<usize> {
     nix::unistd::sysconf(nix::unistd::SysconfVar::PAGE_SIZE)
         .ok()

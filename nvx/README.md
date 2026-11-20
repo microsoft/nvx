@@ -80,7 +80,7 @@ nvx/
 │                    through a launcher of the caller's own
 ├── tests/           the crate's integration tests, with their fixtures, and the conformance
 │                    vectors of the wire formats and of a snapshot's key, in vectors/
-└── public-api/      the crate's public API on Linux and on Windows, which CI checks
+└── public-api/      the crate's public API on Linux x86-64/ARM64 and Windows, which CI checks
 ```
 
 The [module diagrams](../doc/modules/README.md) show the crate's modules, the
@@ -120,7 +120,7 @@ changes only when the module's purpose does.
 | [`nvx::guest::mappings`](#nvxguestmappings) | `Mapping` and `MappingTable`: host mappings, and the account of a host's mapping table, for any guest init or agent |
 | [`nvx::guest::control`](#nvxguestcontrol) | `Connection`: the guest's end of its VM's control connection, ordered bytes to and from the host's program, over a stream such as the control console |
 | [`nvx::guest::terminal`](#nvxguestterminal) | `Terminal`: the terminal on which a guest agent serves its session, such as the VM's control console |
-| [`nvx::guest::time`](#nvxguesttime) | x86_64: the boot steps of NVX time ABI v1 as typed calls in the caller's process, for any guest init or agent |
+| [`nvx::guest::time`](#nvxguesttime) | The boot steps of NVX time ABI v1 as typed calls in the caller's process, for an x86-64 or ARM64 guest init or agent |
 | [`nvx::guest::snapshot`](#nvxguestsnapshot) | x86_64: bounded Fresh capture with inline restore repair and staged failure dispositions, without execution control |
 | [`nvx::guest::restore`](#nvxguestrestore) | x86_64: fence-free guest restore of each clone that its capture repaired |
 | [`nvx::guest::reseed`](#nvxguestreseed) | A restore's fresh entropy, and the reseed of the kernel's random number generator with it |
@@ -385,6 +385,11 @@ it started under the earlier one. `differences` names the `IdentityPart`s in
 which two identities differ. A caller saves it with each VM, in a `SavedVm`,
 which `vm::verify` checks against the current one.
 
+`Runtime.architecture` is an explicit `GuestArchitecture`, `X86_64` or
+`Aarch64`, selected from guest staging metadata. It is not inferred from the
+host, profile spelling, file name, or opaque identity. A caller saves the same
+selection with its VM.
+
 `Hypervisor` names the hypervisor that OpenVMM runs a VM on: KVM or MSHV on
 Linux, or WHP on Windows. It displays, parses, and serializes as its OpenVMM
 spelling, `kvm`, `mshv`, or `whp`. `Hypervisor::from_env_or_default` reads one
@@ -470,8 +475,9 @@ keeps the process.
 
 `SavedVm` bundles what a caller saves to find its VM again: the `VmDir`, the
 control endpoint, the capability's bytes, the process's `ProcessRef`, and the
-`RuntimeIdentity`. The library neither serializes nor locates them. `verify`
-compares the runtime identity, and fails with `ErrorKind::RuntimeMismatch`,
+`RuntimeIdentity` and explicit `GuestArchitecture`. The library neither
+serializes nor locates them. `verify(saved, identity, architecture)`
+compares the guest ISA and runtime identity, and fails with `ErrorKind::RuntimeMismatch`,
 which names the parts that differ, before it opens the process, then returns
 the held `Process`. `attach` also connects to the VM, as `Launched::connect`
 does, with the saved capability, and returns an `Attached` with the process
@@ -841,12 +847,19 @@ serve their sessions on it.
 
 ### `nvx::guest::time`
 
-x86_64: `TimeAbi`, the boot steps of NVX time ABI v1 as typed calls in the
+`TimeAbi`, the boot steps of NVX time ABI v1 on Linux x86-64 and ARM64, in the
 caller's process, for any guest init or agent: the cold-boot time step and,
 separately, the start of the time daemon in a child process that the caller
 supervises, and the VM generation ID.
 
-The ABI's capture request, which repairs the time of a restore, and the
+ARM uses its checked CPU/time binding and full-Hz architectural counter through
+the restricted platform device. It does not admit capture or restore. x86 keeps
+its existing TSC conversion and recorded-rate contract: restore consumes nonzero
+recorded TSC/LAPIC rates and seeds the replaceable TSC cache without another
+frequency-MSR read or profile admission. Hardware conformance checks retain
+their lifecycle order.
+
+On x86-64, the ABI's capture request, which repairs the time of a restore, and the
 restore's finish are private: `nvx::guest::snapshot::capture` runs them, and
 hands the restore's fresh entropy to its repair in memory, as an owned `Seed`,
 while `nvx-time capture` writes it to a file.
@@ -866,11 +879,12 @@ that owns the VM's exit status and shutdown selects, the call fails with the
 and the time daemon enforces the ABI all the same, while the single-call
 snapshot capture below prepares strictly.
 
-A call takes the permission for OpenVMM's ports on the calling thread for each
+An x86-64 call takes permission for OpenVMM's ports on the calling thread for each
 port transaction alone, and fails with `TimeError::PortRelease` if the thread
 may still hold some of it, which a process that it started would inherit, and
-from which NVX's guest programs start none. No call waits for a child that it
-did not start.
+from which NVX's guest programs start none. ARM calls instead use the restricted
+`/dev/nvx-platform` descriptor, without PIO, MSRs or `/dev/mem`. No call waits for
+a child that it did not start.
 
 `nvx-time` runs its steps through them.
 
@@ -2028,13 +2042,13 @@ as `nvx-snapshot` does.
 | `nvx-console-pending DEVICE` | Prints the number of bytes waiting to be read from a device, such as a console |
 | `nvx-mmio-write ADDRESS VALUE` | Stores a 32-bit value at a physical address through `/dev/mem` (x86_64) |
 | `nvx-reseed [--generation-only] SEED_FILE [PREVIOUS]`, `nvx-reseed --sample` | Reseeds the kernel's random number generator from a seed file and checks its VM generation ID, or prints a random sample |
-| `nvx-exit [CODE]` | Stops the VM with an 8-bit exit code through OpenVMM's control port 0x604 (x86_64) |
-| `nvx-device-io file ...`, `nvx-device-io network ...`, `nvx-device-io map PATH TEXT` | The benchmark helper that measures file and UDP round-trip I/O and prints one JSON line, and reports a file benchmark's progress on stderr; `map` writes TEXT at the start of a file through a shared mapping and holds the dirty mapping until its standard input ends, for the microVM scenarios (x86_64) |
-| `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME` | Serves the managed control session and supervises sequential workloads (x86_64) |
+| `nvx-exit [CODE]` | Stops the VM with an 8-bit exit code through x86 control port 0x604 or the restricted ARM platform MMIO driver |
+| `nvx-device-io file ...`, `nvx-device-io network ...`, `nvx-device-io map PATH TEXT` | The benchmark helper that measures file and UDP round-trip I/O and prints one JSON line, and reports a file benchmark's progress on stderr; `map` writes TEXT at the start of a file through a shared mapping and holds the dirty mapping until its standard input ends, for the microVM scenarios |
+| `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME` | Serves the managed control session and supervises sequential workloads |
 | `nvx-ingress [inherit\|start] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that the caller bound to one after the clone's process-free application; `start` binds such a socket and starts `inherit` on it in a session of its own, then exits once its program runs, or with status 1 if it does not start, for a guest agent that cannot hold the announcer; `test DIRECTORY` runs synthetic procfs snapshots |
-| `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v1: runs its conformance checks, repairs the wall clock after a restore, publishes the time state, and runs the discipline and violation-watcher daemon; `test NAME ...` runs its decoder and process test hooks (x86_64) |
+| `nvx-time [--report-only] COMMAND` | Enforces the cold-boot time ABI, publishes time state, and runs the discipline and violation-watcher daemon; x86-64 also supports capture/restore repair and `test NAME ...` decoder/process hooks |
 | `nvx-time-probe latency\|warp\|clock ...` | Diagnoses clock-read latency, cross-CPU TSC warp and offset, the clocks, CPUID, clock events, kernel messages, and optionally MSRs (x86_64) |
-| `nvx-init TIME_DAEMON [ANNOUNCER]` | Takes PID 1 over from a layered root's early boot, with its time daemon and optional announcer: gives itself and them an out-of-memory score adjustment of -1000 and a nice value of -10, collects every child's status, and, after `sync`, ends the VM with status 125 when a helper ends, 0 on `SIGTERM`, or the status of a failed guest restore's class; elsewhere it exits with 2 (x86_64) |
+| `nvx-init TIME_DAEMON [ANNOUNCER]` | Takes PID 1 over from a layered root's early boot, with its time daemon and optional announcer: gives itself and them an out-of-memory score adjustment of -1000 and a nice value of -10, collects every child's status, and, after `sync`, ends the VM with status 125 when a helper ends, 0 on `SIGTERM`, or the status of a failed x86-64 guest restore's class; elsewhere it exits with 2 |
 
 Each binary's command line, exit statuses, and byte output are compatibility
 contracts; the [`nvx::guest`](src/guest/mod.rs) documentation describes each
@@ -2236,7 +2250,8 @@ without default features, rustdoc with
 warnings denied, the minimum supported Rust version (1.89), and a macOS check.
 On Linux, it also lints, builds, and tests the guest binaries through `nvx.py`,
 and checks the crate's public API against its snapshots,
-[`public-api/linux.txt`](public-api/linux.txt) and
+[`public-api/linux.txt`](public-api/linux.txt),
+[`public-api/linux-aarch64.txt`](public-api/linux-aarch64.txt) and
 [`public-api/windows.txt`](public-api/windows.txt), which list each public item
 of the crate by kind and path, hidden items marked. A change to the public API
 updates them, as [Rust crates](../doc/ci.md#rust-crates) describes:

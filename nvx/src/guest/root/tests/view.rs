@@ -2,6 +2,7 @@ use super::*;
 use crate::ErrorKind;
 use crate::guest::view::{self as vm_view, MACHINE_ID_FILE, RESOLVER_FILE};
 use crate::protocol::view::{MachineIdMode, View};
+#[cfg(target_arch = "x86_64")]
 use std::error::Error as _;
 
 #[test]

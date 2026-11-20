@@ -147,6 +147,7 @@ use crate::gpt::{Expected, GptError, Partition};
 use crate::protocol::root::RAM_UPPER_CAPS;
 use crate::uuid::Uuid;
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) use self::block::window_directories;
 pub(crate) use self::kernel::Paths;
 pub(crate) use self::share::{ShareChild, ShareKind, ShareRefusal};
@@ -277,6 +278,7 @@ pub(crate) enum DeviceStep {
     Status,
     /// Rereading the partition table of the GPT disk on it, which a clone asks of the kernel before
     /// it assembles its root.
+    #[cfg(any(test, target_arch = "x86_64"))]
     Reread,
 }
 
@@ -290,6 +292,7 @@ impl fmt::Display for DeviceStep {
             Self::Access => "read the access mode of",
             Self::Open => "open",
             Self::Status => "read the status of",
+            #[cfg(any(test, target_arch = "x86_64"))]
             Self::Reread => "reread the partition table of",
         })
     }
@@ -505,6 +508,7 @@ pub(crate) fn assemble_until(
 ///
 /// The check is bounded, and reads no file's content: of each directory, it reads the status,
 /// and at most one entry besides `.` and `..`, and it opens nothing below it.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn assemble_fresh(
     assembly: &Assembly,
     deadline: Option<Instant>,
@@ -529,6 +533,7 @@ pub(crate) fn assemble_fresh(
 ///
 /// It needs `CAP_SYS_ADMIN`, and the kernel refuses it while one of the disk's partitions is
 /// open, as a mounted one is.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn reread_partitions(
     distro: Device,
     timeout: Duration,
@@ -764,6 +769,7 @@ impl Root {
     ///
     /// Once `Root::switch` has switched into the root, the teardown refuses: it unmounts nothing,
     /// and its error's `TeardownError::is_switched` is true.
+    #[cfg(any(test, target_arch = "x86_64"))]
     pub(crate) fn teardown(mut self) -> Result<(), TeardownError> {
         self.unmount()
     }

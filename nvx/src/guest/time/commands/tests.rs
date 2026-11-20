@@ -1,5 +1,51 @@
 use super::*;
 use crate::guest::sys::Errno;
+use crate::guest::sys::PortError;
+use crate::guest::time::state::StateReport;
+use crate::guest::time::system::tests::FakeOps;
+
+#[test]
+fn unprivileged_status_reports_legacy_fields_without_touching_binding_provider() {
+    let mut ops = FakeOps::new([]);
+    ops.trap_privileged = true;
+    ops.tsc_hz = Err(Errno::EACCES);
+    ops.lapic_hz = Err(Errno::EACCES);
+    let runtime = Runtime::new(&ops, false);
+    let mut output = Vec::new();
+    let mut errors = Vec::new();
+    let fixture = b"version=1\nboot_status=ok\nboot_cpus=1\ntsc_hz=2194843000\n\
+                    lapic_hz=200000000\nsynchronized=1\n";
+    let result = status_report(&runtime, &mut output, &mut errors, || {
+        Ok((StateReport::parse(fixture).unwrap(), true))
+    });
+    assert!(result.is_ok());
+    assert!(errors.is_empty());
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "NVX-TIME-ABI: v=1 phase=boot status=ok cpus=1 tsc_hz=2194843000 \
+         lapic_hz=200000000 generation=0 elapsed_us=0 cpu_us=0\n\
+         NVX-TIME-ABI: v=1 phase=runtime status=synchronized generation=0 \
+         discontinuities=0 offset_ns=0 uncertainty_ns=0 rejected_samples=0 \
+         last_sample_error=none\n"
+    );
+}
+
+#[test]
+fn malformed_report_is_an_error_not_zero_status_or_hardware_admission() {
+    let mut ops = FakeOps::new([]);
+    ops.trap_privileged = true;
+    let runtime = Runtime::new(&ops, false);
+    let mut output = Vec::new();
+    let mut errors = Vec::new();
+    let result = status_report(&runtime, &mut output, &mut errors, || {
+        StateReport::parse(b"version=1\ntsc_hz=invalid\n")
+            .map(|report| (report, true))
+            .ok_or(Errno::EINVAL)
+    });
+    assert!(result.is_err());
+    assert!(output.is_empty());
+    assert!(String::from_utf8(errors).unwrap().contains("unreadable"));
+}
 
 #[test]
 fn a_failed_preparation_reports_why_the_detectors_stay_unsuppressed() {

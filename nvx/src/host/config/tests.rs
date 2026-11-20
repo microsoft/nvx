@@ -671,6 +671,7 @@ fn the_check_of_a_configuration_checks_its_boots_capture() {
 fn runtime() -> Runtime {
     let artifact = |digit: char| ArtifactIdentity::sha256(&digit.to_string().repeat(64)).unwrap();
     Runtime {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         openvmm: missing("openvmm"),
         kernel: missing("vmlinux"),
         initramfs: missing("initramfs.cpio.gz"),
@@ -2207,6 +2208,7 @@ fn configuration_command_lines_keep_the_same_reserve_on_every_host() {
     let config = cold(blockless());
     config.check_command_line().unwrap();
     let runtime = Runtime {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         openvmm: PathBuf::from("x".repeat(PROCESS_COMMAND_LINE_LIMIT)),
         ..runtime()
     };

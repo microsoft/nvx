@@ -1,4 +1,66 @@
 use super::*;
+use crate::guest::counter::{ClockContext, DeclaredGuestIsa};
+use crate::guest::time::model::HostClock;
+
+impl StateReport {
+    pub(crate) fn clock(
+        &self,
+        context: PublishedRateContext<'_>,
+    ) -> Result<ClockState, ClockError> {
+        self.published_rates.decode(context)
+    }
+}
+
+#[test]
+fn opaque_report_conversion_requires_the_callers_explicit_context() {
+    let report = StateReport::parse(ROUND_TRIP_STATE.as_bytes()).unwrap();
+    assert!(report.synchronized);
+    for architecture in [DeclaredGuestIsa::X86_64, DeclaredGuestIsa::Aarch64] {
+        assert!(
+            report
+                .clock(PublishedRateContext::Uninitialized(architecture))
+                .is_err()
+        );
+    }
+    let wrong = ClockContext::x86(2_194_843_001, 200_000_000).unwrap();
+    assert!(
+        report
+            .clock(PublishedRateContext::Validated(&wrong))
+            .is_err()
+    );
+    let matching = ClockContext::x86(2_194_843_000, 200_000_000).unwrap();
+    assert_eq!(
+        report.clock(PublishedRateContext::Validated(&matching)),
+        Ok(ClockState::Ready(matching.clone()))
+    );
+    assert_eq!(report.to_string(), ROUND_TRIP_STATE);
+}
+
+#[test]
+fn failed_admission_report_keeps_zero_metadata_and_failure_visible_for_both_isas() {
+    for architecture in [DeclaredGuestIsa::X86_64, DeclaredGuestIsa::Aarch64] {
+        let context = PublishedRateContext::Uninitialized(architecture);
+        let mut report = StateReport {
+            violations: 1,
+            ..StateReport::default()
+        };
+        let boot = report.check_mut(Phase::Boot).unwrap();
+        boot.status = Some(CheckStatus::Fail);
+        boot.failures = Some(1);
+        report
+            .record_clock(&ClockState::Uninitialized, context)
+            .unwrap();
+        assert!(!report.synchronized);
+        assert_eq!(report.clock(context), Ok(ClockState::Uninitialized));
+        let encoded = report.to_string();
+        assert!(encoded.contains("\ntsc_hz=0\nlapic_hz=0\n"));
+        let decoded = StateReport::parse(encoded.as_bytes()).unwrap();
+        assert_eq!(decoded, report);
+        assert!(!decoded.checks_ok());
+        assert!(decoded.status_markers(true).contains("status=fail"));
+        assert!(decoded.status_markers(true).contains("failures=1"));
+    }
+}
 
 const ROUND_TRIP_STATE: &str = concat!(
     "version=1\n",
@@ -70,7 +132,7 @@ const STATUS_STATE: &str = concat!(
 );
 
 fn status(text: &str, report_only: bool) -> String {
-    let state = TimeState::parse(text.as_bytes()).unwrap();
+    let state = StateReport::parse(text.as_bytes()).unwrap();
     let mut output = state.status_markers(report_only);
     output.push_str(&format!("ok={}\n", u8::from(state.checks_ok())));
     output
@@ -78,7 +140,7 @@ fn status(text: &str, report_only: bool) -> String {
 
 #[test]
 fn fresh_state_has_only_a_pending_boot_check() {
-    let state = TimeState::parse(b"version=1\n").unwrap();
+    let state = StateReport::parse(b"version=1\n").unwrap();
     assert!(
         state
             .to_string()
@@ -88,7 +150,7 @@ fn fresh_state_has_only_a_pending_boot_check() {
         "version=1\ngeneration=0\nboot_status=pending\nboot_cpus=0\n\
                  boot_elapsed_us=0\nboot_cpu_us=0\ntsc_hz=0\nlapic_hz=0\n"
     ));
-    assert_eq!(state.checks[1].status, None);
+    assert_eq!(state.check(Phase::Capture).unwrap().status, None);
     assert!(state.pending(true) && state.pending(false) && !state.checks_ok());
 }
 
@@ -107,14 +169,14 @@ fn malformed_known_values_fail_but_unknown_keys_do_not() {
         b"host_test_hooks=yes\n",
         b"last_sample_error=G_SAMPLE_LATE\n",
     ] {
-        assert_eq!(TimeState::parse(text), None, "{}", text.escape_ascii());
+        assert_eq!(StateReport::parse(text), None, "{}", text.escape_ascii());
     }
-    assert!(TimeState::parse(b"unknown=bad\n").is_some());
+    assert!(StateReport::parse(b"unknown=bad\n").is_some());
 }
 
 #[test]
 fn host_fields_round_trip_with_unknown_bounds() {
-    let state = TimeState::parse(
+    let state = StateReport::parse(
         b"host_status=free-running\nhost_correction_ppb=200000\n\
               host_correction_bound_ppb=unknown\nhost_max_error_us=unknown\n\
               frequency_limited=1\nlast_sample_error=G_SAMPLE_TSC\n",
@@ -136,20 +198,20 @@ fn host_fields_round_trip_with_unknown_bounds() {
     ] {
         assert!(text.contains(line), "{text}");
     }
-    assert_eq!(TimeState::parse(text.as_bytes()).unwrap(), state);
+    assert_eq!(StateReport::parse(text.as_bytes()).unwrap(), state);
 }
 
 #[test]
 fn an_accepted_sample_records_the_host_discipline() {
-    let mut state = TimeState {
+    let mut state = StateReport {
         samples: 2,
         last_sample_error: SampleRejection::Uncertain,
-        ..TimeState::default()
+        ..StateReport::default()
     };
     let sample = BestSample {
         theta: -42,
         epsilon: 1_800,
-        host: decoders::HostClock {
+        host: HostClock {
             status: HostClockStatus::Synchronized,
             disruption: 3,
             correction: 39_321_600,
@@ -227,7 +289,7 @@ fn records_round_trip_with_their_tokens() {
                     host_correction_bound_ppb=unknown\nhost_max_error_us=14\nhost_disruption=15\n\
                     host_test_hooks=1\nsamples=11\nrejected_samples=12\n\
                     last_sample_error=G_SAMPLE_UNCERTAIN\nviolations=13\n";
-    let state = TimeState::parse(text.as_bytes()).unwrap();
+    let state = StateReport::parse(text.as_bytes()).unwrap();
     assert_eq!(state.to_string(), text);
     assert!(!state.pending(false) && !state.checks_ok());
     assert_eq!(
@@ -241,7 +303,7 @@ fn records_round_trip_with_their_tokens() {
 
 #[test]
 fn enforcing_and_report_only_states_round_trip_exactly() {
-    let state = TimeState::parse(ROUND_TRIP_STATE.as_bytes()).unwrap();
+    let state = StateReport::parse(ROUND_TRIP_STATE.as_bytes()).unwrap();
     assert_eq!(state.to_string(), ROUND_TRIP_STATE);
     assert!(state.pending(false) && !state.checks_ok());
 
@@ -253,7 +315,7 @@ fn enforcing_and_report_only_states_round_trip_exactly() {
                  restore_failures=3\n",
         );
     assert_eq!(
-        TimeState::parse(report.as_bytes()).unwrap().to_string(),
+        StateReport::parse(report.as_bytes()).unwrap().to_string(),
         report
     );
 }

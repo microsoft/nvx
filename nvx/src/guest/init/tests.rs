@@ -7,8 +7,10 @@
 //! PID 1 theirs, and the check of the real priority needs the privileges of a guest's PID 1. No
 //! check stops a VM: each records the status with which PID 1 would.
 
+#[cfg(target_arch = "x86_64")]
 mod capture;
 mod exec;
+#[cfg(target_arch = "x86_64")]
 pub(super) mod restore;
 pub(super) use exec::prepare_child;
 
@@ -22,6 +24,26 @@ use crate::guest::sys::tests::{
     CAP_SYS_NICE, CAP_SYS_RESOURCE, create_fifo, fork_isolated_test, holds_capability, nice_of,
 };
 use crate::guest::sys::{ForkResult, wait};
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn arm_fresh_capture_cannot_select_a_rootless_entry_or_open_its_control() {
+    for command_line in [
+        b"nvx_sandbox=1 nvx_snapshot_tier=platform nvx_control_tty=hvc2".as_slice(),
+        b"nvx_snapshot_tier=platform nvx_control_tty=doesnotexist",
+        b"nvx_snapshot_tier",
+    ] {
+        assert_eq!(
+            fresh_capture_control(command_line).unwrap_err(),
+            "Fresh capture is unsupported on aarch64"
+        );
+    }
+    assert!(
+        fresh_capture_control(b"nvx_control_tty=hvc2 nvx_identity=1000:1000")
+            .unwrap()
+            .is_none()
+    );
+}
 
 /// Drives the unchanged helper/signal scripts through production preparation, collection and
 /// shutdown; layered boot itself is exercised by the boot tests.

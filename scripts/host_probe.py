@@ -13,6 +13,7 @@ import ctypes
 import json
 import os
 import platform
+import stat
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -273,7 +274,12 @@ def _artifacts(root: Path) -> dict[str, object]:
     build = root / "build"
     exists = build.exists()
     try:
-        files = sum(1 for path in build.rglob("*") if path.is_file()) if exists else 0
+        # Kernel work trees contain Linux-only links whose targets Windows cannot stat.
+        files = (
+            sum(1 for path in build.rglob("*") if stat.S_ISREG(path.lstat().st_mode))
+            if exists
+            else 0
+        )
     except OSError as error:
         raise ProbeError(f"cannot inspect build artifacts: {error}") from error
     return {"exists": exists, "files": files}

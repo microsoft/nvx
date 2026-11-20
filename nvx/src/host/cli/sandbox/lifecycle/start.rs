@@ -296,6 +296,7 @@ fn launch_locked(
         }
     };
     let saved = SavedVm {
+        architecture: runtime.architecture,
         vm_dir: dir,
         endpoint: launched.outputs.endpoint.clone(),
         capability: *launched.capability.as_bytes(),
@@ -722,6 +723,7 @@ pub(crate) fn run(
         })?;
         cleanup = false;
         let saved = SavedVm {
+            architecture: runtime.architecture,
             vm_dir: dir.clone(),
             endpoint: launched.outputs.endpoint.clone(),
             capability: *launched.capability.as_bytes(),

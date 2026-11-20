@@ -126,6 +126,7 @@ pub(super) fn prepare(
 /// block devices of the partitions that the kernel created from the table that the disk held
 /// before, and creates those of the table that it holds now, and their nodes. It checks nothing
 /// else of the device, whose checks [`prepare`] makes. Returns the path of its node.
+#[cfg(any(test, target_arch = "x86_64"))]
 pub(super) fn reread(
     kernel: &mut dyn Kernel,
     paths: &Paths,

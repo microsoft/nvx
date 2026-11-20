@@ -227,18 +227,38 @@ def _profile_generation(document: object) -> CpuGeneration:
     return CpuGeneration(name, vendor, tuple(cpus))
 
 
+def is_arm_cpu_profile(document: object) -> bool:
+    """Recognize the declared ARM schema when partitioning the x86 catalog.
+
+    This is not ARM profile or time-binding admission; OpenVMM performs that.
+    An unrecognized document still goes through the strict x86 parser.
+    """
+    if not isinstance(document, dict):
+        return False
+    profile = cast(dict[str, object], document).get("profile")
+    return (
+        isinstance(profile, dict)
+        and cast(dict[str, object], profile).get("schema") == "nvx.arm64.cpu.v1"
+    )
+
+
 def openvmm_cpu_generations(openvmm_dir: Path) -> tuple[CpuGeneration, ...]:
     """Return the generations of the pinned CPU profiles in the OpenVMM
     checkout ``openvmm_dir``, from which the OpenVMM that it builds selects
     with ``--cpu-profile auto``, each once.
 
-    Raises ValueError if the checkout holds no pinned profile, or one that
-    cannot be read or names no generation."""
+    Recognized ARM-schema documents belong to a different catalog and are
+    excluded. Raises ValueError if the checkout holds no x86 pinned profile,
+    or an unrecognized document cannot be read or names no generation.
+    """
     directory = openvmm_dir / OPENVMM_CPU_PROFILES
     generations: list[CpuGeneration] = []
     for path in sorted(directory.glob("*.json")):
         try:
-            generation = _profile_generation(json.loads(path.read_bytes()))
+            document = json.loads(path.read_bytes())
+            if is_arm_cpu_profile(document):
+                continue
+            generation = _profile_generation(document)
         except (OSError, ValueError) as error:
             raise ValueError(f"cannot read the CPU profile {path}: {error}") from error
         if generation not in generations:

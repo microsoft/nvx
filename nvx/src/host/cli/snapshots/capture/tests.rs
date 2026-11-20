@@ -187,6 +187,7 @@ fn options(root: &Path, snapshot: &str) -> Options {
 
 fn runtime(root: &Path) -> Runtime {
     Runtime {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         openvmm: std::env::current_exe().unwrap(),
         kernel: root.join("fake-kernel"),
         initramfs: root.join("fake-initramfs"),

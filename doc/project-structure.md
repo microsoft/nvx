@@ -114,7 +114,7 @@ nvx/
 |   |   `-- bin/                 One file per binary, which calls its program's hidden `main`: nvx, nvx-fake-openvmm, and the ten guest binaries
 |   |-- examples/                The external-launch example, and the documented host and guest workflows, which only compile
 |   |-- tests/                   Integration tests of the CLI's scenarios, in cli/, the fake OpenVMM, the guest binaries, the layering of `nvx::host`, a VM's lifecycle on a hypervisor, the security checklist, and the copies of the OpenVMM submodule's data, with their fixtures and the conformance vectors of the wire formats
-|   |-- public-api/              The crate's public API on Linux and on Windows, which CI checks
+|   |-- public-api/              The crate's public API on Linux x86-64/ARM64 and Windows, which CI checks
 |   |-- Cargo.toml               Package manifest: features, binaries, examples, and the `guest` profile
 |   |-- Cargo.lock               The package's own lockfile
 |   |-- LICENSE                  The package's MIT license, which the crate ships
