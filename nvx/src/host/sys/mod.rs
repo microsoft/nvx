@@ -35,5 +35,22 @@ pub(crate) use socket::{
     connect_nonblocking, peer_pid, send_nonblocking, wait_readable, wait_writable,
 };
 
+/// Rounds a finite wait up to milliseconds and caps it at the largest poll timeout.
+/// `None` waits indefinitely.
+#[cfg(target_os = "linux")]
+fn poll_timeout(timeout: Option<std::time::Duration>) -> nix::poll::PollTimeout {
+    use nix::poll::PollTimeout;
+
+    let Some(timeout) = timeout else {
+        return PollTimeout::NONE;
+    };
+    // Round up to avoid spinning on sub-millisecond waits. An unsigned value that does not fit
+    // is too large, so retain the maximum finite wait rather than waiting indefinitely.
+    match PollTimeout::try_from(timeout.as_nanos().div_ceil(1_000_000)) {
+        Ok(timeout) => timeout,
+        Err(_) => PollTimeout::MAX,
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests;
