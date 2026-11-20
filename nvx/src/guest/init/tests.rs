@@ -219,6 +219,8 @@ fn the_runtime_wakes_for_children_without_control_input_and_prioritizes_a_helper
         let mut runtime = Runtime {
             system: RealSystem {
                 signals: Some(signals),
+                #[cfg(target_arch = "aarch64")]
+                platform: None,
             },
             helpers: Helpers {
                 time: helper_id,
@@ -277,7 +279,7 @@ impl Subreaper {
     fn new() -> Self {
         nix::sys::prctl::set_child_subreaper(true).unwrap();
         Self {
-            real: RealSystem { signals: None },
+            real: RealSystem::default(),
             before_wait: None,
             signals: Vec::new(),
             reaped: Vec::new(),
@@ -857,7 +859,7 @@ fn privileged_pid_1_and_its_helpers_run_ahead_of_the_workloads() {
         let mut announcer = Command::new("sleep").arg("30").spawn().unwrap();
         let helpers = [&daemon, &announcer].map(ProcessId::from_child);
         let mut system = Observer {
-            real: RealSystem { signals: None },
+            real: RealSystem::default(),
             helpers,
             observed: Vec::new(),
             reports: String::new(),

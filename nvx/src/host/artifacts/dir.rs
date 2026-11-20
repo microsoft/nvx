@@ -100,6 +100,11 @@ impl ArtifactDir {
         Ok(self)
     }
 
+    /// Returns the explicitly selected guest ISA, independent of the host.
+    pub(crate) fn architecture(&self) -> GuestArchitecture {
+        self.architecture
+    }
+
     /// Returns the absolute directory.
     pub(crate) fn root(&self) -> &Path {
         &self.root
@@ -217,13 +222,18 @@ impl ArtifactDir {
                 Error::unavailable(format!("invalid ARM package manifest {}", path.display()))
                     .with_source(error)
             })?;
+            let expected = if guest == Guest::Ubuntu {
+                "arm64"
+            } else {
+                "aarch64"
+            };
             if value
                 .get("architecture")
                 .and_then(serde_json::Value::as_str)
-                != Some("aarch64")
+                != Some(expected)
             {
                 return Err(Error::unsupported(format!(
-                    "guest package manifest {} does not declare architecture aarch64",
+                    "guest package manifest {} does not declare architecture {expected}",
                     path.display()
                 )));
             }

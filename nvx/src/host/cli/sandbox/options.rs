@@ -13,6 +13,7 @@ use crate::host::network::{
     openvmm_arguments,
 };
 use crate::host::paths;
+use crate::host::runtime::GuestArchitecture;
 use crate::host::sandbox::distro::DistroFormat;
 use crate::host::sandbox::layer::SandboxLayer;
 use crate::host::sandbox::mount::{MountOwner, PolicyKind};
@@ -33,6 +34,9 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
+  --architecture {x86_64,aarch64}
+                        guest ISA of run/provision (default: x86_64); later
+                        transitions use the provisioned record's ISA
   --layer ROLE,PATH,IMAGE_UUID
   --layer-format {erofs,gpt}
                         the image format of run and provision (default:
@@ -153,7 +157,8 @@ fn seconds(value: &str) -> std::result::Result<f64, String> {
 
 /// The options of `nvx sandbox`, which parse with the defaults of the former
 /// `nvx.py sandbox`.
-pub(in crate::host::cli) const OPTIONS: [Spec; 37] = [
+pub(in crate::host::cli) const OPTIONS: [Spec; 38] = [
+    Spec::one("--architecture"),
     Spec::one("--layer"),
     Spec::one("--layer-format"),
     Spec::one("--scratch"),
@@ -196,6 +201,8 @@ pub(in crate::host::cli) const OPTIONS: [Spec; 37] = [
 /// The parsed options of `nvx sandbox`: the namespace of the former `nvx.py sandbox`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Options {
+    /// Explicit ISA for run/provision; no override preserves the x86-64 default.
+    pub(crate) architecture: Option<GuestArchitecture>,
     /// The operation, `run` by default.
     pub(crate) operation: SandboxOperation,
     /// `--layer`, parsed as `SandboxLayer.parse` parses it.
@@ -256,6 +263,7 @@ pub(crate) struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            architecture: None,
             operation: SandboxOperation::Run,
             layers: Vec::new(),
             layer_format: None,
@@ -291,6 +299,12 @@ impl Receiver for Options {
     fn take(&mut self, name: &'static str, value: Option<&str>) -> std::result::Result<(), String> {
         let text = || value.unwrap_or_default().to_owned();
         match name {
+            "--architecture" => {
+                self.architecture = Some(match choice(&text(), &["x86_64", "aarch64"])? {
+                    "aarch64" => GuestArchitecture::Aarch64,
+                    _ => GuestArchitecture::X86_64,
+                });
+            }
             "sandbox_operation" => {
                 let operation = choice(value.unwrap_or("run"), &OPERATIONS)?;
                 self.operation = match operation {

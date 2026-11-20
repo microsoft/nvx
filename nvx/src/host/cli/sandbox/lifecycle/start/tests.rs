@@ -50,6 +50,7 @@ fn run_checks_again_that_its_shares_do_not_overlap() {
     let binding = DistroBinding::verify(&layer).unwrap();
     let distro = RecordedDistro::new(&layer, binding).unwrap();
     let config = ProvisionConfig {
+        architecture: GuestArchitecture::X86_64,
         hypervisor: "kvm",
         memory_mib: 256,
         cmdline: "",
@@ -118,6 +119,7 @@ fn starts_check_the_kernel_command_line_that_they_launch() {
     );
     let configure = |cmdline: &str, scratch: Option<&Path>, export: Option<&PlannedExport>| {
         let config = ProvisionConfig {
+            architecture: GuestArchitecture::X86_64,
             hypervisor: "kvm",
             memory_mib: 256,
             cmdline,
@@ -133,7 +135,7 @@ fn starts_check_the_kernel_command_line_that_they_launch() {
     };
     let refusal = |cmdline: &str, scratch: Option<&Path>, export: Option<&PlannedExport>| {
         let (config, vm) = configure(cmdline, scratch, export);
-        let error = check_command_line(&config, &vm).unwrap_err();
+        let error = check_command_line(&config, &vm, GuestArchitecture::X86_64).unwrap_err();
         assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
         error.message().unwrap_or_default().to_owned()
     };
@@ -144,7 +146,7 @@ fn starts_check_the_kernel_command_line_that_they_launch() {
             let room =
                 COMMAND_LINE_BUDGET - vm.kernel_command_line().unwrap().len() - fragment.len() - 2;
             let (config, vm) = configure(&"x".repeat(room), upper, export);
-            check_command_line(&config, &vm).unwrap();
+            check_command_line(&config, &vm, GuestArchitecture::X86_64).unwrap();
             assert_eq!(
                 vm.kernel_command_line().unwrap().len() + fragment.len() + 1,
                 COMMAND_LINE_BUDGET
@@ -153,6 +155,23 @@ fn starts_check_the_kernel_command_line_that_they_launch() {
                 refusal(&"x".repeat(room + 1), upper, export),
                 "sandbox kernel command line exceeds its 1024-byte x86 budget; use shorter \
                  arguments and kernel parameters"
+            );
+        }
+    }
+    for upper in [None, Some(scratch.as_path())] {
+        for export in [None, read_only.as_ref(), writable.as_ref()] {
+            let (_, vm) = configure("", upper, export);
+            let room = 2048 - arm_effective_command_line(&vm).unwrap().len() - 2;
+            let (config, vm) = configure(&"x".repeat(room), upper, export);
+            check_command_line(&config, &vm, GuestArchitecture::Aarch64).unwrap();
+            assert_eq!(arm_effective_command_line(&vm).unwrap().len() + 1, 2048);
+            let (config, vm) = configure(&"x".repeat(room + 1), upper, export);
+            assert!(
+                check_command_line(&config, &vm, GuestArchitecture::Aarch64)
+                    .unwrap_err()
+                    .message()
+                    .unwrap()
+                    .contains("needs 2049 bytes")
             );
         }
     }

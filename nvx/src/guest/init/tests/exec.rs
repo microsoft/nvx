@@ -370,6 +370,8 @@ fn failed_start_collector_checks(simulated: bool) {
     let mut runtime = Runtime {
         system: RealSystem {
             signals: Some(signals),
+            #[cfg(target_arch = "aarch64")]
+            platform: None,
         },
         helpers: Helpers {
             time: ProcessId::from_child(&helper.0),
@@ -534,6 +536,8 @@ fn a_failed_start_preserves_its_first_errno_and_the_cleanup_failure() {
         let mut runtime = Runtime {
             system: RealSystem {
                 signals: Some(signals),
+                #[cfg(target_arch = "aarch64")]
+                platform: None,
             },
             helpers: Helpers {
                 time: pid(2_000_000),
@@ -836,7 +840,7 @@ fn privileged_exec_resets_priority_credentials_and_signals_before_exec() {
     isolated(
         "privileged_exec_resets_priority_credentials_and_signals_before_exec",
         || {
-            RealSystem { signals: None }.raise_priority(None).unwrap();
+            RealSystem::default().raise_priority(None).unwrap();
             let _signals = SignalDescriptor::new(&SIGNALS).unwrap();
             let groups = [
                 nix::unistd::Gid::from_raw(1000),

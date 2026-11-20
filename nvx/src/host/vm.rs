@@ -758,7 +758,6 @@ pub fn create(
         })
     };
     let runtime = Runtime {
-        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         openvmm: resolve(&runtime.openvmm)?,
         kernel: resolve(&runtime.kernel)?,
         initramfs: resolve(&runtime.initramfs)?,

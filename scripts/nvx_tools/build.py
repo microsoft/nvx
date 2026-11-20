@@ -931,7 +931,11 @@ def _prepare_guest_root(
     if descriptor.name == "alpine":
         return _prepare_alpine_root(config)
     if descriptor.name == "ubuntu":
-        return ubuntu.prepare_root(config.work)
+        return (
+            ubuntu.prepare_root(config.work)
+            if config.architecture == "x86_64"
+            else ubuntu.prepare_root(config.work, architecture=config.architecture)
+        )
     raise AssertionError(f"missing rootfs preparer for {descriptor.name}")
 
 
@@ -940,11 +944,17 @@ def _write_ubuntu_manifest(
     output: Path,
     helpers: dict[str, dict[str, str]],
     input_sha256: str,
+    *,
+    architecture: str = "x86_64",
 ) -> None:
     manifest = output.with_name(
         f"{output.name}{BuildConstants.PACKAGE_MANIFEST_SUFFIX}"
     )
-    document = ubuntu.package_manifest(root, helpers)
+    document = (
+        ubuntu.package_manifest(root, helpers)
+        if architecture == "x86_64"
+        else ubuntu.package_manifest(root, helpers, architecture=architecture)
+    )
     document.update(
         {
             "artifact": output.name,
@@ -989,7 +999,14 @@ def build_initramfs(config: InitramfsBuildConfig) -> None:
     # Snapshot before the root is prepared so the manifest describes the sources
     # this build consumed; the post-pack comparison catches any edit in between.
     ubuntu_input_sha256 = (
-        ubuntu.converter_input_sha256(ubuntu.customization_files())
+        (
+            ubuntu.converter_input_sha256(ubuntu.customization_files())
+            if config.architecture == "x86_64"
+            else ubuntu.converter_input_sha256(
+                ubuntu.customization_files(architecture=config.architecture),
+                architecture=config.architecture,
+            )
+        )
         if descriptor.name == "ubuntu"
         else None
     )
@@ -1001,11 +1018,25 @@ def build_initramfs(config: InitramfsBuildConfig) -> None:
         _write_apk_manifest(root, output, helpers, config.architecture)
     _pack_initramfs(root, output)
     if ubuntu_input_sha256 is not None:
-        _write_ubuntu_manifest(root, output, helpers, ubuntu_input_sha256)
-        if (
+        if config.architecture == "x86_64":
+            _write_ubuntu_manifest(root, output, helpers, ubuntu_input_sha256)
+        else:
+            _write_ubuntu_manifest(
+                root,
+                output,
+                helpers,
+                ubuntu_input_sha256,
+                architecture=config.architecture,
+            )
+        current_ubuntu_input = (
             ubuntu.converter_input_sha256(ubuntu.customization_files())
-            != ubuntu_input_sha256
-        ):
+            if config.architecture == "x86_64"
+            else ubuntu.converter_input_sha256(
+                ubuntu.customization_files(architecture=config.architecture),
+                architecture=config.architecture,
+            )
+        )
+        if current_ubuntu_input != ubuntu_input_sha256:
             output.unlink(missing_ok=True)
             package_manifest.unlink(missing_ok=True)
             raise ScriptError("initramfs source inputs changed during the build")
@@ -1051,19 +1082,36 @@ def build_distro_layer(config: DistroLayerBuildConfig) -> None:
     initramfs_config = InitramfsBuildConfig(
         guest=descriptor.name,
         work=config.work,
+        architecture=config.architecture,
     )
     root = _prepare_guest_root(initramfs_config, descriptor)
     helpers = _install_guest_files(initramfs_config, root, descriptor)
     ubuntu.apply_metadata_policy(root)
+    packages = (
+        ubuntu.package_records(root)
+        if config.architecture == "x86_64"
+        else ubuntu.package_records(root, architecture=config.architecture)
+    )
     if (root / "sbin" / "init").exists() or any(
-        package["name"] == "systemd" for package in ubuntu.package_records(root)
+        package["name"] == "systemd" for package in packages
     ):
         raise ScriptError("systemd is unsupported in the Ubuntu sandbox layer profile")
     _normalize_initramfs_metadata(root)
 
-    input_sha256 = ubuntu.converter_input_sha256(_guest_customization_files(descriptor))
+    input_sha256 = (
+        ubuntu.converter_input_sha256(_guest_customization_files(descriptor))
+        if config.architecture == "x86_64"
+        else ubuntu.converter_input_sha256(
+            ubuntu.customization_files(architecture=config.architecture),
+            architecture=config.architecture,
+        )
+    )
     filesystem_uuid = ubuntu.erofs_uuid(input_sha256)
-    document = ubuntu.package_manifest(root, helpers)
+    document = (
+        ubuntu.package_manifest(root, helpers)
+        if config.architecture == "x86_64"
+        else ubuntu.package_manifest(root, helpers, architecture=config.architecture)
+    )
     document.update(
         {
             "artifact": output.name,
@@ -1153,21 +1201,53 @@ def scratch_template_environment() -> dict[str, str]:
     return environment
 
 
-def _mkfs_ext4() -> str:
-    """Return mkfs.ext4 from PATH, or else from the system directories that
-    distributions such as Debian leave out of an unprivileged user's PATH."""
+def _e2fsprogs_tool(name: str) -> str:
+    """Find an e2fsprogs tool, including Debian's system directories."""
     search = os.pathsep.join(
         directory
         for directory in (os.environ.get("PATH", ""), "/usr/sbin", "/sbin")
         if directory
     )
-    executable = shutil.which("mkfs.ext4", path=search)
+    executable = shutil.which(name, path=search)
     if executable is None:
         raise ScriptError(
-            "mkfs.ext4 was not found on PATH, in /usr/sbin, or in /sbin; "
+            f"{name} was not found on PATH, in /usr/sbin, or in /sbin; "
             "install e2fsprogs"
         )
     return executable
+
+
+def _mkfs_ext4() -> str:
+    return _e2fsprogs_tool("mkfs.ext4")
+
+
+def _scratch_hash_flags(image: Path) -> int:
+    with image.open("rb") as volume:
+        volume.seek(1024)
+        header = volume.read(0x164)
+    if len(header) != 0x164 or header[0x38:0x3A] != b"\x53\xef":
+        raise ScriptError(f"scratch template has no valid ext4 superblock: {image}")
+    flags = int.from_bytes(header[0x160:0x164], "little")
+    if flags not in (1, 2):
+        raise ScriptError(
+            f"scratch template has unexpected directory-hash flags {flags}: {image}"
+        )
+    return flags
+
+
+def _canonicalize_scratch_hash(image: Path) -> None:
+    # libext2fs follows its compiler's char signedness; preserve the pinned signed-hash format.
+    if _scratch_hash_flags(image) == 1:
+        return
+    run_checked(
+        [_e2fsprogs_tool("debugfs"), "-w", os.fspath(image)],
+        env=scratch_template_environment(),
+        input_bytes=b"set_super_value flags 1\nclose -a\n",
+    )
+    if _scratch_hash_flags(image) != 1:
+        raise ScriptError(
+            f"debugfs did not set the scratch directory-hash format: {image}"
+        )
 
 
 def build_scratch_template(config: ScratchTemplateBuildConfig) -> None:
@@ -1198,6 +1278,7 @@ def build_scratch_template(config: ScratchTemplateBuildConfig) -> None:
             [mkfs, *scratch_template_arguments(temporary)],
             env=scratch_template_environment(),
         )
+        _canonicalize_scratch_hash(temporary)
         digest = sha256_file(temporary)
         temporary.replace(output)
     finally:

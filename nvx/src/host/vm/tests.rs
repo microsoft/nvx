@@ -158,6 +158,18 @@ fn cold_runtime() -> Runtime {
 }
 
 #[test]
+fn cold_creation_preserves_the_explicit_runtime_architecture() {
+    for architecture in [GuestArchitecture::X86_64, GuestArchitecture::Aarch64] {
+        let (_temporary, dir) = vm_dir();
+        let mut runtime = cold_runtime();
+        runtime.architecture = architecture;
+        runtime.hypervisor = Hypervisor::Whp;
+        let prepared = create(&runtime, &cold_config(), None, &dir).unwrap();
+        assert_eq!(prepared.architecture(), architecture);
+    }
+}
+
+#[test]
 fn arm_snapshot_and_growth_requests_fail_before_opening_a_vm_directory() {
     let (_temporary, dir) = vm_dir();
     let mut runtime = cold_runtime();

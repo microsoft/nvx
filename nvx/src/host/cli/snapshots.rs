@@ -104,7 +104,8 @@ options:
 /// The options of `sandbox` that only an execution or a cold boot takes, which a restore lacks:
 /// a restore's NIC comes from its snapshot, which `snapshot capture --net` gives one, so it takes
 /// no `--net`.
-const NOT_RESTORED: [&str; 10] = [
+const NOT_RESTORED: [&str; 11] = [
+    "--architecture",
     "--cwd",
     "--environment",
     "--environment-file",

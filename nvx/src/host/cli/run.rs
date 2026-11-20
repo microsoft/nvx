@@ -57,9 +57,9 @@ use super::cpu_profile::{self, HostCpu};
 use super::download::{self, Hold};
 use super::network::{NativeRules, NetworkOptions};
 use super::sandbox::{
-    self, HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, copy_openvmm_outcome, error_with_cause,
-    export_tokens, hypervisor, path_string, path_text, sandbox_network,
-    validate_outcome_destination,
+    self, HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, arm_effective_command_line,
+    copy_openvmm_outcome, error_with_cause, export_tokens, hypervisor, path_string, path_text,
+    sandbox_network, validate_outcome_destination,
 };
 use super::session::{AttachmentCancellation, Session};
 use super::shell::format_command;
@@ -736,51 +736,6 @@ fn cold_vm_config(
     }
     config.check_command_line().map_err(error_with_cause)?;
     Ok(config)
-}
-
-/// Projects the selected VMM's DT boot additions; no x86 device-discovery tokens are appended.
-fn arm_effective_command_line(config: &VmConfig) -> crate::Result<String> {
-    use std::net::{Ipv4Addr, Ipv6Addr};
-
-    use crate::host::network::{self, Access, HostLoopback};
-
-    let mut line = format!(
-        "earlycon=nvx-mmio,0xd1000000 console=hvc1 reboot=t panic=-1 {} \
-         nr_cpus={} nvx_control_tty=hvc2",
-        config.kernel_command_line()?,
-        config.processors,
-    );
-    if let Some(network) = &config.network {
-        let guest = network.cold_nic()?.guest_network;
-        let mask = u32::MAX << (32 - u32::from(guest.prefix_len()));
-        let gateway = Ipv4Addr::from((u32::from(guest.address()) & mask) + 1);
-        let embed = |address: Ipv4Addr| {
-            Ipv6Addr::from((0xfd00_u128 << 112) | u128::from(u32::from(address)))
-        };
-        line.push_str(&format!(
-            " virtnet_ip={} virtnet_mask={} virtnet_gw={gateway}",
-            guest.address(),
-            Ipv4Addr::from(mask),
-        ));
-        if let Some(server) = network::dns_server(&network.policy, gateway, Some(embed(gateway)))? {
-            line.push_str(&format!(" virtnet_dns={server}"));
-        }
-        line.push_str(&format!(
-            " virtnet_ip6={}/{} virtnet_gw6={}",
-            embed(guest.address()),
-            96 + guest.prefix_len(),
-            embed(gateway),
-        ));
-        if network.policy.ingress == Access::Allow {
-            line.push_str(" virtnet_ingress=allow");
-        } else if network.policy.host_loopback == HostLoopback::Allow {
-            line.push_str(" virtnet_ingress=host-loopback");
-        }
-    }
-    if let Some(export) = &config.filesystem {
-        line.push_str(&export_tokens(export));
-    }
-    Ok(line)
 }
 
 fn remove_vm_directory(dir: &VmDir) -> Result {

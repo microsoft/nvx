@@ -7,6 +7,112 @@ use crate::lifecycle::{PROVISIONED, provision, sandbox};
 use crate::openvmm::{Options, assert_opened_distro, assert_opened_images, assert_stable_blocks};
 
 #[test]
+fn sandbox_default_and_explicit_x86_write_the_same_legacy_configuration() {
+    let root = Root::new();
+    root.nvx(&provision("{root/default}", &[]))
+        .assert_silent_success();
+    root.nvx(&provision("{root/explicit}", &["--architecture", "x86_64"]))
+        .assert_silent_success();
+    let default = json(&root.below("default/config.json"));
+    let explicit = json(&root.below("explicit/config.json"));
+    assert_eq!(default, explicit);
+    assert_eq!(default["format"], 10);
+    assert!(default.get("architecture").is_none());
+}
+
+#[cfg(all(windows, target_arch = "aarch64"))]
+#[test]
+fn explicit_arm_sandboxes_keep_their_isa_across_cli_processes() {
+    use crate::harness::PROVENANCE;
+
+    for scratch in [true, false] {
+        let root = Root::new();
+        let mut header = [0u8; 64];
+        header[16..24].copy_from_slice(&64u64.to_le_bytes());
+        header[24..32].copy_from_slice(&10u64.to_le_bytes());
+        header[56..60].copy_from_slice(b"ARM\x64");
+        root.write("build/aarch64/Image", header);
+        root.write("build/aarch64/initramfs.cpio.gz", b"ARM initramfs\n");
+        root.write(
+            "build/aarch64/initramfs.cpio.gz.packages.json",
+            r#"{"architecture":"aarch64"}"#,
+        );
+        for (name, member, digest) in PROVENANCE.into_iter().skip(1) {
+            let name = name.replace("vmlinux", "Image");
+            root.write(
+                &format!("build/aarch64/{name}"),
+                json!({"format":1, (member):digest}).to_string(),
+            );
+        }
+        let mut options = vec!["--architecture", "aarch64", "--layer", LAYER];
+        if scratch {
+            options.extend(["--scratch", SCRATCH]);
+        } else {
+            options.extend(["--upper", "ram"]);
+        }
+        root.nvx(&sandbox("provision", "{root/arm}", &options))
+            .assert_silent_success();
+        let record = json(&root.below("arm/config.json"));
+        assert_eq!(record["format"], 11);
+        assert_eq!(record["architecture"], "aarch64");
+        for value in [None, Some(Value::Null), Some(json!("unknown"))] {
+            let mut malformed = record.clone();
+            if let Some(value) = value {
+                malformed["architecture"] = value;
+            } else {
+                malformed.as_object_mut().unwrap().remove("architecture");
+            }
+            root.write("arm/config.json", malformed.to_string());
+            root.nvx(&sandbox::<&str>("start", "{root/arm}", &[]))
+                .assert_error(
+                    "format-unsupported",
+                    &["requires an explicit supported architecture"],
+                );
+            assert!(root.openvmm_records().is_empty());
+        }
+        root.write("arm/config.json", record.to_string());
+        root.nvx(&sandbox::<&str>("start", "{root/arm}", &[]))
+            .assert_silent_success();
+        let opened = Options::parse(&root.openvmm_arguments("build/aarch64/fake-openvmm-arm.json"));
+        assert_eq!(
+            opened.value("--kernel"),
+            root.expand("{root/build/aarch64/Image}")
+        );
+        assert_eq!(opened.value("--cpu-profile"), "auto");
+        assert_eq!(
+            json(&root.below("arm/runtime.json"))["architecture"],
+            "aarch64"
+        );
+        let mut contradictory = record.clone();
+        contradictory["format"] = json!(10);
+        contradictory
+            .as_object_mut()
+            .unwrap()
+            .remove("architecture");
+        root.write("arm/config.json", contradictory.to_string());
+        root.nvx(&sandbox(
+            "exec",
+            "{root/arm}",
+            &["--entrypoint", "/bin/true"],
+        ))
+        .assert_error("runtime-mismatch", &["different guest architectures"]);
+        root.write("arm/config.json", record.to_string());
+        let result = root.nvx(&sandbox(
+            "exec",
+            "{root/arm}",
+            &["--entrypoint", "/bin/echo", "--arg", "arm-record"],
+        ));
+        result.assert_success();
+        assert_eq!(result.stdout(), "arm-record\n");
+        for operation in ["stop", "deprovision"] {
+            root.nvx(&sandbox::<&str>(operation, "{root/arm}", &[]))
+                .assert_silent_success();
+        }
+        assert!(!root.below("arm").exists());
+    }
+}
+
+#[test]
 fn configurations_of_every_format_start_and_exec() {
     for format in ["erofs", "gpt"] {
         for (upper, cap, expected_cap) in [
