@@ -11,12 +11,10 @@ use std::io;
 use std::mem;
 #[cfg(feature = "cli")]
 use std::os::windows::ffi::OsStrExt;
-#[cfg(any(test, feature = "cli"))]
-use std::os::windows::fs::OpenOptionsExt;
-#[cfg(any(test, feature = "cli"))]
-use std::os::windows::io::AsRawHandle;
 #[cfg(feature = "cli")]
 use std::os::windows::io::OwnedHandle;
+#[cfg(any(test, feature = "cli"))]
+use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
 #[cfg(any(test, feature = "cli"))]
 use std::path::Path;
 #[cfg(feature = "cli")]
@@ -34,16 +32,23 @@ use windows_sys::Win32::Storage::FileSystem::{
 #[cfg(feature = "cli")]
 use super::{owned, raw};
 
+/// Opens a file or directory for its metadata alone, following links and requesting no access
+/// rights, so that another process's open of its contents does not prevent this one.
+#[cfg(any(test, feature = "cli"))]
+fn open_for_metadata(path: &Path) -> io::Result<fs::File> {
+    OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
 /// Returns the volume serial number and 64-bit file index of a file or directory, which a file
 /// system such as ReFS does not keep unique.
 ///
 /// The object is opened without access rights, which succeeds even while OpenVMM holds it open.
 #[cfg(any(test, feature = "cli"))]
 pub(crate) fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
-    let file = OpenOptions::new()
-        .access_mode(0)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?;
+    let file = open_for_metadata(path)?;
     handle_identity(file.as_raw_handle() as HANDLE)
 }
 
@@ -53,10 +58,7 @@ pub(crate) fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
 /// The object is opened without access rights, which succeeds even while OpenVMM holds it open.
 #[cfg(feature = "cli")]
 pub(crate) fn file_id(path: &Path) -> io::Result<(u64, u128)> {
-    let file = OpenOptions::new()
-        .access_mode(0)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?;
+    let file = open_for_metadata(path)?;
     opened_file_id(&file)
 }
 
@@ -104,11 +106,7 @@ impl Directory {
     /// Opens the directory `path`, following its links, without access rights, which the opens of
     /// its entries do not need.
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
-        OpenOptions::new()
-            .access_mode(0)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(path)
-            .map(Self)
+        open_for_metadata(path).map(Self)
     }
 
     /// Returns the identity of its entry `name`, not following a link or other reparse point, as
@@ -310,3 +308,6 @@ pub(super) fn handle_information(handle: HANDLE) -> io::Result<BY_HANDLE_FILE_IN
     }
     Ok(information)
 }
+
+#[cfg(test)]
+mod tests;
