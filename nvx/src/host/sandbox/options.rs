@@ -22,16 +22,13 @@ use super::mount::{
 };
 use super::refused;
 use crate::error::Result;
+use crate::protocol::exec::{MAX_ARGUMENT_BYTES, MAX_ENVIRONMENT};
 use crate::protocol::root::RootUpper;
 
 /// The entrypoints of systemd, which the sandbox security profile does not run.
 const SYSTEMD_ENTRYPOINTS: [&str; 2] = ["/usr/lib/systemd/systemd", "/lib/systemd/systemd"];
 /// The largest environment file of a managed exec, in bytes.
 const MAX_ENVIRONMENT_FILE_BYTES: usize = 1024 * 1024;
-/// The most entries of a managed exec environment.
-const MAX_EXEC_ENVIRONMENT: usize = 256;
-/// The longest entry of a managed exec environment, in UTF-8 bytes.
-const MAX_EXEC_ENVIRONMENT_BYTES: usize = 4096;
 
 /// An operation of `nvx sandbox`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -349,14 +346,14 @@ pub(crate) fn validate_sandbox_entrypoint(entrypoint: &str) -> Result<()> {
 }
 
 /// Checks a managed exec environment, as `encode_exec_environment` does: at most
-/// [`MAX_EXEC_ENVIRONMENT`] entries, each a `KEY=VALUE` string with a nonempty key, without NUL,
-/// of at most [`MAX_EXEC_ENVIRONMENT_BYTES`] bytes, and no key twice.
+/// [`MAX_ENVIRONMENT`] entries, each a `KEY=VALUE` string with a nonempty key, without NUL, of at
+/// most [`MAX_ARGUMENT_BYTES`] bytes, and no key twice.
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
 pub(crate) fn validate_exec_environment(entries: &[String]) -> Result<()> {
-    if entries.len() > MAX_EXEC_ENVIRONMENT {
+    if entries.len() > MAX_ENVIRONMENT {
         return Err(refused(format!(
-            "managed exec environment exceeds {MAX_EXEC_ENVIRONMENT} entries"
+            "managed exec environment exceeds {MAX_ENVIRONMENT} entries"
         )));
     }
     let mut names = std::collections::HashSet::new();
@@ -365,14 +362,11 @@ pub(crate) fn validate_exec_environment(entries: &[String]) -> Result<()> {
             Some((name, _)) => (name, true),
             None => (entry.as_str(), false),
         };
-        if !separator
-            || name.is_empty()
-            || entry.contains('\0')
-            || entry.len() > MAX_EXEC_ENVIRONMENT_BYTES
+        if !separator || name.is_empty() || entry.contains('\0') || entry.len() > MAX_ARGUMENT_BYTES
         {
             return Err(refused(format!(
                 "managed exec environment entries must be non-empty KEY=VALUE strings of at most \
-                 {MAX_EXEC_ENVIRONMENT_BYTES} bytes"
+                 {MAX_ARGUMENT_BYTES} bytes"
             )));
         }
         if !names.insert(name) {

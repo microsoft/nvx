@@ -49,6 +49,7 @@ use crate::host::sandbox::options::validate_exec_environment;
 use crate::host::session::{ControlSession, ExecEvent, SessionError};
 use crate::host::transport;
 use crate::host::vm::{self, SavedVm};
+use crate::protocol::exec::{MAX_ARGUMENT_BYTES, MAX_ARGUMENTS};
 use crate::protocol::v2::{self, Outcome};
 use crate::protocol::{
     CAPABILITY_LEN, HostMap, Workload, WorkloadEnvironment, encode_exec_payload,
@@ -59,10 +60,6 @@ use crate::{ErrorCode, ErrorKind};
 /// which version 2 of NVXC does not have. A cancellation, whose end this session never waits
 /// for, is not among them.
 pub(crate) const EXIT_CATEGORIES: [&str; 4] = ["exit", "timeout", "signal", "failed"];
-/// The most arguments of a workload, `APP_MAX_ARGUMENTS`.
-const MAX_ARGUMENTS: usize = 64;
-/// The longest argument and working directory, in UTF-8 bytes.
-const MAX_ARGUMENT_BYTES: usize = 4096;
 /// The longest that one wait of a transport blocks before it checks for Ctrl-C.
 const POLL_SLICE: Duration = Duration::from_millis(250);
 
