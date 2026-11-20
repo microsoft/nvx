@@ -240,3 +240,27 @@ fn the_stores_tell_files_apart_by_the_identities_that_their_seals_hold() {
     assert_ne!(ids[0], ids[1]);
     assert_eq!(opened.entry_id("missing").unwrap(), None);
 }
+
+#[test]
+fn an_unconfirmed_exit_reports_the_wait_alone_after_a_successful_termination() {
+    let wait = io::Error::new(io::ErrorKind::TimedOut, "the wait failed");
+
+    let error = unconfirmed_exit(Ok(()), wait);
+
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(error.to_string(), "the wait failed");
+}
+
+#[test]
+fn an_unconfirmed_exit_reports_both_failures_when_the_termination_failed_too() {
+    let termination = io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
+    let wait = io::Error::new(io::ErrorKind::TimedOut, "the wait failed");
+
+    let error = unconfirmed_exit(Err(termination), wait);
+
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert_eq!(
+        error.to_string(),
+        "cannot terminate the child: access denied; cannot wait for its exit: the wait failed"
+    );
+}
