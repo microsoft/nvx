@@ -7,9 +7,11 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::time::Duration;
 
 use serde_json::json;
 
+use super::lock::LOCK_NAME;
 use super::*;
 
 /// The commits of a first-parent history, from `HEAD` on.
@@ -457,7 +459,7 @@ fn only_a_rejected_token_falls_back() {
 }
 
 /// A temporary repository checkout with its `SOURCE-MANIFEST.json`, and its `.git` if `git`.
-fn checkout(git: bool) -> (tempfile::TempDir, ArtifactDir) {
+pub(super) fn checkout(git: bool) -> (tempfile::TempDir, ArtifactDir) {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join(MANIFEST_NAME), "{}").unwrap();
     if git {
@@ -620,28 +622,6 @@ fn staging_directories_are_private_and_go_when_dropped() {
     drop(first);
     assert!(!path.exists());
     assert!(second.path().is_dir());
-}
-
-#[test]
-fn one_download_at_a_time_installs_into_a_checkout() {
-    let (_directory, dir) = checkout(true);
-    let first = DownloadLock::acquire(&dir, Report::Stderr).unwrap();
-    let acquired = AtomicBool::new(false);
-    std::thread::scope(|scope| {
-        let waiter = scope.spawn(|| {
-            let lock = DownloadLock::acquire(&dir, Report::Stderr).unwrap();
-            acquired.store(true, Ordering::SeqCst);
-            drop(lock);
-        });
-        std::thread::sleep(Duration::from_millis(500));
-        assert!(!acquired.load(Ordering::SeqCst));
-        drop(first);
-        waiter.join().unwrap();
-    });
-    assert!(acquired.load(Ordering::SeqCst));
-    // The lock file stays, and the next download takes its lock at once.
-    assert!(dir.root().join("build").join(LOCK_NAME).is_file());
-    drop(DownloadLock::acquire(&dir, Report::Stderr).unwrap());
 }
 
 #[test]
