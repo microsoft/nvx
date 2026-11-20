@@ -595,6 +595,21 @@ fn the_variable_turns_downloads_off_with_0_alone() {
 }
 
 #[test]
+fn a_path_is_absent_when_it_has_no_entry_or_a_component_is_no_directory() {
+    for kind in [io::ErrorKind::NotFound, io::ErrorKind::NotADirectory] {
+        assert!(is_absent(&io::Error::from(kind)), "{kind:?}");
+    }
+    for kind in [
+        io::ErrorKind::PermissionDenied,
+        io::ErrorKind::AlreadyExists,
+        io::ErrorKind::IsADirectory,
+        io::ErrorKind::Other,
+    ] {
+        assert!(!is_absent(&io::Error::from(kind)), "{kind:?}");
+    }
+}
+
+#[test]
 fn staging_directories_are_private_and_go_when_dropped() {
     let directory = tempfile::tempdir().unwrap();
     let parent = directory.path().join("build");
