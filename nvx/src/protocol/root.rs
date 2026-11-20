@@ -336,21 +336,11 @@ impl RootLayout {
                 LAYER => image = Some(parse_image(value)?),
                 SCRATCH => {
                     let expected = format!("{SCRATCH_MMIO_BASE:#x},{SCRATCH_FILESYSTEM}");
-                    if value != expected.as_bytes() {
-                        return Err(violation(format!(
-                            "the {SCRATCH} kernel parameter must be {expected}, not '{}'",
-                            value.escape_ascii()
-                        )));
-                    }
+                    cmdline::require_value(SCRATCH, value, &expected)?;
                     scratch = true;
                 }
                 OVERLAY_UPPER => {
-                    if value != RAM_UPPER.as_bytes() {
-                        return Err(violation(format!(
-                            "the {OVERLAY_UPPER} kernel parameter must be {RAM_UPPER}, not '{}'",
-                            value.escape_ascii()
-                        )));
-                    }
+                    cmdline::require_value(OVERLAY_UPPER, value, RAM_UPPER)?;
                     ram = true;
                 }
                 OVERLAY_MODE => {

@@ -456,6 +456,30 @@ fn command_lines_split_into_tokens_as_the_init_splits_them() {
 }
 
 #[test]
+fn a_boot_token_with_one_value_refuses_any_other_and_echoes_it_escaped() {
+    assert_eq!(require_value("virtfs_aggregate", b"1", "1"), Ok(()));
+    assert_eq!(
+        require_value("nvx_scratch", b"0xd0006000", "0xd0006000,ext4")
+            .unwrap_err()
+            .message(),
+        "the nvx_scratch kernel parameter must be 0xd0006000,ext4, not '0xd0006000'"
+    );
+    // The value is compared byte for byte, empty or not text.
+    assert_eq!(
+        require_value("nvx_overlay_upper", b"", "ramfs")
+            .unwrap_err()
+            .message(),
+        "the nvx_overlay_upper kernel parameter must be ramfs, not ''"
+    );
+    assert_eq!(
+        require_value("virtfs_dir", b"/run\xff\x00'", "/run")
+            .unwrap_err()
+            .message(),
+        "the virtfs_dir kernel parameter must be /run, not '/run\\xff\\x00\\''"
+    );
+}
+
+#[test]
 fn the_dns_server_is_read_as_openvmm_renders_it() {
     let ipv4: IpAddr = "10.0.0.1".parse().unwrap();
     let ipv6: IpAddr = "fd00::a00:1".parse().unwrap();

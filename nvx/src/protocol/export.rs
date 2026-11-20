@@ -151,12 +151,7 @@ impl HostExport {
             }
             match parameter {
                 DIRECTORY => {
-                    if value != EXPORT_DIRECTORY.as_bytes() {
-                        return Err(violation(format!(
-                            "the {DIRECTORY} kernel parameter must be {EXPORT_DIRECTORY}, not '{}'",
-                            value.escape_ascii()
-                        )));
-                    }
+                    cmdline::require_value(DIRECTORY, value, EXPORT_DIRECTORY)?;
                     directory = true;
                 }
                 TAG => tag = Some(parse_tag(value)?),
@@ -169,12 +164,7 @@ impl HostExport {
                     })?);
                 }
                 _ => {
-                    if value != AGGREGATE_VALUE.as_bytes() {
-                        return Err(violation(format!(
-                            "the {AGGREGATE} kernel parameter must be {AGGREGATE_VALUE}, not '{}'",
-                            value.escape_ascii()
-                        )));
-                    }
+                    cmdline::require_value(AGGREGATE, value, AGGREGATE_VALUE)?;
                     aggregate = true;
                 }
             }
