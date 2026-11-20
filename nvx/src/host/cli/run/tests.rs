@@ -6,6 +6,44 @@ use proptest::prelude::*;
 use super::*;
 use crate::protocol::cmdline::{self, parameters, virtio_mmio_devices};
 
+#[test]
+fn run_share_refuses_ancestor_and_child_but_accepts_sibling() {
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let vm = directory.path().join("nvx-run-example");
+    let child = vm.join("nested");
+    let sibling = directory.path().join("another-run");
+
+    assert!(refuse_run_vm_share(&vm, directory.path()).is_err());
+    assert!(refuse_run_vm_share(&vm, &child).is_err());
+    assert!(refuse_run_vm_share(&vm, &sibling).is_ok());
+}
+
+#[test]
+fn run_share_refuses_ancestor_through_directory_alias() {
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let actual = directory.path().join("actual");
+    let alias = directory.path().join("alias");
+    std::fs::create_dir(&actual).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&actual, &alias).unwrap();
+    #[cfg(windows)]
+    crate::host::tests::junction(&alias, &actual);
+
+    assert!(refuse_run_vm_share(&actual.join("nvx-run-example"), &alias).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn run_share_refuses_verbatim_named_child() {
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let vm = directory.path().join("nvx-run-example");
+    let verbatim = std::fs::canonicalize(directory.path()).unwrap();
+    let child =
+        std::path::PathBuf::from(format!(r"{}\nvx-run-example\nested.", verbatim.display()));
+
+    assert!(refuse_run_vm_share(&vm, &child).is_err());
+}
+
 /// Models the kernel's discovery of the filesystem, control console, and boot console around the
 /// command line rendered by the actual cold VM configuration.
 fn effective_command_line(config: &VmConfig) -> String {
