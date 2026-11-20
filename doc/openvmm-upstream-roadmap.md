@@ -9,17 +9,19 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c928e8dc1e1673a37c83c10fe145f6611a505cec`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126 and the PR18 fixup at position 302.
-- NVX's pinned OpenVMM revision: `85c3698f94e8c8308ac1b09e99b31b17ae50a037`, position 316, the head
-  of the `feature/microvm/release/v7.1` branch of microsoft/openvmm. The v7.1 rebase moved the 315
-  commits of `feature/microvm/dev` at NVX's previous pin, `6e5303f94`, onto `9a875b563` without
-  dropping any: the 296 of `feature/microvm/release/v7.0` and the 19 that microsoft/openvmm#5129,
-  microsoft/openvmm#5131, microsoft/openvmm#5132, microsoft/openvmm#5134, microsoft/openvmm#5136,
-  microsoft/openvmm#5140, and microsoft/openvmm#5141 landed after it. It added a fixup at its tip,
-  position 316. Every commit keeps its position, and only positions 060 and 277, which conflicted
-  with upstream, and position 007, whose context upstream changed, changed their patches; see
-  [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The pin is 190 commits past the
-  mapped tip on the same first-parent chain. Positions 127-301 and 303-316 are not yet assigned to
-  PRs, and position 302 is a PR18 fixup; see [Commits after the mapped
+- NVX's pinned OpenVMM revision: `ee647f75cba9dc8ced61d5cb065b070fb445fbd7`, position 318, the head
+  of microsoft/openvmm#5168, whose commits follow position 316, `85c3698f9`, the head of
+  `feature/microvm/dev` and of the `feature/microvm/release/v7.1` branch of microsoft/openvmm. The
+  v7.1 rebase moved the 315 commits of `feature/microvm/dev` at NVX's pin before it, `6e5303f94`,
+  onto `9a875b563` without dropping any: the 296 of `feature/microvm/release/v7.0` and the 19 that
+  microsoft/openvmm#5129, microsoft/openvmm#5131, microsoft/openvmm#5132, microsoft/openvmm#5134,
+  microsoft/openvmm#5136, microsoft/openvmm#5140, and microsoft/openvmm#5141 landed after it. It
+  added a fixup at its tip, position 316. Every commit keeps its position, and only positions 060
+  and 277, which conflicted with upstream, and position 007, whose context upstream changed, changed
+  their patches; see [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The pin is 192
+  commits past the mapped tip on the same first-parent chain. Positions 127-301 and 303-318 are not
+  yet assigned to PRs, position 302 is a PR18 fixup, and position 317 backports upstream's
+  microsoft/openvmm#5160, which the next rebase drops; see [Commits after the mapped
   tip](#commits-after-the-mapped-tip).
 - Upstream main: `715927303600a54911a836ed6f53dc338e15c05f` (2026-11-18), one commit past the
   fork base; see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1461,7 +1463,9 @@ The physical branch is one first-parent chain:
   -> snapshot manifest's field map with upstream recorded in the Guide [314]
   -> malformed snapshot ID refused by its field before the rest of the manifest decodes [315]
   -> v7.1 rebase fixup [316]
-  -> 85c3698f9 (NVX pin)
+  -> upstream's EOF for a disconnected named pipe's event query, microsoft/openvmm#5160 [317]
+  -> offsets found in I/O regions that end at the top of their address space [318]
+  -> ee647f75c (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1490,21 +1494,22 @@ position 069 and position 133.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 190 later commits, position
-302 is a PR18 fixup, position 316 is the fixup of the v7.1 rebase, and the others are not yet
-classified or assigned to PRs.
+The NVX pin extends the chain past position 126 without merges. Of its 192 later commits, position
+302 is a PR18 fixup, position 316 is the fixup of the v7.1 rebase, position 317 backports an
+upstream commit, and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 are the ABI restart
 of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 followed the v5.0
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
-v7.0 reorganization, and position 316 is the v7.1 rebase's fixup, so they combine none, apart from
-position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0
-reorganization folded into them. Each commit has the position that it had in v7.0, since the v7.1
-rebase dropped none. Each commit's v6.1 position is its v6.0 position less seven, the number of
-commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position through
-147 and one less from v5.1 position 149 on, and positions 297-316 have no earlier position; see
+v7.0 reorganization, position 316 is the v7.1 rebase's fixup, and positions 317 and 318 followed
+the v7.1 rebase, so they combine none, apart from position 215, which combines v5.1 positions 222
+and 223, and the commits that the v7.0 reorganization folded into them. Each commit has the
+position that it had in v7.0, since the v7.1 rebase dropped none. Each commit's v6.1 position is its
+v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and its v6.0
+position is its v5.1 position through 147 and one less from v5.1 position 149 on, and positions
+297-318 have no earlier position; see
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.1 position counts in
@@ -1706,13 +1711,15 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 314 | `e61ccb214` | - | - | - | - | - | - | Guide: record the snapshot manifest's field map with upstream (microsoft/openvmm#5141) |
 | 315 | `848f60122` | - | - | - | - | - | - | openvmm_helpers: refuse a malformed snapshot ID by its field (microsoft/openvmm#5141) |
 | 316 | `85c3698f9` | - | - | - | - | - | - | cpu_profile, openvmm_helpers: name sha2 as upstream's lock file does (v7.1 rebase fixup for microsoft/openvmm#4941); fold into 069 and 133 |
+| 317 | `2a5e77698` | - | - | - | - | - | - | pal_async: treat disconnected pipe event query as EOF (microsoft/openvmm#5160, backported by microsoft/openvmm#5168 from upstream's `0474df224`); the next rebase drops it |
+| 318 | `ee647f75c` | - | - | - | - | - | - | vmotherboard: find offsets in an I/O region that ends at the top (microsoft/openvmm#5168) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
 regrouped, and later fork bases, up to `7d90c4104` for v6.1 positions 270-315, for later commits,
 and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`, upstream main on
-2026-11-17, for positions 307-312, and `2640ad182`, upstream main later that day, for positions
-313-315.
+2026-11-17, for positions 307-312, `2640ad182`, upstream main later that day, for positions
+313-315, and `715927303`, upstream main on 2026-11-18, for positions 317 and 318.
 They name the positions that the commits have now, but neither the v7.1 rebase on `9a875b563` nor
 the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the earlier
 ones on `7d90c4104`.
@@ -3708,6 +3715,29 @@ rest. Replaying it on upstream main conflicts in its three files: `format.rs` do
 since PR11's position 029 adds it; its tests in `restore.rs` follow those of position 225 and use
 its `read_errors_with_manifest`; and its sentences in the Guide's page follow one that position 225
 writes. So it follows position 225, and the positions that it follows, upstream.
+
+Position 317 is upstream's `0474df224`, which microsoft/openvmm#5160 merged on 2026-11-19, after
+`715927303`, cherry-picked unchanged, with a note in its message. On Windows, `pal_async`'s
+`PolledPipe::refresh_events` treats `ERROR_PIPE_NOT_CONNECTED`, which the query of a named pipe's
+events can return once the server has disconnected the pipe, as `FILE_PIPE_DISCONNECTED`, so that a
+pending read returns EOF. Without it, `pal_async`'s `client_read_completes_when_server_disconnects`
+failed OpenVMM's `unit tests [x64-windows]` job, which NVX's `openvmm-ci` job requires, in each of
+five runs for the first head of microsoft/openvmm#5168, which held only position 318. It changes a
+file that no other commit of the chain changes, and it is not a fixup of a mapped PR. The next
+rebase onto an upstream main that has it drops it as landed, and
+[Landed upstream](#landed-upstream) then lists it.
+
+Position 318 makes `offset_of`, which `vmotherboard` implements for the port I/O and MMIO regions
+of chipset devices, find the offsets in a region whose last byte is the top of its address space,
+such as 2 ports at `0xfffe` or an MMIO region that ends at `u64::MAX` (microsoft/nvx#1384). It
+compared the address with the region's exclusive end, which does not fit the address type there, so
+the first lookup in such a region panicked where overflow checks are on and otherwise found no
+offset. It now compares the address's offset from the base with the region's length, in code that
+upstream main has, and adds two tests beside the tests of the region's mapping, in a file that
+PR10's position 015 also changes, none of the code that it changes. It changes nothing that a mapped
+PR adds. No device of the microVM looks up an offset in its regions, so the microVM behaves as it
+did. Replaying it on upstream main applies without conflicts, and `vmotherboard` type-checks there
+with its tests, which pass, so it can go upstream on its own.
 
 ## PR summary
 
