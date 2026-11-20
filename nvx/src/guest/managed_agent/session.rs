@@ -770,7 +770,7 @@ impl<'r> Session<'r> {
     fn error(&mut self, error: GuestConnectionError) -> Errno {
         let error = match error {
             GuestConnectionError::Ended => return self.last_error.unwrap_or(Errno::EPROTO),
-            GuestConnectionError::Io(error) => io_error(&error),
+            GuestConnectionError::Io(error) => sys::errno_of(&error),
             // `FileDescriptor::read_exact` reports end of file as `EIO`, inside a record or not.
             GuestConnectionError::Closed
             | GuestConnectionError::Protocol(SessionError::Truncated { .. }) => Errno::EIO,
@@ -853,11 +853,6 @@ fn classify(error: &SessionError, epoch: u64) -> Option<ReceiveFailure> {
         | SessionError::SequenceOverflow(_)
         | SessionError::InvalidState => None,
     }
-}
-
-/// Returns the `errno` of an I/O failure, or `EIO` for one without, such as a write of no bytes.
-fn io_error(error: &io::Error) -> Errno {
-    error.raw_os_error().map_or(Errno::EIO, Errno::from_raw)
 }
 
 /// Constructs one typed DATA validation failure.
