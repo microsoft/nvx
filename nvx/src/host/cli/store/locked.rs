@@ -85,7 +85,7 @@ impl StateDir {
                     Ok(()) => break,
                     Err(TryLockError::WouldBlock) => {
                         if !deadline.pause(RETRY_INTERVAL)? {
-                            return Err(busy());
+                            return Err(transition_in_progress());
                         }
                     }
                     Err(TryLockError::Error(error)) => return Err(lock_failed(&path)(error)),
@@ -102,7 +102,7 @@ impl StateDir {
                 return Ok(locked);
             }
             if retried_at_once && !deadline.pause(RETRY_INTERVAL)? {
-                return Err(busy());
+                return Err(transition_in_progress());
             }
             retried_at_once = !retried_at_once;
         }
@@ -110,7 +110,7 @@ impl StateDir {
 }
 
 /// Returns the error of a transition that still waits for another past its deadline.
-fn busy() -> Exit {
+pub(crate) fn transition_in_progress() -> Exit {
     Exit::error(
         ErrorCode::SandboxBusy,
         "another lifecycle transition of the sandbox is still in progress",
