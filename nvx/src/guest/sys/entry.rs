@@ -48,7 +48,7 @@ const DEVICE_MODE: u32 = 0o666;
 
 /// The device nodes of a layered root's `/dev`: the name, and the major and minor numbers of the
 /// character device. Bit `n` of [`populate_devices`]'s selection selects node `n`.
-pub(crate) const DEVICE_NODES: [(&CStr, u32, u32); 6] = [
+const DEVICE_NODES: [(&CStr, u32, u32); 6] = [
     (c"null", 1, 3),
     (c"zero", 1, 5),
     (c"full", 1, 7),

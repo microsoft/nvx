@@ -148,7 +148,7 @@ pub(crate) enum TickMode {
 
 impl TickMode {
     /// Returns the mode that the kernel numbers `number`.
-    pub(crate) const fn from_number(number: i32) -> Option<Self> {
+    const fn from_number(number: i32) -> Option<Self> {
         match number {
             0 => Some(Self::Periodic),
             1 => Some(Self::Oneshot),
@@ -182,7 +182,7 @@ pub(crate) enum ClockEventState {
 
 impl ClockEventState {
     /// Returns the state that the kernel numbers `number`.
-    pub(crate) const fn from_number(number: i32) -> Option<Self> {
+    const fn from_number(number: i32) -> Option<Self> {
         match number {
             0 => Some(Self::Detached),
             1 => Some(Self::Shutdown),

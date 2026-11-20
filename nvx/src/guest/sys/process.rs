@@ -368,10 +368,7 @@ pub(crate) fn kill_process_group(process: ProcessId) -> Result<(), Errno> {
 /// Sends the signal numbered `signal` to the process group led by `process`, by the group's ID.
 ///
 /// libc's `kill` is used because `nix`'s `Signal` cannot represent a real-time signal.
-pub(crate) fn signal_process_group(
-    process: ProcessId,
-    signal: nix::libc::c_int,
-) -> Result<(), Errno> {
+fn signal_process_group(process: ProcessId, signal: nix::libc::c_int) -> Result<(), Errno> {
     // SAFETY: `kill` reads only its integer arguments.
     Errno::result(unsafe { nix::libc::kill(-process.0.as_raw(), signal) }).map(drop)
 }
