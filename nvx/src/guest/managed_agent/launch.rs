@@ -105,7 +105,7 @@ fn workload_environment(
 }
 
 /// Returns whether an absolute path has only canonical nonempty components.
-pub(crate) fn safe_path(path: &[u8]) -> bool {
+fn safe_path(path: &[u8]) -> bool {
     let Some(components) = path.strip_prefix(b"/") else {
         return false;
     };

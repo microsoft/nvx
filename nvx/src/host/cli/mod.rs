@@ -176,7 +176,7 @@ pub(crate) enum Exit {
 }
 
 /// The message of [`Exit::EndpointClosed`], `str(ControlEndpointClosed())`.
-pub(crate) const ENDPOINT_CLOSED: &str = "managed control endpoint closed";
+const ENDPOINT_CLOSED: &str = "managed control endpoint closed";
 
 impl Exit {
     /// Returns the error of `code` that prints `message`.

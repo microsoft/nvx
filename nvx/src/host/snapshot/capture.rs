@@ -116,7 +116,7 @@ struct Outcome {
 }
 
 /// Checks that the outcome report records a capture that OpenVMM published successfully.
-pub(in crate::host) fn check_exit(path: &Path) -> Result<()> {
+fn check_exit(path: &Path) -> Result<()> {
     let description = format!("the outcome report {}", path.display());
     let file = match open_regular(path) {
         Ok(file) => file,
