@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use nix::poll::{PollFd, PollFlags, PollTimeout};
 
-use super::{ChildSignalWait, Errno, FileDescriptor, SignalDescriptor, Timer};
+#[cfg(any(test, target_arch = "x86_64"))]
+use super::ChildSignalWait;
+use super::{Errno, FileDescriptor, SignalDescriptor, Timer};
 
 /// Polls `descriptors` for readable data or hangup, and returns whether each one woke, in the
 /// caller's order.
@@ -59,6 +61,7 @@ pub(crate) enum Pollable<'a> {
     /// A signal descriptor, which polls readable while one of its signals is pending.
     Signals(&'a SignalDescriptor),
     /// A child-signal wait, which polls readable while `SIGCHLD` is pending.
+    #[cfg(any(test, target_arch = "x86_64"))]
     ChildSignal(&'a ChildSignalWait),
 }
 
@@ -69,6 +72,7 @@ impl Pollable<'_> {
             Self::File(descriptor) | Self::Writable(descriptor) => descriptor.borrowed(),
             Self::Timer(timer) => timer.borrowed(),
             Self::Signals(signals) => signals.borrowed(),
+            #[cfg(any(test, target_arch = "x86_64"))]
             Self::ChildSignal(wait) => wait.borrowed(),
         }
     }

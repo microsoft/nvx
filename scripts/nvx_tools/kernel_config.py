@@ -20,7 +20,12 @@ from pathlib import Path
 
 from . import kconfig
 from .common import ScriptError, run_checked
-from .kernel_features import KERNEL_CONFIG_CHECKS, KERNEL_FEATURES, KernelFeature
+from .kernel_features import (
+    KERNEL_CONFIG_CHECKS,
+    KERNEL_FEATURES,
+    KernelFeature,
+    features_for_architecture,
+)
 
 CONFIG_PREFIX = "CONFIG_"
 _SET = re.compile(r"^CONFIG_([A-Za-z0-9_]+)=(.*)$")
@@ -229,8 +234,17 @@ class DerivedRecord:
             entries[assignment.symbol] = (assignment, reason)
         return DerivedRecord(toolchain, entries)
 
-    def render(self) -> str:
-        lines = [DERIVED_HEADER.rstrip("\n"), "#"]
+    def render(self, *, architecture: str = "x86_64") -> str:
+        header = DERIVED_HEADER
+        if architecture == "aarch64":
+            header = header.replace(
+                "`python3 scripts/nvx.py kernel-config` from the kernel feature",
+                "`python3 scripts/nvx.py kernel-config`\n"
+                "# with `--architecture aarch64 --native` from the kernel feature",
+            ).replace("kernel/config-microvm", "kernel/config-microvm-arm64")
+        elif architecture != "x86_64":
+            raise ScriptError(f"unsupported kernel architecture: {architecture}")
+        lines = [header.rstrip("\n"), "#"]
         if self.toolchain is not None:
             lines.append(f"{_TOOLCHAIN_HEADER}{self.toolchain}")
         for symbol in sorted(self.entries):
@@ -399,11 +413,17 @@ class GeneratedConfig:
 def generate(
     source: Path,
     work: Path,
-    features: tuple[KernelFeature, ...] = KERNEL_FEATURES,
+    features: tuple[KernelFeature, ...] | None = None,
+    *,
+    architecture: str = "x86_64",
 ) -> GeneratedConfig:
     """Generate the configuration from a patched kernel source: `make
     allnoconfig` with the inventory's settings as KCONFIG_ALLCONFIG, in the
     build directory `work`."""
+    if architecture not in ("x86_64", "aarch64"):
+        raise ScriptError(f"unsupported kernel architecture: {architecture}")
+    if features is None:
+        features = features_for_architecture(architecture)
     problems = inventory_problems(features)
     if problems:
         raise ScriptError(
@@ -420,6 +440,7 @@ def generate(
             "-s",
             "-C",
             source,
+            *(["ARCH=arm64"] if architecture == "aarch64" else []),
             f"O={work}",
             f"KCONFIG_ALLCONFIG={fragment}",
             "allnoconfig",
@@ -447,7 +468,11 @@ def generate(
     if hidden:
         text = text.rstrip("\n") + "\n\n" + HIDDEN_SETTINGS_COMMENT
         text += "\n".join(sorted(hidden)) + "\n"
-    tree = kconfig.read_kconfig(source)
+    tree = (
+        kconfig.read_kconfig(source, srcarch="arm64", arch="arm64")
+        if architecture == "aarch64"
+        else kconfig.read_kconfig(source)
+    )
     record = DerivedRecord(toolchain_identity(values), derive(tree, values, settings))
     return GeneratedConfig(text, values, record)
 
@@ -457,7 +482,9 @@ def check_build_configuration(
     work: Path,
     effective: Path,
     derived: Path,
-    features: tuple[KernelFeature, ...] = KERNEL_FEATURES,
+    features: tuple[KernelFeature, ...] | None = None,
+    *,
+    architecture: str = "x86_64",
 ) -> None:
     """Require the configuration that a kernel build resolved, `effective`,
     to be the one that the inventory generates with the same kernel source and
@@ -469,7 +496,13 @@ def check_build_configuration(
     detect other capabilities, so then only its entries for symbols with a
     prompt, which the toolchain does not decide, must match, and every other
     entry must name a symbol without a prompt."""
-    generated = generate(source, work, features)
+    if features is None:
+        features = features_for_architecture(architecture)
+    generated = (
+        generate(source, work, features, architecture=architecture)
+        if architecture != "x86_64"
+        else generate(source, work, features)
+    )
     resolved = parse_config(effective.read_text(encoding="utf-8"), str(effective))
     problems: list[str] = []
     for symbol in sorted(resolved.keys() | generated.values.keys()):
@@ -481,7 +514,11 @@ def check_build_configuration(
                 f"inventory generates {Assignment(symbol, expected).line}"
             )
     recorded = DerivedRecord.parse(derived.read_text(encoding="utf-8"), str(derived))
-    tree = kconfig.read_kconfig(source)
+    tree = (
+        kconfig.read_kconfig(source, srcarch="arm64", arch="arm64")
+        if architecture == "aarch64"
+        else kconfig.read_kconfig(source)
+    )
     exact = recorded.toolchain == generated.record.toolchain
     for symbol in sorted(recorded.entries.keys() | generated.record.entries.keys()):
         definition = tree.symbols.get(symbol)
@@ -519,10 +556,14 @@ def _describe(entry: tuple[Assignment, str] | None) -> str:
     return f"{entry[0].line} ({entry[1]})"
 
 
-def summary(config_text: str, derived_text: str) -> str:
+def summary(
+    config_text: str,
+    derived_text: str,
+    features: tuple[KernelFeature, ...] = KERNEL_FEATURES,
+) -> str:
     values = parse_config(config_text)
     record = DerivedRecord.parse(derived_text)
-    settings = inventory_settings()
+    settings = inventory_settings(features)
     enabled = [symbol for symbol, value in values.items() if value != NOT_SET]
     by_inventory = [symbol for symbol in enabled if symbol in settings]
     prompted = [
@@ -530,6 +571,6 @@ def summary(config_text: str, derived_text: str) -> str:
     ]
     return (
         f"{len(enabled)} symbols set: {len(by_inventory)} by the inventory's "
-        f"{len(KERNEL_FEATURES)} features, {len(record.entries)} derived, "
+        f"{len(features)} features, {len(record.entries)} derived, "
         f"{len(prompted)} of them with a prompt"
     )

@@ -1,4 +1,7 @@
 use super::*;
+use crate::guest::time::checks_shared::is_daemon_name;
+use crate::guest::time::checks_shared::{STATUS_POLL, STATUS_WAIT};
+use crate::guest::time::system::DAEMON_NAME;
 
 #[test]
 fn the_daemon_is_recognized_by_the_name_that_it_takes() {

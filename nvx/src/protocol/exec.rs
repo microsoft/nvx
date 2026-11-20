@@ -13,10 +13,7 @@ use std::collections::BTreeSet;
 #[cfg(feature = "cli")]
 use super::{APP_HEADER_LEN, OUTER_MAX_PAYLOAD};
 use super::{ProtocolError, violation};
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 use super::{u16_at, u32_at};
 
 /// Largest number of workload arguments, including the program.
@@ -25,7 +22,7 @@ pub(crate) const MAX_ARGUMENTS: usize = 64;
 pub(crate) const MAX_ARGUMENT_BYTES: usize = 4096;
 /// Largest working directory that the C guest decoder accepts. Unlike host paths, the guest's
 /// wire bound includes all 4096 non-NUL bytes because its terminating NUL is allocated separately.
-#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(feature = "guest", target_os = "linux"))]
 pub(crate) const MAX_GUEST_CWD_BYTES: usize = MAX_ARGUMENT_BYTES;
 /// Largest number of workload environment entries.
 pub(crate) const MAX_ENVIRONMENT: usize = 256;
@@ -188,7 +185,7 @@ pub(crate) struct ExecPayload {
 /// Linux arguments, paths, and environment entries are byte strings. Keeping this form separate
 /// from [`ExecPayload`] preserves the host and fake-OpenVMM APIs, which intentionally use UTF-8,
 /// while accepting every non-NUL byte sequence that the C guest accepted.
-#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(feature = "guest", target_os = "linux"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GuestExecPayload {
     /// Timeout in milliseconds; zero disables it.
@@ -204,10 +201,7 @@ pub(crate) struct GuestExecPayload {
 }
 
 /// The fixed fields of an `EXEC` payload, which both decoders read and check alike.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 struct ExecHeader {
     /// Timeout in milliseconds; zero disables it.
     timeout_ms: u32,
@@ -230,10 +224,7 @@ struct ExecHeader {
 /// unknown extension or flag, a working-directory length without the working-directory flag or
 /// the reverse, environment entries without the environment flag, and more than
 /// [`MAX_ENVIRONMENT`] entries.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 fn decode_exec_header(payload: &[u8], max_cwd: usize) -> Result<ExecHeader, ProtocolError> {
     let truncated = || violation("the exec request is truncated");
     if payload.len() < 8 {
@@ -286,10 +277,7 @@ fn decode_exec_header(payload: &[u8], max_cwd: usize) -> Result<ExecHeader, Prot
 }
 
 /// An `EXEC` payload as both decoders read it, with each string as one decoder holds it.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 struct DecodedExec<S> {
     /// Timeout in milliseconds; zero disables it.
     timeout_ms: u32,
@@ -311,10 +299,7 @@ struct DecodedExec<S> {
 /// entry, or one longer than [`MAX_ARGUMENT_BYTES`], one that contains NUL characters or that `S`
 /// refuses, a relative program or working directory, an entry without a name, a name that
 /// repeats, and trailing bytes.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 fn decode_exec<S: ExecString>(
     payload: &[u8],
     max_cwd: usize,
@@ -417,7 +402,7 @@ pub(crate) fn decode_exec_payload(payload: &[u8]) -> Result<ExecPayload, Protoco
 /// [`EXEC_INHERIT_DEFAULT_ENV`] alone, so unlike the host's, it is false without explicit entries.
 /// The host-facing decoder remains text-oriented, so this guest decoder does not broaden host
 /// behavior.
-#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(feature = "guest", target_os = "linux"))]
 pub(crate) fn decode_guest_exec_payload(payload: &[u8]) -> Result<GuestExecPayload, ProtocolError> {
     let DecodedExec {
         timeout_ms,
@@ -439,10 +424,7 @@ pub(crate) fn decode_guest_exec_payload(payload: &[u8]) -> Result<GuestExecPaylo
 /// entry, as one decoder holds it. Each decoder's implementation holds what it does differently
 /// from the other: the host's reads UTF-8 text, the guest's reads Linux byte strings, and they
 /// word the refusals of an entry's name differently.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 trait ExecString: AsRef<[u8]> + Sized {
     /// Converts the bytes of a string of the payload, which `what` names, as soon as they are
     /// read.
@@ -476,7 +458,7 @@ impl ExecString for String {
 }
 
 /// The guest's decoder keeps Linux byte strings as they are.
-#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(feature = "guest", target_os = "linux"))]
 impl ExecString for Vec<u8> {
     fn convert(bytes: Vec<u8>, _what: &str) -> Result<Self, ProtocolError> {
         Ok(bytes)
@@ -493,10 +475,7 @@ impl ExecString for Vec<u8> {
 
 /// Reads the string at `offset` that its `u32` length precedes, of 1 to [`MAX_ARGUMENT_BYTES`]
 /// bytes, as `S`, and advances `offset` past it.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 fn prefixed_string<S: ExecString>(
     payload: &[u8],
     offset: &mut usize,
@@ -520,10 +499,7 @@ fn prefixed_string<S: ExecString>(
 }
 
 /// Returns one bounded non-NUL byte range without imposing UTF-8.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 fn bytes_at<'a>(
     payload: &'a [u8],
     offset: usize,

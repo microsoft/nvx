@@ -8,9 +8,9 @@
 //!   the table's parts to the caller's own mapper.
 //! - [`reseed`]: a restore's fresh entropy, which starts with the VM's new [`GenerationId`], and
 //!   the reseed of the kernel's random number generator with it.
-//! - On x86-64, `time`: the time ABI's cold-boot step and the start of its daemon, a process that
+//! - `time`: the time ABI's cold-boot step and the start of its daemon, a process that
 //!   the caller supervises, as typed calls.
-//! - On x86-64, [`snapshot`]: a strictly checked Fresh capture by one caller deadline, without
+//! - On x86-64, `snapshot`: a strictly checked Fresh capture by one caller deadline, without
 //!   execution control, with nothing mounted from the devices that a snapshot's clones replace,
 //!   which repairs each clone that a restore of the snapshot starts before it returns: it
 //!   activates the restore's memory target, reseeds the kernel's random number generator, and
@@ -54,13 +54,14 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 mod account;
+mod counter;
 mod generation;
 mod parse;
 mod status;
 #[allow(unsafe_code)]
 mod sys;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod kernel_text;
 
 pub use generation::GenerationId;
@@ -68,19 +69,19 @@ pub use generation::GenerationId;
 #[doc(hidden)]
 pub mod console_pending;
 pub mod control;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[doc(hidden)]
 pub mod device_io;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[doc(hidden)]
 pub mod exit;
 mod gpt;
 #[doc(hidden)]
 pub mod ingress;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[doc(hidden)]
 pub mod init;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[doc(hidden)]
 pub mod managed_agent;
 pub mod mappings;
@@ -95,7 +96,7 @@ pub(crate) mod root;
 #[cfg(target_arch = "x86_64")]
 pub mod snapshot;
 pub mod terminal;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod time;
 #[cfg(target_arch = "x86_64")]
 #[doc(hidden)]

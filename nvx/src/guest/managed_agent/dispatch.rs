@@ -3,8 +3,10 @@ use std::ffi::CString;
 use crate::guest::init::Runtime;
 use crate::guest::mappings::{Mapper, MappingTable, SourceRoot};
 use crate::guest::sys::{self, Errno, FileDescriptor};
+#[cfg(target_arch = "x86_64")]
+use crate::protocol::APP_CAPTURE;
 use crate::protocol::{
-    self, APP_CANCEL, APP_CAPTURE, APP_EXEC, APP_MAPS, APP_PING, APP_READY, APP_STOP, APP_STOPPED,
+    self, APP_CANCEL, APP_EXEC, APP_MAPS, APP_PING, APP_READY, APP_STOP, APP_STOPPED,
     INVALID_REQUEST, MAPPINGS_INCOMPLETE, UNSUPPORTED_OPERATION,
 };
 
@@ -56,6 +58,7 @@ impl AgentConfig {
     }
 
     /// The Fresh loop has no root, mapper, account resolution or workload admission.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn serve_capture(
         runtime: &mut Runtime,
         control: FileDescriptor,
@@ -80,21 +83,41 @@ impl AgentConfig {
         mut mappings: HostMappings,
         fresh: bool,
     ) -> Result<u8, String> {
+        #[cfg(target_arch = "aarch64")]
+        if fresh {
+            return Err("Fresh capture is unsupported on aarch64".to_owned());
+        }
+        #[cfg(target_arch = "x86_64")]
         let capture = runtime.capture(fresh);
         let mut system = RealSystem::new(Paths::default());
-        let mut session = Session::with_runtime(control, runtime)?.with_capture(capture);
-        run(&mut system, &mut session, self, &mut mappings)
-            .map(|Outcome::Stopped| session.capture_status().unwrap_or_default())
-            .or_else(|error| match session.runtime_failure() {
-                Some(failure) => Err(failure),
-                None => session
-                    .activation_status()
-                    .ok_or_else(|| format!("control session failed: {}", error.desc())),
-            })
+        let session = Session::with_runtime(control, runtime)?;
+        #[cfg(target_arch = "x86_64")]
+        let session = session.with_capture(capture);
+        let mut session = session;
+        match run(&mut system, &mut session, self, &mut mappings) {
+            Ok(Outcome::Stopped) => {
+                #[cfg(target_arch = "x86_64")]
+                if let Some(status) = session.capture_status() {
+                    return Ok(status);
+                }
+                Ok(0)
+            }
+            Err(error) => {
+                if let Some(failure) = session.runtime_failure() {
+                    return Err(failure);
+                }
+                #[cfg(target_arch = "x86_64")]
+                if let Some(status) = session.activation_status() {
+                    return Ok(status);
+                }
+                Err(format!("control session failed: {}", error.desc()))
+            }
+        }
     }
 }
 
 /// Preserves the existing receive-stage diagnostic for a restored capture's RESET.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn report_failure_for_capture(failure: ReceiveFailure) -> Errno {
     report_failure(&mut RealSystem::new(Paths::default()), failure)
 }
@@ -204,6 +227,7 @@ fn handle_data(
             return Err(failure.into_error());
         }
     };
+    #[cfg(target_arch = "x86_64")]
     if request.kind == APP_PING && session.has_restored() {
         // The host's request for a restored clone's Ready, which carries what its guest restore
         // established, once the record of its restore packet applied.
@@ -215,6 +239,7 @@ fn handle_data(
         }
         return Ok(None);
     }
+    #[cfg(target_arch = "x86_64")]
     if session.rootless() && !matches!(request.kind, APP_CAPTURE | APP_STOP) {
         session.send_error(
             request.request_id,
@@ -225,6 +250,7 @@ fn handle_data(
     }
     let config = restored.as_ref().unwrap_or(config);
     match request.kind {
+        #[cfg(target_arch = "x86_64")]
         APP_CAPTURE => {
             if session.queue_capture(request, false)? {
                 return finish_capture(session, restored, mappings);
@@ -262,6 +288,7 @@ fn handle_data(
                     return Ok(None);
                 }
             };
+            #[cfg(target_arch = "x86_64")]
             session.start_activation()?;
             let mut stop = None;
             exec::run(
@@ -275,6 +302,7 @@ fn handle_data(
             if let Some(request_id) = stop {
                 return stopped(system, session, request_id);
             }
+            #[cfg(target_arch = "x86_64")]
             if session.capture_pending() {
                 return finish_capture(session, restored, mappings);
             }
@@ -310,6 +338,7 @@ fn handle_data(
 /// Captures the VM once the session acknowledged the capture request, and, in a clone that a
 /// restore of the capture started, applies the record of its restore packet at once, before the
 /// host asks for Ready, which keeps the clone's space and the account of its mapping table.
+#[cfg(target_arch = "x86_64")]
 fn finish_capture(
     session: &mut Session,
     restored: &mut Option<AgentConfig>,

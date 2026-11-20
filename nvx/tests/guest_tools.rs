@@ -376,9 +376,14 @@ fn reseed_needs_privileges_to_reseed() {
 }
 
 #[test]
-#[cfg(target_arch = "x86_64")]
-fn exit_fails_silently_without_dev_port() {
-    if device_error("/dev/port", false, true).is_none() {
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn exit_fails_silently_when_platform_device_is_unavailable() {
+    let device = if cfg!(target_arch = "aarch64") {
+        "/dev/nvx-platform"
+    } else {
+        "/dev/port"
+    };
+    if device_error(device, false, true).is_none() {
         return;
     }
     for arguments in [&["0"][..], &[], &["256", "extra"]] {
@@ -409,7 +414,6 @@ fn init_runs_only_as_pid_1() {
 
 /// Runs `nvx-device-io` with `arguments`, checks that it exits with `expected` and writes nothing
 /// to stderr, and returns its result line, which must be the only output.
-#[cfg(target_arch = "x86_64")]
 fn device_io<I, S>(arguments: I, expected: i32) -> Option<serde_json::Value>
 where
     I: IntoIterator<Item = S>,
@@ -422,7 +426,6 @@ where
 
 /// Runs `nvx-device-io` with `arguments`, checks that it exits with `expected`, and returns its
 /// result line, which must be its only standard output, and the progress lines of its stderr.
-#[cfg(target_arch = "x86_64")]
 fn device_io_with_progress<I, S>(
     arguments: I,
     expected: i32,
@@ -469,7 +472,6 @@ where
 }
 
 #[test]
-#[cfg(target_arch = "x86_64")]
 fn device_io_usage() {
     for arguments in [
         &[][..],
@@ -496,7 +498,6 @@ fn device_io_usage() {
 }
 
 #[test]
-#[cfg(target_arch = "x86_64")]
 fn device_io_measures_a_file() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("disk");
@@ -547,7 +548,6 @@ fn device_io_measures_a_file() {
 }
 
 #[test]
-#[cfg(target_arch = "x86_64")]
 fn device_io_holds_a_mapped_write_until_its_input_ends() {
     use std::io::BufRead;
 
@@ -601,7 +601,6 @@ fn device_io_holds_a_mapped_write_until_its_input_ends() {
 }
 
 #[test]
-#[cfg(target_arch = "x86_64")]
 fn device_io_measures_a_network_round_trip() {
     use std::net::UdpSocket;
     use std::thread;
@@ -650,7 +649,6 @@ fn device_io_measures_a_network_round_trip() {
 }
 
 #[test]
-#[cfg(target_arch = "x86_64")]
 fn device_io_exits_255_when_it_cannot_print() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("disk");
@@ -684,7 +682,6 @@ fn device_io_exits_255_when_it_cannot_print() {
 }
 
 #[test]
-#[cfg(target_arch = "x86_64")]
 fn device_io_ignores_a_closed_stderr() {
     // The progress lines are diagnostics: a stderr whose reader is gone raises no SIGPIPE, even
     // under the default disposition, which ends the program at a closed stdout.
@@ -712,7 +709,6 @@ fn device_io_ignores_a_closed_stderr() {
 
 /// Checks that `stderr` holds the progress lines of a completed file benchmark, with a flush when
 /// it `wrote`.
-#[cfg(target_arch = "x86_64")]
 fn assert_progress(stderr: &[u8], wrote: bool) {
     let progress = String::from_utf8_lossy(stderr);
     let lines: Vec<&str> = progress.lines().collect();

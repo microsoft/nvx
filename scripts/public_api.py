@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Check the public API of the nvx crate against its snapshots.
 
-The snapshots, nvx/public-api/linux.txt and windows.txt, list the items that
-nvx exposes on Linux and on Windows, one a line: the item's kind, its path, and
+The snapshots in nvx/public-api/ list the items that nvx exposes on Linux
+x86-64, Linux ARM64 and Windows, one a line: the item's kind, its path, and
 `(hidden)` if `#[doc(hidden)]` hides it or an item that contains it. The lines
 are sorted by path, so that a change to a snapshot reads like the change to the
 API. A pull request that changes the public API updates the snapshots:
@@ -21,10 +21,11 @@ list a binary's as hidden on any platform, or lists it without hiding it on
 one, or when it hides anything else.
 
 The script builds the library's rustdoc JSON with every feature, for
-x86_64-unknown-linux-musl, the guests' target, and for x86_64-pc-windows-msvc,
-on the Rust release that rust-toolchain.toml pins. It first adds both targets
+x86_64-unknown-linux-musl and aarch64-unknown-linux-musl, the guests' targets,
+and for x86_64-pc-windows-msvc, on the Rust release that rust-toolchain.toml
+pins. It first adds the targets
 to that release with rustup: rustdoc needs only a target's standard library,
-not its linker, so any host lists both platforms, and lists them alike. The
+not its linker, so any host lists all three APIs alike. The
 JSON output is unstable, so the script enables it with RUSTC_BOOTSTRAP=1, and
 reads only the format version of the pinned release.
 
@@ -66,10 +67,10 @@ UPDATE_COMMAND = "python3 scripts/public_api.py --update"
 # The rustdoc JSON format of the Rust release that rust-toolchain.toml pins.
 FORMAT_VERSION = 57
 
-# The snapshot of each platform, and the target that rustdoc documents for it:
-# on Linux, the guests' target, for which the guest module builds.
+# Keep the existing x86 Linux snapshot and separately cover ARM-only guest API differences.
 TARGETS = {
     "linux": GuestRustBuildConstants.TARGET,
+    "linux-aarch64": GuestRustBuildConstants.ARM_TARGET,
     "windows": OpenVMMBuildConstants.WINDOWS_RUST_TARGET,
 }
 

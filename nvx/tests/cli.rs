@@ -2451,38 +2451,47 @@ fn usage_errors_print_the_one_line_usage_of_their_parser() {
 /// vendor and display family, model, and stepping, from the first processor of `/proc/cpuinfo` on
 /// Linux, and from `PROCESSOR_IDENTIFIER`, such as `Intel64 Family 6 Model 85 Stepping 4,
 /// GenuineIntel`, on Windows.
-fn reported_cpu() -> (String, u32, u32, u32) {
-    if cfg!(windows) {
-        let identifier = std::env::var("PROCESSOR_IDENTIFIER").unwrap();
-        let (description, vendor) = identifier.split_once(", ").unwrap();
-        let words: Vec<&str> = description.split_whitespace().collect();
-        let number = |name: &str| -> u32 {
-            let position = words.iter().position(|word| *word == name).unwrap();
-            words[position + 1].parse().unwrap()
-        };
-        return (
-            vendor.trim().to_owned(),
-            number("Family"),
-            number("Model"),
-            number("Stepping"),
-        );
+///
+/// A non-x86 host has no CPUID signature; its failed cold boots must not receive x86 guidance.
+fn reported_cpu() -> Option<(String, u32, u32, u32)> {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        None
     }
-    let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap();
-    let field = |name: &str| -> String {
-        cpuinfo
-            .lines()
-            .find_map(|line| {
-                let (key, value) = line.split_once(':')?;
-                (key.trim() == name).then(|| value.trim().to_owned())
-            })
-            .unwrap()
-    };
-    (
-        field("vendor_id"),
-        field("cpu family").parse().unwrap(),
-        field("model").parse().unwrap(),
-        field("stepping").parse().unwrap(),
-    )
+    #[cfg(target_arch = "x86_64")]
+    {
+        if cfg!(windows) {
+            let identifier = std::env::var("PROCESSOR_IDENTIFIER").unwrap();
+            let (description, vendor) = identifier.split_once(", ").unwrap();
+            let words: Vec<&str> = description.split_whitespace().collect();
+            let number = |name: &str| -> u32 {
+                let position = words.iter().position(|word| *word == name).unwrap();
+                words[position + 1].parse().unwrap()
+            };
+            return Some((
+                vendor.trim().to_owned(),
+                number("Family"),
+                number("Model"),
+                number("Stepping"),
+            ));
+        }
+        let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap();
+        let field = |name: &str| -> String {
+            cpuinfo
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    (key.trim() == name).then(|| value.trim().to_owned())
+                })
+                .unwrap()
+        };
+        Some((
+            field("vendor_id"),
+            field("cpu family").parse().unwrap(),
+            field("model").parse().unwrap(),
+            field("stepping").parse().unwrap(),
+        ))
+    }
 }
 
 /// Returns whether a built-in CPU profile serves the CPU of `vendor` with the display `family`,
@@ -2511,9 +2520,15 @@ fn run_guides_failed_cold_boots_on_cpus_that_no_built_in_profile_serves() {
     // nvx run identifies the host's CPU with CPUID, as OpenVMM does and as the host OS reports
     // it, and guides a failed cold boot only where no built-in profile serves the CPU: what
     // follows OpenVMM's output depends on the host that runs the test.
-    let (vendor, family, model, stepping) = reported_cpu();
-    let unserved = !served(&vendor, family, model, stepping);
-    let host_profiles = ["GenuineIntel", "AuthenticAMD"].contains(&vendor.as_str());
+    let cpu = reported_cpu();
+    let unserved = cpu
+        .as_ref()
+        .is_some_and(|(vendor, family, model, stepping)| {
+            !served(vendor, *family, *model, *stepping)
+        });
+    let host_profiles = cpu
+        .as_ref()
+        .is_some_and(|(vendor, ..)| ["GenuineIntel", "AuthenticAMD"].contains(&vendor.as_str()));
     let root = Root::new();
     let arguments = |arguments: &[&str]| -> Vec<String> {
         std::iter::once("run")
@@ -2591,6 +2606,9 @@ fn run_guides_failed_cold_boots_on_cpus_that_no_built_in_profile_serves() {
             assert_eq!(guidance, "", "{options:?}");
             continue;
         }
+        let (vendor, family, model, stepping) = cpu
+            .as_ref()
+            .expect("x86 profile guidance requires an independently reported CPUID signature");
         assert!(
             guidance.starts_with(&format!(
                 "nvx: no built-in CPU profile serves this host's CPU, {vendor} \

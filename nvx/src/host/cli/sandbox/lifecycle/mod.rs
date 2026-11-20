@@ -235,6 +235,7 @@ fn runtime_for(
 ) -> Result<Runtime> {
     let Located { dir, openvmm } = locate(artifacts.root)?;
     Ok(Runtime {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         openvmm,
         kernel: dir.artifact(KERNEL_NAME),
         initramfs: dir.initramfs(Guest::Alpine),

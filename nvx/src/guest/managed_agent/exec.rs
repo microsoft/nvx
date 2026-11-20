@@ -90,6 +90,7 @@ pub(crate) fn run(
                     workload.cancel();
                 }
                 Ok(ExecControl::Cancel) => {}
+                #[cfg(target_arch = "x86_64")]
                 Ok(ExecControl::Capture) => {
                     workload.terminate();
                     session.sweep_capture().inspect_err(|error| {
@@ -739,6 +740,7 @@ enum ExecControl {
     /// A reset detached this workload's session.
     SessionLost,
     /// Init accepted a capture that requires group termination and the repeated sweep.
+    #[cfg(target_arch = "x86_64")]
     Capture,
 }
 
@@ -794,6 +796,16 @@ fn handle_control(
             },
         );
     }
+    #[cfg(target_arch = "aarch64")]
+    if request.kind == APP_CAPTURE {
+        session.send_error(
+            request.request_id,
+            Errno::ENOTSUP as i32,
+            "unsupported-operation",
+        )?;
+        return Ok(ExecControl::None);
+    }
+    #[cfg(target_arch = "x86_64")]
     if request.kind == APP_CAPTURE && session.has_capture() {
         return session.queue_capture(request, true).map(|accepted| {
             if accepted {

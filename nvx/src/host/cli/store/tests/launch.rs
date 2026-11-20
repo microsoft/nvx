@@ -18,6 +18,7 @@ pub(super) fn prepared(
 ) -> (Prepared, RuntimeIdentity) {
     let identity = |text| ArtifactIdentity::new(text).unwrap();
     let runtime = Runtime {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         openvmm: "missing-openvmm".into(),
         kernel: "missing-kernel".into(),
         initramfs: "missing-initramfs".into(),
@@ -62,6 +63,7 @@ pub(super) fn prepared(
 
 fn saved(state: &StateDir, prepared: &Prepared, runtime: RuntimeIdentity) -> SavedVm {
     SavedVm {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         vm_dir: VmDir::open(state.dir()).unwrap(),
         endpoint: prepared.outputs().endpoint.clone(),
         capability: *prepared.capability().as_bytes(),

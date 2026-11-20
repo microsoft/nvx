@@ -54,8 +54,14 @@ class KernelBuildConstants:
     # The record of every symbol that INPUT_CONFIG sets beyond the feature
     # inventory, with the Kconfig rule that sets it.
     DERIVED_CONFIG: Final = Path("kernel") / "config-microvm.derived"
+    ARM_INPUT_CONFIG: Final = Path("kernel") / "config-microvm-arm64"
+    ARM_DERIVED_CONFIG: Final = Path("kernel") / "config-microvm-arm64.derived"
     DEBUG_CONFIG_FRAGMENT: Final = Path("kernel") / "config-microvm-debug"
     PATCH_DIRECTORY: Final = Path("kernel") / "patches"
+    ARM_PATCHES: Final = (
+        PATCH_DIRECTORY / "arm64" / "0001-nvx-platform-mmio.patch",
+        PATCH_DIRECTORY / "arm64" / "0002-nvx-shared-status-of.patch",
+    )
     # The build directory in which the kernel build and `kernel-config`
     # generate the configuration from the inventory, beside WORK_DIRECTORY_NAME.
     INVENTORY_WORK_DIRECTORY_NAME: Final = "linux-inventory"
@@ -147,6 +153,7 @@ class GuestRustBuildConstants:
     TOOLCHAIN_FILE: Final = BuildConstants.REPO_ROOT / "rust-toolchain.toml"
     TOOLCHAIN: Final = OpenVMMBuildConstants.RUST_TOOLCHAIN
     TARGET: Final = OpenVMMBuildConstants.MUSL_RUST_TARGET
+    ARM_TARGET: Final = "aarch64-unknown-linux-musl"
     PROFILE: Final = "guest"
     FEATURE: Final = "guest"
     BINARIES_VARIABLE: Final = "NVX_GUEST_BINARIES"
@@ -167,6 +174,16 @@ class GuestRustBuildConstants:
         "nvx-ingress",
         "nvx-time",
         "nvx-time-probe",
+        "nvx-init",
+    )
+    ARM_BINARIES: Final = (
+        "nvx-console-pending",
+        "nvx-reseed",
+        "nvx-exit",
+        "nvx-device-io",
+        "nvx-managed-agent",
+        "nvx-ingress",
+        "nvx-time",
         "nvx-init",
     )
     # Executables that earlier builds produced. A build removes them from the output
@@ -212,6 +229,14 @@ class AlpineBuildConstants:
     )
     MINIROOTFS_SHA256: Final = (
         "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081"
+    )
+    ARM_MINIROOTFS_NAME: Final = f"alpine-minirootfs-{VERSION}-aarch64.tar.gz"
+    ARM_MINIROOTFS_URL: Final = (
+        f"https://dl-cdn.alpinelinux.org/alpine/{BRANCH}/releases/"
+        f"aarch64/{ARM_MINIROOTFS_NAME}"
+    )
+    ARM_MINIROOTFS_SHA256: Final = (
+        "f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259"
     )
     INITRAMFS_NAME: Final = "initramfs.cpio.gz"
     PACKAGE_MANIFEST_NAME: Final = (

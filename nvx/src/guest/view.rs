@@ -17,9 +17,9 @@ use crate::protocol::view::{MachineIdMode, View, is_hostname};
 use crate::{Error, Result};
 
 /// The generated machine ID's file in the root's runtime directory.
-pub const MACHINE_ID_FILE: &str = "workload-machine-id";
+pub(crate) const MACHINE_ID_FILE: &str = "workload-machine-id";
 /// The resolver file in the root's runtime directory.
-pub const RESOLVER_FILE: &str = "resolv.conf";
+pub(crate) const RESOLVER_FILE: &str = "resolv.conf";
 /// The mode of a generated machine ID's file.
 const MACHINE_ID_MODE: u32 = 0o444;
 /// The mode of the resolver file, whatever the umask.

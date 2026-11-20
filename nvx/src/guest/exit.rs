@@ -1,21 +1,36 @@
 //! `nvx-exit [CODE]`: stops the VM with an 8-bit exit code, by writing one byte to OpenVMM's
-//! control port 0x604 through `/dev/port`.
+//! control port 0x604 through `/dev/port` on x86, or the restricted platform MMIO driver on ARM.
 //!
 //! CODE defaults to 1, and so does anything other than a decimal number from 0 through 255.
 //! Further arguments are ignored, and the program prints nothing. It exits with 1 when it cannot
 //! write the byte.
 
-use std::ffi::{CStr, CString};
+#[cfg(target_arch = "x86_64")]
+use std::ffi::CStr;
+use std::ffi::CString;
 use std::process::ExitCode;
 
 use super::parse::parse_decimal;
 use super::status::{CommandError, run_main};
-use super::sys::{self, Mode, OpenFlags, PORT_DEVICE, Port};
+use super::sys;
+#[cfg(target_arch = "x86_64")]
+use super::sys::{Mode, OpenFlags, PORT_DEVICE, Port};
 
 /// Runs `nvx-exit` with the process's arguments. It exits with 0 after it writes the byte,
 /// unless the VM stops first, or with 1 when it cannot write the byte.
 pub fn main() -> ExitCode {
-    run_main(|args| run(args, PORT_DEVICE))
+    #[cfg(target_arch = "x86_64")]
+    {
+        run_main(|args| run(args, PORT_DEVICE))
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        run_main(|args| {
+            run_with(args, |code| {
+                sys::aarch64::PlatformDevice::open()?.shutdown(code)
+            })
+        })
+    }
 }
 
 /// Writes the selected exit code through `port`, which stands for `/dev/port`.
@@ -23,15 +38,25 @@ pub fn main() -> ExitCode {
 /// Any failure to open the device or write the byte is an operation failure, which the program
 /// does not report. The descriptor closes when the write returns, whereas the C program left it
 /// open until the process exited; neither the output nor the status differs.
+#[cfg(target_arch = "x86_64")]
 fn run(args: &[CString], port: &CStr) -> Result<(), CommandError> {
+    run_with(args, |code| {
+        let written = sys::open(port, OpenFlags::O_WRONLY, Mode::empty())
+            .and_then(|descriptor| descriptor.pwrite(&[code], Port::Control.offset()));
+        if written == Ok(1) {
+            Ok(())
+        } else {
+            Err(sys::Errno::EIO)
+        }
+    })
+}
+
+fn run_with(
+    args: &[CString],
+    shutdown: impl FnOnce(u8) -> Result<(), sys::Errno>,
+) -> Result<(), CommandError> {
     let code = exit_code(args.get(1).map(|argument| argument.as_bytes()));
-    let written = sys::open(port, OpenFlags::O_WRONLY, Mode::empty())
-        .and_then(|descriptor| descriptor.pwrite(&[code], Port::Control.offset()));
-    if written == Ok(1) {
-        Ok(())
-    } else {
-        Err(CommandError::Operation)
-    }
+    shutdown(code).map_err(|_| CommandError::Operation)
 }
 
 /// Returns the VM exit code that `argument` selects.

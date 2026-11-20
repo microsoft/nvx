@@ -77,6 +77,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Ok(ArtifactIdentity::sha256(text(index)?)?)
     };
     let runtime = Runtime {
+        architecture: nvx::host::runtime::GuestArchitecture::X86_64,
         openvmm: std::path::absolute(Path::new(&args[2]))?,
         kernel: std::path::absolute(Path::new(&args[3]))?,
         initramfs: std::path::absolute(Path::new(&args[4]))?,

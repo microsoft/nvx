@@ -193,6 +193,9 @@ def write_release_fixture(
         "guest_rust": {
             "toolchain": GuestRustBuildConstants.TOOLCHAIN,
             "target": GuestRustBuildConstants.TARGET,
+            "architectures": {
+                "aarch64": {"target": GuestRustBuildConstants.ARM_TARGET}
+            },
         },
         "linux": {
             "version": "6.18.38",

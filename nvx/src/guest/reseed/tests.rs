@@ -23,6 +23,7 @@ pub(super) fn observe_drop(seed: &Seed) {
 
 /// Returns the bytes of each seed that the test's thread dropped since the last call, in
 /// order, as their drops left them.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn take_dropped() -> Vec<[u8; Seed::LENGTH]> {
     DROPPED.take()
 }

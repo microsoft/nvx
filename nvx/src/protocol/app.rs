@@ -50,7 +50,7 @@ pub(crate) mod workload {
 #[cfg(any(
     feature = "cli",
     feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+    all(feature = "guest", target_os = "linux")
 ))]
 pub(crate) mod v2;
 
@@ -58,78 +58,48 @@ pub(crate) mod v2;
 #[cfg(any(
     feature = "cli",
     feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+    all(feature = "guest", target_os = "linux")
 ))]
 pub(crate) const APP_HEADER_LEN: usize = 24;
 
 /// Request that the guest agent acknowledge readiness with [`APP_READY`].
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) const APP_PING: u8 = 1;
 /// Request that the guest agent run a workload; the payload is an `EXEC` payload.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) const APP_EXEC: u8 = 2;
 /// Request that the guest agent shut the VM down, which it acknowledges with [`APP_STOPPED`].
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) const APP_STOP: u8 = 3;
 /// Request that the guest agent terminate the workload of the request with the frame's ID.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) const APP_CANCEL: u8 = 4;
 /// Request that the guest agent mount entries of the host mapping table; the payload is a `MAPS`
 /// payload.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) const APP_MAPS: u8 = 6;
 /// Request that nvx-init capture the VM after optionally killing its executions.
-#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(feature = "guest", target_os = "linux"))]
 pub(crate) const APP_CAPTURE: u8 = 7;
 /// Response that acknowledges a request.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) const APP_READY: u8 = 0x81;
 /// Response that carries a chunk of a workload's standard output.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) const APP_STDOUT: u8 = 0x82;
 /// Response that carries a chunk of a workload's standard error.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) const APP_STDERR: u8 = 0x83;
 /// Response that ends a workload: the status is its exit status, and the payload how it ended,
 /// as [`v2::Outcome`] names it.
-#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(feature = "guest", target_os = "linux"))]
 pub(crate) const APP_EXIT: u8 = 0x84;
 /// Response that acknowledges [`APP_STOP`].
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) const APP_STOPPED: u8 = 0x85;
 /// Response that refuses a request: the status is an error number, and the payload an error
 /// category such as [`LAUNCH_FAILED`].
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) const APP_ERROR: u8 = 0xff;
 
 /// Error category with which a guest agent refuses a request kind that it does not know, or one
@@ -137,52 +107,37 @@ pub(crate) const APP_ERROR: u8 = 0xff;
 #[cfg(any(
     feature = "cli",
     feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+    all(feature = "guest", target_os = "linux")
 ))]
 pub(crate) const UNSUPPORTED_OPERATION: &[u8] = b"unsupported-operation";
 /// Error category with which a guest agent refuses a malformed request.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) const INVALID_REQUEST: &str = "invalid-request";
 /// Error category with which a guest agent refuses a request while a workload runs.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) const BUSY: &str = "busy";
 /// Error category with which a guest agent reports a workload that it could not launch.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) const LAUNCH_FAILED: &str = "launch-failed";
 /// Error category with which a guest agent reports a working directory that the workload cannot
 /// enter. The status is the guest's error number, and nothing of the workload ran.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) const CWD_FAILED: &str = "cwd-failed";
 /// Error category with which a guest agent refuses a workload until it has applied every host
 /// mapping that the kernel command line announced.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) const MAPPINGS_INCOMPLETE: &str = "mappings-incomplete";
 /// Error category with which a guest agent reports a host mapping that it could not apply. The
 /// status is the guest's error number.
 #[cfg(any(
     feature = "cli",
     feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+    all(feature = "guest", target_os = "linux")
 ))]
 pub(crate) const MAPPING_FAILED: &str = "mapping-failed";
 
 /// Decoded application frame.
-#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(feature = "guest", target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AppFrame<'a> {
     /// One of the `APP_*` frame kinds.

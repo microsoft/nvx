@@ -90,6 +90,7 @@
 //! let [openvmm, kernel, initramfs, openvmm_sha256, kernel_sha256, initramfs_sha256] =
 //!     <[String; 6]>::try_from(arguments).map_err(|_| "expected three paths and three digests")?;
 //! let runtime = Runtime {
+//!     architecture: nvx::host::runtime::GuestArchitecture::X86_64,
 //!     identity: RuntimeIdentity::new(
 //!         ArtifactIdentity::sha256(&openvmm_sha256)?,
 //!         ArtifactIdentity::sha256(&kernel_sha256)?,

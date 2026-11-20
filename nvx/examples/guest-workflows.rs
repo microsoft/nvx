@@ -2,6 +2,9 @@
 //! control session, the capture of its VM, the guest restore of a clone, and the host's mapping
 //! table.
 //!
+//! Boot, control attachment and mappings compile for x86-64 and ARM64 Linux guests. Capture and
+//! restore compile only for x86-64; the ARM cold-boot API does not admit those workflows.
+//!
 //! The example only compiles: CI builds it for Linux guests with the `guest` feature, and nothing
 //! calls its functions. `nvx` builds no guest space and runs no execution: each init does both,
 //! so the example leaves them to its caller. NVX's own init, nvx-init, builds its space with NVX's
@@ -9,7 +12,7 @@
 //!
 //! The example's init frames its own protocol's messages in the bytes of its control connection,
 //! and it reads its connection without a deadline. A real init waits for its connection with the
-//! guest restore's deadline, and ticks the guest restore then, as [`GuestRestore`]'s
+//! guest restore's deadline, and ticks the guest restore then, as the x86 guest-restore API's
 //! documentation shows.
 
 #[cfg(target_os = "linux")]
@@ -20,17 +23,24 @@ fn main() {}
 /// The workflows, which run in Linux guests only.
 #[cfg(target_os = "linux")]
 mod linux {
+    #[cfg(target_arch = "x86_64")]
     use std::error::Error;
     use std::io::{self, Read, Write};
+    #[cfg(target_arch = "x86_64")]
     use std::time::{Duration, Instant};
 
-    use nvx::guest::control::{Connection, ConnectionError, Event};
+    #[cfg(target_arch = "x86_64")]
+    use nvx::guest::control::Event;
+    use nvx::guest::control::{Connection, ConnectionError};
     use nvx::guest::mappings::{Mapping, MappingTable, TableError};
+    #[cfg(target_arch = "x86_64")]
     use nvx::guest::restore::{GuestRestore, GuestRestoreAction, GuestRestoreInput};
+    #[cfg(target_arch = "x86_64")]
     use nvx::guest::snapshot::{
         self, CaptureFailure, Captured, Devices, Disks, Disposition, Repaired,
     };
     use nvx::guest::time::{TimeAbi, TimeError};
+    #[cfg(target_arch = "x86_64")]
     use nvx::guest_restore::{GuestRestoreReady, GuestRestoreRecord};
 
     /// Starts the time daemon at boot, before anything that it must not inherit opens, and returns
@@ -51,6 +61,7 @@ mod linux {
 
     /// The framing of the init's own protocol, which carries its messages in the connection's
     /// bytes, and is the init's own code.
+    #[cfg(target_arch = "x86_64")]
     pub trait Framing {
         /// Abandons the bytes of the earlier session that complete no message.
         fn reset(&mut self);
@@ -62,6 +73,7 @@ mod linux {
     }
 
     /// What the init does once [`capture`] returned.
+    #[cfg(target_arch = "x86_64")]
     pub enum AfterCapture {
         /// The guest goes on, without a snapshot, or after a failure that left it running: the
         /// init reports either on the same session.
@@ -78,6 +90,7 @@ mod linux {
     ///
     /// The init keeps its executions still, and its session sends nothing until `capture`
     /// returns.
+    #[cfg(target_arch = "x86_64")]
     pub fn capture(devices: &Devices, deadline: Instant) -> AfterCapture {
         match snapshot::capture(devices, Disks::Fresh, deadline) {
             Ok(Captured::Continued) => AfterCapture::Continue(None),
@@ -105,6 +118,7 @@ mod linux {
     /// builds the guest's space from the record, which is the init's own code, as nvx-init's is
     /// its own, and `ready` sends Ready in the init's protocol. Every failure is final, and the
     /// init ends the VM.
+    #[cfg(target_arch = "x86_64")]
     pub fn activate<S: Read + Write>(
         connection: &mut Connection<S>,
         repaired: &Repaired,

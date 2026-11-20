@@ -769,6 +769,7 @@ fn a_stolen_or_auto_reaped_status_is_reported_once_and_never_reclassified_by_an_
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn a_capture_sweep_refuses_to_run_outside_pid_1() {
     let helpers = Helpers {
         time: pid(42),
@@ -781,6 +782,7 @@ fn a_capture_sweep_refuses_to_run_outside_pid_1() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn the_sweep_repeats_and_preserves_only_pid_1_and_registered_helpers() {
     let helpers = Helpers {
         time: pid(42),
@@ -1101,6 +1103,7 @@ fn privileged_every_ending_kills_the_process_group_including_normal_completion()
 
 #[test]
 #[ignore = "requires a guest's root credentials and private PID/procfs mounts"]
+#[cfg(target_arch = "x86_64")]
 fn privileged_capture_sweep_kills_setsid_escapees_and_spares_both_helpers() {
     isolated(
         "privileged_capture_sweep_kills_setsid_escapees_and_spares_both_helpers",

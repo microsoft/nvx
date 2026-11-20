@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 
 use crate::guest::init;
 use crate::guest::mappings::{Kernel as MappingKernel, SystemKernel};
-use crate::guest::sys::{self, Errno, FileDescriptor, Mode, OpenFlags};
+#[cfg(target_arch = "x86_64")]
+use crate::guest::sys::OpenFlags;
+use crate::guest::sys::{self, Errno, FileDescriptor, Mode};
 
 /// Production paths used by the managed agent and replaceable paths used by tests.
 #[derive(Clone, Debug)]
@@ -13,6 +15,7 @@ pub(crate) struct Paths {
     /// Kernel command line containing the announced mapping count.
     pub(crate) proc_cmdline: PathBuf,
     /// Port device used for fatal diagnostics.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) diagnostic_port: PathBuf,
     /// VM exit helper.
     pub(crate) exit: PathBuf,
@@ -24,6 +27,7 @@ impl Default for Paths {
         Self {
             hostfs_dir: "/run/nvx/hostfs".into(),
             proc_cmdline: "/proc/cmdline".into(),
+            #[cfg(target_arch = "x86_64")]
             diagnostic_port: "/dev/port".into(),
             exit: "/sbin/nvx-exit".into(),
         }
@@ -114,13 +118,23 @@ impl System for RealSystem {
     }
 
     fn write_diagnostic(&mut self, message: &[u8]) -> Result<(), Errno> {
-        let path = path_c_string(&self.paths.diagnostic_port)?;
-        let descriptor = sys::open(
-            &path,
-            OpenFlags::O_WRONLY | OpenFlags::O_CLOEXEC,
-            Mode::empty(),
-        )?;
-        sys::write_port_diagnostic(&descriptor, message)
+        #[cfg(target_arch = "x86_64")]
+        {
+            let path = path_c_string(&self.paths.diagnostic_port)?;
+            let descriptor = sys::open(
+                &path,
+                OpenFlags::O_WRONLY | OpenFlags::O_CLOEXEC,
+                Mode::empty(),
+            )?;
+            sys::write_port_diagnostic(&descriptor, message)
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let device = sys::aarch64::PlatformDevice::open()?;
+            let written = device.write_console(message);
+            let closed = device.close();
+            written.and(closed)
+        }
     }
 
     fn validate_environment(&mut self, _name: &CStr, _value: &CStr) -> Result<(), Errno> {

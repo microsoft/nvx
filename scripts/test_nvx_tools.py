@@ -12146,6 +12146,16 @@ class BuildConstantsTests(unittest.TestCase):
             {
                 "toolchain": GuestRustBuildConstants.TOOLCHAIN,
                 "target": GuestRustBuildConstants.TARGET,
+                "architectures": {
+                    "aarch64": {"target": GuestRustBuildConstants.ARM_TARGET}
+                },
+            },
+        )
+        self.assertEqual(
+            manifest["alpine"]["architectures"]["aarch64"],
+            {
+                "minirootfs_url": AlpineBuildConstants.ARM_MINIROOTFS_URL,
+                "minirootfs_sha256": AlpineBuildConstants.ARM_MINIROOTFS_SHA256,
             },
         )
         for guest in ("alpine", "ubuntu", "azurelinux"):
@@ -13021,6 +13031,106 @@ class AlpineSourceCollectionTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def test_arm_alpine_prepare_keeps_archive_namespace_and_loader_together(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = build_config.InitramfsBuildConfig(
+                architecture="aarch64", work=Path(temporary) / "work"
+            )
+
+            def prepare_files(
+                command: Sequence[str | os.PathLike[str]], **_kwargs: object
+            ) -> None:
+                if command[0] == "tar":
+                    (Path(command[-1]) / "etc").mkdir(parents=True)
+
+            with (
+                patch.object(build, "download_verified") as download,
+                patch.object(build, "require_tool", return_value="tar"),
+                patch.object(build, "run_checked", side_effect=prepare_files) as run,
+            ):
+                root = build._prepare_alpine_root(config)
+            download.assert_called_once_with(
+                AlpineBuildConstants.ARM_MINIROOTFS_URL,
+                config.work / AlpineBuildConstants.ARM_MINIROOTFS_NAME,
+                AlpineBuildConstants.ARM_MINIROOTFS_SHA256,
+            )
+            self.assertEqual(
+                run.call_args_list[1].args[0][0], root / "lib" / "ld-musl-aarch64.so.1"
+            )
+            selected = build_config.BuildConfig.initramfs_config(
+                "alpine", architecture="aarch64"
+            )
+            self.assertEqual(selected.work.parent, BuildConstants.BUILD_DIR / "aarch64")
+            self.assertEqual(
+                selected.output,
+                BuildConstants.BUILD_DIR / "aarch64" / "initramfs.cpio.gz",
+            )
+
+    def test_arm_guest_install_uses_only_the_matching_prebuilt_inventory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            (root / "sbin").mkdir(parents=True)
+            (root / "etc").mkdir()
+            binaries = Path(temporary) / "binaries"
+            binaries.mkdir()
+            hashes: dict[str, str] = {}
+            for name in GuestRustBuildConstants.ARM_BINARIES:
+                path = binaries / name
+                path.write_bytes(f"ARM fixture {name}".encode())
+                hashes[name] = common.sha256_file(path)
+            result = guest_binaries.GuestBinaryBuildResult(
+                "a" * 64, hashes, architecture="aarch64"
+            )
+            with (
+                patch.dict(os.environ, {"NVX_GUEST_BINARIES": str(binaries)}),
+                patch.object(
+                    build, "inspect_guest_binaries", return_value=result
+                ) as inspect,
+                patch.object(build, "build_guest_binaries") as compile_guest,
+            ):
+                helpers = build._install_guest_files(
+                    build_config.InitramfsBuildConfig(architecture="aarch64"),
+                    root,
+                    guests.guest_descriptor("alpine"),
+                )
+            inspect.assert_called_once_with(binaries, architecture="aarch64")
+            compile_guest.assert_not_called()
+            for name, digest in hashes.items():
+                self.assertEqual(common.sha256_file(root / "sbin" / name), digest)
+                self.assertEqual(helpers[name]["binary_sha256"], digest)
+            self.assertFalse((root / "sbin" / "nvx-mmio-write").exists())
+            self.assertFalse((root / "sbin" / "nvx-time-probe").exists())
+
+    def test_arm_apk_manifest_refuses_foreign_packages_without_sealing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            installed = root / "lib" / "apk" / "db" / "installed"
+            installed.parent.mkdir(parents=True)
+            output = Path(temporary) / "initramfs.cpio.gz"
+            installed.write_text("P:busybox\nV:1\nA:x86_64\n")
+            with self.assertRaisesRegex(common.ScriptError, "architecture"):
+                build._write_apk_manifest(root, output, {}, "aarch64")
+            manifest = output.with_name(
+                output.name + BuildConstants.PACKAGE_MANIFEST_SUFFIX
+            )
+            self.assertFalse(manifest.exists())
+            installed.write_text("P:busybox\nV:1\nA:aarch64\n\nP:data\nV:1\nA:noarch\n")
+            build._write_apk_manifest(root, output, {}, "aarch64")
+            self.assertEqual(
+                json.loads(manifest.read_text())["architecture"], "aarch64"
+            )
+
+    def test_unsupported_arm_guest_refuses_before_any_docker_action(self):
+        args = nvx.parse_args(
+            ["build-initramfs", "--architecture", "aarch64", "--guest", "azurelinux"]
+        )
+        with (
+            patch.object(nvx, "build_docker_initramfs") as docker,
+            self.assertRaisesRegex(common.ScriptError, "Alpine only"),
+        ):
+            args.handler(args)
+        docker.assert_not_called()
+
     def test_build_config_owns_standard_runtime_paths(self):
         config = build_config.BuildConfig()
         alpine = config.initramfs_config("alpine")
@@ -13734,6 +13844,9 @@ class BuildTests(unittest.TestCase):
             {
                 "toolchain": GuestRustBuildConstants.TOOLCHAIN,
                 "target": GuestRustBuildConstants.TARGET,
+                "architectures": {
+                    "aarch64": {"target": GuestRustBuildConstants.ARM_TARGET}
+                },
             },
         )
 
@@ -16056,7 +16169,10 @@ class BuildTests(unittest.TestCase):
             installed.append(destination)
             return {}
 
-        def stage_binaries(output: Path) -> guest_binaries.GuestBinaryBuildResult:
+        def stage_binaries(
+            output: Path, *, architecture: str
+        ) -> guest_binaries.GuestBinaryBuildResult:
+            self.assertEqual(architecture, "x86_64")
             output.mkdir()
             binaries: dict[str, str] = {}
             for name in GuestRustBuildConstants.BINARIES:
@@ -16493,6 +16609,7 @@ class BuildTests(unittest.TestCase):
                 work=root / "work-debug",
                 output=output_directory / KernelBuildConstants.DEBUG_BINARY_NAME,
                 debug=True,
+                jobs=1,
             )
 
             with patch.object(BuildConstants, "REPO_ROOT", root):
@@ -16511,9 +16628,15 @@ class BuildTests(unittest.TestCase):
                     "prepare_kernel_source",
                     return_value=(source, source_fingerprint),
                 ),
-                patch.object(build, "run_checked", side_effect=run_build),
+                patch.object(build, "run_checked", side_effect=run_build) as run,
             ):
                 build.build_kernel(config)
+            self.assertTrue(
+                any(
+                    "-j1" in call.args[0] and call.args[0][-1] == "vmlinux"
+                    for call in run.call_args_list
+                )
+            )
 
             generated = (
                 output_directory / KernelBuildConstants.DEBUG_CONFIG_NAME
@@ -16615,7 +16738,10 @@ class BuildTests(unittest.TestCase):
                 },
             )
 
-            def stage_binaries(output: Path) -> guest_binaries.GuestBinaryBuildResult:
+            def stage_binaries(
+                output: Path, *, architecture: str
+            ) -> guest_binaries.GuestBinaryBuildResult:
+                self.assertEqual(architecture, "x86_64")
                 output.mkdir()
                 for name, payload in payloads.items():
                     (output / name).write_bytes(payload)
@@ -16631,7 +16757,8 @@ class BuildTests(unittest.TestCase):
                 )
 
             rust_build.assert_called_once_with(
-                work / GuestRustBuildConstants.OUTPUT_DIRECTORY_NAME
+                work / GuestRustBuildConstants.OUTPUT_DIRECTORY_NAME,
+                architecture="x86_64",
             )
             for name, payload in payloads.items():
                 with self.subTest(helper=name):
@@ -16687,7 +16814,7 @@ class BuildTests(unittest.TestCase):
                     guests.guest_descriptor("alpine"),
                 )
 
-            inspect.assert_called_once_with(prebuilt)
+            inspect.assert_called_once_with(prebuilt, architecture="x86_64")
             rust_build.assert_not_called()
             for name in GuestRustBuildConstants.BINARIES:
                 with self.subTest(helper=name):
@@ -16701,11 +16828,11 @@ class BuildTests(unittest.TestCase):
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
             encoding="utf-8"
         )
-        self.assertIn(
-            "FROM base AS kernel-debug\n"
-            "RUN python3 scripts/nvx.py build-kernel --debug\n",
-            dockerfile,
-        )
+        debug_stage = dockerfile.split("FROM base AS kernel-debug\n", 1)[1].split(
+            "\nFROM ", 1
+        )[0]
+        self.assertIn('set -- --jobs "$NVX_KERNEL_JOBS"', debug_stage)
+        self.assertIn('python3 scripts/nvx.py build-kernel --debug "$@"', debug_stage)
         self.assertIn(
             f"FROM scratch AS {DockerBuildConstants.DEBUG_KERNEL_TARGET}", dockerfile
         )
@@ -17094,6 +17221,7 @@ class InitPseudoMountTests(unittest.TestCase):
         existing_type: str,
         stat_status: int = 0,
         exit_returns: bool = False,
+        architecture: str = "x86_64",
     ) -> subprocess.CompletedProcess[str]:
         shell = _posix_shell()
         if shell is None:
@@ -17106,10 +17234,12 @@ class InitPseudoMountTests(unittest.TestCase):
             function = (
                 _shell_function(source, "mount_pseudo")
                 .replace("/dev/port", port)
+                .replace("/bin/busybox uname", "uname")
                 .replace("/bin/busybox mknod", "test_mknod")
                 .replace("/sbin/nvx-exit", "test_exit")
             )
             script = (
+                f"uname() {{ printf '%s\\n' '{architecture}'; }}\n"
                 f"mount() {{ return {mount_status}; }}\n"
                 f"stat() {{ printf '%s\\n' '{existing_type}'; "
                 f"return {stat_status}; }}\n"
@@ -17144,17 +17274,28 @@ class InitPseudoMountTests(unittest.TestCase):
     def test_wrong_filesystem_stops_before_later_boot_steps(self):
         for filesystem in ("proc", "sysfs"):
             for existing in ("tmpfs", "rootfs", ""):
-                with self.subTest(filesystem=filesystem, existing=existing):
-                    result = self._run(
-                        filesystem, mount_status=1, existing_type=existing
-                    )
-                    self.assertEqual(result.returncode, 1)
-                    self.assertIn(
-                        f"NVX-INIT-ERROR: cannot mount {filesystem}", result.stderr
-                    )
-                    self.assertIn("CREATE-PORT -m 600 ", result.stdout)
-                    self.assertIn(" c 1 4\nEXIT 1\n", result.stdout)
-                    self.assertNotIn("CONTINUED", result.stdout)
+                for architecture in ("x86_64", "aarch64"):
+                    with self.subTest(
+                        filesystem=filesystem,
+                        existing=existing,
+                        architecture=architecture,
+                    ):
+                        result = self._run(
+                            filesystem,
+                            mount_status=1,
+                            existing_type=existing,
+                            architecture=architecture,
+                        )
+                        self.assertEqual(result.returncode, 1)
+                        self.assertIn(
+                            f"NVX-INIT-ERROR: cannot mount {filesystem}", result.stderr
+                        )
+                        if architecture == "x86_64":
+                            self.assertIn("CREATE-PORT -m 600 ", result.stdout)
+                            self.assertIn(" c 1 4\nEXIT 1\n", result.stdout)
+                        else:
+                            self.assertEqual(result.stdout, "EXIT 1\n")
+                        self.assertNotIn("CONTINUED", result.stdout)
 
     def test_unreadable_filesystem_stops(self):
         result = self._run("proc", mount_status=1, existing_type="", stat_status=1)
@@ -18175,6 +18316,21 @@ class StaticElfTests(unittest.TestCase):
         path = self.root / name
         path.write_bytes(data)
         return path
+
+    def test_static_executables_must_match_the_selected_guest_machine(self):
+        x86 = self._write("x86", _elf_file(stack_flags=6))
+        arm_bytes = bytearray(_elf_file(stack_flags=6))
+        struct.pack_into("<H", arm_bytes, 18, 183)
+        arm = self._write("arm", bytes(arm_bytes))
+        with contextlib.redirect_stdout(io.StringIO()):
+            elf.check_static_executables([x86], expected_machine=62)
+            elf.check_static_executables([arm], expected_machine=183)
+            for path, machine in ((x86, 183), (arm, 62)):
+                with (
+                    self.subTest(path=path, machine=machine),
+                    self.assertRaisesRegex(common.ScriptError, "wrong ELF machine"),
+                ):
+                    elf.check_static_executables([path], expected_machine=machine)
 
     def test_static_and_static_pie_executables_pass(self):
         executable = elf.read_elf_executable(self._write("exit", _elf_file()))

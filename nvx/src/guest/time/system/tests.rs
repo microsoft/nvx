@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
@@ -13,7 +13,9 @@ use super::*;
 use crate::guest::sys::tests::PortBackend;
 use crate::guest::time::NSEC_PER_MSEC;
 use crate::guest::time::events::CheckId;
+use crate::guest::time::model::HostClock;
 use crate::guest::time::state::HostClockStatus;
+use crate::protocol::status;
 
 impl Runtime<'_> {
     /// Reads the strict violation without consuming the production finalizer's input.
@@ -76,8 +78,14 @@ pub(crate) struct FakeOps {
     diagnostic_deadlines: Mutex<Vec<(bool, Option<Instant>)>>,
     /// What the frequency MSR reads: the declared TSC rate, or an error.
     pub(crate) tsc_hz: Result<u64, Errno>,
+    pub(crate) lapic_hz: Result<u64, Errno>,
+    pub(crate) trap_privileged: bool,
+    counter_scale_reads: AtomicUsize,
+    counter_scale_results: Mutex<VecDeque<Result<u64, Errno>>>,
+    counter_scale_barrier: Option<std::sync::Barrier>,
     /// The next TSC read, which each read advances by [`FakeOps::TSC_STEP`].
     pub(crate) tsc: AtomicU64,
+    counter_step: u64,
     /// What every read of the realtime clock returns.
     pub(crate) realtime_ns: i64,
 }
@@ -111,7 +119,13 @@ impl FakeOps {
             console_device: None,
             diagnostic_deadlines: Mutex::new(Vec::new()),
             tsc_hz: Ok(Self::TSC_HZ),
+            lapic_hz: Ok(200_000_000),
+            trap_privileged: false,
+            counter_scale_reads: AtomicUsize::new(0),
+            counter_scale_results: Mutex::new(VecDeque::new()),
+            counter_scale_barrier: None,
             tsc: AtomicU64::new(Self::TSC_START),
+            counter_step: Self::TSC_STEP,
             realtime_ns: Self::REALTIME_NS,
         }
     }
@@ -204,8 +218,25 @@ impl PortBackend for FakeOps {
 }
 
 impl PrivilegedOps for FakeOps {
-    fn read_tsc(&self) -> u64 {
-        self.tsc.fetch_add(Self::TSC_STEP, Ordering::Relaxed)
+    fn read_counter(&self) -> u64 {
+        assert!(
+            !self.trap_privileged,
+            "report view attempted a counter read"
+        );
+        self.tsc.fetch_add(self.counter_step, Ordering::Relaxed)
+    }
+
+    fn counter_scale(&self, _: Option<&FileLock>) -> Result<CounterScale, SampleError> {
+        assert!(
+            !self.trap_privileged,
+            "report view attempted counter-scale admission"
+        );
+        self.counter_scale_reads.fetch_add(1, Ordering::Relaxed);
+        if let Some(barrier) = &self.counter_scale_barrier {
+            barrier.wait();
+        }
+        let next = self.counter_scale_results.lock().unwrap().pop_front();
+        checked_x86_scale(next.unwrap_or(self.tsc_hz))
     }
 
     fn realtime_ns(&self) -> i64 {
@@ -213,16 +244,23 @@ impl PrivilegedOps for FakeOps {
     }
 
     fn open_ports(&self) -> Result<PortAccess<'_>, PortError> {
+        assert!(
+            !self.trap_privileged,
+            "report view attempted port/MMIO admission"
+        );
         PortAccess::with_backend(self)
     }
 
     fn open_msr(&self, _: usize, _: MsrAccess) -> Result<MsrDescriptor, Errno> {
+        assert!(!self.trap_privileged, "report view attempted MSR admission");
         Ok(MsrDescriptor::Fake)
     }
 
     fn read_msr(&self, _: &MsrDescriptor, register: u32) -> Result<u64, Errno> {
+        assert!(!self.trap_privileged, "report view attempted an MSR read");
         match register {
             msr::HV_TSC_FREQUENCY => self.tsc_hz,
+            msr::HV_APIC_FREQUENCY => self.lapic_hz,
             _ => Err(Errno::EIO),
         }
     }
@@ -267,6 +305,100 @@ impl PrivilegedOps for FakeOps {
     }
 }
 
+struct FaultingTimeWindow {
+    status: Result<u8, Errno>,
+    selection: Result<(), Errno>,
+    words: Mutex<VecDeque<Result<u32, Errno>>>,
+}
+
+impl TimeWindow for FaultingTimeWindow {
+    fn window_status(&self) -> Result<u8, Errno> {
+        self.status
+    }
+
+    fn select_window(&self, _: u8) -> Result<(), Errno> {
+        self.selection
+    }
+
+    fn read_window_word(&self) -> Result<u32, Errno> {
+        self.words
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected window read")
+    }
+}
+
+#[test]
+fn time_window_borrow_keeps_scalar_words_and_the_partial_tail() {
+    let ops = FakeOps::new([0x0403_0201, 0x0807_0605]);
+    let ports = ops.open_ports().unwrap();
+    let mut bytes = [0; 6];
+    ports.read_window(&mut bytes).unwrap();
+    assert_eq!(bytes, [1, 2, 3, 4, 5, 6]);
+    assert!(ops.input.lock().unwrap().is_empty());
+    ports.release().unwrap();
+}
+
+#[test]
+fn sampling_surfaces_status_selector_and_word_io_failures_without_zero_fallback() {
+    let rates = CounterRates {
+        scale: CounterScale::x86_counter(FakeOps::TSC_HZ).unwrap(),
+        frequency: 0,
+    };
+    for stage in ["status", "selection", "word"] {
+        let window = FaultingTimeWindow {
+            status: if stage == "status" {
+                Err(Errno::EPERM)
+            } else {
+                Ok(PORTB_TIME_WINDOW)
+            },
+            selection: if stage == "selection" {
+                Err(Errno::EIO)
+            } else {
+                Ok(())
+            },
+            words: Mutex::new(VecDeque::from([Err(Errno::EIO)])),
+        };
+        let error =
+            select_sample(&window, &FakeOps::new([]), 3, SAMPLE_BOUND_NS, 0, rates).unwrap_err();
+        let expected = if stage == "status" {
+            Errno::EPERM
+        } else {
+            Errno::EIO
+        };
+        assert_eq!(error, SampleError::Device(expected));
+        assert_eq!(error.rejection(), SampleRejection::Invalid);
+        assert_eq!(
+            error.to_string(),
+            format!("platform time window: {}", expected.desc())
+        );
+    }
+}
+
+#[test]
+fn a_later_window_io_error_cannot_turn_into_success_from_an_earlier_wide_sample() {
+    let window = FaultingTimeWindow {
+        status: Ok(PORTB_TIME_WINDOW),
+        selection: Ok(()),
+        words: Mutex::new(
+            sample_input(0, FakeOps::REALTIME_NS as u64, sample_tsc(0), 150_000, HOST)
+                .into_iter()
+                .map(Ok)
+                .chain([Err(Errno::EIO)])
+                .collect(),
+        ),
+    };
+    let rates = CounterRates {
+        scale: CounterScale::x86_counter(FakeOps::TSC_HZ).unwrap(),
+        frequency: 0,
+    };
+    assert_eq!(
+        select_sample(&window, &FakeOps::new([]), 3, SAMPLE_BOUND_NS, 0, rates),
+        Err(SampleError::Device(Errno::EIO))
+    );
+}
+
 #[test]
 fn port_reader_uses_one_four_byte_read_per_chunk() {
     let ops = FakeOps::new([0x0403_0201, 0x0807_0605]);
@@ -276,6 +408,43 @@ fn port_reader_uses_one_four_byte_read_per_chunk() {
     ports.release().unwrap();
     assert_eq!(bytes, [1, 2, 3, 4, 5, 6, 7]);
     assert!(ops.input.lock().unwrap().is_empty());
+}
+
+#[test]
+fn persisted_x86_rates_keep_the_legacy_nonzero_only_contract_without_privileged_reads() {
+    let mut ops = FakeOps::new([]);
+    ops.trap_privileged = true;
+    for (counter, timer) in [
+        (2_400_000_123, 200_000_000),
+        (1, 1),
+        (999, 19_200_001),
+        (u64::MAX, u64::MAX),
+    ] {
+        let report = StateReport::parse(
+            format!("version=1\ntsc_hz={counter}\nlapic_hz={timer}\n").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(report.x86_persisted_rates(), Ok((counter, timer)));
+        let runtime = Runtime::new(&ops, false);
+        runtime.set_tsc_hz(report.x86_persisted_tsc_hz());
+        assert_eq!(runtime.counter_hz(), Ok(counter));
+    }
+    for (counter, timer) in [(0, 0), (0, 1), (1, 0)] {
+        let report = StateReport::parse(
+            format!("version=1\ntsc_hz={counter}\nlapic_hz={timer}\n").as_bytes(),
+        )
+        .unwrap();
+        assert!(report.x86_persisted_rates().is_err());
+    }
+    assert_eq!(ops.counter_scale_reads.load(Ordering::Relaxed), 0);
+
+    let mut denied = FakeOps::new([]);
+    denied.lapic_hz = Err(Errno::EACCES);
+    // The cold sample requires its independently read counter rate only, not a LAPIC admission.
+    assert_eq!(
+        Runtime::new(&denied, false).counter_hz(),
+        Ok(FakeOps::TSC_HZ)
+    );
 }
 
 #[test]
@@ -488,6 +657,34 @@ fn a_sample_pairs_its_guest_tsc_with_the_realtime_clock() {
 }
 
 #[test]
+fn shared_sample_selection_keeps_an_explicit_arm_scale_through_pairing_and_correction() {
+    let binding = crate::guest::counter::tests::arm_context();
+    let scale = binding.counter_scale();
+    let hz = scale.declared_hz().get();
+    let host = HostClock {
+        correction: 0,
+        ..HOST
+    };
+    let utc_ns = FakeOps::REALTIME_NS as u64 - 1_000_000_000 + 1_000;
+    let ticks = FakeOps::TSC_START + hz.div_ceil(2);
+    let mut ops = FakeOps::new(window_input([sample_input(0, utc_ns, ticks, 0, host)]));
+    ops.counter_step = hz;
+    ops.tsc_hz = Err(Errno::EIO);
+    let access = ops.open_ports().unwrap();
+    let rates = CounterRates {
+        scale,
+        frequency: 0,
+    };
+    let (result, sample) = select_sample(&access, &ops, 1, SAMPLE_BOUND_NS, 0, rates).unwrap();
+    access.release().unwrap();
+    assert_eq!(result, SampleResult::Wide);
+    assert_eq!(sample.theta, 1_000);
+    assert_eq!((sample.frequency, sample.limited), (0, false));
+    assert_eq!(ops.counter_scale_reads.load(Ordering::Relaxed), 0);
+    assert_eq!(ops.transactions(), 1);
+}
+
+#[test]
 fn a_sample_reports_whether_host_test_hooks_altered_it() {
     let utc_ns = FakeOps::REALTIME_NS as u64 + 1_000;
     let mut hooked = sample_input(0, utc_ns, sample_tsc(0), 400, HOST);
@@ -567,19 +764,88 @@ fn a_sample_needs_the_declared_tsc_rate() {
         // The sample took no port transaction.
         assert!(ops.permissions.lock().unwrap().is_empty());
     }
-    // The rate that the boot checks recorded needs no MSR.
+    // Failed admission leaves the runtime explicitly uninitialized, with no synthetic rate.
     let mut ops = FakeOps::new([]);
     ops.tsc_hz = Err(Errno::EIO);
     let runtime = Runtime::new(&ops, false);
-    runtime.set_tsc_hz(0);
-    assert!(runtime.tsc_hz().is_err());
-    runtime.set_tsc_hz(3_000_000_000);
-    assert_eq!(runtime.tsc_hz(), Ok(3_000_000_000));
+    assert_eq!(runtime.tsc_hz.load(Ordering::Relaxed), 0);
+    assert!(runtime.counter_hz().is_err());
+    assert_eq!(runtime.tsc_hz.load(Ordering::Relaxed), 0);
     // The MSR's rate is read once.
     let ops = FakeOps::new([]);
     let runtime = Runtime::new(&ops, false);
-    assert_eq!(runtime.tsc_hz(), Ok(FakeOps::TSC_HZ));
+    assert_eq!(runtime.counter_hz(), Ok(FakeOps::TSC_HZ));
     assert_eq!(runtime.tsc_hz.load(Ordering::Relaxed), FakeOps::TSC_HZ);
+    assert_eq!(runtime.counter_hz(), Ok(FakeOps::TSC_HZ));
+    assert_eq!(ops.counter_scale_reads.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn failed_counter_admission_can_retry_without_caching_errors_or_zero() {
+    let ops = FakeOps::new([]);
+    ops.counter_scale_results
+        .lock()
+        .unwrap()
+        .extend([Err(Errno::EIO), Ok(0), Ok(2_400_000_123)]);
+    let runtime = Runtime::new(&ops, false);
+    assert_eq!(
+        runtime.counter_hz(),
+        Err(SampleError::TscRate(Err(Errno::EIO)))
+    );
+    assert_eq!(runtime.tsc_hz.load(Ordering::Relaxed), 0);
+    assert_eq!(runtime.counter_hz(), Err(SampleError::TscRate(Ok(0))));
+    assert_eq!(runtime.tsc_hz.load(Ordering::Relaxed), 0);
+    assert_eq!(runtime.counter_hz(), Ok(2_400_000_123));
+    assert_eq!(runtime.counter_hz(), Ok(2_400_000_123));
+    assert_eq!(ops.counter_scale_reads.load(Ordering::Relaxed), 3);
+}
+
+#[test]
+fn x86_recorded_rates_ignore_zero_and_allow_positive_replacement_without_msr_admission() {
+    let mut ops = FakeOps::new([]);
+    ops.trap_privileged = true;
+    let runtime = Runtime::new(&ops, false);
+    for rate in [2_400_000_123, 3_000_000_000, 1, 999, 1000, u64::MAX] {
+        runtime.set_tsc_hz(rate);
+        runtime.set_tsc_hz(0);
+        assert_eq!(runtime.counter_hz(), Ok(rate));
+        let scale = runtime.counter_scale().unwrap();
+        assert_eq!(scale.declared_hz().get(), rate);
+        assert_eq!(scale.kernel_hz(), rate / 1000 * 1000);
+        for correction in [i64::MIN, -1, 0, 1, i64::MAX] {
+            assert_eq!(
+                (CounterRates {
+                    scale,
+                    frequency: 0
+                })
+                .requested_frequency(correction),
+                decoders::guest_frequency(correction, rate)
+            );
+        }
+    }
+    assert_eq!(ops.counter_scale_reads.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn concurrent_x86_first_reads_keep_their_successful_values_without_conflict_refusal() {
+    let mut ops = FakeOps::new([]);
+    ops.counter_scale_barrier = Some(std::sync::Barrier::new(2));
+    let first = 2_400_000_000;
+    let second = 3_000_000_000;
+    ops.counter_scale_results
+        .lock()
+        .unwrap()
+        .extend([Ok(first), Ok(second)]);
+    let runtime = Runtime::new(&ops, false);
+    let mut results = std::thread::scope(|scope| {
+        let left = scope.spawn(|| runtime.counter_hz());
+        let right = scope.spawn(|| runtime.counter_hz());
+        [left.join().unwrap(), right.join().unwrap()]
+    });
+    results.sort_by_key(|result| result.unwrap());
+    assert_eq!(results, [Ok(first), Ok(second)]);
+    assert_eq!(ops.counter_scale_reads.load(Ordering::Relaxed), 2);
+    assert!(matches!(runtime.counter_hz(), Ok(rate) if rate == first || rate == second));
 }
 
 #[test]

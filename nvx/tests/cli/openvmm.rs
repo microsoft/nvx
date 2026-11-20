@@ -590,6 +590,7 @@ impl Options {
         config.check_command_line()?;
         let identity = ArtifactIdentity::new("test-fixture").unwrap();
         let runtime = Runtime {
+            architecture: nvx::host::runtime::GuestArchitecture::X86_64,
             openvmm: root.below(OPENVMM),
             kernel: PathBuf::from(old.value("--kernel")),
             initramfs: PathBuf::from(old.value("--initrd")),

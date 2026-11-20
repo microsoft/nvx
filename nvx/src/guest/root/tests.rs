@@ -43,6 +43,7 @@ const FIRST_PARTITION_BOUND: usize = 64 * 1024;
 
 /// Returns why the assembly of `error` failed, for the tests of a clone's application, whose
 /// module can't read the field.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn assembly_failure(error: &AssemblyError) -> &Error {
     &error.error
 }

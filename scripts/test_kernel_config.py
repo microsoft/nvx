@@ -15,6 +15,8 @@ generation.
 from __future__ import annotations
 
 import argparse
+import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -24,6 +26,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 from nvx_tools import build, build_config, common, kconfig  # noqa: E402
+from nvx_tools import create_linux_source_archive as source_archive  # noqa: E402
 from nvx_tools import kernel_config as kc  # noqa: E402
 from nvx_tools.build_constants import (  # noqa: E402
     BuildConstants,
@@ -33,6 +36,7 @@ from nvx_tools.kernel_features import (  # noqa: E402
     KERNEL_CONFIG_CHECKS,
     KERNEL_FEATURES,
     KernelFeature,
+    features_for_architecture,
 )
 from test_kconfig import read_tree, write_tree  # noqa: E402
 
@@ -108,6 +112,27 @@ class InventoryTests(unittest.TestCase):
     def test_the_inventory_is_valid(self):
         self.assertEqual(kc.inventory_problems(), [])
 
+    def test_arm_binding_keeps_shared_owners_without_x86_ports_or_growth(self):
+        self.assertIs(features_for_architecture("x86_64"), KERNEL_FEATURES)
+        arm = features_for_architecture("aarch64")
+        self.assertEqual(kc.inventory_problems(arm), [])
+        self.assertEqual(
+            [feature.name for feature in arm],
+            [feature.name for feature in KERNEL_FEATURES],
+        )
+        shared = {"sandbox-filesystems", "sandbox-isolation", "network", "guest-init"}
+        originals = {feature.name: feature for feature in KERNEL_FEATURES}
+        for feature in arm:
+            if feature.name in shared:
+                self.assertIs(feature, originals[feature.name])
+        settings = kc.inventory_settings(arm)
+        for symbol in ("DEVMEM", "DEVPORT", "HOTPLUG_CPU", "MEMORY_HOTPLUG", "COMPAT"):
+            self.assertEqual(settings[symbol][1].value, "n", symbol)
+        self.assertEqual(settings["HVC_NVX_MMIO"][1].value, "y")
+        self.assertNotIn("X86_X2APIC", settings)
+        with self.assertRaisesRegex(ValueError, "unsupported kernel architecture"):
+            features_for_architecture("arm64")
+
     def test_every_feature_records_why_and_for_whom(self):
         for feature in KERNEL_FEATURES:
             with self.subTest(feature=feature.name):
@@ -179,6 +204,22 @@ class InventoryTests(unittest.TestCase):
 
 
 class DerivedRecordTests(unittest.TestCase):
+    def test_arm_record_names_its_own_generator_and_input_without_changing_x86(self):
+        record = kc.DerivedRecord(
+            "gcc 1.0", {"A": (kc.Assignment("A", "y"), "no prompt")}
+        )
+        original = record.render()
+        self.assertEqual(original, record.render(architecture="x86_64"))
+        arm = record.render(architecture="aarch64")
+        self.assertIn("--architecture aarch64 --native", arm)
+        self.assertIn("kernel/config-microvm-arm64 sets", arm)
+        self.assertEqual(kc.DerivedRecord.parse(arm), record)
+        self.assertEqual(kc.DerivedRecord.parse(original), record)
+        with self.assertRaisesRegex(
+            common.ScriptError, "unsupported kernel architecture"
+        ):
+            record.render(architecture="arm64")
+
     def test_round_trips(self):
         record = kc.DerivedRecord(
             "gcc 1.0",
@@ -370,6 +411,26 @@ class BuildCheckTests(unittest.TestCase):
     def test_accepts_the_generated_configuration(self):
         self.check(self.values, self.record)
 
+    def test_arm_generation_selects_arm_make_and_the_arm_kconfig_tree(self):
+        work = self.root / "arm-work"
+        selected_tree = read_tree()
+
+        def allnoconfig(command: list[object]) -> None:
+            self.assertIn("ARCH=arm64", command)
+            self.assertEqual(command[-1], "allnoconfig")
+            text = "\n".join(kc.Assignment(s, v).line for s, v in self.values.items())
+            (work / ".config").write_text(text + "\n", encoding="utf-8")
+
+        with (
+            patch.object(kc, "inventory_problems", return_value=[]),
+            patch.object(kc, "run_checked", side_effect=allnoconfig),
+            patch.object(
+                kc.kconfig, "read_kconfig", return_value=selected_tree
+            ) as read,
+        ):
+            kc.generate(self.source, work, self.inventory, architecture="aarch64")
+        read.assert_called_once_with(self.source, srcarch="arm64", arch="arm64")
+
     def test_refuses_a_symbol_that_the_inventory_does_not_generate(self):
         with self.assertRaisesRegex(common.ScriptError, "CONFIG_OPTION=y"):
             self.check({**self.values, "OPTION": "y"}, self.record)
@@ -437,6 +498,207 @@ class BuildCheckTests(unittest.TestCase):
                             REPO_ROOT / KernelBuildConstants.DERIVED_CONFIG,
                         ),
                     )
+
+
+class ArmKernelProducerTests(unittest.TestCase):
+    def test_selected_patch_order_and_config_do_not_replace_x86_inputs(self):
+        manifest = json.loads((REPO_ROOT / "SOURCE-MANIFEST.json").read_text())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in (
+                *manifest["linux"]["patches"],
+                *KernelBuildConstants.ARM_PATCHES,
+                KernelBuildConstants.INPUT_CONFIG,
+            ):
+                path = Path(name)
+                target = root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(REPO_ROOT / path, target)
+            (root / KernelBuildConstants.ARM_INPUT_CONFIG).write_text(
+                "CONFIG_ARM64=y\n"
+            )
+            with patch.object(BuildConstants, "REPO_ROOT", root):
+                wire = json.loads(
+                    json.dumps(
+                        {
+                            "x86": build.kernel_provenance_inputs(),
+                            "arm": build.kernel_provenance_inputs("aarch64"),
+                        }
+                    )
+                )
+        original = wire["x86"]["source"]
+        selected = wire["arm"]["source"]
+        self.assertNotIn("architecture", original)
+        self.assertEqual(
+            [row["path"] for row in original["patches"]],
+            manifest["linux"]["patches"],
+        )
+        self.assertEqual(selected["architecture"], "aarch64")
+        self.assertEqual(
+            [row["path"] for row in selected["patches"]],
+            [
+                *manifest["linux"]["patches"],
+                *(path.as_posix() for path in KernelBuildConstants.ARM_PATCHES),
+            ],
+        )
+        self.assertEqual(
+            manifest["linux"]["architectures"]["aarch64"]["patches"],
+            [row["path"] for row in selected["patches"]],
+        )
+        with self.assertRaisesRegex(common.ScriptError, "must not overwrite x86"):
+            build_config.KernelBuildConfig(architecture="aarch64")
+
+    def test_arm_make_and_provenance_use_image_arm_inputs_and_the_real_jobs_limit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            config = replace(
+                build_config.KernelBuildConfig.for_architecture("aarch64", jobs=1),
+                work=root / "work",
+                output=root / "products" / "Image",
+            )
+            input_path = root / config.input_config
+            input_path.parent.mkdir()
+            values: dict[str, str] = {}
+            for feature in features_for_architecture("aarch64"):
+                for setting in (*feature.settings, *feature.expects):
+                    assignment = kc.Assignment.parse(setting)
+                    assert assignment is not None
+                    values[assignment.symbol] = assignment.value
+            text = "\n".join(kc.Assignment(s, v).line for s, v in values.items()) + "\n"
+            input_path.write_text(text, encoding="utf-8")
+            commands: list[list[object]] = []
+
+            def make(command: list[object]) -> None:
+                commands.append(command)
+                self.assertIn("ARCH=arm64", command)
+                if command[-1] == "Image":
+                    self.assertIn("-j1", command)
+                    built = config.work / "arch" / "arm64" / "boot" / "Image"
+                    built.parent.mkdir(parents=True)
+                    built.write_bytes(b"mock producer output")
+
+            fingerprint = json.dumps({"architecture": "aarch64", "patches": []})
+            with (
+                patch.object(BuildConstants, "REPO_ROOT", root),
+                patch.object(build, "_require_linux"),
+                patch.object(build, "require_tool"),
+                patch.object(
+                    build, "prepare_kernel_source", return_value=(source, fingerprint)
+                ),
+                patch.object(
+                    build, "_kernel_source_fingerprint", return_value=fingerprint
+                ),
+                patch.object(build, "run_checked", side_effect=make),
+                patch.object(build, "check_build_configuration") as check,
+            ):
+                build.build_kernel(config)
+            self.assertEqual(
+                [command[-1] for command in commands], ["olddefconfig", "Image"]
+            )
+            self.assertEqual(check.call_args.kwargs["architecture"], "aarch64")
+            self.assertEqual(check.call_args.args[3], root / config.derived_config)
+            self.assertEqual(config.output.read_bytes(), b"mock producer output")
+            receipt = json.loads(
+                config.output.with_name(config.provenance_name).read_text()
+            )
+            self.assertEqual(
+                receipt["input_config"]["path"], config.input_config.as_posix()
+            )
+            self.assertEqual(receipt["source"]["architecture"], "aarch64")
+            self.assertFalse((root / KernelBuildConstants.INPUT_CONFIG).exists())
+
+    def test_current_cli_selects_architecture_and_refuses_unwired_docker_generation(
+        self,
+    ):
+        import nvx  # noqa: PLC0415
+
+        args = nvx.parse_args(["build-kernel", "--architecture=aarch64", "--jobs", "1"])
+        with patch.object(nvx, "build_kernel") as build_selected:
+            nvx.command_build_kernel(args)
+        selected = build_selected.call_args.args[0]
+        self.assertEqual(selected.architecture, "aarch64")
+        self.assertEqual(selected.jobs, 1)
+        self.assertEqual(selected.output.name, "Image")
+        args = nvx.parse_args(["kernel-config", "--architecture", "aarch64"])
+        with (
+            patch.object(nvx, "generate_docker_kernel_config") as docker,
+            self.assertRaisesRegex(common.ScriptError, "requires --native"),
+        ):
+            nvx.command_kernel_config(args)
+        docker.assert_not_called()
+
+    def test_arm_corresponding_source_uses_arm_patch_context_and_final_config_member(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            generated = root / "Image.config"
+            generated.write_text("CONFIG_ARM64=y\n# CONFIG_X86_64 is not set\n")
+            args = argparse.Namespace(
+                architecture="aarch64", config=generated, output=root / "source.tar.gz"
+            )
+            with (
+                patch.object(
+                    source_archive,
+                    "prepare_kernel_source",
+                    return_value=(root / "patched-linux", "{}"),
+                ) as prepare,
+                patch.object(source_archive, "create_reproducible_tar_gz") as archive,
+            ):
+                source_archive.command_create_linux_source_archive(args)
+            prepare.assert_called_once_with(
+                build_config.KernelBuildConfig.for_architecture("aarch64")
+            )
+            members = archive.call_args.args[1]
+            config_member = next(
+                member for member in members if member[0] == generated.resolve()
+            )
+            self.assertEqual(
+                config_member[1],
+                f"{KernelBuildConstants.SOURCE_ARCHIVE_ROOT}-aarch64/Image.config",
+            )
+
+    def test_arm_source_archive_refuses_x86_config_before_any_source_preparation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            generated = root / "Image.config"
+            generated.write_text("CONFIG_X86_64=y\n")
+            args = argparse.Namespace(
+                architecture="aarch64", config=generated, output=root / "source.tar.gz"
+            )
+            with (
+                patch.object(source_archive, "prepare_kernel_source") as prepare,
+                self.assertRaisesRegex(common.ScriptError, "generated ARM64"),
+            ):
+                source_archive.command_create_linux_source_archive(args)
+            prepare.assert_not_called()
+
+    def test_legacy_source_archive_defaults_keep_x86_context_and_vmlinux_member(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            generated = root / "vmlinux.config"
+            generated.write_text("CONFIG_X86_64=y\n")
+            args = argparse.Namespace(config=generated, output=root / "source.tar.gz")
+            with (
+                patch.object(
+                    source_archive,
+                    "prepare_kernel_source",
+                    return_value=(root / "patched-linux", "{}"),
+                ) as prepare,
+                patch.object(source_archive, "create_reproducible_tar_gz") as archive,
+            ):
+                source_archive.command_create_linux_source_archive(args)
+            prepare.assert_called_once_with(build_config.KernelBuildConfig())
+            members = archive.call_args.args[1]
+            self.assertIn(
+                (
+                    generated.resolve(),
+                    f"{KernelBuildConstants.SOURCE_ARCHIVE_ROOT}/vmlinux.config",
+                ),
+                members,
+            )
 
 
 if __name__ == "__main__":

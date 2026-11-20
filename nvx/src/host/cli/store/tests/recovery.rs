@@ -375,6 +375,7 @@ mod process {
         let journal = fs::read(state.path(StateFile::Journal)).unwrap();
         launch
             .commit(&SavedVm {
+                architecture: crate::host::runtime::GuestArchitecture::X86_64,
                 vm_dir: VmDir::open(state.dir()).unwrap(),
                 endpoint: prepared.outputs().endpoint.clone(),
                 capability: *prepared.capability().as_bytes(),
