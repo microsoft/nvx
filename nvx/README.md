@@ -2143,6 +2143,11 @@ tests, only the test hooks that
 [`test-layout-allowlist.json`](../scripts/test-layout-allowlist.json) allows, as
 [Test layout](../doc/contribute.md#test-layout) describes.
 
+On Linux, the relative-path VM launch test links its stand-in to an installed
+executable. The parallel test process never opens the executable for writing,
+so a fork from another test cannot inherit a writer and cause `ETXTBSY` at
+launch. The test still starts the stand-in through the caller-relative path.
+
 The tests need no hypervisor. The fake-OpenVMM test runs `nvx-fake-openvmm`
 directly, as `nvx run` runs OpenVMM on the terminal. The CLI test runs the
 [scenario tests](#scenario-tests) of `nvx`, and checks that `exec` and

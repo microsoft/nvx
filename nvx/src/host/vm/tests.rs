@@ -1931,6 +1931,10 @@ fn spawn_resolves_relative_runtime_and_block_inputs_outside_the_vm_directory() {
     let relative = inputs.path().strip_prefix(&cwd).unwrap();
     let (program, arguments) = stand_in_command();
     let executable = format!("stand-in{}", std::env::consts::EXE_SUFFIX);
+    // A concurrent fork could keep a copy's writable descriptor alive until after spawn.
+    #[cfg(target_os = "linux")]
+    std::os::unix::fs::symlink(&program, inputs.path().join(&executable)).unwrap();
+    #[cfg(windows)]
     fs::copy(program, inputs.path().join(&executable)).unwrap();
     for name in ["kernel", "initramfs", "image.erofs", "scratch.raw"] {
         fs::write(inputs.path().join(name), name.as_bytes()).unwrap();
@@ -1973,6 +1977,20 @@ fn spawn_resolves_relative_runtime_and_block_inputs_outside_the_vm_directory() {
         ..config
     };
     assert_eq!(prepared.program, resolved_runtime.openvmm);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let identity = |path: &Path| {
+            let file = fs::metadata(path).unwrap();
+            (file.dev(), file.ino())
+        };
+        assert_eq!(
+            identity(&prepared.program),
+            identity(&program),
+            "the relative fixture must name the installed executable, not a writable copy"
+        );
+    }
     assert_eq!(
         prepared.arguments(),
         resolved_config
