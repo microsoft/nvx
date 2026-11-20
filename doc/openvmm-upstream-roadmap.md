@@ -9,17 +9,18 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c928e8dc1e1673a37c83c10fe145f6611a505cec`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126 and the PR18 fixup at position 302.
-- NVX's pinned OpenVMM revision: `ee647f75cba9dc8ced61d5cb065b070fb445fbd7`, position 318, the head
-  of microsoft/openvmm#5168, whose commits follow position 316, `85c3698f9`, the head of
-  `feature/microvm/dev` and of the `feature/microvm/release/v7.1` branch of microsoft/openvmm. The
+- NVX's pinned OpenVMM revision: `b929c2d26709b37340488a3bb052ecbdd4e4d1ef`, position 319, the head
+  of microsoft/openvmm#5170, whose commit follows position 318, `ee647f75c`, the head of
+  `feature/microvm/dev`, where microsoft/openvmm#5168 landed positions 317 and 318 on position 316,
+  `85c3698f9`, the head of the `feature/microvm/release/v7.1` branch of microsoft/openvmm. The
   v7.1 rebase moved the 315 commits of `feature/microvm/dev` at NVX's pin before it, `6e5303f94`,
   onto `9a875b563` without dropping any: the 296 of `feature/microvm/release/v7.0` and the 19 that
   microsoft/openvmm#5129, microsoft/openvmm#5131, microsoft/openvmm#5132, microsoft/openvmm#5134,
   microsoft/openvmm#5136, microsoft/openvmm#5140, and microsoft/openvmm#5141 landed after it. It
   added a fixup at its tip, position 316. Every commit keeps its position, and only positions 060
   and 277, which conflicted with upstream, and position 007, whose context upstream changed, changed
-  their patches; see [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The pin is 192
-  commits past the mapped tip on the same first-parent chain. Positions 127-301 and 303-318 are not
+  their patches; see [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The pin is 193
+  commits past the mapped tip on the same first-parent chain. Positions 127-301 and 303-319 are not
   yet assigned to PRs, position 302 is a PR18 fixup, and position 317 backports upstream's
   microsoft/openvmm#5160, which the next rebase drops; see [Commits after the mapped
   tip](#commits-after-the-mapped-tip).
@@ -1465,7 +1466,8 @@ The physical branch is one first-parent chain:
   -> v7.1 rebase fixup [316]
   -> upstream's EOF for a disconnected named pipe's event query, microsoft/openvmm#5160 [317]
   -> offsets found in I/O regions that end at the top of their address space [318]
-  -> ee647f75c (NVX pin)
+  -> chipset devices wired only once their state unit spawns [319]
+  -> b929c2d26 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1494,7 +1496,7 @@ position 069 and position 133.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 192 later commits, position
+The NVX pin extends the chain past position 126 without merges. Of its 193 later commits, position
 302 is a PR18 fixup, position 316 is the fixup of the v7.1 rebase, position 317 backports an
 upstream commit, and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
@@ -1503,13 +1505,13 @@ commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 a
 of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 followed the v5.0
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
-v7.0 reorganization, position 316 is the v7.1 rebase's fixup, and positions 317 and 318 followed
-the v7.1 rebase, so they combine none, apart from position 215, which combines v5.1 positions 222
-and 223, and the commits that the v7.0 reorganization folded into them. Each commit has the
-position that it had in v7.0, since the v7.1 rebase dropped none. Each commit's v6.1 position is its
-v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and its v6.0
+v7.0 reorganization, position 316 is the v7.1 rebase's fixup, and positions 317-319 followed the
+v7.1 rebase, so they combine none, apart from position 215, which combines v5.1 positions 222 and
+223, and the commits that the v7.0 reorganization folded into them. Each commit has the position
+that it had in v7.0, since the v7.1 rebase dropped none. Each commit's v6.1 position is its v6.0
+position less seven, the number of commits that the v6.1 rebase dropped before it, and its v6.0
 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and positions
-297-318 have no earlier position; see
+297-319 have no earlier position; see
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.1 position counts in
@@ -1713,13 +1715,14 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 316 | `85c3698f9` | - | - | - | - | - | - | cpu_profile, openvmm_helpers: name sha2 as upstream's lock file does (v7.1 rebase fixup for microsoft/openvmm#4941); fold into 069 and 133 |
 | 317 | `2a5e77698` | - | - | - | - | - | - | pal_async: treat disconnected pipe event query as EOF (microsoft/openvmm#5160, backported by microsoft/openvmm#5168 from upstream's `0474df224`); the next rebase drops it |
 | 318 | `ee647f75c` | - | - | - | - | - | - | vmotherboard: find offsets in an I/O region that ends at the top (microsoft/openvmm#5168) |
+| 319 | `b929c2d26` | - | - | - | - | - | - | vmotherboard: wire a chipset device only once its unit spawns (microsoft/openvmm#5170) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
 regrouped, and later fork bases, up to `7d90c4104` for v6.1 positions 270-315, for later commits,
 and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`, upstream main on
 2026-11-17, for positions 307-312, `2640ad182`, upstream main later that day, for positions
-313-315, and `715927303`, upstream main on 2026-11-18, for positions 317 and 318.
+313-315, and `715927303`, upstream main on 2026-11-18, for positions 317-319.
 They name the positions that the commits have now, but neither the v7.1 rebase on `9a875b563` nor
 the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the earlier
 ones on `7d90c4104`.
@@ -3738,6 +3741,23 @@ PR10's position 015 also changes, none of the code that it changes. It changes n
 PR adds. No device of the microVM looks up an offset in its regions, so the microVM behaves as it
 did. Replaying it on upstream main applies without conflicts, and `vmotherboard` type-checks there
 with its tests, which pass, so it can go upstream on its own.
+
+Position 319 has `ArcMutexChipsetServices::finalize`, which ends the add of a chipset device in
+`vmotherboard`, make the device the chipset's EOI handler and PIC and a target of the line sets that
+it asked for only once its state unit has spawned, the last step of the add that can fail
+(microsoft/nvx#1387). It made them before the spawn, so an add that failed there, with `NameInUse`
+when another unit had the device's name, left the device wired: the line sets went on driving it,
+though no state unit started, stopped, saved, or restored it, and an interrupt controller added in
+its place failed with `EoiHandlerAlreadySet`. It now checks first that the EOI handler and the PIC
+are free and that the device can be a line target, then spawns the unit, and then wires the device
+in the same order as before, so a failed add leaves the device none of them, and a successful one
+leaves the chipset as before. It changes code that upstream main has, and adds two tests in a new
+`tests` module, in a file that PR10's position 015 and position 318 also change, none of the code
+that either changes. It changes nothing that a mapped PR adds. Every caller of the add, the
+microVM's device loader among them, returns its error, so the microVM behaves as it did. Upstream
+main has the defect: the tests fail there without the fix. Replaying it on upstream main applies
+without conflicts, and `vmotherboard` type-checks there with its tests, which pass, so it can go
+upstream on its own.
 
 ## PR summary
 
