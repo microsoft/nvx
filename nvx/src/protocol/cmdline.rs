@@ -288,6 +288,22 @@ pub fn init_tokens(command_line: &[u8]) -> impl Iterator<Item = Token<'_>> {
         })
 }
 
+/// Refuses, with a [`ProtocolError`] that echoes `value` with its non-text bytes escaped, a `value`
+/// of the boot token `parameter` that is not `expected`, the one value that the token may have.
+pub(super) fn require_value(
+    parameter: &str,
+    value: &[u8],
+    expected: &str,
+) -> Result<(), ProtocolError> {
+    if value == expected.as_bytes() {
+        return Ok(());
+    }
+    Err(violation(format!(
+        "the {parameter} kernel parameter must be {expected}, not '{}'",
+        value.escape_ascii()
+    )))
+}
+
 /// Returns the DNS server that the `virtnet_dns=` token of `command_line`, such as the guest's
 /// `/proc/cmdline`, names, or `None` if no token names one.
 ///
