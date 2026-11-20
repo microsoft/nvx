@@ -34,6 +34,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::platform;
 use crate::error::Error;
+use crate::hex::{parse_hex, write_hex};
 
 /// Longest wait for a terminated OpenVMM process to exit.
 #[cfg_attr(
@@ -93,7 +94,7 @@ impl BootId {
 
 impl fmt::Display for BootId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        platform::write_hex(formatter, &self.0)
+        write_hex(formatter, &self.0)
     }
 }
 
@@ -109,7 +110,7 @@ impl FromStr for BootId {
     /// Parses the text form of a boot identity, failing with
     /// [`ErrorKind::Io`](crate::ErrorKind::Io) for anything other than 32 hexadecimal digits.
     fn from_str(text: &str) -> crate::Result<Self> {
-        platform::parse_hex(text).map(Self).ok_or_else(|| {
+        parse_hex(text).map(Self).ok_or_else(|| {
             Error::io(format!(
                 "{text:?} is not a boot identity, which is 32 hexadecimal digits"
             ))

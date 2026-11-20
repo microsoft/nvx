@@ -1,6 +1,6 @@
 //! Pure decoders, parsers, and arithmetic of the guest time ABI.
 
-use std::fmt::{self, Display, Write as _};
+use std::fmt::{self, Display};
 use std::net::IpAddr;
 use std::ops::RangeInclusive;
 
@@ -739,28 +739,6 @@ pub(crate) fn guest_frequency(correction: i64, tsc_hz: u64) -> (i64, bool) {
     let limit = i128::from(FREQUENCY_LIMIT);
     let held = frequency.clamp(-limit, limit);
     (held as i64, held != frequency)
-}
-
-/// Encodes bytes as lowercase hexadecimal without separators.
-pub(crate) fn format_hex(bytes: &[u8]) -> String {
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(text, "{byte:02x}");
-    }
-    text
-}
-
-/// Decodes exactly `N` bytes from `2 * N` hexadecimal digits, in either case.
-pub(crate) fn parse_hex<const N: usize>(text: &[u8]) -> Option<[u8; N]> {
-    if text.len() != 2 * N {
-        return None;
-    }
-    let digit = |byte: u8| char::from(byte).to_digit(16);
-    let mut bytes = [0; N];
-    for (byte, pair) in bytes.iter_mut().zip(text.chunks_exact(2)) {
-        *byte = u8::try_from(digit(pair[0])? << 4 | digit(pair[1])?).ok()?;
-    }
-    Some(bytes)
 }
 
 /// Converts Linux scaled-ppm frequency into rounded parts per billion.

@@ -25,6 +25,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::error::{Error, Result};
+#[cfg(any(target_os = "linux", windows))]
+use crate::hex::parse_hex;
 
 pub(crate) mod hypervisor;
 pub(crate) mod inherit;
@@ -321,32 +323,6 @@ pub(crate) fn unless_exited(
         return Ok(());
     };
     if exited()? { Ok(()) } else { Err(error) }
-}
-
-/// Parses exactly `2 * N` hexadecimal digits, in either case, into the `N` bytes that they spell.
-pub(crate) fn parse_hex<const N: usize>(text: &str) -> Option<[u8; N]> {
-    let digits = text.as_bytes();
-    if digits.len() != 2 * N {
-        return None;
-    }
-    let mut bytes = [0; N];
-    for (byte, pair) in bytes.iter_mut().zip(digits.chunks_exact(2)) {
-        let nibble = |digit: u8| char::from(digit).to_digit(16);
-        *byte = u8::try_from(nibble(pair[0])? * 16 + nibble(pair[1])?).ok()?;
-    }
-    Some(bytes)
-}
-
-/// Writes `bytes` as lowercase hexadecimal digits, two for each byte.
-pub(crate) fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
-    bytes
-        .iter()
-        .try_for_each(|byte| write!(formatter, "{byte:02x}"))
-}
-
-/// Returns `bytes` as lowercase hexadecimal digits, two for each byte.
-pub(crate) fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Parses the identity of a host as OpenVMM reads it: 32 hexadecimal digits, in either case,

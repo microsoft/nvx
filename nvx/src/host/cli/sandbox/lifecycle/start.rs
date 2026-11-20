@@ -19,6 +19,7 @@ use super::{
     runtime_for,
 };
 use crate::guest_restore::{GuestRestoreRecord, TransactionId};
+use crate::hex::hex;
 use crate::host::artifacts::compatibility::compatibility;
 use crate::host::cli::artifacts::locate;
 use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
@@ -637,7 +638,7 @@ pub(crate) fn run(
     };
     artifacts.require()?;
     let (config, vm_config) = recorded?;
-    let name = platform::hex(&random_bytes::<16>()?);
+    let name = hex(&random_bytes::<16>()?);
     let path = std::env::temp_dir().join(format!("nvx-sandbox-run-{name}"));
     refuse_own_files(
         Some(("VM directory", &path)),

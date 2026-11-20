@@ -479,15 +479,6 @@ fn rates_convert_to_parts_per_billion() {
 }
 
 #[test]
-fn generation_ids_are_exact_hexadecimal() {
-    assert_eq!(parse_hex::<2>(b"0aFf"), Some([0x0a, 0xff]));
-    assert_eq!(parse_hex::<2>(b"0aF"), None);
-    assert_eq!(parse_hex::<2>(b"+aff"), None);
-    assert_eq!(parse_hex::<2>(b"0agf"), None);
-    assert_eq!(format_hex(&[0x0a, 0xff]), "0aff");
-}
-
-#[test]
 fn correction_boundary_matches_the_abi() {
     assert!(matches!(
         plan_correction(128_000_000, 10, true, 0, 0),

@@ -35,6 +35,7 @@ use crate::guest::sys::x86::CpuidResult;
 use crate::guest::sys::{
     self, ChildStatus, ClockAdjustment, Errno, ForkResult, Port, PortAccess, Signal,
 };
+use crate::hex::{hex, parse_hex};
 
 /// How long after its start the `promote` hook's first promoter promotes the threads.
 const PROMOTION_DELAY_NS: i64 = 50 * NSEC_PER_MSEC;
@@ -127,8 +128,7 @@ fn record(fixture: &[u8], offset: usize, size: usize) -> Vec<u8> {
 fn test_packet(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandError> {
     let [path, recorded, previous] = exactly(arguments)?;
     let bytes = read_fixture(path)?;
-    let previous =
-        decoders::parse_hex::<GENERATION_ID_SIZE>(previous).ok_or(CommandError::Usage)?;
+    let previous = parse_hex::<GENERATION_ID_SIZE>(previous).ok_or(CommandError::Usage)?;
     let recorded: u64 = number(recorded)?;
     let header = match PacketHeader::parse(&record(&bytes, 0, PACKET_HEADER_SIZE)) {
         Ok(header) => header,
@@ -178,7 +178,7 @@ fn test_packet(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandEr
         header.generation,
         header.rate_deviation,
         header.downtime_ns,
-        decoders::format_hex(packet.generation_id())
+        hex(packet.generation_id())
     );
     for (start, length) in packet.ranges {
         let _ = write!(out, " range={start}:{length}");
@@ -194,7 +194,7 @@ fn test_packet(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandEr
         );
     }
     if let Some(activation) = &packet.activation {
-        let _ = write!(out, " activation={}", decoders::format_hex(activation));
+        let _ = write!(out, " activation={}", hex(activation));
     }
     let _ = writeln!(out);
     Ok(())

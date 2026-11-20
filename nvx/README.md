@@ -63,6 +63,8 @@ nvx/
 │   │                Ready reports about it; no dependencies, shared by the host and the guest
 │   ├── net/         CIDR networks and their subtraction, hostnames, guest addresses, and gateways
 │   ├── gpt/         strict reading of GPT disks for NVX's guest programs, private to the crate
+│   ├── hex.rs       the crate's one definition of bytes as lowercase hexadecimal text and back,
+│   │                private to the crate
 │   ├── uuid.rs      UUIDs in their canonical text and in GPT's layout
 │   ├── error.rs     nvx::Error, its ErrorKind, and the stable codes that the CLI prints
 │   ├── host/        feature `host` (default): runtimes, VM configurations, VM directories and

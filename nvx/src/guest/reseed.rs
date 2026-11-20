@@ -49,6 +49,7 @@ use std::process::ExitCode;
 use super::GenerationId;
 use super::status::{CommandError, run_main};
 use super::sys::{self, Errno, Mode, OpenFlags};
+use crate::hex::{hex, parse_hex};
 
 /// The kernel's random device, through which [`reseed`] adds a seed.
 const RANDOM_DEVICE: &CStr = c"/dev/random";
@@ -355,17 +356,13 @@ fn validate_generation_change(
         );
         return Err(CommandError::Operation);
     }
-    let mut previous_bytes = [0; GenerationId::LENGTH];
-    for (byte, digits) in previous_bytes.iter_mut().zip(previous.chunks_exact(2)) {
-        let (Some(high), Some(low)) = (hex_value(digits[0]), hex_value(digits[1])) else {
-            sys::report(
-                err,
-                &[b"nvx-reseed: previous VM generation ID is not hexadecimal\n"],
-            );
-            return Err(CommandError::Operation);
-        };
-        *byte = (high << 4) | low;
-    }
+    let Some(previous_bytes) = parse_hex::<{ GenerationId::LENGTH }>(previous) else {
+        sys::report(
+            err,
+            &[b"nvx-reseed: previous VM generation ID is not hexadecimal\n"],
+        );
+        return Err(CommandError::Operation);
+    };
     if previous_bytes == *generation_id {
         sys::report(err, &[b"nvx-reseed: VM generation ID did not change\n"]);
         return Err(CommandError::Operation);
@@ -373,19 +370,9 @@ fn validate_generation_change(
     Ok(())
 }
 
-/// Returns one hexadecimal nibble, accepting the upper- and lowercase C forms.
-fn hex_value(digit: u8) -> Option<u8> {
-    match digit {
-        b'0'..=b'9' => Some(digit - b'0'),
-        b'a'..=b'f' => Some(digit - b'a' + 10),
-        b'A'..=b'F' => Some(digit - b'A' + 10),
-        _ => None,
-    }
-}
-
 /// Prints `bytes` in lowercase hexadecimal and a newline.
 fn print_hex(bytes: &[u8], out: &mut dyn Write, err: &mut dyn Write) -> Result<(), CommandError> {
-    let mut line: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut line = hex(bytes);
     line.push('\n');
     if sys::print(out, line.as_bytes()).is_err() {
         sys::report(err, &[b"nvx-reseed: write output failed\n"]);

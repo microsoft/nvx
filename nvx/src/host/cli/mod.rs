@@ -62,6 +62,7 @@ use std::path::{Path, PathBuf};
 
 use self::args::{Parser, Receiver, Spec, Stop, Syntax};
 use crate::ErrorCode;
+use crate::hex::hex;
 use crate::host::platform;
 
 /// Returns the name of a temporary file next to `path`: `.NAME.UUID.tmp`, with a fresh UUID4 in
@@ -85,7 +86,7 @@ fn uuid4_hex() -> Result<String> {
     let mut bytes = random_bytes::<16>()?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Ok(platform::hex(&bytes))
+    Ok(hex(&bytes))
 }
 
 /// Returns `N` random bytes from the operating system.

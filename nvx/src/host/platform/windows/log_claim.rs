@@ -34,7 +34,7 @@ use super::identity::opened_file_identity;
 use super::identity::{opened_file_id, status_error};
 use super::private::{CurrentUser, Required, privacy_problem, with_owner_only_attributes};
 use super::{last_error, owned, raw, wide};
-use crate::host::platform::hex;
+use crate::hex::hex;
 
 /// Claims a launch's fresh log, which `file` holds open.
 ///

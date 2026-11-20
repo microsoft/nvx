@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use super::collect::{self, Collector, DiagnosticInput, IPV6_DUAL_STACK_BY_DEFAULT};
 use super::{DecimalFile, FIRST_SOURCE_PORT, PATH_BUFFER_SIZE, bounded_path, read_decimal_file};
 use crate::guest::sys;
+use crate::hex::hex;
 
 /// The file of a snapshot that holds its scan time, in milliseconds, which test mode prints and
 /// passes to the collector in place of the monotonic clock.
@@ -53,12 +54,8 @@ pub(super) fn run(directory: &CStr, out: &mut dyn Write) -> Result<(), Error> {
             now,
             ipv6_dual_stack,
         );
-        let mut line = format!("{now} ").into_bytes();
-        for byte in payload {
-            line.extend_from_slice(format!("{byte:02x}").as_bytes());
-        }
-        line.push(b'\n');
-        sys::report(out, &[&line]);
+        let line = format!("{now} {}\n", hex(&payload));
+        sys::report(out, &[line.as_bytes()]);
         index = index.wrapping_add(1);
     }
 }

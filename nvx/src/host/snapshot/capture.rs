@@ -11,6 +11,7 @@ use super::{
     CaptureContext, DESCRIPTION_FILE, KEY_FILE, MANIFEST_NAME, OPENVMM_DIR, SNAPSHOT_ARTIFACTS,
     SnapshotKey, SnapshotManifest, check_openvmm,
 };
+use crate::hex::hex;
 use crate::host::platform::{self, open_regular, read_at_most, sync_dir, write_private};
 use crate::host::process::Exited;
 use crate::host::vm_directory::{OUTCOME, VmDir};
@@ -82,7 +83,7 @@ pub fn finish_capture(
             "captureUtcNs": time.capture_utc_ns,
             "captureMonotonicNs": time.capture_monotonic_ns,
             "hostClock": time.host_clock.as_str(),
-            "hostId": platform::hex(&time.host_id),
+            "hostId": hex(&time.host_id),
             "bootId": time.boot_id,
             "lineage": time.lineage,
             "cutToAnchorNs": time.cut_to_anchor_ns,

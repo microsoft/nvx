@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::hex::write_hex;
+
 /// The VM generation ID: 16 random bytes that each VM process of a guest has, from cold boot or
 /// from a restore of a snapshot, so that clones of one snapshot have different IDs.
 ///
@@ -29,9 +31,7 @@ impl GenerationId {
 impl fmt::Display for GenerationId {
     /// Writes the ID as 32 lowercase hexadecimal digits.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0
-            .iter()
-            .try_for_each(|byte| write!(formatter, "{byte:02x}"))
+        write_hex(formatter, &self.0)
     }
 }
 

@@ -18,10 +18,10 @@ use sha2::{Digest, Sha256};
 
 use super::filesystem::{ExportPlan, ReservedTargets};
 use super::network::{self, NetworkPolicy};
-use super::platform::{parse_hex, write_hex};
 use super::runtime::{GuestPowerAction, Hypervisor, Runtime};
 use crate::error::{Error, Result};
 use crate::guest_restore;
+use crate::hex::{parse_hex, write_hex};
 use crate::net::Ipv4Cidr;
 use crate::protocol::cmdline::{self, Parameter};
 use crate::protocol::maps::HostMap;

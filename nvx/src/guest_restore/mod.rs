@@ -174,6 +174,7 @@
 use std::fmt;
 use std::net::IpAddr;
 
+use crate::hex::write_hex;
 use crate::protocol::MAX_HOST_MAPPINGS;
 use crate::protocol::root::{ImageFormat, Journal, OverlayMode};
 use crate::protocol::view::{MAX_HOSTNAME_BYTES, View, is_hostname};
@@ -606,11 +607,4 @@ fn is_proxy_endpoint(endpoint: &str) -> bool {
         && endpoint
             .bytes()
             .all(|byte| byte.is_ascii_graphic() && byte != b'@')
-}
-
-/// Writes `bytes` as lowercase hexadecimal digits, two for each byte.
-fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
-    bytes
-        .iter()
-        .try_for_each(|byte| write!(formatter, "{byte:02x}"))
 }

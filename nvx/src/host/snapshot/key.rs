@@ -17,8 +17,8 @@ use super::manifest::{
 };
 use crate::error::{Error, Result};
 use crate::guest_restore;
+use crate::hex::{parse_hex, write_hex};
 use crate::host::config::{DiskCapture, check_setting};
-use crate::host::platform::{parse_hex, write_hex};
 use crate::host::process::BootId;
 use crate::host::runtime::{
     ArtifactIdentity, CompatibilityIdentity, Hypervisor, MAX_IDENTITY_LEN, RuntimeIdentity,
