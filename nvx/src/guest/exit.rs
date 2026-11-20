@@ -8,6 +8,7 @@
 use std::ffi::{CStr, CString};
 use std::process::ExitCode;
 
+use super::parse::parse_decimal;
 use super::status::{CommandError, run_main};
 use super::sys::{self, Mode, OpenFlags, PORT_DEVICE, Port};
 
@@ -37,24 +38,12 @@ fn run(args: &[CString], port: &CStr) -> Result<(), CommandError> {
 ///
 /// A nonempty decimal number from 0 through 255 is accepted, including leading zeros. A missing
 /// or empty argument, a sign, whitespace, any other character, or a larger value selects 1, as in
-/// the C program. Rust's `u8::from_str` also accepts a leading `+`, so the program keeps its own
-/// parser.
+/// the C program.
 fn exit_code(argument: Option<&[u8]>) -> u8 {
-    let Some(argument) = argument else {
-        return 1;
-    };
-    let mut value = 0_u32;
-    for &byte in argument {
-        if !byte.is_ascii_digit() {
-            return 1;
-        }
-        // The function returns as soon as the value exceeds 255, so this cannot overflow.
-        value = value * 10 + u32::from(byte - b'0');
-        if value > 255 {
-            return 1;
-        }
-    }
-    if argument.is_empty() { 1 } else { value as u8 }
+    argument
+        .and_then(parse_decimal)
+        .and_then(|code| u8::try_from(code).ok())
+        .unwrap_or(1)
 }
 
 #[cfg(test)]
