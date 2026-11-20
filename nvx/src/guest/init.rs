@@ -352,7 +352,7 @@ pub(crate) enum Source {
 
 /// Why an execution was ended rather than completing on its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Cause {
+enum Cause {
     Cancelled,
     Terminated,
     TimedOut,

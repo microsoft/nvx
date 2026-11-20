@@ -152,7 +152,7 @@ pub(crate) use self::kernel::Paths;
 pub(crate) use self::share::{ShareChild, ShareKind, ShareRefusal};
 
 /// Where the runtime binds its time status read-only in the root.
-pub(crate) const TIME_STATUS_TARGET: &str = "/run/nvx/time";
+const TIME_STATUS_TARGET: &str = "/run/nvx/time";
 
 /// The directory of the layers' mount points, below the runtime directory.
 const LAYERS_DIRECTORY: &str = "layers";
@@ -218,7 +218,7 @@ const RUNTIME_DIRECTORY_MODE: u32 = 0o755;
 /// The most bytes of options that `mount(2)` passes a file system whole: one 4 KiB page, the
 /// smallest into which Linux copies them, less the NUL that ends them. Linux cuts longer options
 /// short, so [`assemble`] refuses an overlay whose options are longer.
-pub(crate) const MOUNT_OPTIONS_LIMIT: usize = 4095;
+const MOUNT_OPTIONS_LIMIT: usize = 4095;
 
 /// The role of a block device in a layered root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -376,7 +376,7 @@ pub(crate) enum Upper {
 
 impl Upper {
     /// Returns the upper's kind.
-    pub(crate) const fn kind(self) -> UpperKind {
+    const fn kind(self) -> UpperKind {
         match self {
             Self::Scratch { .. } => UpperKind::Scratch,
             Self::Tmpfs { .. } => UpperKind::Tmpfs,
@@ -387,7 +387,7 @@ impl Upper {
 /// The kind of a root's upper.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub(crate) enum UpperKind {
+enum UpperKind {
     /// An ext4 scratch, on the scratch device.
     Scratch,
     /// A tmpfs.
@@ -482,10 +482,7 @@ pub(crate) fn assemble(assembly: &Assembly) -> Result<Root, AssemblyError> {
 /// Assembles the layered root of `assembly`, as [`assemble`] does, but waits for each device until
 /// `deadline` at the latest, if any, however long `assembly`'s timeout allows: a device that has
 /// not appeared by then is missing, as one that has not appeared by the timeout is.
-pub(crate) fn assemble_until(
-    assembly: &Assembly,
-    deadline: Option<Instant>,
-) -> Result<Root, AssemblyError> {
+fn assemble_until(assembly: &Assembly, deadline: Option<Instant>) -> Result<Root, AssemblyError> {
     assemble_with(
         Box::new(SystemKernel),
         &Paths::default(),
@@ -616,7 +613,7 @@ fn assemble_with(
 
 /// A read-only layer of an assembled root, one of the overlay's lower directories.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Lower {
+struct Lower {
     /// The layer's mount.
     mount: Mount,
     /// The node of the layer's block device.
@@ -1432,7 +1429,7 @@ impl fmt::Debug for Root {
 }
 
 /// Binds a view file read-only, retaining an attachment that could not be detached.
-pub(crate) fn bind_file_retained(
+fn bind_file_retained(
     kernel: &mut dyn mappings::Kernel,
     root: &TargetRoot,
     path: &Path,
@@ -1455,7 +1452,7 @@ pub(crate) fn bind_file_retained(
 /// `root`, with `kernel`, through the walk and attach of a runtime bind, [`bind_retained_with`],
 /// from a source root at `path`'s parent directory, and returns the bind, retaining a failed bind
 /// that its caller must detach.
-pub(crate) fn bind_runtime_file_retained(
+fn bind_runtime_file_retained(
     kernel: &mut dyn mappings::Kernel,
     root: &TargetRoot,
     path: &Path,
@@ -2328,7 +2325,7 @@ pub(crate) struct TeardownError {
 impl TeardownError {
     /// Returns whether the teardown was refused because the root had
     /// [switched](Root::switch), so that it unmounted nothing.
-    pub(crate) fn is_switched(&self) -> bool {
+    fn is_switched(&self) -> bool {
         self.failures.is_empty()
     }
 }
