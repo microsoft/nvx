@@ -3,7 +3,9 @@
 //!
 //! - `file PATH read|write DURATION SIZE direct|buffered create|existing` reads or writes
 //!   page-aligned 4096-byte blocks of PATH, at deterministic pseudo-random offsets within its
-//!   first SIZE bytes, until DURATION milliseconds have passed.
+//!   first SIZE bytes, until DURATION milliseconds have passed. `create` first creates PATH when
+//!   it is missing and sets its size to SIZE, for reads as for writes; `existing` opens PATH as it
+//!   is.
 //! - `network IPV4 PORT DURATION` sends 64-byte UDP datagrams to an echo server until DURATION
 //!   milliseconds have passed, and counts those that come back within 100 ms.
 //! - `map PATH TEXT` maps the first bytes of the existing regular file PATH shared and
@@ -65,7 +67,7 @@ struct FileBenchmark<'a> {
     size_bytes: u64,
     /// Whether to open the file with `O_DIRECT`.
     direct: bool,
-    /// Whether to create the file and set its size.
+    /// Whether to create the file and set its size, which opens it for writing even to read it.
     create: bool,
 }
 
@@ -318,7 +320,8 @@ fn measure_file(
     benchmark: &FileBenchmark<'_>,
     progress: &mut dyn FnMut(&[u8]),
 ) -> Result<Measurement, CommandError> {
-    let mut flags = if benchmark.writing {
+    // Sizing the file takes a descriptor open for writing, which a read benchmark needs too.
+    let mut flags = if benchmark.writing || benchmark.create {
         OpenFlags::O_RDWR
     } else {
         OpenFlags::O_RDONLY

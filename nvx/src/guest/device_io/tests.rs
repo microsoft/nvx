@@ -277,6 +277,49 @@ fn measures_a_file_and_reports_each_failure() {
 }
 
 #[test]
+fn reads_a_file_that_it_creates_and_sizes() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("disk");
+    let read = [
+        "file",
+        file.to_str().unwrap(),
+        "read",
+        "1",
+        "8192",
+        "buffered",
+        "create",
+    ];
+    // The benchmark creates a missing file, and sizes an existing one of another size.
+    for existing in [false, true] {
+        if existing {
+            fs::write(&file, [1; 3 * BLOCK_SIZE]).unwrap();
+        }
+        let mut out = Vec::new();
+        let mut report = Vec::new();
+        let status = ExitStatus::from(run(
+            &args(&read),
+            &mut out,
+            &mut |line| report.extend_from_slice(line),
+            &mut never_holds,
+        ));
+        assert_eq!(status, ExitStatus::Success, "existing: {existing}");
+        let line = String::from_utf8(out).unwrap();
+        assert!(
+            line.starts_with("{\"device\":\"file\",\"operation\":\"read\",\"operations\":"),
+            "{line}"
+        );
+        assert_eq!(fs::metadata(&file).unwrap().len(), 8192);
+        let lines = progress_lines(&report);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0], "nvx-device-io: opened");
+        assert!(
+            lines[1].starts_with("nvx-device-io: transferred ") && lines[1].ends_with(" blocks"),
+            "{lines:?}"
+        );
+    }
+}
+
+#[test]
 fn writes_through_a_held_mapping_and_reports_each_failure() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("mapped");
