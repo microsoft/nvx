@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use super::is_absent;
 use crate::ErrorCode;
 use crate::host::artifacts::compatibility::{
     CONTROL_CONTRACT_REVISION, CONTROL_SESSION_PROTOCOL_VERSION, RESTORE_PACKET_VERSION,
@@ -114,14 +115,7 @@ pub(super) fn destinations(dir: &ArtifactDir) -> Vec<PathBuf> {
 pub(super) fn exists(path: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) =>
-        {
-            Ok(false)
-        }
+        Err(error) if is_absent(&error) => Ok(false),
         Err(error) => Err(error),
     }
 }
@@ -551,14 +545,7 @@ fn set_aside(
     let failed = |error: io::Error| Stop::Failed(io_error(ErrorCode::Io, &error, path));
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) =>
-        {
-            return Ok(None);
-        }
+        Err(error) if is_absent(&error) => return Ok(None),
         Err(error) => return Err(failed(error)),
     };
     if mode == Mode::Fresh {

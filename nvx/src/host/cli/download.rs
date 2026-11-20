@@ -765,6 +765,15 @@ fn system_program(name: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Returns whether `error` says that nothing exists at a path: it has no entry, or one of its
+/// components is no directory, below which nothing can exist.
+fn is_absent(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
+}
+
 /// Removes the file at `path` if there is one.
 fn remove_stale(path: &Path) -> Result {
     match fs::remove_file(path) {

@@ -9,7 +9,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::Report;
+use super::{Report, is_absent};
 use crate::ErrorCode;
 use crate::host::artifacts::{ArtifactDir, REPO_BUILD_DIR};
 use crate::host::cli::{Result, check_interrupt, io_error};
@@ -72,14 +72,7 @@ impl DownloadLock {
             {
                 match fs::File::open(&path) {
                     Ok(file) => file,
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                        ) =>
-                    {
-                        return Ok(None);
-                    }
+                    Err(error) if is_absent(&error) => return Ok(None),
                     Err(error) => return Err(io_error(ErrorCode::Io, &error, &path)),
                 }
             }
