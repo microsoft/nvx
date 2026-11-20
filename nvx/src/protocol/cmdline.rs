@@ -288,6 +288,34 @@ pub fn init_tokens(command_line: &[u8]) -> impl Iterator<Item = Token<'_>> {
         })
 }
 
+/// Returns the one of `parameters` that the boot token `token` names, with the token's value, or
+/// `None` if the token names none of them, as an unrelated token does.
+///
+/// Fails with a [`ProtocolError`] if the token names one of `parameters` but has no value.
+pub(super) fn boot_parameter<'a>(
+    parameters: &[&'static str],
+    token: Token<'a>,
+) -> Result<Option<(&'static str, &'a [u8])>, ProtocolError> {
+    let Some(&parameter) = parameters
+        .iter()
+        .find(|parameter| parameter.as_bytes() == token.name)
+    else {
+        return Ok(None);
+    };
+    match token.value {
+        Some(value) => Ok(Some((parameter, value))),
+        None => Err(violation(format!(
+            "the {parameter} kernel parameter has no value"
+        ))),
+    }
+}
+
+/// Returns the [`ProtocolError`] that refuses the boot token `parameter`, which a command line
+/// repeats, as each of the parameters may occur once.
+pub(super) fn repeated_parameter(parameter: &str) -> ProtocolError {
+    violation(format!("the {parameter} kernel parameter is repeated"))
+}
+
 /// Refuses, with a [`ProtocolError`] that echoes `value` with its non-text bytes escaped, a `value`
 /// of the boot token `parameter` that is not `expected`, the one value that the token may have.
 pub(super) fn require_value(
@@ -347,9 +375,7 @@ fn address_token<A: FromStr + Display>(
             continue;
         };
         if found.is_some() {
-            return Err(violation(format!(
-                "the {name} kernel parameter is repeated"
-            )));
+            return Err(repeated_parameter(name));
         }
         let address = std::str::from_utf8(value).ok().and_then(|text| {
             text.parse::<A>()
