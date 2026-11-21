@@ -14,7 +14,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{FreeLibrary, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{FreeLibrary, HANDLE, INVALID_HANDLE_VALUE, MAX_PATH};
 use windows_sys::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
@@ -74,10 +74,14 @@ fn refuse_nul(path: &Path) -> io::Result<()> {
 /// Encodes a filesystem path for Win32, resolving it before adding an extended-length prefix
 /// when it reaches the legacy directory limit. Existing verbatim and device prefixes are preserved.
 fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+    /// The legacy directory budget in UTF-16 units: MAX_PATH (260) minus the 12 units Windows
+    /// reserves for appending an 8.3 file name.
+    const LEGACY_DIRECTORY_UNITS: usize = 248;
+
     let path = std::path::absolute(path)?;
     refuse_nul(&path)?;
     let name = wide(&path);
-    if name.len() <= 248 {
+    if name.len() <= LEGACY_DIRECTORY_UNITS {
         return Ok(name);
     }
     let (prefix, skip) = match path.components().next() {
@@ -97,7 +101,8 @@ fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
 /// Returns the system directory, such as `C:\Windows\System32`, as `GetSystemDirectoryW` names
 /// it: a directory of every Windows host that only administrators may change.
 pub(crate) fn system_directory() -> io::Result<PathBuf> {
-    let mut buffer = vec![0u16; 260];
+    // The legacy path budget is an initial capacity, not a limit on the returned directory.
+    let mut buffer = vec![0u16; MAX_PATH as usize];
     loop {
         // SAFETY: the buffer holds `buffer.len()` units.
         let length =
