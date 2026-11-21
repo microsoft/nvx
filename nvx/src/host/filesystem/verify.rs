@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use super::guest_path::depth;
 use super::host_path::{display_path, relative_text};
-use super::limits::policy_limits;
+use super::limits::{file_name_problem, policy_limits};
 #[cfg(feature = "cli")]
 use super::policy::Writable;
 use super::policy::{nearest_rule, policy_rule_problem};
@@ -30,8 +30,9 @@ impl ExportPlan {
     /// root that reserves `reserved`: at least one and at most [`MAX_CHILDREN`] children, none
     /// inside another, each an absolute host path below a volume's root, with its host paths
     /// resolved, without a NUL character or a `..` component, and, on Windows, on a local drive,
-    /// without the verbatim prefix, whose policy paths lie inside it within OpenVMM's limits and
-    /// keep its rules, and writable exactly when a bind maps a path of it read-write; and at least
+    /// without the verbatim prefix, each file without a colon or a backslash in its name, whose
+    /// policy paths lie inside it within OpenVMM's limits and keep its rules, and writable exactly
+    /// when a bind maps a path of it read-write; and at least
     /// one and at most [`MAX_HOST_MAPPINGS`] binds, each of a known child, from a relative source
     /// that holds the host's names joined with `/`, that a guest path can hold, and that the child
     /// does not hide, unless it shows paths inside it again, to a free guest target, parents before
@@ -78,6 +79,14 @@ impl ExportPlan {
             {
                 return invalid(format!(
                     "child {index} has the host path {path:?}, which {problem}"
+                ));
+            }
+            if child.file
+                && let Some(problem) = file_name_problem(&child.root)
+            {
+                return invalid(format!(
+                    "child {index}, {}, is a file that {problem}, which OpenVMM cannot export",
+                    child.root.display()
                 ));
             }
             if let Some(path) = [&child.denied, &child.allowed, &child.write]

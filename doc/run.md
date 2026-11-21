@@ -890,7 +890,11 @@ children are the outermost mapped directories and the mapped files outside
 them, so a `--mount` of a directory again, or of a path inside a mapped
 directory, maps a part of that directory's child rather than a child of its
 own. OpenVMM's `file` flag marks a child that is a shared file, so OpenVMM
-refuses a directory that replaced the file rather than export all of it. A
+refuses a directory that replaced the file rather than export all of it.
+OpenVMM refuses a colon or a backslash in every path of a share, and so a
+file child whose name contains one, such as a Windows path that names an
+alternate data stream, which the guest could never reach; NVX rejects such a
+file child before boot. A
 child is read-write only if it holds a read-write mapping, and OpenVMM then
 limits its writes to its read-write mappings, which NVX passes as
 `--mount-write` paths when they lie inside a read-only one. A read-only
