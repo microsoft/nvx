@@ -220,7 +220,9 @@ pub(super) fn object_name(handle: HANDLE) -> io::Result<Vec<u16>> {
 /// names it, such as `\Sessions\1\BaseNamedObjects`: that of a fresh event, named at random so
 /// that no link can take its name first.
 pub(super) fn local_directory() -> io::Result<Vec<u16>> {
-    let mut bytes = [0u8; 16];
+    /// A 128-bit random suffix makes collisions between fresh event names unlikely.
+    const EVENT_NAME_RANDOM_BYTES: usize = 16;
+    let mut bytes = [0u8; EVENT_NAME_RANDOM_BYTES];
     getrandom::fill(&mut bytes).map_err(io::Error::other)?;
     let suffix = hex(&bytes);
     let name = wide(format!(r"Local\nvx-namespace-{suffix}"));
