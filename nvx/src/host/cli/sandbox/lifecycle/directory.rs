@@ -75,9 +75,12 @@ pub(crate) fn create_state_directory(path: &Path) -> Result {
 }
 
 /// Returns the error with which creating a directory fails for a path that exists.
+/// Windows reports `ERROR_ALREADY_EXISTS` for this case.
 fn already_exists() -> std::io::Error {
     #[cfg(windows)]
-    let error = std::io::Error::from_raw_os_error(183);
+    let error = std::io::Error::from_raw_os_error(
+        windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS as i32,
+    );
     #[cfg(unix)]
     let error = std::io::Error::from_raw_os_error(nix::errno::Errno::EEXIST as i32);
     #[cfg(not(any(windows, unix)))]
