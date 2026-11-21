@@ -54,7 +54,7 @@ Left to CI:
 - [ ] The documentation that the change affects is updated, including
       `.github/copilot-instructions.md` and the skills when a convention or
       workflow changes.
-- [ ] A change to the public API of `nvx` updates `nvx-rs/public-api/` with
+- [ ] A change to the public API of `nvx` updates `nvx/public-api/` with
       `python3 scripts/public_api.py --update`.
 - [ ] Snapshots, protocols, and on-disk formats stay compatible, or the
       description says how the change versions or migrates them.
