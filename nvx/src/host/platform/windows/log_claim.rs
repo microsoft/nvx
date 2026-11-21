@@ -176,7 +176,9 @@ pub(super) fn object_name(handle: HANDLE) -> io::Result<Vec<u16>> {
         STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_INFO_LENGTH_MISMATCH,
     };
 
-    let mut len: u32 = 1024;
+    /// Bounds the first query's allocation to 1 KiB; larger names use the size Windows reports.
+    const INITIAL_OBJECT_NAME_BYTES: u32 = 1024;
+    let mut len = INITIAL_OBJECT_NAME_BYTES;
     loop {
         let mut buffer = vec![0u64; (len as usize).div_ceil(mem::size_of::<u64>())];
         let mut needed = 0;
