@@ -44,6 +44,35 @@ fn partial_or_root_workload_identities_and_unknown_modes_are_refused() {
 }
 
 #[test]
+fn repeated_workload_identities_and_modes_are_refused() {
+    let identity = "a workload identity may be specified only once";
+    let mode = "the blockless mode may be specified only once";
+    for (line, message) in [
+        ("nvx_identity=1000:1000 nvx_identity=1001:1001", identity),
+        ("nvx_identity=1000:1000 nvx_identity=1000:1000", identity),
+        (
+            "nvx_workload_uid=1000 nvx_workload_uid=1001 nvx_workload_gid=1001",
+            identity,
+        ),
+        (
+            "nvx_workload_uid=1000 nvx_workload_gid=1000 nvx_workload_gid=1001",
+            identity,
+        ),
+        (
+            "nvx_workload_uid=1000 nvx_workload_gid=1000 nvx_identity=1000:1000",
+            identity,
+        ),
+        ("nvx_mode=one-shot nvx_lifecycle=managed", mode),
+        ("nvx_mode=managed nvx_mode=managed", mode),
+        ("nvx_lifecycle=managed\tnvx_lifecycle=one-shot", mode),
+    ] {
+        let error = render(line, None).unwrap_err();
+        assert_eq!(error.kind(), crate::ErrorKind::Unsupported, "{line}");
+        assert_eq!(error.to_string(), message, "{line}");
+    }
+}
+
+#[test]
 fn planned_boot_shares_keep_table_sources_targets_access_and_file_kind() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("share");
