@@ -588,7 +588,36 @@ def _arguments(argv: Sequence[str] | None) -> list[str]:
         return ["list"]
     if arguments[0] not in COMMANDS and not arguments[0].startswith("-"):
         arguments.insert(0, "show")
+    if arguments[0] == "run":
+        arguments = _normalize_run_arguments(arguments)
     return arguments
+
+
+def _normalize_run_arguments(arguments: list[str]) -> list[str]:
+    option_arguments: list[str] = []
+    other_arguments: list[str] = []
+    index = 1
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            other_arguments.extend(arguments[index:])
+            break
+        option = argument.partition("=")[0]
+        matches = [name for name in ("--file", "--cwd") if name.startswith(option)]
+        if len(matches) == 1:
+            option_arguments.append(argument)
+            if "=" not in argument:
+                if index + 1 == len(arguments) or arguments[index + 1].startswith("-"):
+                    return arguments
+                option_arguments.append(arguments[index + 1])
+                index += 2
+                continue
+        else:
+            other_arguments.append(argument)
+        index += 1
+    # Older argparse versions stop collecting nargs="*" positionals after
+    # matching the profile and script, so keep run options ahead of them.
+    return [arguments[0], *option_arguments, *other_arguments]
 
 
 def _remainder(words: Sequence[str]) -> list[str]:

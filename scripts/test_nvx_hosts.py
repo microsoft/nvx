@@ -443,7 +443,8 @@ class HostInventoryTests(unittest.TestCase):
                     str(script),
                     "--file",
                     str(inventory),
-                    "--",
+                    "--cwd",
+                    "/srv/alternate",
                     "a b",
                 ],
                 runner,
@@ -474,7 +475,7 @@ class HostInventoryTests(unittest.TestCase):
                     "ConnectTimeout=20",
                     "-n",
                     "kvm-target",
-                    "cd -- /srv/nvx && bash '/tmp/nvx dir/nvx.123' 'a b'",
+                    "cd -- /srv/alternate && bash '/tmp/nvx dir/nvx.123' 'a b'",
                 ),
             )
             self.assertEqual(
