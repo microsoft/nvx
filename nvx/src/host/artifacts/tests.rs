@@ -416,6 +416,51 @@ fn a_release_identifies_its_runtime_by_its_checksum_list() {
     fails("is missing, so the runtime cannot be identified: the release is incomplete".to_owned());
 }
 
+#[test]
+fn oversized_metadata_is_refused_for_its_size_whatever_its_content() {
+    let installed = tempfile::tempdir().unwrap();
+    checkout(installed.path());
+    record_provenance(
+        installed.path(),
+        &["a", "b", "c"].map(|digit| digit.repeat(64)),
+    );
+    let repository = ArtifactDir::repository(installed.path()).unwrap();
+    let extracted = tempfile::tempdir().unwrap();
+    release(extracted.path());
+    let released = ArtifactDir::release(extracted.path()).unwrap();
+    let limit = usize::try_from(MAX_METADATA_LEN).unwrap();
+    for (artifacts, path, description) in [
+        (
+            &repository,
+            repository.artifact(KERNEL_PROVENANCE_NAME),
+            "kernel build provenance",
+        ),
+        (
+            &released,
+            released.root().join(CHECKSUMS_NAME),
+            "release checksum list",
+        ),
+    ] {
+        let refused = |content: &[u8], problem: &str| {
+            fs::write(&path, content).unwrap();
+            let error = artifacts.runtime_identity().unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unavailable);
+            assert_eq!(
+                error.message(),
+                format!("the {description} {} {problem}", path.display())
+            );
+        };
+        let larger = format!("is larger than {MAX_METADATA_LEN} bytes");
+        // Valid UTF-8 whose two-byte character starts at the limit, so the byte past the limit
+        // that detects the excess ends in the middle of it.
+        let mut straddling = vec![b'x'; limit];
+        straddling.extend_from_slice("é".as_bytes());
+        refused(&straddling, &larger);
+        refused(&vec![0xff; limit + 1], &larger);
+        refused(&[0xff], "is not UTF-8 text");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn metadata_that_is_not_a_regular_file_fails_at_once() {
