@@ -156,9 +156,10 @@ pub(crate) fn open_lock(path: &Path) -> Result<File> {
         {
             use std::os::windows::fs::OpenOptionsExt;
 
-            /// `FILE_FLAG_OPEN_REPARSE_POINT`, which opens a link as itself.
-            const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-            options.custom_flags(OPEN_REPARSE_POINT);
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+            // Open a link as itself rather than its target.
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
         }
         options.open(path)
     };
