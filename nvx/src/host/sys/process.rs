@@ -9,12 +9,12 @@ use std::time::Duration;
 
 use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl, open};
 use nix::libc;
-use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use nix::poll::{PollFd, PollFlags, poll};
 use nix::sys::signal::{self, Signal};
 use nix::sys::stat::Mode;
 use nix::unistd::{Pid, setsid};
 
-use super::Errno;
+use super::{Errno, poll_timeout};
 
 /// The highest descriptor of a standard stream: standard error.
 ///
@@ -59,9 +59,7 @@ impl PidFd {
     /// its main one. That holds whether or not the caller is the process's parent, and whether
     /// or not the process has been reaped. A signal that interrupts the wait ends it early.
     pub(crate) fn wait_exit(&self, timeout: Duration) -> io::Result<bool> {
-        // Round up, so that a wait shorter than a millisecond does not spin.
-        let timeout = PollTimeout::try_from(timeout.as_nanos().div_ceil(1_000_000))
-            .unwrap_or(PollTimeout::MAX);
+        let timeout = poll_timeout(Some(timeout));
         let mut descriptors = [PollFd::new(self.0.as_fd(), PollFlags::POLLIN)];
         match poll(&mut descriptors, timeout) {
             Ok(0) | Err(Errno::EINTR) => Ok(false),
