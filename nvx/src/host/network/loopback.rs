@@ -89,8 +89,10 @@ impl LoopbackForward {
     #[cfg(feature = "cli")]
     pub(crate) fn parse(value: &str) -> Result<Self> {
         let refused = |reason: &str| Err(Error::unsupported(format!("{value}: {reason}")));
-        let fields: Vec<&str> = value.split(':').collect();
-        let [protocol, host_port, guest_port] = fields[..] else {
+        let mut fields = value.split(':');
+        let (Some(protocol), Some(host_port), Some(guest_port), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
             return refused("expected tcp:HOST_PORT:GUEST_PORT or udp:HOST_PORT:GUEST_PORT");
         };
         let protocol = match protocol {
