@@ -44,6 +44,50 @@ fn partial_or_root_workload_identities_and_unknown_modes_are_refused() {
 }
 
 #[test]
+fn invalid_workload_identities_are_refused_by_their_token_names() {
+    let range = "must be between 1 and 4294967294";
+    for (line, message) in [
+        (
+            "nvx_identity=1000",
+            "nvx_identity must be UID:GID".to_owned(),
+        ),
+        (
+            "nvx_identity=1:2:3",
+            "nvx_identity must be UID:GID".to_owned(),
+        ),
+        (
+            "nvx_identity=a:1000",
+            "nvx_identity must contain numeric UID and GID".to_owned(),
+        ),
+        ("nvx_identity=0:1000", format!("nvx_identity UID {range}")),
+        (
+            "nvx_identity=1000:4294967295",
+            format!("nvx_identity GID {range}"),
+        ),
+        (
+            "nvx_workload_uid=0 nvx_workload_gid=1000",
+            format!("nvx_workload_uid {range}"),
+        ),
+        (
+            "nvx_workload_uid=+1000 nvx_workload_gid=1000",
+            format!("nvx_workload_uid {range}"),
+        ),
+        (
+            "nvx_workload_uid=1000 nvx_workload_gid=4294967295",
+            format!("nvx_workload_gid {range}"),
+        ),
+        (
+            "nvx_workload_uid=1000 nvx_workload_gid=1000:1000",
+            format!("nvx_workload_gid {range}"),
+        ),
+    ] {
+        let error = render(line, None).unwrap_err();
+        assert_eq!(error.kind(), crate::ErrorKind::Unsupported, "{line}");
+        assert_eq!(error.to_string(), message, "{line}");
+    }
+}
+
+#[test]
 fn repeated_workload_identities_and_modes_are_refused() {
     let identity = "a workload identity may be specified only once";
     let mode = "the blockless mode may be specified only once";

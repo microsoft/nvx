@@ -78,35 +78,46 @@ pub(crate) fn refused(message: impl Into<String>) -> Error {
     Error::unsupported(message)
 }
 
-/// Parses a `--workload-user` value, `UID:GID`, with both IDs between 1 and 4294967294.
-///
-/// 4294967295 is refused: as `(uid_t)-1` it reads as "leave unchanged" to `setresuid`/`setresgid`,
-/// so accepting it would leave a one-shot sandbox workload running as UID 0 and GID 0.
-///
-/// Each ID contains only ASCII decimal digits, without a sign or whitespace. Fails with
-/// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
+/// Parses a `--workload-user` value, `UID:GID`, as [`parse_named_workload_identity`] does.
 #[cfg(feature = "cli")]
 pub(crate) fn parse_workload_identity(value: &str) -> Result<(u32, u32)> {
+    parse_named_workload_identity("--workload-user", value)
+}
+
+/// Parses a workload identity, `UID:GID`, with both IDs as [`parse_workload_id`] parses them, and
+/// names it `name`, such as `--workload-user`, in its refusals.
+///
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
+#[cfg(feature = "cli")]
+pub(crate) fn parse_named_workload_identity(name: &str, value: &str) -> Result<(u32, u32)> {
     let mut fields = value.split(':');
     let (Some(uid), Some(gid), None) = (fields.next(), fields.next(), fields.next()) else {
-        return Err(refused("--workload-user must be UID:GID"));
+        return Err(refused(format!("{name} must be UID:GID")));
     };
     if [uid, gid]
         .iter()
         .any(|field| field.is_empty() || !field.bytes().all(|byte| byte.is_ascii_digit()))
     {
-        return Err(refused("--workload-user must contain numeric UID and GID"));
+        return Err(refused(format!("{name} must contain numeric UID and GID")));
     }
-    let id = |value: &str, name: &str| {
-        parse_decimal::<u32>(value)
-            .filter(|&id| id != 0 && id != u32::MAX)
-            .ok_or_else(|| {
-                refused(format!(
-                    "--workload-user {name} must be between 1 and 4294967294"
-                ))
-            })
-    };
-    Ok((id(uid, "UID")?, id(gid, "GID")?))
+    Ok((
+        parse_workload_id(format_args!("{name} UID"), uid)?,
+        parse_workload_id(format_args!("{name} GID"), gid)?,
+    ))
+}
+
+/// Parses a workload UID or GID, between 1 and 4294967294, and names it `name` in its refusal.
+///
+/// 4294967295 is refused: as `(uid_t)-1` it reads as "leave unchanged" to `setresuid`/`setresgid`,
+/// so accepting it would leave a one-shot sandbox workload running as UID 0 and GID 0.
+///
+/// The ID contains only ASCII decimal digits, without a sign or whitespace. Fails with
+/// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
+#[cfg(feature = "cli")]
+pub(crate) fn parse_workload_id(name: impl std::fmt::Display, value: &str) -> Result<u32> {
+    parse_decimal::<u32>(value)
+        .filter(|&id| id != 0 && id != u32::MAX)
+        .ok_or_else(|| refused(format!("{name} must be between 1 and 4294967294")))
 }
 
 /// Parses nonempty ASCII decimal digits into a native integer, refusing signs and whitespace.
