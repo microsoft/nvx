@@ -1894,6 +1894,14 @@ crashes, as that scenario asks. A managed `start` also reads the root's
 [runtime identity](#runtime-identity), so a test root holds build provenance,
 as the roots of the CLI tests do.
 
+`fake_foreground_gate=boot`, with `NVX_TEST_FOREGROUND_GATE_DIR` naming a private
+directory, publishes `phase.json` after any boot diagnostics and holds the
+control endpoint until a regular `release` file appears there. Other foreground
+gate phases hold the fake until the CLI's verified stop. The boot-diagnostics
+test reads its console bytes and binary log before releasing that gate, then
+uses `fake_exit_during_attach=3` to end only after an authenticated control
+attachment. Neither observation depends on a boot delay or a crash timer.
+
 ```bash
 cd nvx
 cargo build --features cli,testing --bins

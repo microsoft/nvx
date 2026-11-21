@@ -68,7 +68,8 @@
 //! `fake_report_before_console=1` writes a run's report before console output or its boot delay.
 //! `fake_boot_diagnostics=1` emits console output and a binary log before control attachment.
 //! `fake_refuse_attach=1` refuses attachment after the endpoint has accepted its client.
-//! `fake_foreground_gate=console|connect|handshake|keys` synchronizes foreground regressions.
+//! `fake_foreground_gate=boot|console|connect|handshake|keys` synchronizes foreground regressions.
+//! The `boot` gate holds the control endpoint until its private directory has a `release` file.
 //! `fake_refuse_maps=1` fails every `MAPS` request like a guest that cannot mount a mapped path.
 //! The command line is recorded in `fake-openvmm-<token>.json` next to the
 //! kernel, and each connection to the control endpoint that the fake accepts adds a line to
@@ -628,7 +629,9 @@ pub fn main() -> ExitCode {
             }
         },
     };
-    if let Some((_, directory)) = options.foreground_gate.clone() {
+    if let Some((phase, directory)) = options.foreground_gate.clone()
+        && phase != "boot"
+    {
         thread::spawn(move || {
             while !directory.join("release").is_file() {
                 thread::sleep(Duration::from_millis(5));
@@ -642,6 +645,10 @@ pub fn main() -> ExitCode {
         });
     }
     if let Err(error) = foreground_gate(&options, "connect") {
+        eprintln!("{program}: {error}");
+        return ExitCode::from(1);
+    }
+    if let Err(error) = foreground_gate(&options, "boot") {
         eprintln!("{program}: {error}");
         return ExitCode::from(1);
     }
@@ -674,7 +681,7 @@ pub fn main() -> ExitCode {
     }
 }
 
-/// Holds one named fixture phase until the CLI's verified stop terminates this fake.
+/// Holds the boot phase until its release file, or another phase until the CLI's verified stop.
 fn foreground_gate(options: &Options, phase: &str) -> io::Result<()> {
     if let Some((requested, directory)) = &options.foreground_gate
         && requested == phase
@@ -682,6 +689,27 @@ fn foreground_gate(options: &Options, phase: &str) -> io::Result<()> {
         let record = serde_json::json!({"pid": std::process::id(), "phase": phase});
         fs::write(directory.join("phase.tmp"), serde_json::to_vec(&record)?)?;
         fs::rename(directory.join("phase.tmp"), directory.join("phase.json"))?;
+        if phase == "boot" {
+            let release = directory.join("release");
+            loop {
+                match fs::metadata(&release) {
+                    Ok(metadata) if metadata.is_file() => return Ok(()),
+                    Ok(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "foreground gate release is not a file: {}",
+                                release.display()
+                            ),
+                        ));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
         loop {
             thread::park();
         }
@@ -1892,9 +1920,9 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         refuse_attach: knob("fake_refuse_attach") == Some("1"),
         foreground_gate: knob("fake_foreground_gate")
             .map(|phase| {
-                if !matches!(phase, "console" | "connect" | "handshake" | "keys") {
+                if !matches!(phase, "boot" | "console" | "connect" | "handshake" | "keys") {
                     return Err(
-                        "fake_foreground_gate must be console, connect, handshake or keys"
+                        "fake_foreground_gate must be boot, console, connect, handshake or keys"
                             .to_owned(),
                     );
                 }
