@@ -169,11 +169,20 @@ impl HostCpu {
     /// and AMD only for family 15.
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     fn from_cpuid(mut cpuid: impl FnMut(u32) -> [u32; 4]) -> Self {
+        /// CPUID's extended-function query returns the maximum supported extended leaf in EAX.
+        const EXTENDED_FUNCTIONS: u32 = 0x8000_0000;
+        /// The first of the three CPUID leaves holding the brand string in EAX/EBX/ECX/EDX order.
+        const BRAND_FIRST_LEAF: u32 = 0x8000_0002;
+        /// The last brand-string leaf, which must be supported before reading the whole string.
+        const BRAND_LAST_LEAF: u32 = 0x8000_0004;
+
         let [max_basic, ebx, ecx, edx] = cpuid(0);
         let vendor = register_text(&[ebx, edx, ecx]);
         let signature = if max_basic >= 1 { cpuid(1)[0] } else { 0 };
-        let brand = if cpuid(0x8000_0000)[0] >= 0x8000_0004 {
-            let registers: Vec<u32> = (0x8000_0002..=0x8000_0004).flat_map(&mut cpuid).collect();
+        let brand = if cpuid(EXTENDED_FUNCTIONS)[0] >= BRAND_LAST_LEAF {
+            let registers: Vec<u32> = (BRAND_FIRST_LEAF..=BRAND_LAST_LEAF)
+                .flat_map(&mut cpuid)
+                .collect();
             register_text(&registers)
         } else {
             String::new()
