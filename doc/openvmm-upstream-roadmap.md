@@ -9,9 +9,10 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c928e8dc1e1673a37c83c10fe145f6611a505cec`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126 and the PR18 fixup at position 302.
-- NVX's pinned OpenVMM revision: `51e9af75dc7d4a3a9bd40ae52c996a822d3311cf`, position 330, the head
-  of microsoft/openvmm#5198, whose commit follows position 329, `3eb7500fd`, the head of
-  `feature/microvm/dev`, where microsoft/openvmm#5195 landed positions 328 and 329 on position 327,
+- NVX's pinned OpenVMM revision: `32c0c2bbc90a3f7632386b87a524c71b7e11ecc9`, position 331, the head
+  of microsoft/openvmm#5200, whose commit follows position 330, `51e9af75d`, the head of
+  `feature/microvm/dev`, where microsoft/openvmm#5198 landed position 330 on position 329,
+  `3eb7500fd`, where microsoft/openvmm#5195 landed positions 328 and 329 on position 327,
   `ea3f62ad8`, where microsoft/openvmm#5194 landed position 327 on position 326,
   `fe7405247`, where microsoft/openvmm#5180 landed position 326 on position 325,
   `91360acfc`, where microsoft/openvmm#5177 landed position 325 on position 324,
@@ -29,8 +30,8 @@
   microsoft/openvmm#5136, microsoft/openvmm#5140, and microsoft/openvmm#5141 landed after it. It
   added a fixup at its tip, position 316. Every commit keeps its position, and only positions 060
   and 277, which conflicted with upstream, and position 007, whose context upstream changed, changed
-  their patches; see [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The pin is 204
-  commits past the mapped tip on the same first-parent chain. Positions 127-301 and 303-330 are not
+  their patches; see [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The pin is 205
+  commits past the mapped tip on the same first-parent chain. Positions 127-301 and 303-331 are not
   yet assigned to PRs, position 302 is a PR18 fixup, and position 317 backports upstream's
   microsoft/openvmm#5160, which the next rebase drops; see [Commits after the mapped
   tip](#commits-after-the-mapped-tip).
@@ -1488,7 +1489,8 @@ The physical branch is one first-parent chain:
   -> one reply checked for each FUSE session test request [328]
   -> EIO replies for FUSE data longer than its request allows [329]
   -> EIO replies for FUSE write and copy counts beyond u32 [330]
-  -> 51e9af75d (NVX pin)
+  -> FUSE_INIT failed for file systems that want flags that the guest did not offer [331]
+  -> 32c0c2bbc (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1517,7 +1519,7 @@ position 069 and position 133.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 204 later commits, position
+The NVX pin extends the chain past position 126 without merges. Of its 205 later commits, position
 302 is a PR18 fixup, position 316 is the fixup of the v7.1 rebase, position 317 backports an
 upstream commit, and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
@@ -1526,13 +1528,13 @@ commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 a
 of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 followed the v5.0
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
-v7.0 reorganization, position 316 is the v7.1 rebase's fixup, and positions 317-330 followed the
+v7.0 reorganization, position 316 is the v7.1 rebase's fixup, and positions 317-331 followed the
 v7.1 rebase, so they combine none, apart from position 215, which combines v5.1 positions 222 and
 223, and the commits that the v7.0 reorganization folded into them. Each commit has the position
 that it had in v7.0, since the v7.1 rebase dropped none. Each commit's v6.1 position is its v6.0
 position less seven, the number of commits that the v6.1 rebase dropped before it, and its v6.0
 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and positions
-297-330 have no earlier position; see
+297-331 have no earlier position; see
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.1 position counts in
@@ -1748,6 +1750,7 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 328 | `e21dcb5c9` | - | - | - | - | - | - | fuse: check that a session sends one reply to each test request (microsoft/openvmm#5195) |
 | 329 | `3eb7500fd` | - | - | - | - | - | - | fuse: fail a reply longer than the request allows with EIO (microsoft/openvmm#5195) |
 | 330 | `51e9af75d` | - | - | - | - | - | - | fuse: reply EIO when a write or copy count overflows u32 (microsoft/openvmm#5198) |
+| 331 | `32c0c2bbc` | - | - | - | - | - | - | fuse: fail FUSE_INIT when init wants flags the client did not offer (microsoft/openvmm#5200) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -1757,8 +1760,8 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`
 313-315, `715927303`, upstream main on 2026-11-18, for positions 317-321, `5cf28492b`, upstream
 main on 2026-11-19, for positions 322-325, `78af54a51`, upstream main on 2026-11-20, for position
 326, `d83f87209`, upstream main later that day, for position 327, `265f0a73f`, upstream main
-later still, for positions 328 and 329, and `bf353460f`, upstream main on 2026-11-21, for position
-330.
+later still, for positions 328 and 329, and `bf353460f`, upstream main on 2026-11-21, for positions
+330 and 331.
 They name the positions that the commits have now, but neither the v7.1 rebase on `9a875b563` nor
 the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the earlier
 ones on `7d90c4104`.
@@ -3986,6 +3989,31 @@ Upstream main has the defect, in the same two replies. Replaying it on upstream 
 only in the module declarations of `session.rs`'s test module, which lacks the tests of PR13's
 position 047 and positions 324, 326, 327, and 329, and its tests need the harness, which upstream
 main lacks, so it cannot go upstream on its own as it is.
+
+Position 331 has `Session::dispatch_init` fail `FUSE_INIT` with `EIO`, and leave the session
+uninitialized with no negotiation to save, when the file system's `init` wants a flag that the guest
+did not offer, or, while it keeps `FUSE_INIT_EXT`, an extended flag that the guest did not offer,
+which it logs with a rate-limited error (microsoft/nvx#1630). It asserted that `init` wants only
+offered flags, so a file system that wanted a flag that the guest left out panicked, which aborts
+the VMM. It also keeps the version and the guest's capabilities across `init`, rather than reading
+them back from the `SessionInfo` that `init` may replace: PR13's position 047 made `SessionInfo`
+convertible from the public `SessionInfoState`, so an `init` that claimed every capability passed
+the check, replied flags that the guest never offered, and saved a version and capabilities that the
+guest never sent. It changes code that upstream main has, `dispatch_init` in `session.rs`, whose
+lines that it changes no earlier chain commit changes, and documents the bounds of the negotiation
+on `Fuse::init` in `lib.rs`, which PR13's position 047 and positions 324, 326, 329, and 330 also
+change, none of the lines that they change. Its tests, which use the session's test harness of
+positions 324 and 328 and the session state of PR13's position 047, are in a new file that it
+declares in the session's test module. It changes nothing that a mapped PR adds, but it closes the
+replacement that position 047 opened, so PR13 should go upstream with it. NVX's virtio-fs servers
+never want an unoffered flag: `VirtioFs` wants only flags that the guest offers, and `SectionFs` and
+the dormant microVM file system keep the default `init`, so the microVM negotiates as it did.
+Upstream main has the abort, in the same two assertions, but not the replacement, since its
+`SessionInfo` converts from no `SessionInfoState`. Replaying it on upstream main conflicts only in
+the module declarations of `session.rs`'s test module, which lacks the tests of PR13's position 047
+and positions 324, 326, 327, 329, and 330; without its tests, its change applies there, and `fuse`
+type-checks. Its tests need the harness and PR13's session state, which upstream main lacks, so it
+cannot go upstream on its own as it is.
 
 ## PR summary
 
