@@ -4,43 +4,50 @@ use crate::host::filesystem::ExportPlan;
 use crate::host::sandbox::{has_kernel_separator, parse_workload_identity};
 use crate::{Error, Result};
 
+/// Refusal of a workload identity that the caller's tokens name more than once.
+const REPEATED_IDENTITY: &str = "a workload identity may be specified only once";
+
 /// Renders both blockless modes and the planned boot binds, keeping other caller tokens.
+///
+/// The caller's tokens give each of the CLI's settings at most once: the blockless mode, with
+/// `nvx_mode=` or `nvx_lifecycle=`, and the workload identity, with `nvx_identity=` or both of
+/// `nvx_workload_uid=` and `nvx_workload_gid=`. A repeated one is refused, never resolved.
 pub(super) fn render(command_line: &str, export: Option<&ExportPlan>) -> Result<String> {
-    let mut mode = "one-shot";
-    let (mut uid, mut gid, mut identity) = (None, None, None);
+    let (mut mode, mut uid, mut gid, mut identity) = (None, None, None, None);
     let mut caller = String::new();
     let mut tokens = Vec::new();
     for part in command_line.split_inclusive(|ch: char| ch.is_ascii_whitespace()) {
         let token = part.trim_ascii_end();
         let (name, value) = token.split_once('=').unwrap_or((token, ""));
-        match name {
-            "nvx_mode" | "nvx_lifecycle" => mode = value,
-            "nvx_workload_uid" => uid = Some(value),
-            "nvx_workload_gid" => gid = Some(value),
-            "nvx_identity" => identity = Some(value.to_owned()),
+        let (setting, repeated) = match name {
+            "nvx_mode" | "nvx_lifecycle" => {
+                (&mut mode, "the blockless mode may be specified only once")
+            }
+            "nvx_workload_uid" => (&mut uid, REPEATED_IDENTITY),
+            "nvx_workload_gid" => (&mut gid, REPEATED_IDENTITY),
+            "nvx_identity" => (&mut identity, REPEATED_IDENTITY),
             _ => {
                 caller.push_str(part);
                 continue;
             }
+        };
+        if setting.replace(value).is_some() {
+            return Err(Error::unsupported(repeated));
         }
         caller.push_str(&part[token.len()..]);
     }
+    let mode = mode.unwrap_or("one-shot");
     if !matches!(mode, "one-shot" | "managed") {
         return Err(Error::unsupported(
             "blockless mode must be one-shot or managed",
         ));
     }
-    if uid.is_some() || gid.is_some() {
-        let (Some(uid), Some(gid)) = (uid, gid) else {
-            return Err(Error::unsupported("a workload needs both its UID and GID"));
-        };
-        if identity.is_some() {
-            return Err(Error::unsupported(
-                "a workload identity may be specified only once",
-            ));
-        }
-        identity = Some(format!("{uid}:{gid}"));
-    }
+    let identity = match (uid, gid, identity) {
+        (None, None, identity) => identity.map(str::to_owned),
+        (Some(uid), Some(gid), None) => Some(format!("{uid}:{gid}")),
+        (Some(_), Some(_), Some(_)) => return Err(Error::unsupported(REPEATED_IDENTITY)),
+        _ => return Err(Error::unsupported("a workload needs both its UID and GID")),
+    };
     tokens.push(format!("nvx_mode={mode}"));
     if let Some(identity) = identity {
         let (uid, gid) = parse_workload_identity(&identity)?;
