@@ -3,15 +3,18 @@
 
 import argparse
 import hashlib
+import http.client
+import io
 import os
 import re
 import sys
 import tarfile
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 from nvx_tools import archive, common, release  # noqa: E402
@@ -581,6 +584,170 @@ class SharedFileTests(unittest.TestCase):
             self.assertNotIn("bundle/__pycache__", {member.name for member in members})
             self.assertTrue(all(member.mtime == 0 for member in members))
             self.assertTrue(all(member.uid == member.gid == 0 for member in members))
+
+
+class DownloadTests(unittest.TestCase):
+    def test_rejects_nonpositive_attempts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "archive.tar.xz"
+            with (
+                patch("nvx_tools.common.urllib.request.urlopen") as urlopen,
+                self.assertRaisesRegex(
+                    common.ScriptError, "download attempts must be positive"
+                ),
+            ):
+                common.download(
+                    "https://example.invalid/archive.tar.xz",
+                    destination,
+                    attempts=0,
+                )
+
+            urlopen.assert_not_called()
+            self.assertFalse(destination.exists())
+
+    def test_names_the_client_unless_the_caller_does(self):
+        for headers, user_agent in (
+            (None, common.DOWNLOAD_USER_AGENT),
+            ({"Accept": "*/*"}, common.DOWNLOAD_USER_AGENT),
+            ({"User-Agent": "caller"}, "caller"),
+        ):
+            with self.subTest(headers=headers):
+                with tempfile.TemporaryDirectory() as temporary:
+                    with patch(
+                        "nvx_tools.common.urllib.request.urlopen",
+                        return_value=io.BytesIO(b"archive"),
+                    ) as urlopen:
+                        common.download(
+                            "https://example.invalid/archive.tar.xz",
+                            Path(temporary) / "archive.tar.xz",
+                            headers=headers,
+                        )
+
+                request = urlopen.call_args.args[0]
+                self.assertEqual(request.get_header("User-agent"), user_agent)
+
+    def test_retries_checksum_mismatch(self):
+        payload = b"verified archive"
+        expected_sha256 = hashlib.sha256(payload).hexdigest()
+        responses = [io.BytesIO(b"corrupt archive"), io.BytesIO(payload)]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "archive.tar.xz"
+            with patch(
+                "nvx_tools.common.urllib.request.urlopen", side_effect=responses
+            ) as urlopen:
+                common.download(
+                    "https://example.invalid/archive.tar.xz",
+                    destination,
+                    expected_sha256=expected_sha256,
+                )
+
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(urlopen.call_count, 2)
+            self.assertFalse(destination.with_name("archive.tar.xz.part").exists())
+
+    def test_does_not_publish_checksum_mismatch(self):
+        payload = b"verified archive"
+        expected_sha256 = hashlib.sha256(payload).hexdigest()
+        responses = [io.BytesIO(b"corrupt archive") for _ in range(3)]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "archive.tar.xz"
+            with (
+                patch(
+                    "nvx_tools.common.urllib.request.urlopen",
+                    side_effect=responses,
+                ),
+                self.assertRaisesRegex(common.ScriptError, "SHA-256 is"),
+            ):
+                common.download(
+                    "https://example.invalid/archive.tar.xz",
+                    destination,
+                    expected_sha256=expected_sha256,
+                )
+
+            self.assertFalse(destination.exists())
+            self.assertFalse(destination.with_name("archive.tar.xz.part").exists())
+
+    def test_backs_off_before_retrying_a_failed_request(self):
+        sleep = MagicMock()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "archive.tar.xz"
+            with (
+                patch(
+                    "nvx_tools.common.urllib.request.urlopen",
+                    side_effect=urllib.error.URLError("connection reset"),
+                ) as urlopen,
+                self.assertRaisesRegex(common.ScriptError, "connection reset"),
+            ):
+                common.download(
+                    "https://example.invalid/archive.tar.xz", destination, sleep=sleep
+                )
+
+            self.assertEqual(urlopen.call_count, 3)
+            self.assertEqual(sleep.call_args_list, [call(5.0), call(10.0)])
+            self.assertFalse(destination.exists())
+
+    def test_waits_as_long_as_a_rate_limit_asks_up_to_a_minute(self):
+        payload = b"verified archive"
+        for retry_after, delay in (("30", 30.0), ("3600", 60.0), ("soon", 5.0)):
+            with self.subTest(retry_after=retry_after):
+                headers = http.client.HTTPMessage()
+                headers["Retry-After"] = retry_after
+                limited = urllib.error.HTTPError(
+                    "https://example.invalid/archive.tar.xz",
+                    429,
+                    "Too Many Requests",
+                    headers,
+                    None,
+                )
+                sleep = MagicMock()
+                with tempfile.TemporaryDirectory() as temporary:
+                    destination = Path(temporary) / "archive.tar.xz"
+                    with patch(
+                        "nvx_tools.common.urllib.request.urlopen",
+                        side_effect=[limited, io.BytesIO(payload)],
+                    ):
+                        common.download(
+                            "https://example.invalid/archive.tar.xz",
+                            destination,
+                            expected_sha256=hashlib.sha256(payload).hexdigest(),
+                            sleep=sleep,
+                        )
+
+                    self.assertEqual(destination.read_bytes(), payload)
+                sleep.assert_called_once_with(delay)
+
+    def test_replaces_mismatched_cached_archive(self):
+        payload = b"verified archive"
+        expected_sha256 = hashlib.sha256(payload).hexdigest()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "archive.tar.xz"
+            destination.write_bytes(b"corrupt archive")
+
+            def write_verified(
+                _url: str,
+                output: Path,
+                *,
+                expected_sha256: str,
+            ) -> None:
+                self.assertFalse(output.exists())
+                self.assertEqual(
+                    expected_sha256,
+                    hashlib.sha256(payload).hexdigest(),
+                )
+                output.write_bytes(payload)
+
+            with patch.object(common, "download", side_effect=write_verified):
+                common.download_verified(
+                    "https://example.invalid/archive.tar.xz",
+                    destination,
+                    expected_sha256,
+                )
+
+            self.assertEqual(destination.read_bytes(), payload)
 
 
 if __name__ == "__main__":
