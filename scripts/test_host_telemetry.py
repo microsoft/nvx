@@ -443,7 +443,28 @@ class AzureProvenanceTests(unittest.TestCase):
     def test_metadata_request_is_aborted_at_the_deadline(self):
         server = socket.create_server(("127.0.0.1", 0))
         self.addCleanup(server.close)
+        accepted = threading.Event()
         aborted = threading.Event()
+        real_monotonic = time.monotonic
+        timeout = 0.2
+        requester = threading.current_thread()
+        deadline_started = False
+        joined = 0.0
+
+        def deadline_clock() -> float:
+            nonlocal deadline_started, joined
+            # The worker always sees the deadline's start, so each of its socket
+            # waits keeps the whole timeout and only the cut-off can end them.
+            if threading.current_thread() is not requester:
+                return 0.0
+            if not deadline_started:
+                deadline_started = True
+                return 0.0
+            # Reach the deadline only once the server holds the connection, so
+            # that a worker that starts late still reaches the server first.
+            self.assertTrue(accepted.wait(5), "the metadata connection never started")
+            joined = real_monotonic()
+            return timeout
 
         def trickle_headers() -> None:
             # Each header line arrives within the socket timeout, and no blank
@@ -451,6 +472,7 @@ class AzureProvenanceTests(unittest.TestCase):
             connection, _ = server.accept()
             with connection:
                 connection.sendall(b"HTTP/1.1 200 OK\r\n")
+                accepted.set()
                 try:
                     for _ in range(100):
                         connection.sendall(b"X-Pad: 0123456789\r\n")
@@ -462,13 +484,13 @@ class AzureProvenanceTests(unittest.TestCase):
         url = f"http://127.0.0.1:{server.getsockname()[1]}/metadata"
         # Workers left running by earlier tests are not this request's worker.
         earlier = set(threading.enumerate())
-        started = time.monotonic()
         with (
+            patch.object(host_telemetry.time, "monotonic", side_effect=deadline_clock),
             patch.object(host_telemetry, "AZURE_IMDS_URL", url),
             self.assertRaises(TimeoutError),
         ):
-            host_telemetry.read_azure_compute_metadata(timeout=0.2)
-        self.assertLess(time.monotonic() - started, 1.0)
+            host_telemetry.read_azure_compute_metadata(timeout=timeout)
+        self.assertLess(real_monotonic() - joined, 1.0)
         self.assertTrue(aborted.wait(2), "the metadata connection was left open")
         workers = [
             t
