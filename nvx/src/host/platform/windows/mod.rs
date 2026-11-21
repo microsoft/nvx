@@ -179,7 +179,7 @@ pub(crate) fn probe_hypervisor(hypervisor: Hypervisor) -> Result<(), String> {
             get_capability(
                 HYPERVISOR_PRESENT,
                 (&raw mut present).cast(),
-                4,
+                std::mem::size_of_val(&present) as u32,
                 &mut written,
             )
         };
