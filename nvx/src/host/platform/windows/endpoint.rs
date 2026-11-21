@@ -280,8 +280,11 @@ pub(crate) fn endpoint_server_pid_until(
         match last_error() {
             ERROR_FILE_NOT_FOUND => return Ok(None),
             ERROR_PIPE_BUSY => {
+                /// Bounds each busy-pipe wait to 100 ms before rechecking the endpoint and
+                /// the caller's deadline.
+                const MAX_PIPE_WAIT_MS: u128 = 100;
                 let left = time_left(Some(deadline))?.expect("the probe has a deadline");
-                let wait = left.as_millis().min(100) as u32;
+                let wait = left.as_millis().min(MAX_PIPE_WAIT_MS) as u32;
                 // Zero selects the server's default timeout, not a nonblocking wait.
                 if wait == 0 {
                     return Err(io::ErrorKind::TimedOut.into());
