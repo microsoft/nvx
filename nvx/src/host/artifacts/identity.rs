@@ -24,8 +24,9 @@ pub(super) fn sha256_identity(digest: &str) -> Option<ArtifactIdentity> {
     }
 }
 
-/// Reads the file of install metadata at `path`, which messages call `description`, as text of
-/// at most [`MAX_METADATA_LEN`] bytes. A missing file fails with `advice` on how to provide it.
+/// Reads the file of install metadata at `path`, which messages call `description`, as UTF-8 text
+/// of at most [`MAX_METADATA_LEN`] bytes, a limit that is checked before the encoding. A missing
+/// file fails with `advice` on how to provide it.
 ///
 /// The open does not wait, as it would on Unix for a FIFO without a writer, and a file that is
 /// not a regular file is refused before anything is read from it, as a FIFO whose writer keeps it
@@ -72,17 +73,23 @@ pub(super) fn read_metadata(path: &Path, description: &str, advice: &str) -> Res
     if !file.metadata().map_err(unreadable)?.file_type().is_file() {
         return Err(not_regular());
     }
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     file.take(MAX_METADATA_LEN + 1)
-        .read_to_string(&mut text)
+        .read_to_end(&mut bytes)
         .map_err(unreadable)?;
-    if text.len() as u64 > MAX_METADATA_LEN {
+    if bytes.len() as u64 > MAX_METADATA_LEN {
         return Err(Error::unavailable(format!(
             "the {description} {} is larger than {MAX_METADATA_LEN} bytes",
             path.display()
         )));
     }
-    Ok(text)
+    String::from_utf8(bytes).map_err(|error| {
+        Error::unavailable(format!(
+            "the {description} {} is not UTF-8 text",
+            path.display()
+        ))
+        .with_source(error)
+    })
 }
 
 /// Returns the identity of the artifact `what` that the build provenance at `path` records: the
