@@ -1959,12 +1959,13 @@ fn spawn_resolves_relative_runtime_and_block_inputs_outside_the_vm_directory() {
     let inputs = tempfile::tempdir_in(&cwd).unwrap();
     let relative = inputs.path().strip_prefix(&cwd).unwrap();
     let (program, arguments) = stand_in_command();
-    let executable = format!("stand-in{}", std::env::consts::EXE_SUFFIX);
+    // Multicall coreutils selects sleep by its executable name.
+    let executable = program.file_name().unwrap();
     // A concurrent fork could keep a copy's writable descriptor alive until after spawn.
     #[cfg(target_os = "linux")]
-    std::os::unix::fs::symlink(&program, inputs.path().join(&executable)).unwrap();
+    std::os::unix::fs::symlink(&program, inputs.path().join(executable)).unwrap();
     #[cfg(windows)]
-    fs::copy(program, inputs.path().join(&executable)).unwrap();
+    fs::copy(&program, inputs.path().join(executable)).unwrap();
     for name in ["kernel", "initramfs", "image.erofs", "scratch.raw"] {
         fs::write(inputs.path().join(name), name.as_bytes()).unwrap();
     }
@@ -1981,7 +1982,7 @@ fn spawn_resolves_relative_runtime_and_block_inputs_outside_the_vm_directory() {
         })
     };
     let runtime = Runtime {
-        openvmm: relative.join(&executable),
+        openvmm: relative.join(executable),
         kernel: relative.join("kernel"),
         initramfs: relative.join("initramfs"),
         ..cold_runtime()
@@ -1993,7 +1994,7 @@ fn spawn_resolves_relative_runtime_and_block_inputs_outside_the_vm_directory() {
     let (_directory, vm) = vm_dir();
     let mut prepared = create(&runtime, &config, None, &vm).unwrap();
     let resolved_runtime = Runtime {
-        openvmm: inputs.path().join(&executable),
+        openvmm: inputs.path().join(executable),
         kernel: inputs.path().join("kernel"),
         initramfs: inputs.path().join("initramfs"),
         ..runtime
@@ -2019,6 +2020,9 @@ fn spawn_resolves_relative_runtime_and_block_inputs_outside_the_vm_directory() {
             identity(&program),
             "the relative fixture must name the installed executable, not a writable copy"
         );
+        // The liveness check below can beat an invalid applet name's exit.
+        let status = Command::new(&prepared.program).arg("0").status().unwrap();
+        assert!(status.success(), "sleep 0 through the fixture: {status}");
     }
     assert_eq!(
         prepared.arguments(),
