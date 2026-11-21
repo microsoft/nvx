@@ -146,7 +146,9 @@ impl ReadyListener {
             }
             self.connected = true;
         }
-        let mut buffer = [0u8; 64];
+        /// Bounds the stack buffer and each pipe read, with room for the restore-ready event.
+        const READ_CHUNK_BYTES: usize = 64;
+        let mut buffer = [0u8; READ_CHUNK_BYTES];
         let room = limit.saturating_sub(received.len()).min(buffer.len());
         if room == 0 {
             return Ok(true);
