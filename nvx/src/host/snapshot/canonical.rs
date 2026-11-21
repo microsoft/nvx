@@ -54,17 +54,17 @@ impl Writer {
 
     /// Writes a `u16`.
     pub(super) fn u16(&mut self, value: u16) {
-        self.bytes.extend_from_slice(&value.to_le_bytes());
+        self.fixed(&value.to_le_bytes());
     }
 
     /// Writes a `u32`.
     pub(super) fn u32(&mut self, value: u32) {
-        self.bytes.extend_from_slice(&value.to_le_bytes());
+        self.fixed(&value.to_le_bytes());
     }
 
     /// Writes a `u64`.
     pub(super) fn u64(&mut self, value: u64) {
-        self.bytes.extend_from_slice(&value.to_le_bytes());
+        self.fixed(&value.to_le_bytes());
     }
 
     /// Writes a boolean.
