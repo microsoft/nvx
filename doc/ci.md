@@ -2239,6 +2239,8 @@ flagging script shares to read Rust.
 
 ## Issue link
 
+<!-- Temporary non-default-base verification for issue 1676; do not merge. -->
+
 The [`issue-link.yml`](../.github/workflows/issue-link.yml) workflow checks
 that a pull request references an issue of this repository, as
 [Commits and pull requests](contribute.md#commits-and-pull-requests) asks. A
