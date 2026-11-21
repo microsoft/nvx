@@ -2,48 +2,44 @@
 
 ## Scope
 
-- OpenVMM fork base: `9a875b563d62eaca040137c0227224c9a17e944d`, upstream main on 2026-11-18.
-  The `feature/microvm/release/v7.1` rebase moved the chain there from
-  `e6b458cc032208448d16c529ef973f0cee7c23e1`, upstream main on 2026-11-13, where the
-  `feature/microvm/release/v7.0` reorganization had moved it; see
-  [Upstream status](#upstream-status).
-- Mapped fork tip: `c928e8dc1e1673a37c83c10fe145f6611a505cec`, position 126. The graph, PR
+- OpenVMM fork base: `bf353460ff70e4a65627bb7003bed2cad1ce121f`, upstream main on 2026-11-21.
+  The `feature/microvm/release/v7.2` rebase moved the chain there from
+  `9a875b563d62eaca040137c0227224c9a17e944d`, upstream main on 2026-11-18, where the
+  `feature/microvm/release/v7.1` rebase had moved it; see [Upstream status](#upstream-status).
+- Mapped fork tip: `1e492803287f04b40bb7c17e8648c4b96af52ecc`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126 and the PR18 fixups at positions 302
-  and 334.
-- NVX's pinned OpenVMM revision: `30fe00786454b128c5b86a7f89986240c9573aba`, position 335, the head
-  of microsoft/openvmm#5205, whose commit follows position 334, `2f3007255`, the head of
-  `feature/microvm/dev`, where microsoft/openvmm#5203 landed position 334 on position 333,
-  `f918f2e78`, where microsoft/openvmm#5202 landed position 333 on position 332,
-  `a3da7e2b4`, where microsoft/openvmm#5201 landed position 332 on position 331,
-  `32c0c2bbc`, where microsoft/openvmm#5200 landed position 331 on position 330,
-  `51e9af75d`, where microsoft/openvmm#5198 landed position 330 on position 329,
-  `3eb7500fd`, where microsoft/openvmm#5195 landed positions 328 and 329 on position 327,
-  `ea3f62ad8`, where microsoft/openvmm#5194 landed position 327 on position 326,
-  `fe7405247`, where microsoft/openvmm#5180 landed position 326 on position 325,
-  `91360acfc`, where microsoft/openvmm#5177 landed position 325 on position 324,
-  `9ea35e853`, where microsoft/openvmm#5176 landed position 324 on position 323,
-  `f391801de`, where microsoft/openvmm#5175 landed position 323 on position 322,
-  `b909d6a20`, where microsoft/openvmm#5173 landed position 322 on position 321,
-  `7747ece2c`, where microsoft/openvmm#5172 landed position 321 on position 320,
-  `ccece742e`, where microsoft/openvmm#5171 landed position 320 on position 319,
-  `b929c2d26`, where microsoft/openvmm#5170 landed position 319 on position 318,
-  `ee647f75c`, where microsoft/openvmm#5168 landed positions 317 and 318 on position 316,
-  `85c3698f9`, the head of the `feature/microvm/release/v7.1` branch of microsoft/openvmm. The
-  v7.1 rebase moved the 315 commits of `feature/microvm/dev` at NVX's pin before it, `6e5303f94`,
-  onto `9a875b563` without dropping any: the 296 of `feature/microvm/release/v7.0` and the 19 that
-  microsoft/openvmm#5129, microsoft/openvmm#5131, microsoft/openvmm#5132, microsoft/openvmm#5134,
-  microsoft/openvmm#5136, microsoft/openvmm#5140, and microsoft/openvmm#5141 landed after it. It
-  added a fixup at its tip, position 316. Every commit keeps its position, and only positions 060
-  and 277, which conflicted with upstream, and position 007, whose context upstream changed, changed
-  their patches; see [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The pin is 209
-  commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-333, and 335
-  are not yet assigned to PRs, positions 302 and 334 are PR18 fixups, and position 317 backports
-  upstream's microsoft/openvmm#5160, which the next rebase drops; see [Commits after the mapped
-  tip](#commits-after-the-mapped-tip).
-- Upstream main: `715927303600a54911a836ed6f53dc338e15c05f` (2026-11-18), one commit past the
-  fork base; see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
+  and 333.
+- NVX's pinned OpenVMM revision: `b51f9156cfef006fe79d2237f7008cde4f3e0fe3`, position 339, the head
+  of the `feature/microvm/release/v7.2` branch of microsoft/openvmm. The v7.2 rebase moved the 335
+  commits of `feature/microvm/dev` at NVX's previous pin, `30fe00786`, onto `bf353460f`. It
+  dropped position 317, upstream's microsoft/openvmm#5160, which upstream had landed, so each later
+  commit's position is one less than before, and it added five fixups at its tip, positions
+  335-339. Of the 334 replayed commits, 47 conflicted with upstream and 13 replayed with new
+  context; see [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase). The pin is 213
+  commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, and 334
+  are not yet assigned to PRs, positions 302 and 333 are PR18 fixups, and positions 316 and 335-339
+  are rebase fixups; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
+- Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
+  [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
 ## Upstream status
+
+The `feature/microvm/release/v7.2` rebase moved the 335-commit chain of `feature/microvm/dev`,
+through NVX's previous pin `30fe00786`, from `9a875b563` onto `bf353460f`, 27 upstream commits
+later. It dropped position 317, `2a5e77698`, which backported upstream's `0474df224`
+(microsoft/openvmm#5160) before upstream landed it; [Landed upstream](#landed-upstream) lists it.
+Replaying the remaining 334 commits had conflicts at 47 positions: 38 with microsoft/openvmm#5082
+and one with microsoft/openvmm#5164, which merge guest-architecture and platform cfgs into
+`cfg_select!` blocks; seven with microsoft/openvmm#4876, which impersonates Windows users in
+virtio-fs, or microsoft/openvmm#5002, which extends the management RPC's virtio-fs options, one of
+them, position 223, with microsoft/openvmm#5082 too; one with microsoft/openvmm#5040, which adds
+configurable virtio-blk request queues; and one with microsoft/openvmm#5159, which moves the mirror
+refresh to Azure Pipelines; [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase) lists
+them. The patches of 274 replayed commits are unchanged, and those of 13 more differ only in
+context. Four fixups at its tip, positions 335-338, adapt the chain to microsoft/openvmm#4876,
+microsoft/openvmm#5080, microsoft/openvmm#5002, and microsoft/openvmm#5040, which broke it
+without a textual conflict, and a fifth, position 339, completes the resolution of position 254
+with microsoft/openvmm#5082.
 
 The `feature/microvm/release/v7.1` rebase moved the 315-commit chain of `feature/microvm/dev`,
 through NVX's previous pin `6e5303f94`, from `e6b458cc0` onto `9a875b563`, 14 upstream commits
@@ -153,6 +149,7 @@ which changed the diffs of 50 of them.
 
 | Dropped by | Former position | Fork commit | Roadmap PR | Upstream PR | Upstream commit |
 | --- | ---: | --- | --- | --- | --- |
+| v7.2 | 317 | `2a5e77698` - pal_async: treat disconnected pipe event query as EOF | - | microsoft/openvmm#5160 | `0474df224` |
 | v6.1 | 002 | `707747c16` - flowey: distinguish native Windows and WSL nextest paths | PR01 | microsoft/openvmm#4595 | `5d3ab02f0` |
 | v6.1 | 008 | `299a04d4f` - pal: query Unix socket peer credentials | PR03 | microsoft/openvmm#4591 | `42d4fe619` |
 | v6.1 | 009 | `a0e70d99e` - pal: resolve the process token user SID | PR04 | microsoft/openvmm#4604 | `6937acefb` |
@@ -198,11 +195,18 @@ rebase, `feature/microvm/release/v2.2` for the v2.3 rebase, `feature/microvm/rel
 the v2.4 rebase, `feature/microvm/release/v2.4` for the v3.0 reorganization,
 `feature/microvm/release/v3.0` for the v4.0 reorganization, `feature/microvm/dev` at
 `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4.0`, for the v5.0
-reorganization, and `feature/microvm/dev` at `5ca20ee08`, whose first 220 commits are those of
-`feature/microvm/release/v6.0`, for the v6.1 rebase.
+reorganization, `feature/microvm/dev` at `5ca20ee08`, whose first 220 commits are those of
+`feature/microvm/release/v6.0`, for the v6.1 rebase, and `feature/microvm/dev` at `30fe00786`,
+whose first 316 commits are those of `feature/microvm/release/v7.1`, for the v7.2 rebase.
 microsoft/openvmm#4661 names the `acpi_rsdp_addr` field of `boot_params` exactly as position 074
 did, so the v2.3 rebase dropped 074 as empty. microsoft/openvmm#4554 carried it ahead of v6.0
 positions 051-053 until it merged.
+
+v7.1 position 317, which no roadmap PR held, was upstream's `0474df224`, cherry-picked unchanged
+so that `pal_async`'s `client_read_completes_when_server_disconnects` passed OpenVMM's
+`unit tests [x64-windows]` job, which NVX requires, before microsoft/openvmm#5160 reached the fork
+base. The v7.2 base has it, and microsoft/openvmm#5165 adds tests of the same handling there, so
+the v7.2 rebase dropped it. No other commit of the chain changes `pal_async`'s pipe code.
 
 The v6.1 rebase took upstream's versions of its drops and adapted the later commits to them.
 microsoft/openvmm#4595 is identical to v6.0 position 002, and microsoft/openvmm#4591 adds tests to
@@ -285,7 +289,7 @@ Upstream also landed parts of commits that remain in the chain:
 
 ### Open upstream pull requests
 
-As of 2026-11-18, every commit of PR01-PR03, PR05, PR06, and PR09 except positions 001, 003, 004,
+As of 2026-11-21, every commit of PR01-PR03, PR05, PR06, and PR09 except positions 001, 003, 004,
 and 012 is in an open upstream pull request; the commits that upstream has merged are under [Landed
 upstream](#landed-upstream), and PR04, PR07, and PR08 have landed whole. Each pull request carries
 one commit. Of those 10 pull requests, only microsoft/openvmm#4597, microsoft/openvmm#4613, and
@@ -367,9 +371,9 @@ Stacked pull requests carry their prerequisites' commits: microsoft/openvmm#4613
 microsoft/openvmm#4536, and microsoft/openvmm#4626 builds on microsoft/openvmm#4872.
 Most of these pull requests have gained review commits that the fork chain does not carry. When
 one merges, the next rebase should drop its fork commit, as the `microvm/v2.2`,
-`feature/microvm/release/v2.3`, `feature/microvm/release/v2.4`, and
-`feature/microvm/release/v6.1` rebases and the v3.0, v4.0, and v5.0 reorganizations dropped the
-39 above, and adapt later commits to the merged form.
+`feature/microvm/release/v2.3`, `feature/microvm/release/v2.4`, `feature/microvm/release/v6.1`,
+and `feature/microvm/release/v7.2` rebases and the v3.0, v4.0, and v5.0 reorganizations dropped the
+40 above, and adapt later commits to the merged form.
 
 The v3.0 reorganization folded fixups into positions 005, 008, 009, and 049, and the v4.0
 reorganization changed positions 011 and 014, whose pull requests lack those changes; see [The v4.0
@@ -446,6 +450,117 @@ refuses a microVM, which restores through CreateVM. microsoft/openvmm#4676, an o
 request that adds an eager-copy RestoreVM, changes no device contract, so the chain takes it at the
 rebase after it lands. No restore-at-start plumbing remains to remove: the v4.0 reorganization
 stopped staging device state for activation; see [The v4.0 reorganization](#the-v40-reorganization).
+
+### Conflicts of the v7.2 rebase
+
+A v7.1 position in this section counts in `feature/microvm/dev` at `30fe00786`, whose first 316
+commits are those of `feature/microvm/release/v7.1`, and a position without a release is a v7.2
+position. The v7.2 rebase dropped v7.1 position 317, so v7.1 positions 001-316 keep their numbers
+and v7.1 positions 318-335 are positions 317-334. A position from 317 on in a section on an earlier
+release counts in that release.
+
+The `feature/microvm/release/v7.2` rebase replayed the 334 remaining commits onto `bf353460f` with
+conflicts at 47 positions, which it resolved in place. Each is before position 317, so the table
+lists each resolution at the position that the commit had in v7.1 too. Each resolution keeps
+upstream's structure, such as its `cfg_select!` blocks, its `ParsedVirtioFs` and
+`VirtioFsDeviceOptions`, and its virtio-blk options, and applies the commit's change to it.
+
+| Position | v7.2 commit | v7.1 commit | Upstream PR | Resolution |
+| ---: | --- | --- | --- | --- |
+| 003 | `56a94131a` | 003 `75e56fa86` - virt_whp, petri: enable native PCIe NVMe boot on WHP | microsoft/openvmm#5082 | `cpu_contract` is declared in the x86-64 arm of upstream's module `cfg_select!`, beside `apic` and `emu`, instead of under a top-level `#[cfg(guest_arch = "x86_64")]` |
+| 007 | `af721003c` | 007 `01a59c75c` - virt_mshv: make RUN_VP cancellation race-free | microsoft/openvmm#5082 | The architecture-independent `run_vp` module is declared before upstream's `cfg_select!` of the aarch64 and x86-64 modules |
+| 008 | `a2490e1ed` | 008 `e50265e1a` - virt: add Partition::finalize_memory; create the MSHV BSP after finalization | microsoft/openvmm#5082 | `virt_mshv` declares the architecture-independent `timing` module beside `run_vp`, before upstream's `cfg_select!`; `virt_backend_tests` keeps upstream's `cfg_select!` of `fixture`, `native`, and `time` and drops `#![forbid(unsafe_code)]`, as the commit does, since its fixture now maps RAM under `#![expect(unsafe_code)]` |
+| 032 | `75f1282c7` | 032 `002f67201` - membacking: map guest RAM privately copy-on-write with fault accounting | microsoft/openvmm#5082 | Keeps upstream's unbraced Windows arm of the `cfg_select!` that maps a file view, and the commit's choice between `map_file_copy_on_write` and `map_file` in the other arm |
+| 040 | `001b572b6` | 040 `ec13c36b2` - virtio_console: add attachment identities and reconnect and disconnect policies | microsoft/openvmm#5164 | Builds the console handle with the commit's `Discard` disconnect policy and no attachment, and keeps upstream's `cfg!(any(windows, target_os = "macos"))` test after it |
+| 049 | `9aa49a98b` | 049 `631aea0ff` - vmm_core: make level-triggered legacy IRQs explicit | microsoft/openvmm#5082 | Keeps upstream's `cfg_select!` of each ACPI architecture configuration and adds the commit's empty `level_triggered_irqs` to each x86-64 configuration in it |
+| 051 | `0ce005036` | 051 `16d19ecd3` - virt: describe the deterministic microVM topology | microsoft/openvmm#5082 | Keeps upstream's `cfg_select!` of the aarch64 and x86-64 processor topologies and passes the commit's machine profile to `build_x86_topology` in the x86-64 arm |
+| 055 | `b0f9dced1` | 055 `974bf5f96` - chipset: add the microVM portb console | microsoft/openvmm#5082 | Registers `MicrovmPortbResolver` after `PitResolver` in upstream's x86-64-only `register_static_resolvers!` block instead of with a cfg of its own in the shared list |
+| 056 | `afb93af63` | 056 `30099c8ab` - chipset: add the microVM shutdown and exit-status port | microsoft/openvmm#5082 | Registers `MicrovmShutdownResolver` after `MicrovmPortbResolver` in upstream's x86-64-only `register_static_resolvers!` block |
+| 057 | `6dcc237a5` | 057 `9e3dcbf79` - openvmm_core: boot microVMs through MP-table direct load | microsoft/openvmm#5082 | Declares the `microvm` module before upstream's `cfg_select!` of the architecture imports; keeps upstream's `cfg_select!` of the IOMMU devices and of the ACPI architecture configuration, treats MP-table boot like device-tree boot in its aarch64 SMMU arm, and takes the x86-64 level-triggered IRQs from the machine profile |
+| 059 | `92aba67ea` | 059 `936fb32ef` - openvmm_entry: expose `--machine microvm` | microsoft/openvmm#5082 | Keeps upstream's `cfg_select!` of the four serial device names, sets up the microVM portb console after it, and passes the commit's microVM default COM1 backend with upstream's `serial0_name` |
+| 066 | `42b523b81` | 066 `8055aa4a3` - chipset: add the microVM snapshot-request port | microsoft/openvmm#5082 | Registers `MicrovmSnapshotRequestResolver` after `MicrovmShutdownResolver` in upstream's x86-64-only `register_static_resolvers!` block |
+| 072 | `7a292f606` | 072 `144d19bf0` - virt: build a reproducible CPU and clock contract for microVM partitions | microsoft/openvmm#5082 | `virt_kvm` declares `cpu_contract` without the inner `#![cfg]` that upstream moved to the module's declaration; `virt_whp` configures the versioned contract in an x86-64 statement of its own, before the x86-64 block into which upstream folded the nested-virtualization property, which keeps the commit's order |
+| 078 | `5e75bbdf7` | 078 `e96f8f754` - openvmm: attach a portable Consomme NIC to microVMs | microsoft/openvmm#5082 | Keeps upstream's `cfg_select!` of the TAP endpoint and adds the commit's refusal of a bare IPv4/prefix endpoint outside the microVM profile after it |
+| 081 | `4354bcc9e` | 081 `41686521c` - virtiofs: add the fixed microVM filesystem profile | microsoft/openvmm#4876, microsoft/openvmm#5002 | Keeps upstream's `ParsedVirtioFs` parsing and `VirtioFsDeviceOptions` construction, and resolves the commit's microVM profile before upstream parses the handle; the parser, which only standard-profile handles reach, ignores the profile, and upstream's resolver tests build standard-profile handles |
+| 085 | `45704afb4` | 085 `ad4d90921` - openvmm: reserve a dormant microVM filesystem slot | microsoft/openvmm#4876 | The commit's refusal of a `Dormant` backend for the standard device moves into upstream's `ParsedVirtioFs::parse`, as the first arm of its backend match |
+| 086 | `ef8854204` | 086 `8bac7ff2d` - openvmm: add fixed-role microVM sandbox block slots | microsoft/openvmm#5040 | `VirtioBlkDisk` keeps upstream's request-queue options beside the commit's microVM sandbox role, and an ordinary virtio-blk disk takes its options and no role |
+| 119 | `c1865e5da` | 119 `8b3480db6` - vmservice: create, capture, and restore microVMs over the management RPC | microsoft/openvmm#5002 | `VirtioFs` keeps upstream's `mount_options` and `windows_options`, fields 3 and 4, which replace `read_only`, and the commit's `guest_mount_target` and `read_write` follow them as fields 5 and 6; the standard machine's conversion refuses the microVM fields before it resolves upstream's Windows options; the server and the VMM tests keep upstream's handle-passing modules beside the commit's `microvm` modules; the interface tests take upstream's mount options and default the microVM fields; the gRPC reference keeps upstream's resource-passing link beside the commit's |
+| 122 | `c5a107f2e` | 122 `81bb943b1` - ci: restrict privileged, self-hosted, and publishing jobs to microsoft/openvmm | microsoft/openvmm#5159 | Upstream moved the mirror refresh to Azure Pipelines and deleted `refresh-mirror.yml`, so the commit's repository gate on that workflow goes with it |
+| 124 | `b0121fd5d` | 124 `91dc2f416` - vmservice: keep NVX wire-tag compatibility | microsoft/openvmm#5002 | `VirtioFs` gives the commit's legacy tags 3 and 4 to `guest_mount_target` and `read_write`, and moves upstream's `mount_options` and `windows_options`, which replace the `read_only` that the commit moved to field 5, to fields 5 and 6 |
+| 133 | `8ae27d658` | 133 `93ace61db` - cpu_profile: fingerprint backend CPU surfaces and pin CPU profiles | microsoft/openvmm#5082 | `mod fingerprint` and `pub use fingerprint::cpu_fingerprint` join the x86-64 arm of upstream's module `cfg_select!` |
+| 135 | `4c6f2cb89` | 135 `4c55ccdd5` - virt_whp: implement the NVX time ABI backend | microsoft/openvmm#5082 | The x86-64 arm of upstream's capabilities `cfg_select!` takes the commit's time ABI identity lookup and its hv1 and KVM-clock refusal; upstream's vendor `cfg_select!` stays |
+| 142 | `7fc976c52` | 142 `9f5a2f22b` - openvmm: make the NVX time ABI the only microVM time path | microsoft/openvmm#5082 | The x86-64 arm of upstream's capabilities `cfg_select!` refuses hv1 alone, as the commit does; the file's change matches the commit's, 9 insertions and 63 deletions |
+| 144 | `f85810622` | 144 `29b065e8f` - openvmm: pin an Alder Lake CPU profile and add opt-in host profiles | microsoft/openvmm#5082 | `pub use fingerprint::profile_unlisted_cpuid` joins the x86-64 arm of upstream's module `cfg_select!` |
+| 150 | `e0df778af` | 150 `6b45b9251` - vmm_core: preserve halt state across snapshots | microsoft/openvmm#5082 | The halt path calls the commit's `record_halt`, which reports the halt to the debugger through upstream's `cfg_select!` on `feature = "gdb"` |
+| 167 | `c4e774d9f` | 167 `1a1630600` - virtiofs: test microVM queues that start or stop with host input gated | microsoft/openvmm#4876 | Upstream already split the harness into `new` and `with_device`, now with `VirtioFsDeviceOptions`; the commit's `new_microvm` harness and the doc comment of `with_device` follow upstream's `new` |
+| 198 | `e1710ad0b` | 198 `1837ec180` - vmservice: give the microVM fields upstream-compatible numbers | microsoft/openvmm#5002 | `VirtioFs` returns to the layout of position 119: upstream's `mount_options` and `windows_options` keep fields 3 and 4, and `guest_mount_target` and `read_write` follow at 5 and 6; the `read_only` that the commit restored to field 3 is gone upstream |
+| 223 | `671b9592d` | 223 `62d7a8311` - vmservice: carry microVM blocks, network, RAM file, and share policy | microsoft/openvmm#5082, microsoft/openvmm#5002 | `on_big_stack`, which the commit moves to the module, takes upstream's `cfg_select!` on `windows`; `VirtioFs`'s new fork fields follow upstream's `windows_options` and the fork's `read_write`: `denied_paths` to `writable_paths` take 7 to 9, `owner` 10, and `aggregate_children` 11, one above the commit's numbers |
+| 254 | `2f1d5e036` | 254 `cbbd386b7` - openvmm_entry: parse the microVM options on a big stack on every host | microsoft/openvmm#5082 | The Windows arm of `on_big_stack`'s `cfg_select!` calls the commit's `with_big_stack`, which position 339 builds only where a caller is |
+| 260 | `a5ed8b8da` | 260 `2dd72ba30` - virt_kvm: refuse a restored EFER.SVME for a guest whose CPUID has no SVM | microsoft/openvmm#5082 | `mod registers`, under `#[cfg(target_os = "linux")]`, joins the native x86-64 arm of upstream's module `cfg_select!` |
+| 263 | `957844e85` | 263 `360009b17` - virt_kvm: reject a restored APIC timer whose delivery mode is not Fixed | microsoft/openvmm#5082 | `mod apic`, under `#[cfg(target_os = "linux")]`, joins the native x86-64 arm of upstream's module `cfg_select!` |
+| 266 | `9a9076f2f` | 266 `1a7fa3923` - vmm_tests: check that a new KVM VP can be saved | microsoft/openvmm#5082 | `mod save`, under `#[cfg(target_os = "linux")]`, joins the native x86-64 arm of upstream's module `cfg_select!` |
+| 267 | `c1a26f57b` | 267 `9cf73f25b` - virt_kvm: refuse to restore an injected #BP or #OF | microsoft/openvmm#5082 | `mod activity`, under `#[cfg(target_os = "linux")]`, joins the native x86-64 arm of upstream's module `cfg_select!` |
+| 268 | `8d5b5eab5` | 268 `2b84aa555` - virt_kvm: report an INIT or a SIPI that a stopped VP has not accepted | microsoft/openvmm#5082 | `mod init_sipi`, under `#[cfg(target_os = "linux")]`, joins the native x86-64 arm of upstream's module `cfg_select!` |
+| 270 | `3dfc3133f` | 270 `08200bb48` - consomme: relay ICMP echo replies on Linux hosts | microsoft/openvmm#5082 | The socket type follows the commit's `match Delivery::HOST`, which replaces upstream's `cfg_select!` on `windows` |
+| 273 | `95c6d55bc` | 273 `8ee750138` - vmm_tests: check that a restore keeps a guest's SPEC_CTRL controls | microsoft/openvmm#5082 | `mod speculation` joins the native x86-64 arm of upstream's module `cfg_select!` |
+| 277 | `f38539a5b` | 277 `eaf039eed` - virt: save a guest's user-wait, debug, and feature MSRs | microsoft/openvmm#5082 | The x86-64 arm of upstream's capabilities `cfg_select!` clears `umwait_control`, as the commit does; `mod msr_state` joins the native x86-64 arm of upstream's module `cfg_select!` |
+| 283 | `7fdcddeb6` | 283 `62d8ba613` - virt_kvm: refuse to restore a short or malformed XSAVE area | microsoft/openvmm#5082 | `mod xsave`, under `#[cfg(target_os = "linux")]`, joins the native x86-64 arm of upstream's module `cfg_select!` |
+| 284 | `6af2c5139` | 284 `ddb174c79` - virt_kvm: drop interrupts in the reserved remote-read delivery mode | microsoft/openvmm#5082 | `mod msi` joins the native x86-64 arm of upstream's module `cfg_select!` |
+| 288 | `d6d6b7720` | 288 `445469dfe` - virt: refuse a pending NMI count that a backend cannot hold | microsoft/openvmm#5082 | `mod nmi` joins the native x86-64 arm of upstream's module `cfg_select!` |
+| 290 | `772bba5e5` | 290 `39c220726` - virt: let a restore's check accept what a hypervisor documents it keeps | microsoft/openvmm#5082 | `mod restore`, under `#[cfg(target_os = "linux")]`, joins the native x86-64 arm of upstream's module `cfg_select!` |
+| 293 | `9d0904f41` | 293 `76f382c05` - virt: refuse an interrupt shadow kind that a backend cannot hold | microsoft/openvmm#5082 | `mod shadow` joins the native x86-64 arm of upstream's module `cfg_select!` |
+| 296 | `af16fdfc9` | 296 `6065e6616` - vmm_tests: check that each backend refuses unsupported restore state | microsoft/openvmm#5082 | `mod unsupported_state` joins the native x86-64 arm of upstream's module `cfg_select!` |
+| 297 | `58f4eb0c4` | 297 `7f2d3f771` - virt_whp: keep a restored halted VP halted | microsoft/openvmm#5082 | `mod suspend`, under `#[cfg(windows)]`, joins the native x86-64 arm of upstream's module `cfg_select!` |
+| 301 | `42432d77e` | 301 `ec3dc1b2a` - virt_kvm: map RAM into KVM's SMM address space | microsoft/openvmm#5082 | `mod smm`, under `#[cfg(target_os = "linux")]`, joins the native x86-64 arm of upstream's module `cfg_select!` |
+| 303 | `9023d0e3e` | 303 `064f61c76` - virt_whp, virt_mshv: save and restore a guest's IA32_UMWAIT_CONTROL | microsoft/openvmm#5082 | The x86-64 arm of upstream's capabilities `cfg_select!` no longer clears `umwait_control`, as the commit does; the file's change matches the commit's |
+| 305 | `b6e165d96` | 305 `b61856239` - virt, virt_kvm: save and restore AMD's VM_CR, VM_HSAVE_PA, and OSVW | microsoft/openvmm#5082 | The x86-64 arm of upstream's capabilities `cfg_select!` clears `osvw`, as the commit does; the file's change matches the commit's |
+
+Upstream changes also broke the chain without a textual conflict. Four fixups at the tip adapt the
+chain to them, and a fifth completes a resolution that OpenVMM CI found incomplete; fold each into
+the commits that it names at the next reorganization, or before submission.
+
+| Position | Fixup | Upstream PR | Fold into |
+| ---: | --- | --- | --- |
+| 335 | `8d989e670` - microVM: adapt virtio-fs to upstream's Windows impersonation | microsoft/openvmm#4876 | 081, 082, 085, 119, 120, 164, 198, and 223 |
+| 336 | `5dbe25966` - virt_support_x86emu: convert exception codes with u16::from | microsoft/openvmm#5080 | 143 |
+| 337 | `d22ea2c5a` - vmservice: refuse virtio-fs mount options on a microVM | microsoft/openvmm#5002 | 119, 198, and 223 |
+| 338 | `942eeeda1` - openvmm_entry: keep the microVM sandbox blocks' fixed queue shape | microsoft/openvmm#5040 | 086, 087, 171, and 223 |
+| 339 | `b51f9156c` - openvmm_entry: build with_big_stack only where it runs | microsoft/openvmm#5082 | 254 |
+
+Position 335 builds the fixed no-DAX shape of the microVM virtio-fs devices of positions 081 and
+085 through the `VirtioFsDeviceOptions` of upstream's `VirtioFsDevice::new`, which replaced
+`with_num_request_queues`. The microVM resolver of position 081 and the management RPC's microVM
+attachment of positions 119 and 223 refuse upstream's Windows options, as they refuse mount
+options, and the `HostFs` values of positions 082 and 164 leave them unset; the tests of positions
+119 and 120 pass upstream's `ResourceRegistry`, which replaced `FdRegistry`. Position 336 converts
+the exception codes that upstream's translation code and its tests compare with `u16::from`:
+position 143 makes `virt` depend on `cpu_profile`, which position 133 makes depend on
+`serde_json`, whose `PartialEq<serde_json::Value>` implementation for `u16` leaves the target of
+upstream's `.into()` ambiguous. Position 337 has the RPC's microVM attachment refuse non-empty
+`mount_options` before it opens device resources, as the microVM's `HostFs` resolver does, since
+the `read_only` that it refused when set is gone. Position 338 gives the sandbox block devices of
+positions 086, 087, and 171 upstream's default virtio-blk options, one queue of depth 64, which is
+the shape that they had. A sandbox block refuses upstream's per-disk `num_queues` as it refuses the
+other per-disk options of position 086, and a microVM refuses the global `--virtio-blk-queues` and
+`--virtio-blk-io-depth` options unless they keep their defaults, since its blocks have a fixed
+device shape. Position 339 completes the resolution of position 254: upstream's `cfg_select!`
+builds only the Windows arm of `on_big_stack`, where the commit's `cfg!(windows)` test built both,
+so on other hosts only the management RPC's microVM options, under the `ttrpc` or `grpc` feature,
+call `with_big_stack`. Without either feature, as `cargo hack` checks `openvmm_entry`, it was dead
+code that `-D warnings` refuses, so it is built only on Windows or with one of those features.
+
+microsoft/openvmm#4876 and microsoft/openvmm#5002 replace the management RPC's `VirtioFs.read_only`,
+field 3, with `mount_options` and `windows_options`, fields 3 and 4, so each fork field of
+`VirtioFs` is one above its v7.1 number: `guest_mount_target` and `read_write` are fields 5 and 6
+from position 119 on, apart from positions 124-197, where they keep the legacy tags 3 and 4, and
+`denied_paths`, `allowed_paths`, `writable_paths`, `owner`, and `aggregate_children` are fields 7
+to 11 from position 223 on. The messages of positions 119, 198, and 223 still give the v7.1
+numbers, and that of position 124 the `read_only` field that upstream replaced. NVX does not use
+the management RPC.
+
+The chain has no merges, and every commit has a good signature. Against v7.1, a range diff finds
+the patches of 274 commits unchanged, those of the 47 resolved commits changed, and those of 13
+more changed only in their context.
 
 ### Conflicts of the v7.1 rebase
 
@@ -1223,19 +1338,17 @@ returns nothing, which position 026 makes fallible with `StateUnit::start`.
 
 ### Upstream main past the fork base
 
-As of 2026-11-18, upstream main is one commit past the fork base: `715927303`
-(microsoft/openvmm#5082) merges the guest-architecture and platform cfgs of 41 files into
-`cfg_select!` blocks and formats them. It conflicts with the pin in 12 hunks of 10 files, each at
-a cfg that it rewrites beside code that the chain adds or changes: `underhill_core`'s `worker.rs`,
-`membacking`'s `va_mapper.rs`, `openvmm_core`'s `partition.rs` and `worker/dispatch.rs`, the
-`lib.rs` of `openvmm_entry` and `openvmm_resources`, the KVM x86-64, MSHV, and WHP backends, and
-the `virt_backend_tests` VMM tests, which positions 003 through 305 change. The v7.1 rebase
-deferred it, so the next rebase resolves it.
+As of 2026-11-21, upstream main is the fork base, `bf353460f`.
 
-Of the 14 commits that upstream main had past the v7.0 base, `e6b458cc0`, the v7.1 rebase
-resolved `9b05d16fd` (microsoft/openvmm#4941) at position 060 and `20582cf41`
-(microsoft/openvmm#4942) at position 277; see
-[Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The other 12 merged with the chain
+Of the 27 commits that upstream main had past the v7.1 base, `9a875b563`, the v7.2 rebase resolved
+`715927303` (microsoft/openvmm#5082), `8538ead65` (microsoft/openvmm#4876), `e5c06b0aa`
+(microsoft/openvmm#5002), `e1bf98ef7` (microsoft/openvmm#5159), `78af54a51`
+(microsoft/openvmm#5040), and `e692d56c8` (microsoft/openvmm#5164) where they conflict with the
+chain, and dropped the chain's backport of `0474df224` (microsoft/openvmm#5160); fixups at its tip
+adapt the chain to microsoft/openvmm#4876, `8ee0e98d8` (microsoft/openvmm#5080),
+microsoft/openvmm#5002, and microsoft/openvmm#5040, and complete its resolution of
+microsoft/openvmm#5082 at position 254; see
+[Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase). The other 19 merged with the chain
 without conflicts.
 
 ## Legend
@@ -1256,7 +1369,7 @@ upstream pull requests.
 
 ```mermaid
 flowchart TB
-    LB["Landed upstream before the base<br/>39 fork commits, dropped by<br/>the v2.2, v2.3, v2.4, and v6.1 rebases,<br/>v3.0, v4.0, and v5.0"]
+    LB["Landed upstream before the base<br/>40 fork commits, dropped by<br/>the v2.2, v2.3, v2.4, v6.1, and v7.2 rebases,<br/>v3.0, v4.0, and v5.0"]
     LPART["Partly superseded upstream<br/>microsoft/openvmm#4703, #4704, and #4764<br/>adopted by the commits that they overlap"]
     B["OpenVMM fork base<br/>9a875b563"]
     F["Recommended foundation fan-in<br/>before the microVM profile stack"]
@@ -1360,7 +1473,7 @@ flowchart TB
 The physical branch is one first-parent chain:
 
 ```text
-9a875b563
+bf353460f
   -> PR01 [001-003] -> PR02 [004-005] -> PR03 [006]
   -> PR05 [007-009] -> PR06 [010]
   -> PR09 [011-014] -> PR10 [015-027] -> PR11 [028-031]
@@ -1370,7 +1483,7 @@ The physical branch is one first-parent chain:
   -> PR21 [096-101] -> PR22 [102-103] -> PR23 [104-113]
   -> PR24 [114-118] -> PR25 [119-120] -> PR26 [121]
   -> fork tail [122-124] -> PR27 [125-126]
-  -> c928e8dc1 (mapped tip)
+  -> 1e4928032 (mapped tip)
   -> time ABI v1 and CPU profiles [127-143] -> CPU profiles [144-149]
   -> VM time [150-152] -> time ABI checks [153-154]
   -> time ABI 2 [155] -> management and test profiles [156-157]
@@ -1480,26 +1593,26 @@ The physical branch is one first-parent chain:
   -> snapshot manifest's field map with upstream recorded in the Guide [314]
   -> malformed snapshot ID refused by its field before the rest of the manifest decodes [315]
   -> v7.1 rebase fixup [316]
-  -> upstream's EOF for a disconnected named pipe's event query, microsoft/openvmm#5160 [317]
-  -> offsets found in I/O regions that end at the top of their address space [318]
-  -> chipset devices wired only once their state unit spawns [319]
-  -> empty buffers skipped in virtio-fs descriptor chains [320]
-  -> FUSE data sizes checked before their data is allocated [321]
-  -> FUSE request lengths too short for their header refused [322]
-  -> virtio-fs SETATTR times with out-of-range nanoseconds refused [323]
-  -> FUSE ioctl replies that carry the file system's output [324]
-  -> FUSE replies whose length counts their data [325]
-  -> EIO replies for out-of-range FUSE error codes [326]
-  -> FUSE replies longer than their header can describe refused [327]
-  -> one reply checked for each FUSE session test request [328]
-  -> EIO replies for FUSE data longer than its request allows [329]
-  -> EIO replies for FUSE write and copy counts beyond u32 [330]
-  -> FUSE_INIT failed for file systems that want flags that the guest did not offer [331]
-  -> virtio-fs inodes keyed by device and inode number [332]
-  -> virtio-fs guest inode numbers keyed by host device [333]
-  -> PR18 fixup [334]
-  -> virtio-fs lookup counts saturated rather than wrapped to zero [335]
-  -> 30fe00786 (NVX pin)
+  -> offsets found in I/O regions that end at the top of their address space [317]
+  -> chipset devices wired only once their state unit spawns [318]
+  -> empty buffers skipped in virtio-fs descriptor chains [319]
+  -> FUSE data sizes checked before their data is allocated [320]
+  -> FUSE request lengths too short for their header refused [321]
+  -> virtio-fs SETATTR times with out-of-range nanoseconds refused [322]
+  -> FUSE ioctl replies that carry the file system's output [323]
+  -> FUSE replies whose length counts their data [324]
+  -> EIO replies for out-of-range FUSE error codes [325]
+  -> FUSE replies longer than their header can describe refused [326]
+  -> one reply checked for each FUSE session test request [327]
+  -> EIO replies for FUSE data longer than its request allows [328]
+  -> EIO replies for FUSE write and copy counts beyond u32 [329]
+  -> FUSE_INIT failed for file systems that want flags that the guest did not offer [330]
+  -> virtio-fs inodes keyed by device and inode number [331]
+  -> virtio-fs guest inode numbers keyed by host device [332]
+  -> PR18 fixup [333]
+  -> virtio-fs lookup counts saturated rather than wrapped to zero [334]
+  -> v7.2 rebase fixups [335-339]
+  -> b51f9156c (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1524,28 +1637,32 @@ snapshot builds it. Its test's configuration folds into PR20's position 093, whi
 that `validate_machine_config` accepts, and its IPv6 cases into position 193, which gives every
 NIC an IPv6 identity. Fold the v7.1 rebase's fixup at position 316 into the commits that
 [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase) names before submission, PR17's
-position 069 and position 133. Fold position 334 into PR18's position 081 before submission, which
-adds the microVM preflight of an insert that it corrects, and its tests into position 083, which
-adds the `VirtioFsInode::volume` that they call.
+position 069 and position 133, and the v7.2 rebase's fixups at positions 335-339 into those that
+[Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase) names. Fold position 333 into PR18's
+position 081 before submission, which adds the microVM preflight of an insert that it corrects,
+and its tests into position 083, which adds the `VirtioFsInode::volume` that they call.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 209 later commits, positions
-302 and 334 are PR18 fixups, position 316 is the fixup of the v7.1 rebase, position 317 backports
-an upstream commit, and the others are not yet classified or assigned to PRs.
+The NVX pin extends the chain past position 126 without merges. Of its 213 later commits, positions
+302 and 333 are PR18 fixups, position 316 is the fixup of the v7.1 rebase, positions 335-339 are
+the fixups of the v7.2 rebase, and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 are the ABI restart
 of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 followed the v5.0
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
-v7.0 reorganization, position 316 is the v7.1 rebase's fixup, and positions 317-335 followed the
-v7.1 rebase, so they combine none, apart from position 215, which combines v5.1 positions 222 and
-223, and the commits that the v7.0 reorganization folded into them. Each commit has the position
-that it had in v7.0, since the v7.1 rebase dropped none. Each commit's v6.1 position is its v6.0
-position less seven, the number of commits that the v6.1 rebase dropped before it, and its v6.0
-position is its v5.1 position through 147 and one less from v5.1 position 149 on, and positions
-297-335 have no earlier position; see
+v7.0 reorganization, position 316 is the v7.1 rebase's fixup, positions 317-334 followed the
+v7.1 rebase, and positions 335-339 are the v7.2 rebase's fixups, so they combine none, apart from
+position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0
+reorganization folded into them. Each commit through position 316 has the position that it had in
+v7.0 and v7.1, and each of positions 317-334 is its v7.1 position less one, since the v7.2 rebase
+dropped v7.1 position 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each
+commit's v6.1 position is its v6.0 position less seven, the number of commits that the v6.1 rebase
+dropped before it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1
+position 149 on, and positions 297-339 have no earlier position; see
+[Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.1 position counts in
@@ -1557,229 +1674,233 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 
 | Position | Commit | v6.1 position | v6.0 position | v5.1 position | v4.0 position | v3.0 position | v2.4 positions | Topic |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
-| 127 | `d4b521a4c` | 125 | 132 | 132 | 136 | 145 | 149, 150, 382 (part), 317 (part) | virt: add the NVX time ABI v1 scaffolding |
-| 128 | `314100b26` | 126 | 133 | 133 | 137 | 146 | 151, 152 | virt_kvm: implement the NVX time ABI backend |
-| 129 | `8db6f8b1c` | 127 | 134 | 134 | 138 | 147 | 153, 325 (part), 373 (part) | virt_mshv: implement the NVX time ABI backend |
-| 130 | `e664d1118` | 128 | 135 | 135 | 139 | 148 | 154, 157, 159, 160 | openvmm_core: add the time ABI platform behind --x-time-abi-v1 |
-| 131 | `a5d79da08` | 129 | 136 | 136 | 140 | 149 | 155, 158 | openvmm_helpers: add snapshot manifest version 6 for the time ABI |
-| 132 | `d53d40b61` | 130 | 137 | 137 | 141 | 150 | 156 | chipset: serve restore packet v4 and time samples on portb |
-| 133 | `93ace61db` | 131 | 138 | 138 | 142 | 151 | 161, 162, 163, 164, 166, 167, 179 | cpu_profile: fingerprint backend CPU surfaces and pin CPU profiles |
-| 134 | `6e904754e` | 132 | 139 | 139 | 143 | 152 | 165, 314 (part), 168, 169, 170, 171, 173, 174, 175, 176, 180, 319 | openvmm: preflight, capture, and restore the time ABI clocks |
-| 135 | `4c55ccdd5` | 133 | 140 | 140 | 144 | 153 | 172 | virt_whp: implement the NVX time ABI backend |
-| 136 | `e42084a4c` | 134 | 141 | 141 | 145 | 154 | 177 | openvmm_entry: add the --cpu-fingerprint tool |
-| 137 | `115b116aa` | 135 | 142 | 142 | 146 | 155 | 178, 181, 182, 183, 184, 185 | openvmm: carry the selected CPU profile in the time ABI configuration |
-| 138 | `f0dfc7600` | 136 | 143 | 143 | 147 | 156 | 186, 187, 325 (part), 196 | virt_mshv, virt_whp: deliver LAPIC vectors written to a halted VP's IRR |
-| 139 | `36bb93ba7` | 137 | 144 | 144 | 148 | 157 | 188, 189, 190, 191, 192, 193, 373 (part), 194, 195, 197, 198, 199 | openvmm: program the complete effective CPUID of time ABI CPU profiles |
-| 140 | `ff491f7ee` | 138 | 145 | 145 | 149 | 158 | 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212 | virt: make the CPUID entries that a CPU profile omits read zero |
-| 141 | `a0c4d2f18` | 139 | 146 | 146 | 150 | 159 | 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235 | virt: complete the time ABI's topology leaves and VP 0's CPUID view |
-| 142 | `9f5a2f22b` | 140 | 147 | 147 | 151 | 160 | 236, 237, 238, 373 (part), 239, 240, 241, 242, 243, 244, 324 (part) | openvmm: make the NVX time ABI the only microVM time path |
-| 143 | `500853515` | 141 | 148 | 149 | 153 | 162 | 245, 246, 247, 248, 249, 250, 318, 251, 252, 253, 254, 255, 256, 257, 258, 259 | virt: build the time ABI effective CPUID in one place |
-| 144 | `29b065e8f` | 142 | 149 | 150 | 154 | 163 | 262, 263, 264 | openvmm: pin an Alder Lake CPU profile and add opt-in host profiles |
-| 145 | `cea926f15` | 143 | 150 | 151 | 155 | 164 | 267, 268, 269, 270, 271, 373 (part), 272 | cpu_profile: pin AMD Milan, Genoa, and Turin CPU profiles |
-| 146 | `677574b68` | 144 | 151 | 152 | 156 | 165 | 274 | virt_whp: let WHP answer CPUID leaves 0 and 1 without exits |
-| 147 | `b9ddde064` | 145 | 152 | 153 | 157 | 166 | 278 | openvmm_core: fall back from --cpu-profile auto to a host profile |
-| 148 | `526167a70` | 146 | 153 | 154 | 158 | 167 | 338, 339 | cpu_profile: pin amd.genoa.v2 for Genoa hosts without the TSA immunities |
-| 149 | `2b3093b49` | 147 | 154 | 155 | 159 | 168 | 350, 351 | cpu_profile: verify pinned profiles, including their CPU time bits |
-| 150 | `6b45b9251` | 148 | 155 | 156 | 160 | 169 | 290 | vmm_core: preserve halt state across snapshots |
-| 151 | `37bd6ddc9` | 149 | 156 | 157 | 161 | 170 | 291, 292 | openvmm: preserve snapshot VM clock cut across save/restore |
-| 152 | `be496c868` | 150 | 157 | 158 | 162 | 171 | 358, 359 | vmcore: map VM times beyond the host clock to its latest time |
-| 153 | `12677f19f` | 151 | 158 | 159 | 163 | 172 | 299, 314 (part) | openvmm: make the time ABI documentation standalone |
-| 154 | `2e5aeadee` | 152 | 159 | 160 | 164 | 173 | 352, 353, 354, 355, 356, 357 | openvmm_core: name every CPUID difference in E_CPU_SURFACE errors |
-| 155 | `6607b5e50` | 153 | 160 | 161 | 165 | 174 | 363, 364, 365, 366, 367, 368 | virt: publish host UTC and its clock correction in time ABI 2 |
-| 156 | `2ef49cd99` | 154 | 161 | 162 | 166 | 175 | 322, 377 (part) | vmservice: select the microVM CPU profile over the management RPC |
-| 157 | `9b062e160` | 155 | 162 | 163 | 167 | 176 | 323 | petri, vmm_tests: fall back to the host CPU profile where auto's is unsupported |
-| 158 | `955d6c946` | 156 | 163 | 164 | 168 | 177 | 260, 261, 320 (part) | virtiofs: perform microVM share requests as the guest caller |
-| 159 | `4903fabcd` | 157 | 164 | 165 | 169 | 178 | 265, 266 | microVM: attach a second virtio-fs share with its own slot |
-| 160 | `beaed8803` | 158 | 165 | 166 | 170 | 179 | 273, 320 (part) | virtiofs: add a per-subtree access policy to microVM shares |
-| 161 | `7a018577f` | 159 | 166 | 167 | 171 | 180 | 275, 276, 277, 317 (part), 320 (part), 329 (part) | openvmm_entry: bind microVM snapshots to their generation and scratch |
-| 162 | `2e10de705` | 160 | 167 | 168 | 172 | 181 | 279, 320 (part) | openvmm_entry: permit RAM-backed microVM overlays without scratch |
-| 163 | `02a20fb1f` | 161 | 168 | 169 | 173 | 182 | 280, 320 (part), 281, 282 | microVM: select egress rules by protocol and port range, and add IPv6 |
-| 164 | `4b97578d2` | 162 | 169 | 170 | 174 | 183 | 283, 320 (part), 284, 285, 286 | microVM: share several host directories through one virtio-fs slot |
-| 165 | `daacfda5a` | 163 | 170 | 171 | 175 | 184 | 287, 320 (part), 288, 289 | microVM: export single host files as aggregate virtio-fs children |
-| 166 | `63c507fb6` | 164 | 171 | 172 | 176 | 185 | 293 | virtiofs: test RENAME_EXCHANGE node names and snapshots |
-| 167 | `1a1630600` | 165 | 172 | 173 | 177 | 186 | 334, 335 (part) | virtiofs: test microVM queues that start or stop with host input gated |
-| 168 | `6dd078ab4` | 166 | 173 | 174 | 178 | 187 | 294, 320 (part), 295 | microVM: accept host paths with commas in --mount |
-| 169 | `8679181cf` | 167 | 174 | 175 | 179 | 188 | 296, 320 (part), 297, 379 (part), 298, 300 | microVM: publish guest listeners to private networks and host loopback |
-| 170 | `0b2e35094` | 168 | 175 | 176 | 180 | 189 | 331 | disk_zerofill: present a fixed geometry over a shorter or absent disk |
-| 171 | `4d230d673` | 169 | 176 | 177 | 181 | 190 | 332, 333 | microVM: let a platform restore present a shorter distro and no scratch |
-| 172 | `c22bb0848` | 170 | 177 | 178 | 182 | 191 | 340, 341, 342 | disk_blob: bound, retry, and inspect HTTP blob requests |
-| 173 | `b88545b8a` | 171 | 178 | 179 | 183 | 192 | 336, 337 | microVM: let a platform restore install a new policy on a NIC template |
-| 174 | `711659389` | 172 | 179 | 180 | 184 | 193 | 360 | microVM: reject explicit host-loopback access on a /30 IPv4 network |
-| 175 | `db8d8892e` | 173 | 180 | 181 | 185 | 194 | 343, 344 | microVM: let a platform restore attach an aggregate to a dormant slot |
-| 176 | `8cb74019a` | 174 | 181 | 182 | 186 | 195 | 369, 370 | microVM: install a new network policy at an untiered restore |
-| 177 | `960f3ac75` | 175 | 182 | 183 | 187 | 196 | 345, 346 | guestmem, virtio: admit only a set of ranges to a device's memory |
-| 178 | `e99ba14d7` | 176 | 183 | 184 | 188 | 197 | 347, 348, 349 | microVM: restrict virtio device DMA to the RAM ranges of the e820 map |
-| 179 | `349086da7` | 177 | 184 | 185 | 189 | 198 | 302, 303, 304, 305, 306, 307 | microVM: refuse command lines that the guest kernel would truncate |
-| 180 | `578e1db3b` | 178 | 185 | 186 | 190 | 199 | 361 | vmm_tests: Fix kvp test flakiness by updating windows version |
-| 181 | `2806c5a64` | 179 | 186 | 187 | 191 | 200 | 362 | ci: run the Windows Server 2025 KVP test on Linux KVM |
-| 182 | `2b976b3bc` | 180 | 187 | 188 | 192 | 201 | - | microVM: remove the runtime and custom sandbox block roles (microsoft/openvmm#4839) |
-| 183 | `d3fd85308` | 181 | 188 | 189 | 193 | 202 | - | microVM: give every virtio device class an exact feature mask (microsoft/openvmm#4840) |
-| 184 | `6ff5a9fb4` | 182 | 189 | 190 | 194 | 203 | - | microVM: drop access-platform and the console size in microVM ABI 3 (microsoft/openvmm#4840) |
-| 185 | `a3b1ee89b` | 183 | 190 | 191 | 195 | 204 | - | microVM: route every IOAPIC input in the MP table (microsoft/openvmm#4842) |
-| 186 | `413bf6cca` | 184 | 191 | 192 | 196 | 205 | - | microVM: give each virtio slot its own IOAPIC input in ABI 3 (microsoft/openvmm#4842) |
-| 187 | `977f738bd` | 185 | 192 | 193 | 197 | - | - | microVM: restart the microVM ABI and boot layout at version 1 |
-| 188 | `ff03520f7` | 186 | 193 | 194 | 198 | - | - | microVM: restart the time ABI, time sample, and restore packet at version 1 |
-| 189 | `25e845b28` | 187 | 194 | 195 | 199 | - | - | openvmm_entry: remove the no-op --restore-entropy switch |
-| 190 | `81114200f` | 188 | 195 | 196 | 200 | - | - | openvmm_helpers: make the snapshot manifest version 2 |
-| 191 | `8339f275c` | 189 | 196 | 197 | 201 | - | - | virtio_console: give the saved state a single schema version |
-| 192 | `1e82b045c` | 190 | 197 | 198 | 202 | - | - | net_backend_resources: give the egress policy digest a single encoding |
-| 193 | `89b8f71fa` | 191 | 198 | 199 | 203 | - | - | microVM: give every NIC an IPv6 identity |
-| 194 | `4bc7c3b41` | 192 | 199 | 200 | 204 | - | - | virtiofs: restart the microVM saved-state schema at 1 |
-| 195 | `e9a6c8757` | 193 | 200 | 201 | 205 | - | - | chipset: drop the retired RTC transaction state |
-| 196 | `f34a8d4a6` | 194 | 201 | 202 | 206 | - | - | openvmm: require the snapshot's VM-time cut |
-| 197 | `c73f06640` | 195 | 202 | 203 | 207 | - | - | microVM: always reserve the virtio-fs slot |
-| 198 | `1837ec180` | 196 | 203 | 204 | 208 | - | - | vmservice: give the microVM fields upstream-compatible numbers |
-| 199 | `61f8c5a91` | 197 | 204 | 205 | 209 | - | - | microVM: drop the history from the layout and snapshot helpers |
-| 200 | `5f637290c` | 198 | 205 | 206 | 210 | - | - | openvmm_helpers: number the snapshot's fields without gaps |
-| 201 | `97a9ac2d5` | 199 | 206 | 207 | 211 | - | - | microVM: drain the boot console's terminal output at guest exit (microsoft/openvmm#4894) |
-| 202 | `252e045ff` | 200 | 207 | 208 | 212 | - | - | vmm_tests: drive the microVM guests without portb input (microsoft/openvmm#4886) |
-| 203 | `46d114380` | 201 | 208 | 209 | 213 | - | - | microVM: remove portb's host input (microsoft/openvmm#4887) |
-| 204 | `6962ebd1a` | 202 | 209 | 210 | 214 | - | - | pal: support long paths in secure file and directory creation (microsoft/openvmm#4916) |
-| 205 | `e0c9d2565` | 203 | 210 | 211 | 215 | - | - | state_unit: log the units that a state change waits for (microsoft/openvmm#4921) |
-| 206 | `a8b143090` | 204 | 211 | 212 | 220 | - | - | net_consomme: give a port forward that cannot bind a stable code (microsoft/openvmm#4951) |
-| 207 | `89613f15f` | 205 | 212 | 213 | - | - | - | virtio_net: fail the queue start when the endpoint cannot create queues (microsoft/openvmm#4953) |
-| 208 | `9ef263fc8` | 206 | 213 | 214 | - | - | - | virtio: test removal before start and stop/start queue progress (microsoft/openvmm#4954) |
-| 209 | `95dda3f8b` | 207 | 214 | 215 | - | - | - | virtio: document how a queue that fails to start after restore is reported (microsoft/openvmm#4955) |
-| 210 | `98f1e1b3b` | 208 | 215 | 216 | - | - | - | microVM: identify snapshot blocks only by storage generation (microsoft/openvmm#4970) |
-| 211 | `0b70028d9` | 209 | 216 | 217 | - | - | - | microVM: check the storage generation of a restore's sandbox blocks (microsoft/openvmm#4970) |
-| 212 | `62681c27d` | 210 | 217 | 218 | - | - | - | virtio: keep the progress of queues that a failed start stops (microsoft/openvmm#4968) |
-| 213 | `3a197e1ec` | 211 | 218 | 219 | - | - | - | vmcore: confirm device starts before the VM runs (microsoft/openvmm#4969) |
-| 214 | `9238359cc` | 212 | 219 | 220 | - | - | - | microVM: publish the outcome report below long Windows paths (microsoft/openvmm#4981) |
-| 215 | `ad2a1398c` | 213 | 220 | 222, 223 | - | - | - | virt: read the guest TSC offset until it is within its bound (microsoft/openvmm#4984) |
-| 216 | `2128a3646` | 214 | 221 | - | - | - | - | cpu_profile: clear AMX's features without its XSAVE state (microsoft/openvmm#4986) |
-| 217 | `efa4e1d20` | 215 | 222 | - | - | - | - | cpu_profile: clear AVX10, whose leaf 0x24 keeps no data (microsoft/openvmm#4986) |
-| 218 | `1a1fcff88` | 216 | 223 | - | - | - | - | cpu_profile: pin intel.graniterapids.v1 for Granite Rapids (microsoft/openvmm#4986) |
-| 219 | `b96d2f1ff` | 217 | 224 | - | - | - | - | cpu_profile: pin amd.turin.v2 for Turin hosts without the TSA immunities (microsoft/openvmm#4987) |
-| 220 | `83660da29` | 218 | 225 | - | - | - | - | openvmm_entry: refuse TCP endpoints for microVM consoles (microsoft/openvmm#4988) |
-| 221 | `f4d643a2a` | 219 | 226 | - | - | - | - | chipset: keep undelivered microVM portb output (microsoft/openvmm#4989) |
-| 222 | `960a1adc1` | 220 | 227 | - | - | - | - | microvm: let a restore attach a listener to a disconnected boot console (microsoft/openvmm#4991) |
-| 223 | `62d7a8311` | 221 | 228 | - | - | - | - | vmservice: carry microVM blocks, network, RAM file, and share policy (microsoft/openvmm#4992) |
-| 224 | `7486bfbc3` | 222 | 229 | - | - | - | - | openvmm_helpers: don't resume beside a restorable staged snapshot (microsoft/openvmm#4993) |
-| 225 | `516e32269` | 223 | 230 | - | - | - | - | openvmm_helpers: refuse earlier snapshot formats before decoding them (microsoft/openvmm#4994) |
-| 226 | `24c1d407c` | 224 | 231 | - | - | - | - | openvmm_helpers: reserve the manifest fields that upstream assigns (microsoft/openvmm#4994) |
-| 227 | `5ddd8c6f4` | 225 | 232 | - | - | - | - | openvmm_helpers: refuse an unknown paired-scratch restore mode (microsoft/openvmm#4995) |
-| 228 | `17db6eadf` | 226 | 233 | - | - | - | - | microvm: carry a clone's activation record in the restore packet (microsoft/openvmm#4996) |
-| 229 | `d3a18c887` | 227 | 234 | - | - | - | - | openvmm_helpers: don't publish a snapshot over an empty directory (microsoft/openvmm#4997) |
-| 230 | `ffc0a9cda` | 228 | 235 | - | - | - | - | openvmm_helpers: admit kernel tuning on platform command lines (microsoft/openvmm#5001) |
-| 231 | `c93930c69` | 229 | 236 | - | - | - | - | openvmm_helpers: compute memory-expansion ranges without overflow (microsoft/openvmm#5003) |
-| 232 | `9d301f342` | 230 | 237 | - | - | - | - | openvmm_helpers: refuse a FIFO artifact without waiting for a writer (microsoft/openvmm#5004) |
-| 233 | `e3aa8f301` | 231 | 238 | - | - | - | - | vmotherboard: gate a device's input without closing it to the vCPUs (microsoft/openvmm#5005) |
-| 234 | `694756508` | 232 | 239 | - | - | - | - | petri: let a microVM test be its snapshot controller (microsoft/openvmm#5010) |
-| 235 | `dbfac876a` | 233 | 240 | - | - | - | - | openvmm_core: run a quiesced microVM again only through its rollback (microsoft/openvmm#5010) |
-| 236 | `75c279458` | 237 | 244 | - | - | - | - | state_unit: fail a stop instead of panicking when a unit is lost (microsoft/openvmm#5013) |
-| 237 | `cb4f66967` | 238 | 245 | - | - | - | - | state_unit: fail a reset, save, restore, or time advance on a lost unit (microsoft/openvmm#5013) |
-| 238 | `c12829b63` | 239 | 246 | - | - | - | - | virtio: test PCI re-save before start and missing queue progress (microsoft/openvmm#5016) |
-| 239 | `f7f9cbe9e` | 244 | 251 | - | - | - | - | microVM: attach direct-claimed scratch in place instead of linking it (microsoft/openvmm#5042) |
-| 240 | `4af87117a` | 245 | 252 | - | - | - | - | virt: split clock-token command lines at every Linux whitespace byte (microsoft/openvmm#5044) |
-| 241 | `aa2943e2b` | 246 | 253 | - | - | - | - | virt: accept a snapshot downtime of up to 365 days (microsoft/openvmm#5046) |
-| 242 | `29fe05e24` | 247 | 254 | - | - | - | - | virt: report when the synchronized TSC set lets the TSCs run (microsoft/openvmm#5052) |
-| 243 | `0209ace72` | 248 | 255 | - | - | - | - | openvmm: run restored VM time from the instant the TSCs resume (microsoft/openvmm#5052) |
-| 244 | `0f5865b49` | 249 | 256 | - | - | - | - | virt_kvm: share the guest RAM of the real-mode KVM tests (microsoft/openvmm#5053) |
-| 245 | `e73090f03` | 250 | 257 | - | - | - | - | virt_kvm: do not fire an expired LAPIC timer whose interrupt is pending (microsoft/openvmm#5053) |
-| 246 | `68c089cac` | 251 | 258 | - | - | - | - | vmm_core, virt: run a restored LAPIC timer from the time ABI anchors (microsoft/openvmm#5053) |
-| 247 | `4079e8532` | 252 | 259 | - | - | - | - | kvm: deliver the interrupts that KVM holds without running the VP (microsoft/openvmm#5055) |
-| 248 | `86e0d1ad9` | 253 | 260 | - | - | - | - | virt_kvm: keep a restore from firing a taken one-shot LAPIC timer again (microsoft/openvmm#5055) |
-| 249 | `b1ecff06c` | 255 | 262 | - | - | - | - | microVM: saturate the time ABI restore's logged phase durations (microsoft/openvmm#5056) |
-| 250 | `28dd823d9` | 256 | 263 | - | - | - | - | chipset: start each PIT low/high count with its low byte (microsoft/openvmm#5061) |
-| 251 | `d54458e3b` | 257 | 264 | - | - | - | - | chipset: keep the sub-100 ns part of the PIT's last tick time (microsoft/openvmm#5065) |
-| 252 | `3bc53c1f6` | 258 | 265 | - | - | - | - | chipset: reject a saved PIT control word with RW = 0 (microsoft/openvmm#5067) |
-| 253 | `5257bd401` | 260 | 267 | - | - | - | - | chipset: zero-extend wide reads of the RTC's ports (microsoft/openvmm#5072) |
-| 254 | `cbbd386b7` | 272 | - | - | - | - | - | openvmm_entry: parse the microVM options on a big stack on every host (microsoft/openvmm#5077) |
-| 255 | `6dbca9a60` | 274 | - | - | - | - | - | chipset: zero-extend wide IOAPIC MMIO reads (microsoft/openvmm#5084) |
-| 256 | `b2cb15875` | 275 | - | - | - | - | - | chipset: reject a restored IOAPIC id that the ID register cannot hold (microsoft/openvmm#5087) |
-| 257 | `dd541e79d` | 276 | - | - | - | - | - | cpu_profile: refuse a restored host profile outside the derivation policy (microsoft/openvmm#5094) |
-| 258 | `901697805` | 277 | - | - | - | - | - | virt: saturate the XSAVE lengths that overflow (microsoft/openvmm#5095) |
-| 259 | `e21e717c9` | 278 | - | - | - | - | - | virt_kvm: refuse an XSAVE layout that KVM cannot hold (microsoft/openvmm#5095) |
-| 260 | `2dd72ba30` | 279 | - | - | - | - | - | virt_kvm: refuse a restored EFER.SVME for a guest whose CPUID has no SVM (microsoft/openvmm#5097) |
-| 261 | `1e2ddc824` | 280 | - | - | - | - | - | virt: hold each SYSENTER MSR in the field that names it (microsoft/openvmm#5100) |
-| 262 | `e18ba965d` | 281 | - | - | - | - | - | virt_kvm: refuse a restored XSAVE component outside the caps (microsoft/openvmm#5101) |
-| 263 | `360009b17` | 282 | - | - | - | - | - | virt_kvm: reject a restored APIC timer whose delivery mode is not Fixed (microsoft/openvmm#5102) |
-| 264 | `8514c7e0b` | 283 | - | - | - | - | - | virt: let a backend refuse to save a state that it cannot hold (microsoft/openvmm#5105) |
-| 265 | `3b156a48f` | 284 | - | - | - | - | - | virt_kvm: refuse to save a vCPU whose GIF is clear (microsoft/openvmm#5105) |
-| 266 | `1a7fa3923` | 285 | - | - | - | - | - | vmm_tests: check that a new KVM VP can be saved (microsoft/openvmm#5105) |
-| 267 | `9cf73f25b` | 286 | - | - | - | - | - | virt_kvm: refuse to restore an injected #BP or #OF (microsoft/openvmm#5106) |
-| 268 | `2b84aa555` | 287 | - | - | - | - | - | virt_kvm: report an INIT or a SIPI that a stopped VP has not accepted (microsoft/openvmm#5107) |
-| 269 | `a267d418f` | 288 | - | - | - | - | - | vmm_core: refuse a snapshot capture while a VP holds an INIT or a SIPI (microsoft/openvmm#5107) |
-| 270 | `08200bb48` | 289 | - | - | - | - | - | consomme: relay ICMP echo replies on Linux hosts (microsoft/openvmm#5108) |
-| 271 | `d8c584997` | 290 | - | - | - | - | - | consomme: poll a TCP listener again after it accepts a connection (microsoft/openvmm#5109) |
-| 272 | `d1da71495` | 291 | - | - | - | - | - | virt: save and restore a guest's IA32_SPEC_CTRL (microsoft/openvmm#5110) |
-| 273 | `8ee750138` | 292 | - | - | - | - | - | vmm_tests: check that a restore keeps a guest's SPEC_CTRL controls (microsoft/openvmm#5110) |
-| 274 | `67e22e3c5` | 293 | - | - | - | - | - | virt_whp: check that WHP takes SPEC_CTRL under a host profile (microsoft/openvmm#5110) |
-| 275 | `1bef0a705` | 294 | - | - | - | - | - | virt: build the SPEC_CTRL profile test only for x86-64 guests (microsoft/openvmm#5110) |
-| 276 | `a56eac9a9` | 295 | - | - | - | - | - | virt_kvm: hide AMD's legacy PMU from a time ABI guest (microsoft/openvmm#5114) |
-| 277 | `eaf039eed` | 296 | - | - | - | - | - | virt: save a guest's user-wait, debug, and feature MSRs (microsoft/openvmm#5114) |
-| 278 | `067334405` | 297 | - | - | - | - | - | virt_kvm: save the machine-check state of a VP (microsoft/openvmm#5114) |
-| 279 | `44a83e439` | 298 | - | - | - | - | - | Guide: describe the VP state elements that hold a guest's MSRs (microsoft/openvmm#5114) |
-| 280 | `24e9740fc` | 299 | - | - | - | - | - | virt_kvm: raise #GP for AMD's HWCR under an Intel CPU profile (microsoft/openvmm#5115) |
-| 281 | `37623b424` | 300 | - | - | - | - | - | virt_kvm: raise a VP thread's PKRU of 0 so that saves keep the guest's (microsoft/openvmm#5117) |
-| 282 | `cd13f526e` | 301 | - | - | - | - | - | virt_kvm: restore the init components of an XSAVE area as init (microsoft/openvmm#5118) |
-| 283 | `62d8ba613` | 302 | - | - | - | - | - | virt_kvm: refuse to restore a short or malformed XSAVE area (microsoft/openvmm#5119) |
-| 284 | `ddb174c79` | 303 | - | - | - | - | - | virt_kvm: drop interrupts in the reserved remote-read delivery mode (microsoft/openvmm#5120) |
-| 285 | `ab0614217` | 304 | - | - | - | - | - | virt_kvm: refuse to save a vCPU in SMM or with an SMI pending (microsoft/openvmm#5121) |
-| 286 | `419ffe3f7` | 305 | - | - | - | - | - | virt_kvm: take a vCPU out of SMM when its activity is set (microsoft/openvmm#5121) |
-| 287 | `ca2f1ee23` | 306 | - | - | - | - | - | virt_kvm: save and restore two pending NMIs (microsoft/openvmm#5122) |
-| 288 | `445469dfe` | 307 | - | - | - | - | - | virt: refuse a pending NMI count that a backend cannot hold (microsoft/openvmm#5122) |
-| 289 | `ee7af6979` | 308 | - | - | - | - | - | virt_kvm: save a queued exception once and refuse one KVM would drop (microsoft/openvmm#5123) |
-| 290 | `39c220726` | 309 | - | - | - | - | - | virt: let a restore's check accept what a hypervisor documents it keeps (microsoft/openvmm#5123) |
-| 291 | `980a7f353` | 310 | - | - | - | - | - | virt: let a saved activity hold the kind of its interrupt shadow (microsoft/openvmm#5125) |
-| 292 | `b76acd835` | 311 | - | - | - | - | - | virt_kvm: keep the kind of an interrupt shadow across a save and restore (microsoft/openvmm#5125) |
-| 293 | `76f382c05` | 312 | - | - | - | - | - | virt: refuse an interrupt shadow kind that a backend cannot hold (microsoft/openvmm#5125) |
-| 294 | `d8e178b87` | 313 | - | - | - | - | - | virt: say what an STI shadow restored as a MOV SS shadow loses (microsoft/openvmm#5125) |
-| 295 | `416abf320` | 314 | - | - | - | - | - | virt: refuse to restore an element that the partition lacks (microsoft/openvmm#5126) |
-| 296 | `6065e6616` | 315 | - | - | - | - | - | vmm_tests: check that each backend refuses unsupported restore state (microsoft/openvmm#5126) |
-| 297 | `7f2d3f771` | - | - | - | - | - | - | virt_whp: keep a restored halted VP halted (microsoft/openvmm#5129) |
-| 298 | `4e1b8f4b7` | - | - | - | - | - | - | vmm_tests: build the fixture's memory accessor on Windows only (microsoft/openvmm#5129) |
-| 299 | `f196bbb74` | - | - | - | - | - | - | virt_whp: resuspend a restored VP without the hypervisor's translation (microsoft/openvmm#5129) |
-| 300 | `468f4f7e4` | - | - | - | - | - | - | virt_whp: let a restored VP with a pending NMI take it (microsoft/openvmm#5129) |
-| 301 | `ec3dc1b2a` | - | - | - | - | - | - | virt_kvm: map RAM into KVM's SMM address space (microsoft/openvmm#5131) |
-| 302 | `c02849eec` | - | - | - | - | - | - | microVM: refuse a decoded network identity other than the derived one (microsoft/openvmm#5132); fold into 078, its test's configuration into 093, its IPv6 cases into 193 |
-| 303 | `064f61c76` | - | - | - | - | - | - | virt_whp, virt_mshv: save and restore a guest's IA32_UMWAIT_CONTROL (microsoft/openvmm#5134) |
-| 304 | `e27cafe18` | - | - | - | - | - | - | virt: save and restore a guest's IA32_BNDCFGS (microsoft/openvmm#5134) |
-| 305 | `b61856239` | - | - | - | - | - | - | virt, virt_kvm: save and restore AMD's VM_CR, VM_HSAVE_PA, and OSVW (microsoft/openvmm#5134) |
-| 306 | `93afcb91c` | - | - | - | - | - | - | virt_mshv, virt_whp: refuse to save a pending software interrupt (microsoft/openvmm#5134) |
-| 307 | `4d2df168d` | - | - | - | - | - | - | virtio_net: keep the saved queue lifecycle through a failed start (microsoft/openvmm#5136) |
-| 308 | `30e82a832` | - | - | - | - | - | - | pci_core: program the delivery of restored MSI-X vectors (microsoft/openvmm#5136) |
-| 309 | `3124efac2` | - | - | - | - | - | - | virtio: hold restored interrupt lines until the device starts (microsoft/openvmm#5136) |
-| 310 | `77f95c44e` | - | - | - | - | - | - | virtiofs: test a transport restore of a file gone from the host (microsoft/openvmm#5136) |
-| 311 | `482b25067` | - | - | - | - | - | - | chipset_device_worker: test requests to an ended device worker (microsoft/openvmm#5136) |
-| 312 | `64a70211f` | - | - | - | - | - | - | vmcore, virtio: say that a failed start keeps its queues' progress (microsoft/openvmm#5136) |
-| 313 | `6c3877b34` | - | - | - | - | - | - | openvmm_core: roll back a microVM snapshot only at its boundary (microsoft/openvmm#5140) |
-| 314 | `e61ccb214` | - | - | - | - | - | - | Guide: record the snapshot manifest's field map with upstream (microsoft/openvmm#5141) |
-| 315 | `848f60122` | - | - | - | - | - | - | openvmm_helpers: refuse a malformed snapshot ID by its field (microsoft/openvmm#5141) |
-| 316 | `85c3698f9` | - | - | - | - | - | - | cpu_profile, openvmm_helpers: name sha2 as upstream's lock file does (v7.1 rebase fixup for microsoft/openvmm#4941); fold into 069 and 133 |
-| 317 | `2a5e77698` | - | - | - | - | - | - | pal_async: treat disconnected pipe event query as EOF (microsoft/openvmm#5160, backported by microsoft/openvmm#5168 from upstream's `0474df224`); the next rebase drops it |
-| 318 | `ee647f75c` | - | - | - | - | - | - | vmotherboard: find offsets in an I/O region that ends at the top (microsoft/openvmm#5168) |
-| 319 | `b929c2d26` | - | - | - | - | - | - | vmotherboard: wire a chipset device only once its unit spawns (microsoft/openvmm#5170) |
-| 320 | `ccece742e` | - | - | - | - | - | - | virtiofs: skip empty buffers in a request's descriptor chain (microsoft/openvmm#5171) |
-| 321 | `7747ece2c` | - | - | - | - | - | - | fuse: check a request's data size before allocating its data (microsoft/openvmm#5172) |
-| 322 | `b909d6a20` | - | - | - | - | - | - | fuse: refuse a request whose length cannot hold its header (microsoft/openvmm#5173) |
-| 323 | `f391801de` | - | - | - | - | - | - | virtiofs: refuse SETATTR times with out-of-range nanoseconds (microsoft/openvmm#5175) |
-| 324 | `9ea35e853` | - | - | - | - | - | - | fuse: reply to FUSE_IOCTL with the file system's output (microsoft/openvmm#5176) |
-| 325 | `91360acfc` | - | - | - | - | - | - | fuse: count the data in the length of an argument-and-data reply (microsoft/openvmm#5177) |
-| 326 | `fe7405247` | - | - | - | - | - | - | fuse: reply EIO for an error code that a reply cannot carry (microsoft/openvmm#5180) |
-| 327 | `ea3f62ad8` | - | - | - | - | - | - | fuse: refuse a reply longer than its header can describe (microsoft/openvmm#5194) |
-| 328 | `e21dcb5c9` | - | - | - | - | - | - | fuse: check that a session sends one reply to each test request (microsoft/openvmm#5195) |
-| 329 | `3eb7500fd` | - | - | - | - | - | - | fuse: fail a reply longer than the request allows with EIO (microsoft/openvmm#5195) |
-| 330 | `51e9af75d` | - | - | - | - | - | - | fuse: reply EIO when a write or copy count overflows u32 (microsoft/openvmm#5198) |
-| 331 | `32c0c2bbc` | - | - | - | - | - | - | fuse: fail FUSE_INIT when init wants flags the client did not offer (microsoft/openvmm#5200) |
-| 332 | `a3da7e2b4` | - | - | - | - | - | - | virtiofs: deduplicate inodes by device and inode number (microsoft/openvmm#5201) |
-| 333 | `f918f2e78` | - | - | - | - | - | - | virtiofs: key guest inode numbers by host device (microsoft/openvmm#5202) |
-| 334 | `2f3007255` | - | - | - | - | - | - | virtiofs: preflight a microVM object of another file type as a new node (microsoft/openvmm#5203); fold into 081, its tests into 083 |
-| 335 | `30fe00786` | - | - | - | - | - | - | virtiofs: saturate lookup counts rather than wrap them to zero (microsoft/openvmm#5205) |
+| 127 | `2ae8cb609` | 125 | 132 | 132 | 136 | 145 | 149, 150, 382 (part), 317 (part) | virt: add the NVX time ABI v1 scaffolding |
+| 128 | `d6bab2874` | 126 | 133 | 133 | 137 | 146 | 151, 152 | virt_kvm: implement the NVX time ABI backend |
+| 129 | `061cf1e84` | 127 | 134 | 134 | 138 | 147 | 153, 325 (part), 373 (part) | virt_mshv: implement the NVX time ABI backend |
+| 130 | `95e19267a` | 128 | 135 | 135 | 139 | 148 | 154, 157, 159, 160 | openvmm_core: add the time ABI platform behind --x-time-abi-v1 |
+| 131 | `246ea9b6f` | 129 | 136 | 136 | 140 | 149 | 155, 158 | openvmm_helpers: add snapshot manifest version 6 for the time ABI |
+| 132 | `b42235f04` | 130 | 137 | 137 | 141 | 150 | 156 | chipset: serve restore packet v4 and time samples on portb |
+| 133 | `8ae27d658` | 131 | 138 | 138 | 142 | 151 | 161, 162, 163, 164, 166, 167, 179 | cpu_profile: fingerprint backend CPU surfaces and pin CPU profiles |
+| 134 | `6765ddefd` | 132 | 139 | 139 | 143 | 152 | 165, 314 (part), 168, 169, 170, 171, 173, 174, 175, 176, 180, 319 | openvmm: preflight, capture, and restore the time ABI clocks |
+| 135 | `4c6f2cb89` | 133 | 140 | 140 | 144 | 153 | 172 | virt_whp: implement the NVX time ABI backend |
+| 136 | `14ba37541` | 134 | 141 | 141 | 145 | 154 | 177 | openvmm_entry: add the --cpu-fingerprint tool |
+| 137 | `2905ae4ec` | 135 | 142 | 142 | 146 | 155 | 178, 181, 182, 183, 184, 185 | openvmm: carry the selected CPU profile in the time ABI configuration |
+| 138 | `c448daa1a` | 136 | 143 | 143 | 147 | 156 | 186, 187, 325 (part), 196 | virt_mshv, virt_whp: deliver LAPIC vectors written to a halted VP's IRR |
+| 139 | `a7f2618f5` | 137 | 144 | 144 | 148 | 157 | 188, 189, 190, 191, 192, 193, 373 (part), 194, 195, 197, 198, 199 | openvmm: program the complete effective CPUID of time ABI CPU profiles |
+| 140 | `d91d0d06b` | 138 | 145 | 145 | 149 | 158 | 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212 | virt: make the CPUID entries that a CPU profile omits read zero |
+| 141 | `e86e06dd3` | 139 | 146 | 146 | 150 | 159 | 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235 | virt: complete the time ABI's topology leaves and VP 0's CPUID view |
+| 142 | `7fc976c52` | 140 | 147 | 147 | 151 | 160 | 236, 237, 238, 373 (part), 239, 240, 241, 242, 243, 244, 324 (part) | openvmm: make the NVX time ABI the only microVM time path |
+| 143 | `d71872550` | 141 | 148 | 149 | 153 | 162 | 245, 246, 247, 248, 249, 250, 318, 251, 252, 253, 254, 255, 256, 257, 258, 259 | virt: build the time ABI effective CPUID in one place |
+| 144 | `f85810622` | 142 | 149 | 150 | 154 | 163 | 262, 263, 264 | openvmm: pin an Alder Lake CPU profile and add opt-in host profiles |
+| 145 | `61f473ee7` | 143 | 150 | 151 | 155 | 164 | 267, 268, 269, 270, 271, 373 (part), 272 | cpu_profile: pin AMD Milan, Genoa, and Turin CPU profiles |
+| 146 | `d238c45b9` | 144 | 151 | 152 | 156 | 165 | 274 | virt_whp: let WHP answer CPUID leaves 0 and 1 without exits |
+| 147 | `d449b92b5` | 145 | 152 | 153 | 157 | 166 | 278 | openvmm_core: fall back from --cpu-profile auto to a host profile |
+| 148 | `abc1b3a7d` | 146 | 153 | 154 | 158 | 167 | 338, 339 | cpu_profile: pin amd.genoa.v2 for Genoa hosts without the TSA immunities |
+| 149 | `97221ee5c` | 147 | 154 | 155 | 159 | 168 | 350, 351 | cpu_profile: verify pinned profiles, including their CPU time bits |
+| 150 | `e0df778af` | 148 | 155 | 156 | 160 | 169 | 290 | vmm_core: preserve halt state across snapshots |
+| 151 | `d4668f83e` | 149 | 156 | 157 | 161 | 170 | 291, 292 | openvmm: preserve snapshot VM clock cut across save/restore |
+| 152 | `22f585c26` | 150 | 157 | 158 | 162 | 171 | 358, 359 | vmcore: map VM times beyond the host clock to its latest time |
+| 153 | `636c98972` | 151 | 158 | 159 | 163 | 172 | 299, 314 (part) | openvmm: make the time ABI documentation standalone |
+| 154 | `b521cf17a` | 152 | 159 | 160 | 164 | 173 | 352, 353, 354, 355, 356, 357 | openvmm_core: name every CPUID difference in E_CPU_SURFACE errors |
+| 155 | `3af71744b` | 153 | 160 | 161 | 165 | 174 | 363, 364, 365, 366, 367, 368 | virt: publish host UTC and its clock correction in time ABI 2 |
+| 156 | `aeaf1b2a1` | 154 | 161 | 162 | 166 | 175 | 322, 377 (part) | vmservice: select the microVM CPU profile over the management RPC |
+| 157 | `a397e2b0e` | 155 | 162 | 163 | 167 | 176 | 323 | petri, vmm_tests: fall back to the host CPU profile where auto's is unsupported |
+| 158 | `e04adcb1a` | 156 | 163 | 164 | 168 | 177 | 260, 261, 320 (part) | virtiofs: perform microVM share requests as the guest caller |
+| 159 | `224fd7dc7` | 157 | 164 | 165 | 169 | 178 | 265, 266 | microVM: attach a second virtio-fs share with its own slot |
+| 160 | `b03ea1b27` | 158 | 165 | 166 | 170 | 179 | 273, 320 (part) | virtiofs: add a per-subtree access policy to microVM shares |
+| 161 | `c87356317` | 159 | 166 | 167 | 171 | 180 | 275, 276, 277, 317 (part), 320 (part), 329 (part) | openvmm_entry: bind microVM snapshots to their generation and scratch |
+| 162 | `e0c55199d` | 160 | 167 | 168 | 172 | 181 | 279, 320 (part) | openvmm_entry: permit RAM-backed microVM overlays without scratch |
+| 163 | `72228f6d3` | 161 | 168 | 169 | 173 | 182 | 280, 320 (part), 281, 282 | microVM: select egress rules by protocol and port range, and add IPv6 |
+| 164 | `3c2452027` | 162 | 169 | 170 | 174 | 183 | 283, 320 (part), 284, 285, 286 | microVM: share several host directories through one virtio-fs slot |
+| 165 | `d26ae8bd5` | 163 | 170 | 171 | 175 | 184 | 287, 320 (part), 288, 289 | microVM: export single host files as aggregate virtio-fs children |
+| 166 | `9b9172854` | 164 | 171 | 172 | 176 | 185 | 293 | virtiofs: test RENAME_EXCHANGE node names and snapshots |
+| 167 | `c4e774d9f` | 165 | 172 | 173 | 177 | 186 | 334, 335 (part) | virtiofs: test microVM queues that start or stop with host input gated |
+| 168 | `e0a2c5aab` | 166 | 173 | 174 | 178 | 187 | 294, 320 (part), 295 | microVM: accept host paths with commas in --mount |
+| 169 | `ef8e613eb` | 167 | 174 | 175 | 179 | 188 | 296, 320 (part), 297, 379 (part), 298, 300 | microVM: publish guest listeners to private networks and host loopback |
+| 170 | `8042a6ea8` | 168 | 175 | 176 | 180 | 189 | 331 | disk_zerofill: present a fixed geometry over a shorter or absent disk |
+| 171 | `696346481` | 169 | 176 | 177 | 181 | 190 | 332, 333 | microVM: let a platform restore present a shorter distro and no scratch |
+| 172 | `987edca9b` | 170 | 177 | 178 | 182 | 191 | 340, 341, 342 | disk_blob: bound, retry, and inspect HTTP blob requests |
+| 173 | `2f1b6537c` | 171 | 178 | 179 | 183 | 192 | 336, 337 | microVM: let a platform restore install a new policy on a NIC template |
+| 174 | `594b71f5f` | 172 | 179 | 180 | 184 | 193 | 360 | microVM: reject explicit host-loopback access on a /30 IPv4 network |
+| 175 | `074ac5090` | 173 | 180 | 181 | 185 | 194 | 343, 344 | microVM: let a platform restore attach an aggregate to a dormant slot |
+| 176 | `e721692b9` | 174 | 181 | 182 | 186 | 195 | 369, 370 | microVM: install a new network policy at an untiered restore |
+| 177 | `3c745ec8b` | 175 | 182 | 183 | 187 | 196 | 345, 346 | guestmem, virtio: admit only a set of ranges to a device's memory |
+| 178 | `2f2782a23` | 176 | 183 | 184 | 188 | 197 | 347, 348, 349 | microVM: restrict virtio device DMA to the RAM ranges of the e820 map |
+| 179 | `0a0c8abc0` | 177 | 184 | 185 | 189 | 198 | 302, 303, 304, 305, 306, 307 | microVM: refuse command lines that the guest kernel would truncate |
+| 180 | `e2a8a50a5` | 178 | 185 | 186 | 190 | 199 | 361 | vmm_tests: Fix kvp test flakiness by updating windows version |
+| 181 | `971f96a53` | 179 | 186 | 187 | 191 | 200 | 362 | ci: run the Windows Server 2025 KVP test on Linux KVM |
+| 182 | `f89d0b2ba` | 180 | 187 | 188 | 192 | 201 | - | microVM: remove the runtime and custom sandbox block roles (microsoft/openvmm#4839) |
+| 183 | `350a41cf9` | 181 | 188 | 189 | 193 | 202 | - | microVM: give every virtio device class an exact feature mask (microsoft/openvmm#4840) |
+| 184 | `75d03a1d9` | 182 | 189 | 190 | 194 | 203 | - | microVM: drop access-platform and the console size in microVM ABI 3 (microsoft/openvmm#4840) |
+| 185 | `a657e64a7` | 183 | 190 | 191 | 195 | 204 | - | microVM: route every IOAPIC input in the MP table (microsoft/openvmm#4842) |
+| 186 | `5d67df37b` | 184 | 191 | 192 | 196 | 205 | - | microVM: give each virtio slot its own IOAPIC input in ABI 3 (microsoft/openvmm#4842) |
+| 187 | `f89d66184` | 185 | 192 | 193 | 197 | - | - | microVM: restart the microVM ABI and boot layout at version 1 |
+| 188 | `7ba20c057` | 186 | 193 | 194 | 198 | - | - | microVM: restart the time ABI, time sample, and restore packet at version 1 |
+| 189 | `2f0c1a0ad` | 187 | 194 | 195 | 199 | - | - | openvmm_entry: remove the no-op --restore-entropy switch |
+| 190 | `2c1b15031` | 188 | 195 | 196 | 200 | - | - | openvmm_helpers: make the snapshot manifest version 2 |
+| 191 | `a91dcc4e4` | 189 | 196 | 197 | 201 | - | - | virtio_console: give the saved state a single schema version |
+| 192 | `d47852c1b` | 190 | 197 | 198 | 202 | - | - | net_backend_resources: give the egress policy digest a single encoding |
+| 193 | `dd827ef6c` | 191 | 198 | 199 | 203 | - | - | microVM: give every NIC an IPv6 identity |
+| 194 | `c6df29b7f` | 192 | 199 | 200 | 204 | - | - | virtiofs: restart the microVM saved-state schema at 1 |
+| 195 | `80eff3838` | 193 | 200 | 201 | 205 | - | - | chipset: drop the retired RTC transaction state |
+| 196 | `22bc7b701` | 194 | 201 | 202 | 206 | - | - | openvmm: require the snapshot's VM-time cut |
+| 197 | `3bbd0d9c3` | 195 | 202 | 203 | 207 | - | - | microVM: always reserve the virtio-fs slot |
+| 198 | `e1710ad0b` | 196 | 203 | 204 | 208 | - | - | vmservice: give the microVM fields upstream-compatible numbers |
+| 199 | `5a21ba9d9` | 197 | 204 | 205 | 209 | - | - | microVM: drop the history from the layout and snapshot helpers |
+| 200 | `073090ecb` | 198 | 205 | 206 | 210 | - | - | openvmm_helpers: number the snapshot's fields without gaps |
+| 201 | `9ccd45789` | 199 | 206 | 207 | 211 | - | - | microVM: drain the boot console's terminal output at guest exit (microsoft/openvmm#4894) |
+| 202 | `2355971b9` | 200 | 207 | 208 | 212 | - | - | vmm_tests: drive the microVM guests without portb input (microsoft/openvmm#4886) |
+| 203 | `d1740d0a3` | 201 | 208 | 209 | 213 | - | - | microVM: remove portb's host input (microsoft/openvmm#4887) |
+| 204 | `984ace653` | 202 | 209 | 210 | 214 | - | - | pal: support long paths in secure file and directory creation (microsoft/openvmm#4916) |
+| 205 | `fd1a689e3` | 203 | 210 | 211 | 215 | - | - | state_unit: log the units that a state change waits for (microsoft/openvmm#4921) |
+| 206 | `c819b7165` | 204 | 211 | 212 | 220 | - | - | net_consomme: give a port forward that cannot bind a stable code (microsoft/openvmm#4951) |
+| 207 | `0a32436db` | 205 | 212 | 213 | - | - | - | virtio_net: fail the queue start when the endpoint cannot create queues (microsoft/openvmm#4953) |
+| 208 | `e46d4d32d` | 206 | 213 | 214 | - | - | - | virtio: test removal before start and stop/start queue progress (microsoft/openvmm#4954) |
+| 209 | `2a34e693f` | 207 | 214 | 215 | - | - | - | virtio: document how a queue that fails to start after restore is reported (microsoft/openvmm#4955) |
+| 210 | `f7d66c1c8` | 208 | 215 | 216 | - | - | - | microVM: identify snapshot blocks only by storage generation (microsoft/openvmm#4970) |
+| 211 | `52f872508` | 209 | 216 | 217 | - | - | - | microVM: check the storage generation of a restore's sandbox blocks (microsoft/openvmm#4970) |
+| 212 | `52989f5e8` | 210 | 217 | 218 | - | - | - | virtio: keep the progress of queues that a failed start stops (microsoft/openvmm#4968) |
+| 213 | `21cffa861` | 211 | 218 | 219 | - | - | - | vmcore: confirm device starts before the VM runs (microsoft/openvmm#4969) |
+| 214 | `8795cafbb` | 212 | 219 | 220 | - | - | - | microVM: publish the outcome report below long Windows paths (microsoft/openvmm#4981) |
+| 215 | `e96e0100e` | 213 | 220 | 222, 223 | - | - | - | virt: read the guest TSC offset until it is within its bound (microsoft/openvmm#4984) |
+| 216 | `8a005b70e` | 214 | 221 | - | - | - | - | cpu_profile: clear AMX's features without its XSAVE state (microsoft/openvmm#4986) |
+| 217 | `6b49258bc` | 215 | 222 | - | - | - | - | cpu_profile: clear AVX10, whose leaf 0x24 keeps no data (microsoft/openvmm#4986) |
+| 218 | `cfb07ba86` | 216 | 223 | - | - | - | - | cpu_profile: pin intel.graniterapids.v1 for Granite Rapids (microsoft/openvmm#4986) |
+| 219 | `5a0350ece` | 217 | 224 | - | - | - | - | cpu_profile: pin amd.turin.v2 for Turin hosts without the TSA immunities (microsoft/openvmm#4987) |
+| 220 | `a2e18197e` | 218 | 225 | - | - | - | - | openvmm_entry: refuse TCP endpoints for microVM consoles (microsoft/openvmm#4988) |
+| 221 | `4499222ee` | 219 | 226 | - | - | - | - | chipset: keep undelivered microVM portb output (microsoft/openvmm#4989) |
+| 222 | `939b1fde8` | 220 | 227 | - | - | - | - | microvm: let a restore attach a listener to a disconnected boot console (microsoft/openvmm#4991) |
+| 223 | `671b9592d` | 221 | 228 | - | - | - | - | vmservice: carry microVM blocks, network, RAM file, and share policy (microsoft/openvmm#4992) |
+| 224 | `1d868f7cc` | 222 | 229 | - | - | - | - | openvmm_helpers: don't resume beside a restorable staged snapshot (microsoft/openvmm#4993) |
+| 225 | `e9000e881` | 223 | 230 | - | - | - | - | openvmm_helpers: refuse earlier snapshot formats before decoding them (microsoft/openvmm#4994) |
+| 226 | `a7ca9c2f8` | 224 | 231 | - | - | - | - | openvmm_helpers: reserve the manifest fields that upstream assigns (microsoft/openvmm#4994) |
+| 227 | `3834c0d9d` | 225 | 232 | - | - | - | - | openvmm_helpers: refuse an unknown paired-scratch restore mode (microsoft/openvmm#4995) |
+| 228 | `5865c9859` | 226 | 233 | - | - | - | - | microvm: carry a clone's activation record in the restore packet (microsoft/openvmm#4996) |
+| 229 | `0cd492acd` | 227 | 234 | - | - | - | - | openvmm_helpers: don't publish a snapshot over an empty directory (microsoft/openvmm#4997) |
+| 230 | `6b3b35497` | 228 | 235 | - | - | - | - | openvmm_helpers: admit kernel tuning on platform command lines (microsoft/openvmm#5001) |
+| 231 | `a6b8a6cb2` | 229 | 236 | - | - | - | - | openvmm_helpers: compute memory-expansion ranges without overflow (microsoft/openvmm#5003) |
+| 232 | `7bb32fed8` | 230 | 237 | - | - | - | - | openvmm_helpers: refuse a FIFO artifact without waiting for a writer (microsoft/openvmm#5004) |
+| 233 | `80447f4c8` | 231 | 238 | - | - | - | - | vmotherboard: gate a device's input without closing it to the vCPUs (microsoft/openvmm#5005) |
+| 234 | `6a3f7aa84` | 232 | 239 | - | - | - | - | petri: let a microVM test be its snapshot controller (microsoft/openvmm#5010) |
+| 235 | `9682f2550` | 233 | 240 | - | - | - | - | openvmm_core: run a quiesced microVM again only through its rollback (microsoft/openvmm#5010) |
+| 236 | `84fb286a7` | 237 | 244 | - | - | - | - | state_unit: fail a stop instead of panicking when a unit is lost (microsoft/openvmm#5013) |
+| 237 | `88c5f2f88` | 238 | 245 | - | - | - | - | state_unit: fail a reset, save, restore, or time advance on a lost unit (microsoft/openvmm#5013) |
+| 238 | `34b45648d` | 239 | 246 | - | - | - | - | virtio: test PCI re-save before start and missing queue progress (microsoft/openvmm#5016) |
+| 239 | `e240d159f` | 244 | 251 | - | - | - | - | microVM: attach direct-claimed scratch in place instead of linking it (microsoft/openvmm#5042) |
+| 240 | `d22bf7a3a` | 245 | 252 | - | - | - | - | virt: split clock-token command lines at every Linux whitespace byte (microsoft/openvmm#5044) |
+| 241 | `fcbd2e3fa` | 246 | 253 | - | - | - | - | virt: accept a snapshot downtime of up to 365 days (microsoft/openvmm#5046) |
+| 242 | `3bcaedcc6` | 247 | 254 | - | - | - | - | virt: report when the synchronized TSC set lets the TSCs run (microsoft/openvmm#5052) |
+| 243 | `8628927fc` | 248 | 255 | - | - | - | - | openvmm: run restored VM time from the instant the TSCs resume (microsoft/openvmm#5052) |
+| 244 | `f8c42e031` | 249 | 256 | - | - | - | - | virt_kvm: share the guest RAM of the real-mode KVM tests (microsoft/openvmm#5053) |
+| 245 | `b548dae2d` | 250 | 257 | - | - | - | - | virt_kvm: do not fire an expired LAPIC timer whose interrupt is pending (microsoft/openvmm#5053) |
+| 246 | `11341bc03` | 251 | 258 | - | - | - | - | vmm_core, virt: run a restored LAPIC timer from the time ABI anchors (microsoft/openvmm#5053) |
+| 247 | `bd531e351` | 252 | 259 | - | - | - | - | kvm: deliver the interrupts that KVM holds without running the VP (microsoft/openvmm#5055) |
+| 248 | `ad438c7e7` | 253 | 260 | - | - | - | - | virt_kvm: keep a restore from firing a taken one-shot LAPIC timer again (microsoft/openvmm#5055) |
+| 249 | `cb480bb0b` | 255 | 262 | - | - | - | - | microVM: saturate the time ABI restore's logged phase durations (microsoft/openvmm#5056) |
+| 250 | `bd9ba4c9e` | 256 | 263 | - | - | - | - | chipset: start each PIT low/high count with its low byte (microsoft/openvmm#5061) |
+| 251 | `a1219cf72` | 257 | 264 | - | - | - | - | chipset: keep the sub-100 ns part of the PIT's last tick time (microsoft/openvmm#5065) |
+| 252 | `7951d1657` | 258 | 265 | - | - | - | - | chipset: reject a saved PIT control word with RW = 0 (microsoft/openvmm#5067) |
+| 253 | `ccdd90e58` | 260 | 267 | - | - | - | - | chipset: zero-extend wide reads of the RTC's ports (microsoft/openvmm#5072) |
+| 254 | `2f1d5e036` | 272 | - | - | - | - | - | openvmm_entry: parse the microVM options on a big stack on every host (microsoft/openvmm#5077) |
+| 255 | `faa52dfd8` | 274 | - | - | - | - | - | chipset: zero-extend wide IOAPIC MMIO reads (microsoft/openvmm#5084) |
+| 256 | `63084d120` | 275 | - | - | - | - | - | chipset: reject a restored IOAPIC id that the ID register cannot hold (microsoft/openvmm#5087) |
+| 257 | `fc86d6bb7` | 276 | - | - | - | - | - | cpu_profile: refuse a restored host profile outside the derivation policy (microsoft/openvmm#5094) |
+| 258 | `f3416cfe0` | 277 | - | - | - | - | - | virt: saturate the XSAVE lengths that overflow (microsoft/openvmm#5095) |
+| 259 | `121d0dfc6` | 278 | - | - | - | - | - | virt_kvm: refuse an XSAVE layout that KVM cannot hold (microsoft/openvmm#5095) |
+| 260 | `a5ed8b8da` | 279 | - | - | - | - | - | virt_kvm: refuse a restored EFER.SVME for a guest whose CPUID has no SVM (microsoft/openvmm#5097) |
+| 261 | `8e55f8553` | 280 | - | - | - | - | - | virt: hold each SYSENTER MSR in the field that names it (microsoft/openvmm#5100) |
+| 262 | `b7abd1e6b` | 281 | - | - | - | - | - | virt_kvm: refuse a restored XSAVE component outside the caps (microsoft/openvmm#5101) |
+| 263 | `957844e85` | 282 | - | - | - | - | - | virt_kvm: reject a restored APIC timer whose delivery mode is not Fixed (microsoft/openvmm#5102) |
+| 264 | `a805815ce` | 283 | - | - | - | - | - | virt: let a backend refuse to save a state that it cannot hold (microsoft/openvmm#5105) |
+| 265 | `2d468614e` | 284 | - | - | - | - | - | virt_kvm: refuse to save a vCPU whose GIF is clear (microsoft/openvmm#5105) |
+| 266 | `9a9076f2f` | 285 | - | - | - | - | - | vmm_tests: check that a new KVM VP can be saved (microsoft/openvmm#5105) |
+| 267 | `c1a26f57b` | 286 | - | - | - | - | - | virt_kvm: refuse to restore an injected #BP or #OF (microsoft/openvmm#5106) |
+| 268 | `8d5b5eab5` | 287 | - | - | - | - | - | virt_kvm: report an INIT or a SIPI that a stopped VP has not accepted (microsoft/openvmm#5107) |
+| 269 | `cc7c598ed` | 288 | - | - | - | - | - | vmm_core: refuse a snapshot capture while a VP holds an INIT or a SIPI (microsoft/openvmm#5107) |
+| 270 | `3dfc3133f` | 289 | - | - | - | - | - | consomme: relay ICMP echo replies on Linux hosts (microsoft/openvmm#5108) |
+| 271 | `c5ce208eb` | 290 | - | - | - | - | - | consomme: poll a TCP listener again after it accepts a connection (microsoft/openvmm#5109) |
+| 272 | `b1f4a2740` | 291 | - | - | - | - | - | virt: save and restore a guest's IA32_SPEC_CTRL (microsoft/openvmm#5110) |
+| 273 | `95c6d55bc` | 292 | - | - | - | - | - | vmm_tests: check that a restore keeps a guest's SPEC_CTRL controls (microsoft/openvmm#5110) |
+| 274 | `88c31d661` | 293 | - | - | - | - | - | virt_whp: check that WHP takes SPEC_CTRL under a host profile (microsoft/openvmm#5110) |
+| 275 | `b65510d90` | 294 | - | - | - | - | - | virt: build the SPEC_CTRL profile test only for x86-64 guests (microsoft/openvmm#5110) |
+| 276 | `12c1838f7` | 295 | - | - | - | - | - | virt_kvm: hide AMD's legacy PMU from a time ABI guest (microsoft/openvmm#5114) |
+| 277 | `f38539a5b` | 296 | - | - | - | - | - | virt: save a guest's user-wait, debug, and feature MSRs (microsoft/openvmm#5114) |
+| 278 | `e9d3891f8` | 297 | - | - | - | - | - | virt_kvm: save the machine-check state of a VP (microsoft/openvmm#5114) |
+| 279 | `555388440` | 298 | - | - | - | - | - | Guide: describe the VP state elements that hold a guest's MSRs (microsoft/openvmm#5114) |
+| 280 | `427c97719` | 299 | - | - | - | - | - | virt_kvm: raise #GP for AMD's HWCR under an Intel CPU profile (microsoft/openvmm#5115) |
+| 281 | `78b0e455b` | 300 | - | - | - | - | - | virt_kvm: raise a VP thread's PKRU of 0 so that saves keep the guest's (microsoft/openvmm#5117) |
+| 282 | `56416688b` | 301 | - | - | - | - | - | virt_kvm: restore the init components of an XSAVE area as init (microsoft/openvmm#5118) |
+| 283 | `7fdcddeb6` | 302 | - | - | - | - | - | virt_kvm: refuse to restore a short or malformed XSAVE area (microsoft/openvmm#5119) |
+| 284 | `6af2c5139` | 303 | - | - | - | - | - | virt_kvm: drop interrupts in the reserved remote-read delivery mode (microsoft/openvmm#5120) |
+| 285 | `c8a945295` | 304 | - | - | - | - | - | virt_kvm: refuse to save a vCPU in SMM or with an SMI pending (microsoft/openvmm#5121) |
+| 286 | `aacab917d` | 305 | - | - | - | - | - | virt_kvm: take a vCPU out of SMM when its activity is set (microsoft/openvmm#5121) |
+| 287 | `6e7713220` | 306 | - | - | - | - | - | virt_kvm: save and restore two pending NMIs (microsoft/openvmm#5122) |
+| 288 | `d6d6b7720` | 307 | - | - | - | - | - | virt: refuse a pending NMI count that a backend cannot hold (microsoft/openvmm#5122) |
+| 289 | `26f176a51` | 308 | - | - | - | - | - | virt_kvm: save a queued exception once and refuse one KVM would drop (microsoft/openvmm#5123) |
+| 290 | `772bba5e5` | 309 | - | - | - | - | - | virt: let a restore's check accept what a hypervisor documents it keeps (microsoft/openvmm#5123) |
+| 291 | `6208fb1d1` | 310 | - | - | - | - | - | virt: let a saved activity hold the kind of its interrupt shadow (microsoft/openvmm#5125) |
+| 292 | `d3db8710a` | 311 | - | - | - | - | - | virt_kvm: keep the kind of an interrupt shadow across a save and restore (microsoft/openvmm#5125) |
+| 293 | `9d0904f41` | 312 | - | - | - | - | - | virt: refuse an interrupt shadow kind that a backend cannot hold (microsoft/openvmm#5125) |
+| 294 | `871854ae0` | 313 | - | - | - | - | - | virt: say what an STI shadow restored as a MOV SS shadow loses (microsoft/openvmm#5125) |
+| 295 | `d870712c7` | 314 | - | - | - | - | - | virt: refuse to restore an element that the partition lacks (microsoft/openvmm#5126) |
+| 296 | `af16fdfc9` | 315 | - | - | - | - | - | vmm_tests: check that each backend refuses unsupported restore state (microsoft/openvmm#5126) |
+| 297 | `58f4eb0c4` | - | - | - | - | - | - | virt_whp: keep a restored halted VP halted (microsoft/openvmm#5129) |
+| 298 | `2100f6d3d` | - | - | - | - | - | - | vmm_tests: build the fixture's memory accessor on Windows only (microsoft/openvmm#5129) |
+| 299 | `4a5c555e9` | - | - | - | - | - | - | virt_whp: resuspend a restored VP without the hypervisor's translation (microsoft/openvmm#5129) |
+| 300 | `574762448` | - | - | - | - | - | - | virt_whp: let a restored VP with a pending NMI take it (microsoft/openvmm#5129) |
+| 301 | `42432d77e` | - | - | - | - | - | - | virt_kvm: map RAM into KVM's SMM address space (microsoft/openvmm#5131) |
+| 302 | `8d71cff3a` | - | - | - | - | - | - | microVM: refuse a decoded network identity other than the derived one (microsoft/openvmm#5132); fold into 078, its test's configuration into 093, its IPv6 cases into 193 |
+| 303 | `9023d0e3e` | - | - | - | - | - | - | virt_whp, virt_mshv: save and restore a guest's IA32_UMWAIT_CONTROL (microsoft/openvmm#5134) |
+| 304 | `bf7a5f0ce` | - | - | - | - | - | - | virt: save and restore a guest's IA32_BNDCFGS (microsoft/openvmm#5134) |
+| 305 | `b6e165d96` | - | - | - | - | - | - | virt, virt_kvm: save and restore AMD's VM_CR, VM_HSAVE_PA, and OSVW (microsoft/openvmm#5134) |
+| 306 | `9270f58c2` | - | - | - | - | - | - | virt_mshv, virt_whp: refuse to save a pending software interrupt (microsoft/openvmm#5134) |
+| 307 | `fb2ea66fb` | - | - | - | - | - | - | virtio_net: keep the saved queue lifecycle through a failed start (microsoft/openvmm#5136) |
+| 308 | `6b581c05e` | - | - | - | - | - | - | pci_core: program the delivery of restored MSI-X vectors (microsoft/openvmm#5136) |
+| 309 | `d42f8b7cf` | - | - | - | - | - | - | virtio: hold restored interrupt lines until the device starts (microsoft/openvmm#5136) |
+| 310 | `8843e4430` | - | - | - | - | - | - | virtiofs: test a transport restore of a file gone from the host (microsoft/openvmm#5136) |
+| 311 | `1a961e21f` | - | - | - | - | - | - | chipset_device_worker: test requests to an ended device worker (microsoft/openvmm#5136) |
+| 312 | `99b7f7c61` | - | - | - | - | - | - | vmcore, virtio: say that a failed start keeps its queues' progress (microsoft/openvmm#5136) |
+| 313 | `d004a6e83` | - | - | - | - | - | - | openvmm_core: roll back a microVM snapshot only at its boundary (microsoft/openvmm#5140) |
+| 314 | `7dd84d3c9` | - | - | - | - | - | - | Guide: record the snapshot manifest's field map with upstream (microsoft/openvmm#5141) |
+| 315 | `21ace68d4` | - | - | - | - | - | - | openvmm_helpers: refuse a malformed snapshot ID by its field (microsoft/openvmm#5141) |
+| 316 | `335ebf312` | - | - | - | - | - | - | cpu_profile, openvmm_helpers: name sha2 as upstream's lock file does (v7.1 rebase fixup for microsoft/openvmm#4941); fold into 069 and 133 |
+| 317 | `7f34c4e06` | - | - | - | - | - | - | vmotherboard: find offsets in an I/O region that ends at the top (microsoft/openvmm#5168) |
+| 318 | `6fa1a9706` | - | - | - | - | - | - | vmotherboard: wire a chipset device only once its unit spawns (microsoft/openvmm#5170) |
+| 319 | `c2a73caa5` | - | - | - | - | - | - | virtiofs: skip empty buffers in a request's descriptor chain (microsoft/openvmm#5171) |
+| 320 | `3f8884bc0` | - | - | - | - | - | - | fuse: check a request's data size before allocating its data (microsoft/openvmm#5172) |
+| 321 | `acae9ad1e` | - | - | - | - | - | - | fuse: refuse a request whose length cannot hold its header (microsoft/openvmm#5173) |
+| 322 | `79da3b7a5` | - | - | - | - | - | - | virtiofs: refuse SETATTR times with out-of-range nanoseconds (microsoft/openvmm#5175) |
+| 323 | `69bc5bb3f` | - | - | - | - | - | - | fuse: reply to FUSE_IOCTL with the file system's output (microsoft/openvmm#5176) |
+| 324 | `faa8d6dfe` | - | - | - | - | - | - | fuse: count the data in the length of an argument-and-data reply (microsoft/openvmm#5177) |
+| 325 | `e161ea1a4` | - | - | - | - | - | - | fuse: reply EIO for an error code that a reply cannot carry (microsoft/openvmm#5180) |
+| 326 | `32d87e38e` | - | - | - | - | - | - | fuse: refuse a reply longer than its header can describe (microsoft/openvmm#5194) |
+| 327 | `81bd17f41` | - | - | - | - | - | - | fuse: check that a session sends one reply to each test request (microsoft/openvmm#5195) |
+| 328 | `f5b31b7ec` | - | - | - | - | - | - | fuse: fail a reply longer than the request allows with EIO (microsoft/openvmm#5195) |
+| 329 | `5adc780ee` | - | - | - | - | - | - | fuse: reply EIO when a write or copy count overflows u32 (microsoft/openvmm#5198) |
+| 330 | `a76e076e8` | - | - | - | - | - | - | fuse: fail FUSE_INIT when init wants flags the client did not offer (microsoft/openvmm#5200) |
+| 331 | `7f930d398` | - | - | - | - | - | - | virtiofs: deduplicate inodes by device and inode number (microsoft/openvmm#5201) |
+| 332 | `6a79db4c2` | - | - | - | - | - | - | virtiofs: key guest inode numbers by host device (microsoft/openvmm#5202) |
+| 333 | `2dbfb495a` | - | - | - | - | - | - | virtiofs: preflight a microVM object of another file type as a new node (microsoft/openvmm#5203); fold into 081, its tests into 083 |
+| 334 | `8aff102e1` | - | - | - | - | - | - | virtiofs: saturate lookup counts rather than wrap them to zero (microsoft/openvmm#5205) |
+| 335 | `8d989e670` | - | - | - | - | - | - | microVM: adapt virtio-fs to upstream's Windows impersonation (v7.2 rebase fixup for microsoft/openvmm#4876); fold into 081, 082, 085, 119, 120, 164, 198, and 223 |
+| 336 | `5dbe25966` | - | - | - | - | - | - | virt_support_x86emu: convert exception codes with u16::from (v7.2 rebase fixup for microsoft/openvmm#5080); fold into 143 |
+| 337 | `d22ea2c5a` | - | - | - | - | - | - | vmservice: refuse virtio-fs mount options on a microVM (v7.2 rebase fixup for microsoft/openvmm#5002); fold into 119, 198, and 223 |
+| 338 | `942eeeda1` | - | - | - | - | - | - | openvmm_entry: keep the microVM sandbox blocks' fixed queue shape (v7.2 rebase fixup for microsoft/openvmm#5040); fold into 086, 087, 171, and 223 |
+| 339 | `b51f9156c` | - | - | - | - | - | - | openvmm_entry: build with_big_stack only where it runs (v7.2 rebase fixup for microsoft/openvmm#5082); fold into 254 |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
 regrouped, and later fork bases, up to `7d90c4104` for v6.1 positions 270-315, for later commits,
 and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`, upstream main on
 2026-11-17, for positions 307-312, `2640ad182`, upstream main later that day, for positions
-313-315, `715927303`, upstream main on 2026-11-18, for positions 317-321, `5cf28492b`, upstream
-main on 2026-11-19, for positions 322-325, `78af54a51`, upstream main on 2026-11-20, for position
-326, `d83f87209`, upstream main later that day, for position 327, `265f0a73f`, upstream main
-later still, for positions 328 and 329, and `bf353460f`, upstream main on 2026-11-21, for positions
-330-335.
-They name the positions that the commits have now, but neither the v7.1 rebase on `9a875b563` nor
-the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the earlier
-ones on `7d90c4104`.
+313-315, `715927303`, upstream main on 2026-11-18, for positions 317-320, `5cf28492b`, upstream
+main on 2026-11-19, for positions 321-324, `78af54a51`, upstream main on 2026-11-20, for position
+325, `d83f87209`, upstream main later that day, for position 326, `265f0a73f`, upstream main
+later still, for positions 327 and 328, and `bf353460f`, upstream main on 2026-11-21 and the v7.2
+fork base, for positions 329-334.
+They name the positions that the commits have now, but neither the v7.2 rebase on `bf353460f`, the
+v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did
+the v6.1 rebase check the earlier ones on `7d90c4104`.
 
 Some of these commits change mapped work rather than add to it. Position 142 removes the legacy
 microVM clock paths, changing files that PR10 and PR17 also change, and makes manifest version 6 the
@@ -3773,18 +3894,7 @@ since PR11's position 029 adds it; its tests in `restore.rs` follow those of pos
 its `read_errors_with_manifest`; and its sentences in the Guide's page follow one that position 225
 writes. So it follows position 225, and the positions that it follows, upstream.
 
-Position 317 is upstream's `0474df224`, which microsoft/openvmm#5160 merged on 2026-11-19, after
-`715927303`, cherry-picked unchanged, with a note in its message. On Windows, `pal_async`'s
-`PolledPipe::refresh_events` treats `ERROR_PIPE_NOT_CONNECTED`, which the query of a named pipe's
-events can return once the server has disconnected the pipe, as `FILE_PIPE_DISCONNECTED`, so that a
-pending read returns EOF. Without it, `pal_async`'s `client_read_completes_when_server_disconnects`
-failed OpenVMM's `unit tests [x64-windows]` job, which NVX's `openvmm-ci` job requires, in each of
-five runs for the first head of microsoft/openvmm#5168, which held only position 318. It changes a
-file that no other commit of the chain changes, and it is not a fixup of a mapped PR. The next
-rebase onto an upstream main that has it drops it as landed, and
-[Landed upstream](#landed-upstream) then lists it.
-
-Position 318 makes `offset_of`, which `vmotherboard` implements for the port I/O and MMIO regions
+Position 317 makes `offset_of`, which `vmotherboard` implements for the port I/O and MMIO regions
 of chipset devices, find the offsets in a region whose last byte is the top of its address space,
 such as 2 ports at `0xfffe` or an MMIO region that ends at `u64::MAX` (microsoft/nvx#1384). It
 compared the address with the region's exclusive end, which does not fit the address type there, so
@@ -3796,7 +3906,7 @@ PR adds. No device of the microVM looks up an offset in its regions, so the micr
 did. Replaying it on upstream main applies without conflicts, and `vmotherboard` type-checks there
 with its tests, which pass, so it can go upstream on its own.
 
-Position 319 has `ArcMutexChipsetServices::finalize`, which ends the add of a chipset device in
+Position 318 has `ArcMutexChipsetServices::finalize`, which ends the add of a chipset device in
 `vmotherboard`, make the device the chipset's EOI handler and PIC and a target of the line sets that
 it asked for only once its state unit has spawned, the last step of the add that can fail
 (microsoft/nvx#1387). It made them before the spawn, so an add that failed there, with `NameInUse`
@@ -3806,14 +3916,14 @@ its place failed with `EoiHandlerAlreadySet`. It now checks first that the EOI h
 are free and that the device can be a line target, then spawns the unit, and then wires the device
 in the same order as before, so a failed add leaves the device none of them, and a successful one
 leaves the chipset as before. It changes code that upstream main has, and adds two tests in a new
-`tests` module, in a file that PR10's position 015 and position 318 also change, none of the code
+`tests` module, in a file that PR10's position 015 and position 317 also change, none of the code
 that either changes. It changes nothing that a mapped PR adds. Every caller of the add, the
 microVM's device loader among them, returns its error, so the microVM behaves as it did. Upstream
 main has the defect: the tests fail there without the fix. Replaying it on upstream main applies
 without conflicts, and `vmotherboard` type-checks there with its tests, which pass, so it can go
 upstream on its own.
 
-Position 320 has the payload reader and writer of `virtiofs`, which read a FUSE request from the
+Position 319 has the payload reader and writer of `virtiofs`, which read a FUSE request from the
 device-readable buffers of a descriptor chain and write its reply into the device-writable ones,
 skip empty buffers (microsoft/nvx#1621), which a driver may place anywhere in a chain, since the
 virtio specification forbids a device to assume any arrangement of descriptors. They moved to the
@@ -3832,7 +3942,7 @@ the defect: the tests fail there without the fix. Replaying it on upstream main 
 conflicts, and `virtiofs` type-checks there with its tests, which pass, so it can go upstream on its
 own.
 
-Position 321 has `RequestReader::read_count`, with which the `fuse` crate's request decoder reads
+Position 320 has `RequestReader::read_count`, with which the `fuse` crate's request decoder reads
 the data of a `FUSE_WRITE`, `FUSE_SETXATTR`, or `FUSE_IOCTL` request, check the size that the
 request declares against the data that it carries before it allocates the data (microsoft/nvx#1596).
 It allocated and zeroed the declared size first, so an 85-byte `FUSE_WRITE` whose size is
@@ -3847,7 +3957,7 @@ declares, so the microVM behaves as it did. Upstream main has the defect: withou
 without conflicts, and `fuse` type-checks there with its tests, which pass, so it can go upstream on
 its own.
 
-Position 322 has `Request::read_operation`, with which the `fuse` crate's request decoder decodes a
+Position 321 has `Request::read_operation`, with which the `fuse` crate's request decoder decodes a
 request's operation, refuse a request whose header declares a length shorter than the header
 (microsoft/nvx#1607), as it refuses one whose header declares more than the request carries. It
 checked only that upper bound, so a `FUSE_INIT` whose length is below 40 underflowed the size of its
@@ -3857,13 +3967,13 @@ any other request with such a length decoded as if its length were valid. It now
 request as `Invalid`, which the session fails with `EIO`, and a request whose length holds its
 header decodes as before. It changes code that upstream main has, whose subtraction of the header's
 size came with the extended `FUSE_INIT` payload in microsoft/openvmm#3385, and adds two tests, in a
-file that position 321 also changes, none of the code that it changes. It changes nothing that a
+file that position 320 also changes, none of the code that it changes. It changes nothing that a
 mapped PR adds. NVX's Linux guest sets each length to the header plus the arguments, so the microVM
 behaves as it did. Upstream main has the defect: the tests fail there without the fix. Replaying it
 on upstream main applies without conflicts, and `fuse` type-checks there with its tests, which pass,
 so it can go upstream on its own.
 
-Position 323 has `fuse_set_attr_to_lxutil`, with which `virtiofs` converts the attributes that a
+Position 322 has `fuse_set_attr_to_lxutil`, with which `virtiofs` converts the attributes that a
 `SETATTR` request sets, refuse with `EINVAL`, as `utimensat` does, a time whose nanoseconds are a
 second or more (microsoft/nvx#1597). It passed the request's seconds and nanoseconds to
 `Duration::new`, which carries whole seconds of nanoseconds into the seconds and panics when that
@@ -3884,7 +3994,7 @@ on upstream main conflicts in `inode.rs`, where the call that it changes follows
 `validate_confined_object()` check that PR27's position 126 adds, so it cannot go upstream on its
 own as it is.
 
-Position 324 has the `fuse` crate's session reply to a successful `FUSE_IOCTL` with the output that
+Position 323 has the `fuse` crate's session reply to a successful `FUSE_IOCTL` with the output that
 the file system's `Fuse::ioctl` returns (microsoft/nvx#1615). It sent the request's own input after
 `fuse_ioctl_out` in its place, so the reply never carried that output, and carried as many bytes as
 the request's input, which can exceed the room for output that the request allows. The output, which
@@ -3897,29 +4007,29 @@ that a mapped PR adds. NVX's virtio-fs servers do not implement `ioctl`, and fai
 `ENOSYS` before any reply data, so the microVM behaves as it did. Upstream main has the defect: the
 tests fail there without the fix. Replaying it on upstream main conflicts in `session.rs`, whose
 test module lacks the `saved_state` tests of PR13's position 047, and on Windows its tests need
-position 321's development dependency on `test_with_tracing`, which upstream main has only on Unix,
+position 320's development dependency on `test_with_tracing`, which upstream main has only on Unix,
 so it cannot go upstream on its own as it is. With the conflict resolved and that dependency, `fuse`
 type-checks there with its tests, which pass.
 
-Position 325 has `ReplySender::send_arg_data`, with which the `fuse` crate sends a reply of an
+Position 324 has `ReplySender::send_arg_data`, with which the `fuse` crate sends a reply of an
 argument and data, count the data in the length that the reply's header gives (microsoft/nvx#1616),
 as `send_data` and `send_string` count theirs. It left the data out, so a reply with data claimed
 fewer bytes than it carried: the reply of a `fuse_ioctl_out` and 4 bytes of ioctl output said 32
 bytes instead of 36, which Linux refuses on `/dev/fuse`, and from which its virtio-fs driver takes
 the length of the ioctl's output, so it dropped the output. The session's `FUSE_IOCTL` reply, which
-carries the file system's output since position 324, is its only caller. It changes code that
+carries the file system's output since position 323, is its only caller. It changes code that
 upstream main has, in `reply.rs`, which no earlier chain commit changes, adds a test in a new file,
-and has the session's test harness that position 324 adds check the length of every reply that it
-returns, so position 324's tests check the length of the `FUSE_IOCTL` reply too. It changes nothing
+and has the session's test harness that position 323 adds check the length of every reply that it
+returns, so position 323's tests check the length of the `FUSE_IOCTL` reply too. It changes nothing
 that a mapped PR adds. NVX's virtio-fs servers do not implement `ioctl`, and fail `FUSE_IOCTL` with
 `ENOSYS` before any reply data, so the microVM behaves as it did. Upstream main has the defect: the
 new test fails there without the fix. Replaying it on upstream main conflicts in the session's test
-harness, which upstream main lacks, and on Windows its test needs position 321's development
+harness, which upstream main lacks, and on Windows its test needs position 320's development
 dependency on `test_with_tracing`, which upstream main has only on Unix, so it cannot go upstream on
 its own as it is. Without the harness's change and with that dependency, `fuse` type-checks there
 with its tests, which pass.
 
-Position 326 has `ReplySender::send_error`, with which the `fuse` crate sends an error reply, send a
+Position 325 has `ReplySender::send_error`, with which the `fuse` crate sends an error reply, send a
 code only when a reply can carry it, 0 for an empty reply or 1 through 511, and otherwise log a
 rate-limited error and fail the request with `EIO` (microsoft/nvx#1625). It negated the code
 unchecked, though the session passes it the code of any `lx::Error` that a file system fails with:
@@ -3927,20 +4037,20 @@ negating `i32::MIN` panicked where overflow checks are on, which aborts the VMM,
 replied with the error `i32::MIN`. Linux refuses a reply whose error is positive or `-512`
 (`-ERESTARTSYS`) or less, which every code outside that range gave: on `/dev/fuse` its request
 stays pending, and its virtio-fs driver fails the request with `EIO`. It changes code that upstream
-main has, in `reply.rs`, which position 325 also changes, and documents the range on the `Fuse`
-trait in `lib.rs`, which PR13's position 047 and position 324 also change, none of the code that
-they change. It adds two tests to the file that position 325 adds, and one that uses the session's
-test harness of position 324, in a new file that it declares in the session's test module. It
+main has, in `reply.rs`, which position 324 also changes, and documents the range on the `Fuse`
+trait in `lib.rs`, which PR13's position 047 and position 323 also change, none of the code that
+they change. It adds two tests to the file that position 324 adds, and one that uses the session's
+test harness of position 323, in a new file that it declares in the session's test module. It
 changes nothing that a mapped PR adds. NVX's virtio-fs servers fail with host errno values and `lx`
 constants below 512, so the microVM behaves as it did. Upstream main has the defect: without the
 fix, the test that sends `i32::MIN` panics there. Replaying it on upstream main conflicts in
 `reply/tests.rs`, which upstream main lacks, and in `session.rs`, whose test module lacks the tests
-of PR13's position 047 and position 324, and on Windows its tests need position 321's development
+of PR13's position 047 and position 323, and on Windows its tests need position 320's development
 dependency on `test_with_tracing`, which upstream main has only on Unix, so it cannot go upstream on
 its own as it is. With its change of `reply.rs`, its tests of it, and that dependency, `fuse`
 type-checks there with its tests, which pass.
 
-Position 327 has `make_header`, which builds the header of every reply that the `fuse` crate's
+Position 326 has `make_header`, which builds the header of every reply that the `fuse` crate's
 `ReplySender` helpers send, fail with `InvalidInput` for a reply longer than `u32::MAX` bytes, which
 the `u32` `len` of its header cannot describe, and the helpers return that error before they send
 anything (microsoft/nvx#1628). It converted the length with `try_into().unwrap()`, so such a reply
@@ -3948,64 +4058,64 @@ panicked, which aborts the VMM: a file system's reply to a read, directory, or e
 request of `u32::MAX` bytes that it honors in full, or with nearly `u32::MAX` bytes of ioctl output
 or of a symbolic link's target. The session logs a reply that it cannot send with a rate-limited
 error, so such a request now gets no reply. It changes code that upstream main has, in `reply.rs`,
-which positions 325 and 326 also change, among it the line of `send_arg_data` whose length position
-325 corrects, and adds a test to the file that position 325 adds, and one that uses the session's
-test harness of position 324, in a new file that it declares in the session's test module. It
+which positions 324 and 325 also change, among it the line of `send_arg_data` whose length position
+324 corrects, and adds a test to the file that position 324 adds, and one that uses the session's
+test harness of position 323, in a new file that it declares in the session's test module. It
 changes nothing that a mapped PR adds. NVX's virtio-fs servers send no reply that long: they refuse
 buffers of more than 1 MiB, return the targets of the host's links, list only their shares in an
 aggregate's root, and do not implement `ioctl`, so the microVM behaves as it did. Upstream main has
 the defect, in the same `make_header`. Replaying it on upstream main conflicts in `reply.rs`, whose
-`send_arg_data` and `send_error` lack the changes of positions 325 and 326, in `reply/tests.rs`,
+`send_arg_data` and `send_error` lack the changes of positions 324 and 325, in `reply/tests.rs`,
 which upstream main lacks, and in `session.rs`, whose test module lacks the tests of PR13's
-position 047 and positions 324 and 326, so it cannot go upstream on its own as it is.
+position 047 and positions 323 and 325, so it cannot go upstream on its own as it is.
 
-Position 328 has the session's test harness, which position 324 adds, keep every reply that the
+Position 327 has the session's test harness, which position 323 adds, keep every reply that the
 session sends to a request, and fail the request unless it gets exactly one. Each request that the
 tests send through it should get one reply: the harness returns the reply, so the tests never send
 it `FUSE_FORGET` or `FUSE_BATCH_FORGET`, which get none. Its `dispatch_request` read the reply
 through `CapturingSender`, which keeps only the last buffer sent, so a session that sent a reply's
 data and then an error reply to the same request passed. Each of those requests gets one reply, so
-the tests pass as before. It changes only that harness, which position 325 also changes, and
+the tests pass as before. It changes only that harness, which position 324 also changes, and
 nothing that a mapped PR adds or that the microVM runs. Upstream main lacks the harness, so it
 cannot go upstream on its own.
 
-Position 329 has `Session::send_max_size`, which sends the replies to `FUSE_READ`, `FUSE_READDIR`,
+Position 328 has `Session::send_max_size`, which sends the replies to `FUSE_READ`, `FUSE_READDIR`,
 `FUSE_READDIRPLUS`, `FUSE_GETXATTR`, and `FUSE_LISTXATTR`, fail a file system's reply that is longer
 than its request allows with `EIO`, as the Linux FUSE driver does, and log it with a rate-limited
 error (microsoft/nvx#1629). It asserted the bound, so a file system that returned even one byte
 more panicked, which aborts the VMM. It changes code that upstream main has, `send_max_size` in
 `session.rs`, which no earlier chain commit changes, and documents the bound on the five `Fuse`
-methods in `lib.rs`, which PR13's position 047 and positions 324 and 326 also change, none of the
-lines that they change. Its tests, which use the session's test harness of positions 324 and 328,
+methods in `lib.rs`, which PR13's position 047 and positions 323 and 325 also change, none of the
+lines that they change. Its tests, which use the session's test harness of positions 323 and 327,
 are in a new file that it declares in the session's test module. It changes nothing that a mapped
 PR adds. NVX's virtio-fs servers send no such reply: `VirtioFs` sizes its read, directory, and
 extended-attribute buffers from the request, and `SectionFs` and the dormant microVM file system
 implement none of these requests, so the microVM behaves as it did. Upstream main has the defect,
 in the same `send_max_size`. Replaying it on upstream main conflicts in `session.rs`, whose test
-module lacks the tests of PR13's position 047 and positions 324, 326, and 327, and its tests need
+module lacks the tests of PR13's position 047 and positions 323, 325, and 326, and its tests need
 the harness, which upstream main lacks, so it cannot go upstream on its own as it is.
 
-Position 330 has `Session::write_out` build the replies to `FUSE_WRITE` and `FUSE_COPY_FILE_RANGE`,
+Position 329 has `Session::write_out` build the replies to `FUSE_WRITE` and `FUSE_COPY_FILE_RANGE`,
 and fail with `EIO` a byte count from the file system that the `u32` `size` of their
 `fuse_write_out` cannot hold, which it logs with a rate-limited error (microsoft/nvx#1631). The
 session converted the count with `try_into().unwrap()`, so a file system that reported more than
 `u32::MAX` bytes panicked, which aborts the VMM, and a guest can drive a copy's count that far,
 since `fuse_copy_file_range_in` carries a 64-bit length, which Linux passed on unclamped until 6.17.
 It changes code that upstream main has, the two replies in `dispatch_helper` in `session.rs`, which
-no earlier chain commit changes, adds `write_out` after `send_max_size`, which position 329
+no earlier chain commit changes, adds `write_out` after `send_max_size`, which position 328
 changes, and documents the bound on `Fuse::write` and `Fuse::copy_file_range` in `lib.rs`, which
-PR13's position 047 and positions 324, 326, and 329 also change, none of the lines that they
-change. Its tests, which use the session's test harness of positions 324 and 328, are in a new file
+PR13's position 047 and positions 323, 325, and 328 also change, none of the lines that they
+change. Its tests, which use the session's test harness of positions 323 and 327, are in a new file
 that it declares in the session's test module. It changes nothing that a mapped PR adds. NVX's
 virtio-fs servers never report such a count: `VirtioFs` refuses a write of more than 1 MiB and
 implements no `copy_file_range`, and `SectionFs` and the dormant microVM file system implement
 neither request, so `write_out` replies to the microVM's writes with the counts that it did.
 Upstream main has the defect, in the same two replies. Replaying it on upstream main conflicts
 only in the module declarations of `session.rs`'s test module, which lacks the tests of PR13's
-position 047 and positions 324, 326, 327, and 329, and its tests need the harness, which upstream
+position 047 and positions 323, 325, 326, and 328, and its tests need the harness, which upstream
 main lacks, so it cannot go upstream on its own as it is.
 
-Position 331 has `Session::dispatch_init` fail `FUSE_INIT` with `EIO`, and leave the session
+Position 330 has `Session::dispatch_init` fail `FUSE_INIT` with `EIO`, and leave the session
 uninitialized with no negotiation to save, when the file system's `init` wants a flag that the guest
 did not offer, or, while it keeps `FUSE_INIT_EXT`, an extended flag that the guest did not offer,
 which it logs with a rate-limited error (microsoft/nvx#1630). It asserted that `init` wants only
@@ -4016,9 +4126,9 @@ convertible from the public `SessionInfoState`, so an `init` that claimed every 
 the check, replied flags that the guest never offered, and saved a version and capabilities that the
 guest never sent. It changes code that upstream main has, `dispatch_init` in `session.rs`, whose
 lines that it changes no earlier chain commit changes, and documents the bounds of the negotiation
-on `Fuse::init` in `lib.rs`, which PR13's position 047 and positions 324, 326, 329, and 330 also
+on `Fuse::init` in `lib.rs`, which PR13's position 047 and positions 323, 325, 328, and 329 also
 change, none of the lines that they change. Its tests, which use the session's test harness of
-positions 324 and 328 and the session state of PR13's position 047, are in a new file that it
+positions 323 and 327 and the session state of PR13's position 047, are in a new file that it
 declares in the session's test module. It changes nothing that a mapped PR adds, but it closes the
 replacement that position 047 opened, so PR13 should go upstream with it. NVX's virtio-fs servers
 never want an unoffered flag: `VirtioFs` wants only flags that the guest offers, and `SectionFs` and
@@ -4026,11 +4136,11 @@ the dormant microVM file system keep the default `init`, so the microVM negotiat
 Upstream main has the abort, in the same two assertions, but not the replacement, since its
 `SessionInfo` converts from no `SessionInfoState`. Replaying it on upstream main conflicts only in
 the module declarations of `session.rs`'s test module, which lacks the tests of PR13's position 047
-and positions 324, 326, 327, 329, and 330; without its tests, its change applies there, and `fuse`
+and positions 323, 325, 326, 328, and 329; without its tests, its change applies there, and `fuse`
 type-checks. Its tests need the harness and PR13's session state, which upstream main lacks, so it
 cannot go upstream on its own as it is.
 
-Position 332 has `VirtioFsInode` record the device number of the stat that gives its inode number,
+Position 331 has `VirtioFsInode` record the device number of the stat that gives its inode number,
 and `InodeMap` key the inodes of a volume with stable file IDs by volume, device, and inode number
 (microsoft/nvx#1604). It keyed them by volume and inode number alone, but a share that spans
 devices, through a nested mount or a btrfs subvolume, whose roots all have inode number 256, can
@@ -4042,11 +4152,11 @@ last, and saving a microVM failed the check of PR18's position 083 that a node's
 one object, since they identified objects on two devices. Windows reports every device number as
 0, so its keys are unchanged in effect. It changes code that upstream main has: `DedupKey`,
 `with_attr`, and `dedup_key` in `inode.rs`, which PR06's position 010, PR13's position 048, PR18's
-positions 081 and 083, PR22's position 102, PR27's position 126, and positions 160, 165, and 323
+positions 081 and 083, PR22's position 102, PR27's position 126, and positions 160, 165, and 322
 also change, none of the code that they change, though it adds its field next to the alias field
 of position 048 and the fields that position 083 makes visible to the crate; and the description
 of `insert_inode` in `lib.rs`, which PR06's position 010, PR13's position 048, PR18's positions 081
-and 083, PR27's position 126, and positions 158, 160, 164, and 323 also change, none of the code
+and 083, PR27's position 126, and positions 158, 160, 164, and 322 also change, none of the code
 that they change. It adds a test to each of those files and one to the microVM's persistence tests,
 which PR18's positions 081 and 083 and PR22's position 102 also change, and the helper that its
 Linux tests share to a file that no earlier chain commit changes. It changes nothing that a mapped
@@ -4059,7 +4169,7 @@ main conflicts in `inode.rs`, only in the fields of `VirtioFsInode` next to the 
 positions 048 and 083 change, and in `microvm/fs_tests.rs`, which upstream main lacks, so it cannot
 go upstream on its own as it is; its other changes and tests apply there.
 
-Position 333 has a virtio-fs volume record the host device of its root object, its directory or the
+Position 332 has a virtio-fs volume record the host device of its root object, its directory or the
 file that a microVM aggregate child exposes, and XOR a key of each other host device into the
 namespaced guest inode numbers of that device's objects (microsoft/nvx#1619). The guest sees a share
 under the one device of its FUSE superblock, but LOOKUP, GETATTR, STATX, and READDIR numbered each
@@ -4086,19 +4196,19 @@ keys change, so it restores with keys, and the saved state keeps its format. The
 strict-path volumes that position 081 adds and position 165 changes now fails, as the volume's other
 constructors do, when the volume's root object cannot be inspected. It changes `inode.rs`, which
 PR06's position 010, PR13's position 048, PR18's positions 081 and 083, PR22's position 102, PR27's
-position 126, and positions 160, 165, 323, and 332 also change; `lib.rs`, which PR06's position 010,
+position 126, and positions 160, 165, 322, and 331 also change; `lib.rs`, which PR06's position 010,
 PR13's position 048, PR18's positions 081 and 083, PR27's position 126, and positions 158, 160, 164,
-323, and 332 also change; `aggregate.rs`, which PR18's position 081 and positions 164 and 165 also
+322, and 331 also change; `aggregate.rs`, which PR18's position 081 and positions 164 and 165 also
 change, the last in the lines of a child's READDIR entry that it changes; `aggregate_tests.rs`,
 which no earlier chain commit changes; the microVM's `file.rs`, `fs.rs`, `fs_tests.rs`, and
 `inode.rs`, which PR18's positions 081 and 083 add and its position 085, PR22's position 102, PR27's
-position 126, and positions 158, 160, 164, 165, 194, and 332 also change; and the Guide's virtio-fs
+position 126, and positions 158, 160, 164, 165, 194, and 331 also change; and the Guide's virtio-fs
 page, which PR18's position 085 adds and PR22's position 103, PR25's position 119, PR27's position
 126, and positions 158-160, 164-166, 168, 175, 184, 186, and 197 also change, position 164 in the
 sentence on an aggregate's inode numbers that it changes. It adds tests to `inode.rs`, `lib.rs`, and
-the microVM's persistence tests, and adapts calls in existing tests, among them position 332's, to
+the microVM's persistence tests, and adapts calls in existing tests, among them position 331's, to
 the fallible constructor and to `map_inode`'s device argument. Its READDIRPLUS change fixes two
-defects of position 083, but it tells entries apart by the device numbers that position 332 records,
+defects of position 083, but it tells entries apart by the device numbers that position 331 records,
 which position 083 lacks, and its restore and constructor changes fix no defect of PR18 but follow
 the new numbering, so it is not a fixup of PR18, and its microVM changes follow PR18 upstream.
 Upstream main has the defect, in the same `map_inode`, which `a5f055dd7` (microsoft/openvmm#3821)
@@ -4106,9 +4216,9 @@ adds and which numbers objects by volume and inode number alone. Replaying it on
 conflicts in eight of its nine files, all but `aggregate_tests.rs`: upstream main lacks the
 microVM's files and the Guide's virtio-fs page, and `inode.rs`, `lib.rs`, and `aggregate.rs`
 conflict next to code that PR13's position 048, PR18's positions 081 and 083, and positions 160,
-165, and 332 add, so it cannot go upstream on its own as it is.
+165, and 331 add, so it cannot go upstream on its own as it is.
 
-Position 334 has the microVM preflight of an insert, `preflight_microvm_insert`, which PR18's
+Position 333 has the microVM preflight of an insert, `preflight_microvm_insert`, which PR18's
 position 081 adds, check the limits of a new node, rather than those of a new name, for an object
 whose dedup key a node of another file type holds (microsoft/nvx#1626). Upstream's
 `InodeMap::dedup_entry`, which `389e4e57a` (microsoft/openvmm#4594) adds for both inserts with the
@@ -4126,8 +4236,8 @@ It changes `preflight_microvm_insert` in the microVM's `limits.rs`, which PR18's
 and PR27's position 126 and position 160 also change, none of the code that they change; and
 `dedup_entry` in `lib.rs`, upstream's code, which no chain commit changes, though PR06's position
 010, PR13's position 048, PR18's positions 081 and 083, PR27's position 126, and positions 158,
-160, 164, 323, 332, and 333 change the file. It adds tests to the microVM's persistence tests, which
-PR18's positions 081 and 083, PR22's position 102, and positions 332 and 333 also change, and they
+160, 164, 322, 331, and 332 change the file. It adds tests to the microVM's persistence tests, which
+PR18's positions 081 and 083, PR22's position 102, and positions 331 and 332 also change, and they
 call `VirtioFsInode::volume`, which position 083 adds. It fixes a defect of position 081 and needs
 nothing that a later position adds but that function, so it is a PR18 fixup: fold it into position
 081, and its tests into position 083. Upstream main lacks the defect, since it lacks the microVM
@@ -4135,7 +4245,7 @@ preflight. Replaying the commit there conflicts only in the microVM's `limits.rs
 `fs_tests.rs`, which upstream main lacks, while its change to `lib.rs` applies, so it follows PR18
 upstream.
 
-Position 335 has `VirtioFsInode::inc_lookup` saturate a node's lookup count at `u64::MAX`, as
+Position 334 has `VirtioFsInode::inc_lookup` saturate a node's lookup count at `u64::MAX`, as
 `forget` already saturates its decrement, and `VirtioFsInode::lookup` call it (microsoft/nvx#1633).
 Both added to the count with a wrapping `fetch_add`, so a reference that the guest took to a node at
 the largest count, through a LOOKUP, a READDIRPLUS entry, or another reply that returns a node that
@@ -4150,22 +4260,22 @@ counts its lookups in a `u64` too, never holds more references than a saturated 
 changes `lookup` and `inc_lookup` in `inode.rs`, upstream's code, whose increments no earlier chain
 commit changes, though PR13's position 048 adds the alias that `lookup` records after its increment,
 and PR06's position 010, PR13's position 048, PR18's positions 081 and 083, PR22's position 102,
-PR27's position 126, and positions 160, 165, 323, 332, and 333 also change the file. It adds a test
-to `inode.rs`, which calls the fallible `VirtioFsVolume::new` of position 333, and one to the
-microVM's persistence tests, which PR18's positions 081 and 083, PR22's position 102, positions 332
-and 333, and PR18's fixup at position 334 also change. It changes nothing that a mapped PR adds, and
+PR27's position 126, and positions 160, 165, 322, 331, and 332 also change the file. It adds a test
+to `inode.rs`, which calls the fallible `VirtioFsVolume::new` of position 332, and one to the
+microVM's persistence tests, which PR18's positions 081 and 083, PR22's position 102, positions 331
+and 332, and PR18's fixup at position 333 also change. It changes nothing that a mapped PR adds, and
 it fixes no defect of position 083, whose restore only makes upstream's defect reachable, so it is
 not a PR18 fixup. Upstream main has the defect, in the same two increments, which `lookup` has had
 since its initial import and `inc_lookup` since `021d02d00` (microsoft/openvmm#2661), but no restore
 that reaches the largest count. Replaying it on upstream main conflicts in `inode.rs`, only in
 `lookup`, next to the alias of position 048, and in `microvm/fs_tests.rs`, which upstream main
 lacks; its change to `inc_lookup` and its unit test apply there, but the test calls the fallible
-constructor of position 333, which upstream main lacks, so it cannot go upstream on its own as it
+constructor of position 332, which upstream main lacks, so it cannot go upstream on its own as it
 is.
 
 ## PR summary
 
-Each count is of v7.1 commits, which include the fixups that the v3.0, v4.0, v5.0, v6.0, and v7.0
+Each count is of v7.2 commits, which include the fixups that the v3.0, v4.0, v5.0, v6.0, and v7.0
 reorganizations folded into them; see [The v7.0 reorganization](#the-v70-reorganization),
 [The v6.0 reorganization](#the-v60-reorganization),
 [The v5.0 reorganization](#the-v50-reorganization),
@@ -4174,44 +4284,44 @@ reorganizations folded into them; see [The v7.0 reorganization](#the-v70-reorgan
 
 | PR | Class | Topic | Actual positions | Actual commit range(s) | Count | Recommended direct dependency |
 | --- | --- | --- | ---: | --- | ---: | --- |
-| PR01 | U | Build and test infrastructure | 001-003 | `642f5c72d..75e56fa86` | 3 | Current upstream |
-| PR02 | U | Host primitives: mesh and sparse_mmap | 004-005 | `09488bc5a..de5830e43` | 2 | Current upstream |
-| PR03 | U | Host primitives: PAL on Unix | 006 | `89ae38c8c` | 1 | Current upstream |
+| PR01 | U | Build and test infrastructure | 001-003 | `3971db76b..56a94131a` | 3 | Current upstream |
+| PR02 | U | Host primitives: mesh and sparse_mmap | 004-005 | `8c4beaa25..a9154aa5b` | 2 | Current upstream |
+| PR03 | U | Host primitives: PAL on Unix | 006 | `b5df7b773` | 1 | Current upstream |
 | PR04 | U | Host primitives: PAL and PAL async on Windows | - | all landed upstream | 0 | Current upstream |
-| PR05 | U | Hypervisor backend fixes | 007-009 | `01a59c75c..17c1d5148` | 3 | Current upstream |
-| PR06 | U | Device fixes and hardening | 010 | `ab22332f9` | 1 | Current upstream |
+| PR05 | U | Hypervisor backend fixes | 007-009 | `af721003c..7b19b1618` | 3 | Current upstream |
+| PR06 | U | Device fixes and hardening | 010 | `8b956a687` | 1 | Current upstream |
 | PR07 | U | Consomme resource bounding | - | all landed upstream | 0 | Current upstream |
 | PR08 | U | Preparatory refactors | - | all landed upstream | 0 | Current upstream |
-| PR09 | U | Fallible VM lifecycle | 011-014 | `d56e438a1..3f37fab5c` | 4 | Current upstream |
-| PR10 | U | Portable CPU and clock state | 015-027 | `3e87fad8e..5f6158124` | 13 | PR09 |
-| PR11 | U | Snapshot publication protocol | 028-031 | `c4ec3519b..f30da47bd` | 4 | PR10 |
-| PR12 | U | Immutable private-CoW restore | 032-036 | `002f67201..dcb8436cb` | 5 | PR10 |
-| PR13 | U | Generic virtio persistence | 037-048 | `fb0c836af..4b33617c6` | 12 | PR11 + PR12 |
-| PR14 | U | Firmware-less direct boot, loader half | 049 | `631aea0ff` | 1 | Current upstream |
-| PR15 | P | microVM machine profile and minimal chipset | 050-060 | `a6c338b95..65258e052` | 11 | Foundation fan-in |
-| PR16 | P | Fixed virtio-MMIO ABI and shared interrupt status | 061-064 | `1fd06a7ad..ddac51484` | 4 | PR15 |
-| PR17 | P | microVM snapshot capture and authoritative restore | 065-075 | `eefa0d9b4..2bf9417c8` | 11 | PR16 |
-| PR18 | P | microVM host attachments and device persistence | 076-085; 302, 334 (fixups) | `8311891a0..ad4d90921`; `c02849eec`, `2f3007255` | 12 | PR17 |
-| PR19 | N/P | Sandbox block roles and snapshot tiers | 086-088 | `8bac7ff2d..e55e6f3c5` | 3 | PR18 |
-| PR20 | P | Restore-time processor and memory activation | 089-095 | `5882ada56..1c0203d42` | 7 | PR19 |
-| PR21 | P/N | Network egress policy | 096-101 | `545c4646e..07903debb` | 6 | PR20; core can start after PR13 |
-| PR22 | P | Filesystem deny policy | 102-103 | `c6667715c..178c6c66c` | 2 | PR21 |
-| PR23 | N | Authenticated control console | 104-113 | `0b29e9e70..6c630a536` | 10 | PR22; protocol/broker can start after PR13 |
-| PR24 | N | Managed workload and outcome reporting | 114-118 | `3eec98a5b..443ac87dd` | 5 | PR23 |
-| PR25 | P | Management plane | 119-120 | `8b3480db6..b40f77f22` | 2 | PR24 |
-| PR26 | U | Profiling benchmark | 121 | `4a98fcf3a` | 1 | PR25 in the current stack |
-| PR27 | U/P | Safe symlinks for writable microVM shares | 125-126 | `f483afc94..c928e8dc1` | 2 | PR22; position 125 can land independently |
-| Fork tail | F | CI guards and NVX wire compatibility | 122-124 | `81bb943b1..91dc2f416` | 3 | PR26; do not submit upstream |
+| PR09 | U | Fallible VM lifecycle | 011-014 | `8aa86bc26..4d5f410ea` | 4 | Current upstream |
+| PR10 | U | Portable CPU and clock state | 015-027 | `9f254770b..fea603ce9` | 13 | PR09 |
+| PR11 | U | Snapshot publication protocol | 028-031 | `99707a0bf..eee71081d` | 4 | PR10 |
+| PR12 | U | Immutable private-CoW restore | 032-036 | `75f1282c7..d7e43e399` | 5 | PR10 |
+| PR13 | U | Generic virtio persistence | 037-048 | `9d5bde6b6..bc4e1fad7` | 12 | PR11 + PR12 |
+| PR14 | U | Firmware-less direct boot, loader half | 049 | `9aa49a98b` | 1 | Current upstream |
+| PR15 | P | microVM machine profile and minimal chipset | 050-060 | `a43ebb21f..9ef208a3d` | 11 | Foundation fan-in |
+| PR16 | P | Fixed virtio-MMIO ABI and shared interrupt status | 061-064 | `2ea61a194..8b8834095` | 4 | PR15 |
+| PR17 | P | microVM snapshot capture and authoritative restore | 065-075 | `68a2d64c1..dc9696109` | 11 | PR16 |
+| PR18 | P | microVM host attachments and device persistence | 076-085; 302, 333 (fixups) | `8e55ba5e5..45704afb4`; `8d71cff3a`, `2dbfb495a` | 12 | PR17 |
+| PR19 | N/P | Sandbox block roles and snapshot tiers | 086-088 | `ef8854204..fb80162dd` | 3 | PR18 |
+| PR20 | P | Restore-time processor and memory activation | 089-095 | `a4a9d3270..d04c81f37` | 7 | PR19 |
+| PR21 | P/N | Network egress policy | 096-101 | `4189a685a..16922634e` | 6 | PR20; core can start after PR13 |
+| PR22 | P | Filesystem deny policy | 102-103 | `f408ae2bc..6536dff3b` | 2 | PR21 |
+| PR23 | N | Authenticated control console | 104-113 | `d4401ee18..a77e320e1` | 10 | PR22; protocol/broker can start after PR13 |
+| PR24 | N | Managed workload and outcome reporting | 114-118 | `bab4af583..5908c8186` | 5 | PR23 |
+| PR25 | P | Management plane | 119-120 | `c1865e5da..0273bb325` | 2 | PR24 |
+| PR26 | U | Profiling benchmark | 121 | `eefb26ccb` | 1 | PR25 in the current stack |
+| PR27 | U/P | Safe symlinks for writable microVM shares | 125-126 | `551d80703..1e4928032` | 2 | PR22; position 125 can land independently |
+| Fork tail | F | CI guards and NVX wire compatibility | 122-124 | `c5a107f2e..b0121fd5d` | 3 | PR26; do not submit upstream |
 
 ## Exact commit-to-PR mapping
 
-Each entry, at the position that the commit had in v7.0 too, names the v6.1 position of the commit,
-its v6.0 position, which it had in v5.0 and v5.1 too, the v4.0 position, the v3.0 and v2.4
-positions that v4.0 recorded, and the v2.4, v5.1, and v6.1 fixups that it folds; "(part)" marks a
-fixup that split across commits. Positions 016 and 017,
-which followed the v6.0 reorganization and the v6.1 rebase, and positions 302 and 334, which
-followed the v7.0 reorganization and the v7.1 rebase, name their OpenVMM pull request instead of
-earlier positions. A v6.1 position
+Each entry, at the position that the commit had in v7.0 and v7.1 too, names the v6.1 position of
+the commit, its v6.0 position, which it had in v5.0 and v5.1 too, the v4.0 position, the v3.0 and
+v2.4 positions that v4.0 recorded, and the v2.4, v5.1, and v6.1 fixups that it folds; "(part)"
+marks a fixup that split across commits. Positions 016 and 017, which followed the v6.0
+reorganization and the v6.1 rebase, and positions 302 and 333, which followed the v7.0
+reorganization and the v7.1 rebase, name their OpenVMM pull request instead of earlier positions;
+position 333 was v7.1 position 334. A v6.1 position
 counts in `feature/microvm/dev` at `fe61f9cbf`, whose first
 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 position in `feature/microvm/dev`
 at `5ca20ee08`, whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0
@@ -4227,9 +4337,9 @@ commit.
 <details>
 <summary><strong>PR01 - Build and test infrastructure (U)</strong> - 3 commits + 5 landed upstream</summary>
 
-- 001 `642f5c72d` - build: keep Winsock eagerly imported on Windows (v6.1 001, v6.0 001, v4.0 001, v3.0 001, v2.4 001; **not upstream**: microsoft/openvmm#4451 was closed without merging)
-- 002 `e314e2aa8` - flowey: keep caller temp directories for native local VMM-test runs (v6.1 002, v6.0 003, v4.0 003, v3.0 003, v2.4 003; **open upstream**: microsoft/openvmm#4618)
-- 003 `75e56fa86` - virt_whp, petri: enable native PCIe NVMe boot on WHP (v6.1 003, v6.0 004, v4.0 005, v3.0 005, v2.4 005; **not upstream**: microsoft/openvmm#4615 was closed, since a Windows servicing release fixes the WHP behavior that it works around)
+- 001 `3971db76b` - build: keep Winsock eagerly imported on Windows (v6.1 001, v6.0 001, v4.0 001, v3.0 001, v2.4 001; **not upstream**: microsoft/openvmm#4451 was closed without merging)
+- 002 `c2e0222d7` - flowey: keep caller temp directories for native local VMM-test runs (v6.1 002, v6.0 003, v4.0 003, v3.0 003, v2.4 003; **open upstream**: microsoft/openvmm#4618)
+- 003 `56a94131a` - virt_whp, petri: enable native PCIe NVMe boot on WHP (v6.1 003, v6.0 004, v4.0 005, v3.0 005, v2.4 005; **not upstream**: microsoft/openvmm#4615 was closed, since a Windows servicing release fixes the WHP behavior that it works around)
 
 Landed upstream and dropped from the chain:
 
@@ -4249,8 +4359,8 @@ Landed upstream and dropped from the chain:
 <details>
 <summary><strong>PR02 - Host primitives: mesh and sparse_mmap (U)</strong> - 2 commits + 1 landed upstream</summary>
 
-- 004 `09488bc5a` - mesh_protobuf: clone type-erased messages and expose encoded length (v6.1 004, v6.0 005, v4.0 006, v3.0 006, v2.4 006; **partly landed upstream**: microsoft/openvmm#4556, merged as `96647c331`, derives `Clone`; this commit now adds only `ProtobufAny::value_len` and a clone check)
-- 005 `de5830e43` - sparse_mmap: flush file-backed ranges with bounded concurrency (v6.1 005, v6.0 006, v4.0 007, v3.0 007, v2.4 007; **open upstream**: microsoft/openvmm#4558; folds v2.4 328 (part))
+- 004 `8c4beaa25` - mesh_protobuf: clone type-erased messages and expose encoded length (v6.1 004, v6.0 005, v4.0 006, v3.0 006, v2.4 006; **partly landed upstream**: microsoft/openvmm#4556, merged as `96647c331`, derives `Clone`; this commit now adds only `ProtobufAny::value_len` and a clone check)
+- 005 `a9154aa5b` - sparse_mmap: flush file-backed ranges with bounded concurrency (v6.1 005, v6.0 006, v4.0 007, v3.0 007, v2.4 007; **open upstream**: microsoft/openvmm#4558; folds v2.4 328 (part))
 
 Landed upstream and dropped from the chain:
 
@@ -4262,7 +4372,7 @@ Landed upstream and dropped from the chain:
 <details>
 <summary><strong>PR03 - Host primitives: PAL on Unix (U)</strong> - 1 commit + 2 landed upstream</summary>
 
-- 006 `89ae38c8c` - pal: bound Linux descriptor-table pre-expansion (v6.1 006, v6.0 007, v4.0 008, v3.0 008, v2.4 008; **open upstream**: microsoft/openvmm#4589)
+- 006 `b5df7b773` - pal: bound Linux descriptor-table pre-expansion (v6.1 006, v6.0 007, v4.0 008, v3.0 008, v2.4 008; **open upstream**: microsoft/openvmm#4589)
 
 Landed upstream and dropped from the chain:
 
@@ -4298,9 +4408,9 @@ Landed upstream and dropped from the chain:
 <details>
 <summary><strong>PR05 - Hypervisor backend fixes (U)</strong> - 3 commits + 2 landed upstream</summary>
 
-- 007 `01a59c75c` - virt_mshv: make RUN_VP cancellation race-free (v6.1 007, v6.0 010, v4.0 011, v3.0 013, v2.4 013; **open upstream**: microsoft/openvmm#4536)
-- 008 `e50265e1a` - virt: add Partition::finalize_memory; create the MSHV BSP after finalization (v6.1 008, v6.0 011, v4.0 012, v3.0 014, v2.4 014; **open upstream**: microsoft/openvmm#4607; folds v2.4 325 (part), 373 (part), and 386)
-- 009 `17c1d5148` - virt_mshv: persist and redeliver pending external interrupts (v6.1 009, v6.0 012, v4.0 013, v3.0 015, v2.4 015; **open upstream**: microsoft/openvmm#4613, stacked on microsoft/openvmm#4536; folds v2.4 325 (part) and 311)
+- 007 `af721003c` - virt_mshv: make RUN_VP cancellation race-free (v6.1 007, v6.0 010, v4.0 011, v3.0 013, v2.4 013; **open upstream**: microsoft/openvmm#4536)
+- 008 `a2490e1ed` - virt: add Partition::finalize_memory; create the MSHV BSP after finalization (v6.1 008, v6.0 011, v4.0 012, v3.0 014, v2.4 014; **open upstream**: microsoft/openvmm#4607; folds v2.4 325 (part), 373 (part), and 386)
+- 009 `7b19b1618` - virt_mshv: persist and redeliver pending external interrupts (v6.1 009, v6.0 012, v4.0 013, v3.0 015, v2.4 015; **open upstream**: microsoft/openvmm#4613, stacked on microsoft/openvmm#4536; folds v2.4 325 (part) and 311)
 
 Landed upstream and dropped from the chain:
 
@@ -4314,7 +4424,7 @@ Landed upstream and dropped from the chain:
 <details>
 <summary><strong>PR06 - Device fixes and hardening (U)</strong> - 1 commit + 9 landed upstream</summary>
 
-- 010 `ab22332f9` - virtiofs: bound guest payload allocations and rate-limit diagnostics (v6.1 010, v6.0 013, v4.0 014, v3.0 018, v2.4 019; **open upstream**: microsoft/openvmm#4597)
+- 010 `8b956a687` - virtiofs: bound guest payload allocations and rate-limit diagnostics (v6.1 010, v6.0 013, v4.0 014, v3.0 018, v2.4 019; **open upstream**: microsoft/openvmm#4597)
 
 Position 039, which carried the first revision of microsoft/openvmm#4605, moved to PR13.
 
@@ -4382,10 +4492,10 @@ Landed upstream and dropped from the chain:
 <details>
 <summary><strong>PR09 - Fallible VM lifecycle (U)</strong> - 4 commits + 1 landed upstream + 2 retired</summary>
 
-- 011 `d56e438a1` - state_unit: roll back a partial start instead of panicking (v6.1 011, v6.0 015, v4.0 018, v3.0 026, v2.4 027; **open upstream**: microsoft/openvmm#4872, with review changes that the chain lacks, apart from those of the v6.1 commits that it folds; microsoft/openvmm#4619 proposed the fallible unit start that the v4.0 reorganization retired, in favor of microsoft/nvx#1232; see [The v4.0 reorganization](#the-v40-reorganization); folds v6.1 234 (part), 235, and 236 (part))
-- 012 `b64c8e467` - openvmm: make VM resume fallible (v6.1 012, v6.0 016, v4.0 019, v3.0 028, v2.4 029; **closed upstream**: microsoft/openvmm#4623 was closed in favor of microsoft/nvx#1232, but the resume stays fallible: the post-restore input gate, the restore readiness event, and the time ABI's TSC offset measurement fail it)
-- 013 `2fe879b41` - state_unit: record the exact unit inventory in saved state (v6.1 013, v6.0 017, v4.0 020, v3.0 029, v2.4 030; **open upstream**: microsoft/openvmm#4624)
-- 014 `3f37fab5c` - vmcore: add device input quiesce and resume (v6.1 014, v6.0 018, v4.0 022, v3.0 031, v2.4 032; **open upstream**: microsoft/openvmm#4626, stacked on microsoft/openvmm#4872, without the input gate's deadline, which the v5.0 reorganization removed here too, by folding v4.0 position 216; folds v6.1 240 (part))
+- 011 `8aa86bc26` - state_unit: roll back a partial start instead of panicking (v6.1 011, v6.0 015, v4.0 018, v3.0 026, v2.4 027; **open upstream**: microsoft/openvmm#4872, with review changes that the chain lacks, apart from those of the v6.1 commits that it folds; microsoft/openvmm#4619 proposed the fallible unit start that the v4.0 reorganization retired, in favor of microsoft/nvx#1232; see [The v4.0 reorganization](#the-v40-reorganization); folds v6.1 234 (part), 235, and 236 (part))
+- 012 `b385ba898` - openvmm: make VM resume fallible (v6.1 012, v6.0 016, v4.0 019, v3.0 028, v2.4 029; **closed upstream**: microsoft/openvmm#4623 was closed in favor of microsoft/nvx#1232, but the resume stays fallible: the post-restore input gate, the restore readiness event, and the time ABI's TSC offset measurement fail it)
+- 013 `a861462ec` - state_unit: record the exact unit inventory in saved state (v6.1 013, v6.0 017, v4.0 020, v3.0 029, v2.4 030; **open upstream**: microsoft/openvmm#4624)
+- 014 `4d5f410ea` - vmcore: add device input quiesce and resume (v6.1 014, v6.0 018, v4.0 022, v3.0 031, v2.4 032; **open upstream**: microsoft/openvmm#4626, stacked on microsoft/openvmm#4872, without the input gate's deadline, which the v5.0 reorganization removed here too, by folding v4.0 position 216; folds v6.1 240 (part))
 
 Landed upstream and dropped from the chain:
 
@@ -4404,65 +4514,65 @@ Retired by the v4.0 and v5.0 reorganizations:
 <details>
 <summary><strong>PR10 - Portable CPU and clock state (U)</strong> - 13 commits</summary>
 
-- 015 `3e87fad8e` - vmcore, state_unit: advance guest time across stopped downtime (v6.1 015, v6.0 019, v4.0 024, v3.0 033, v2.4 033; folds v2.4 213 (part) and 371 (part), and v6.1 234 (part))
-- 016 `6bd032ec4` - vmcore: skip a periodic timer's missed periods at once (v6.1 261, microsoft/openvmm#5073; moved here by the v7.0 reorganization, ahead of position 018, whose RTC restarts its periodic timer at its saved deadline; can go upstream on its own)
-- 017 `e85870e64` - vmcore: start a periodic timer at a given deadline (v6.1 270, microsoft/openvmm#5077; moved here by the v7.0 reorganization, ahead of position 018, whose RTC restarts its periodic timer at its saved deadline through it; can go upstream on its own after position 016)
-- 018 `19cc350df` - chipset: persist and advance the RTC clock (v6.1 016, v6.0 020, v4.0 025, v3.0 034, v2.4 034; folds v2.4 213 (part), and v6.1 271 (part) and 273 (part))
-- 019 `64c4ffb54` - chipset: reject inconsistent RTC interrupt state on restore (v6.1 017, v6.0 021, v4.0 026, v3.0 035, v2.4 035; folds v6.1 271 (part) and 273 (part))
-- 020 `5811d0122` - chipset: catch up the PIT after downtime (v6.1 018, v6.0 022, v4.0 027, v3.0 036, v2.4 036)
-- 021 `b1bcc8f7f` - virt: define a canonical x86 CPU compatibility contract (v6.1 019, v6.0 023, v4.0 028, v3.0 037, v2.4 037)
-- 022 `814ef3aa0` - virt: record TSC-deadline support and advance APIC timers (v6.1 020, v6.0 024, v4.0 029, v3.0 038, v2.4 038; **partly superseded upstream**: microsoft/openvmm#4704, merged as `1c093df84` before the fork base, adds the same `TscDeadline` state element and backend accessors, whose chain copies this commit no longer adds; folds v2.4 324 (part))
-- 023 `bb1ed7453` - virt: add exact TSC-frequency helpers and snapshot clock hooks (v6.1 021, v6.0 025, v4.0 030, v3.0 039, v2.4 039)
-- 024 `cbe1c4e8e` - virt_kvm: save and restore exact TSC and kvm-clock state (v6.1 022, v6.0 026, v4.0 031, v3.0 040, v2.4 040)
-- 025 `a5ae10b28` - virt_mshv: synchronize restored vCPU clocks and expose the exact TSC frequency (v6.1 023, v6.0 027, v4.0 032, v3.0 041, v2.4 041; folds v2.4 373 (part))
-- 026 `cc4275ed5` - virt_whp: synchronize restored vCPU clocks and keep SMP TSC reads coherent (v6.1 024, v6.0 028, v4.0 033, v3.0 042, v2.4 042; folds v2.4 312 and 324 (part))
-- 027 `5f6158124` - vmm_core: advance VP TSC and APIC timers across downtime (v6.1 025, v6.0 029, v4.0 034, v3.0 043, v2.4 043)
+- 015 `9f254770b` - vmcore, state_unit: advance guest time across stopped downtime (v6.1 015, v6.0 019, v4.0 024, v3.0 033, v2.4 033; folds v2.4 213 (part) and 371 (part), and v6.1 234 (part))
+- 016 `4ef77bd1f` - vmcore: skip a periodic timer's missed periods at once (v6.1 261, microsoft/openvmm#5073; moved here by the v7.0 reorganization, ahead of position 018, whose RTC restarts its periodic timer at its saved deadline; can go upstream on its own)
+- 017 `569f78f59` - vmcore: start a periodic timer at a given deadline (v6.1 270, microsoft/openvmm#5077; moved here by the v7.0 reorganization, ahead of position 018, whose RTC restarts its periodic timer at its saved deadline through it; can go upstream on its own after position 016)
+- 018 `1c6059f0f` - chipset: persist and advance the RTC clock (v6.1 016, v6.0 020, v4.0 025, v3.0 034, v2.4 034; folds v2.4 213 (part), and v6.1 271 (part) and 273 (part))
+- 019 `bedaaeb17` - chipset: reject inconsistent RTC interrupt state on restore (v6.1 017, v6.0 021, v4.0 026, v3.0 035, v2.4 035; folds v6.1 271 (part) and 273 (part))
+- 020 `aec5fb643` - chipset: catch up the PIT after downtime (v6.1 018, v6.0 022, v4.0 027, v3.0 036, v2.4 036)
+- 021 `ce62cbf86` - virt: define a canonical x86 CPU compatibility contract (v6.1 019, v6.0 023, v4.0 028, v3.0 037, v2.4 037)
+- 022 `26374ae5a` - virt: record TSC-deadline support and advance APIC timers (v6.1 020, v6.0 024, v4.0 029, v3.0 038, v2.4 038; **partly superseded upstream**: microsoft/openvmm#4704, merged as `1c093df84` before the fork base, adds the same `TscDeadline` state element and backend accessors, whose chain copies this commit no longer adds; folds v2.4 324 (part))
+- 023 `e345f79c8` - virt: add exact TSC-frequency helpers and snapshot clock hooks (v6.1 021, v6.0 025, v4.0 030, v3.0 039, v2.4 039)
+- 024 `fe1f3f144` - virt_kvm: save and restore exact TSC and kvm-clock state (v6.1 022, v6.0 026, v4.0 031, v3.0 040, v2.4 040)
+- 025 `87e5a1499` - virt_mshv: synchronize restored vCPU clocks and expose the exact TSC frequency (v6.1 023, v6.0 027, v4.0 032, v3.0 041, v2.4 041; folds v2.4 373 (part))
+- 026 `fead6b254` - virt_whp: synchronize restored vCPU clocks and keep SMP TSC reads coherent (v6.1 024, v6.0 028, v4.0 033, v3.0 042, v2.4 042; folds v2.4 312 and 324 (part))
+- 027 `fea603ce9` - vmm_core: advance VP TSC and APIC timers across downtime (v6.1 025, v6.0 029, v4.0 034, v3.0 043, v2.4 043)
 
 </details>
 
 <details>
 <summary><strong>PR11 - Snapshot publication protocol (U)</strong> - 4 commits</summary>
 
-- 028 `c4ec3519b` - openvmm_defs: add opt-in snapshot lifecycle profiling (v6.1 026, v6.0 030, v4.0 035, v3.0 044, v2.4 044)
-- 029 `bc1c60754` - openvmm_helpers: version the snapshot manifest format and bound its decoding (v6.1 027, v6.0 031, v4.0 036, v3.0 045, v2.4 045)
-- 030 `da1aa92a3` - openvmm_helpers: publish snapshots atomically through durable staging (v6.1 028, v6.0 032, v4.0 037, v3.0 046, v2.4 046; folds v6.1 267 (part) and 269)
-- 031 `f30da47bd` - openvmm: publish the exact file-backed RAM handle (v6.1 029, v6.0 033, v4.0 038, v3.0 047, v2.4 047; folds v2.4 317 (part))
+- 028 `99707a0bf` - openvmm_defs: add opt-in snapshot lifecycle profiling (v6.1 026, v6.0 030, v4.0 035, v3.0 044, v2.4 044)
+- 029 `d66488008` - openvmm_helpers: version the snapshot manifest format and bound its decoding (v6.1 027, v6.0 031, v4.0 036, v3.0 045, v2.4 045)
+- 030 `4a44532d0` - openvmm_helpers: publish snapshots atomically through durable staging (v6.1 028, v6.0 032, v4.0 037, v3.0 046, v2.4 046; folds v6.1 267 (part) and 269)
+- 031 `eee71081d` - openvmm: publish the exact file-backed RAM handle (v6.1 029, v6.0 033, v4.0 038, v3.0 047, v2.4 047; folds v2.4 317 (part))
 
 </details>
 
 <details>
 <summary><strong>PR12 - Immutable private-CoW restore (U)</strong> - 5 commits</summary>
 
-- 032 `002f67201` - membacking: map guest RAM privately copy-on-write with fault accounting (v6.1 030, v6.0 034, v4.0 039, v3.0 048, v2.4 048; folds v2.4 375 (part))
-- 033 `53a21ee90` - openvmm_helpers: open snapshots once and read artifacts relative to the directory (v6.1 031, v6.0 035, v4.0 040, v3.0 049, v2.4 049; folds v5.1 221 (part), and v6.1 264)
-- 034 `9250dac33` - openvmm: restore RAM through a private CoW mapping and retain generation handles (v6.1 032, v6.0 036, v4.0 041, v3.0 050, v2.4 050; folds v2.4 375 (part) and v5.1 221 (part), and v6.1 267 (part))
-- 035 `df6644ab2` - openvmm: signal restore readiness to a local socket or pipe (v6.1 033, v6.0 037, v4.0 042, v3.0 051, v2.4 051)
-- 036 `dcb8436cb` - virt_whp: resolve unmapped-GPA faults and register restored RAM lazily (v6.1 034, v6.0 038, v4.0 043, v3.0 052, v2.4 052; folds v2.4 313 and 382 (part))
+- 032 `75f1282c7` - membacking: map guest RAM privately copy-on-write with fault accounting (v6.1 030, v6.0 034, v4.0 039, v3.0 048, v2.4 048; folds v2.4 375 (part))
+- 033 `a5a9e5aa6` - openvmm_helpers: open snapshots once and read artifacts relative to the directory (v6.1 031, v6.0 035, v4.0 040, v3.0 049, v2.4 049; folds v5.1 221 (part), and v6.1 264)
+- 034 `d5ef7dbb3` - openvmm: restore RAM through a private CoW mapping and retain generation handles (v6.1 032, v6.0 036, v4.0 041, v3.0 050, v2.4 050; folds v2.4 375 (part) and v5.1 221 (part), and v6.1 267 (part))
+- 035 `d43a30a90` - openvmm: signal restore readiness to a local socket or pipe (v6.1 033, v6.0 037, v4.0 042, v3.0 051, v2.4 051)
+- 036 `d7e43e399` - virt_whp: resolve unmapped-GPA faults and register restored RAM lazily (v6.1 034, v6.0 038, v4.0 043, v3.0 052, v2.4 052; folds v2.4 313 and 382 (part))
 
 </details>
 
 <details>
 <summary><strong>PR13 - Generic virtio persistence (U)</strong> - 12 commits</summary>
 
-- 037 `fb0c836af` - virtio: add device-private saved state and restore it while the device is stopped (v6.1 035, v6.0 039, v4.0 044, v3.0 053, v2.4 053; folds v2.4 372; rewritten by the v4.0 reorganization to restore device-private state into the stopped device, for microsoft/nvx#1232)
-- 038 `cc9206aa0` - virtio: forward input quiesce and resume through transports (v6.1 036, v6.0 040, v4.0 045, v3.0 054, v2.4 054; folds v6.1 240 (part))
-- 039 `28d07b2cb` - serial_socket: drop the connection on any write failure (v6.1 037, v6.0 041, v4.0 015, v3.0 019, v2.4 020; folds v4.0 218, which explains and tests the write handling; moved from PR06 by the v5.0 reorganization: it carried the first revision of microsoft/openvmm#4605, which merged narrowed to the read path as `48e0681e9`, and stays for the guest output that position 040's `Retain` policy and PR15's portb console keep for the next peer, so it goes upstream with this PR)
-- 040 `ec13c36b2` - virtio_console: add attachment identities and reconnect and disconnect policies (v6.1 038, v6.0 042, v4.0 046, v3.0 055, v2.4 055; folds v2.4 380 (part))
-- 041 `028933c64` - virtio_console: persist buffered direct-console I/O (v6.1 039, v6.0 043, v4.0 047, v3.0 056, v2.4 056; folds v4.0 219, which tests that a `Retain` console keeps output for the next peer, re-expressed for this commit's harness, and v6.1 240 (part))
-- 042 `5d2338a2c` - net_backend: add an endpoint queue quiesce contract (v6.1 040, v6.0 044, v4.0 048, v3.0 057, v2.4 057)
-- 043 `fce507c27` - net_tap: quiesce queues and retain pending transmit ownership (v6.1 041, v6.0 045, v4.0 049, v3.0 058, v2.4 058; folds v2.4 309 (part) and 379 (part))
-- 044 `a1e933705` - net_consomme: quiesce endpoint queues (v6.1 042, v6.0 046, v4.0 050, v3.0 059, v2.4 059)
-- 045 `79bd275c5` - consomme: add an exact static IPv4 and gateway identity (v6.1 043, v6.0 047, v4.0 051, v3.0 060, v2.4 060)
-- 046 `4ecb587ee` - virtio_net: persist drained queue state for static-identity NICs (v6.1 044, v6.0 048, v4.0 052, v3.0 061, v2.4 061; folds v6.1 240 (part) and 268)
-- 047 `c0a543f60` - fuse: save and restore negotiated session state (v6.1 045, v6.0 049, v4.0 053, v3.0 062, v2.4 062)
-- 048 `4b33617c6` - virtiofs: track inode aliases through link, rename, and unlink (v6.1 046, v6.0 050, v4.0 054, v3.0 063, v2.4 063)
+- 037 `9d5bde6b6` - virtio: add device-private saved state and restore it while the device is stopped (v6.1 035, v6.0 039, v4.0 044, v3.0 053, v2.4 053; folds v2.4 372; rewritten by the v4.0 reorganization to restore device-private state into the stopped device, for microsoft/nvx#1232)
+- 038 `a15ebdc8d` - virtio: forward input quiesce and resume through transports (v6.1 036, v6.0 040, v4.0 045, v3.0 054, v2.4 054; folds v6.1 240 (part))
+- 039 `c032b542b` - serial_socket: drop the connection on any write failure (v6.1 037, v6.0 041, v4.0 015, v3.0 019, v2.4 020; folds v4.0 218, which explains and tests the write handling; moved from PR06 by the v5.0 reorganization: it carried the first revision of microsoft/openvmm#4605, which merged narrowed to the read path as `48e0681e9`, and stays for the guest output that position 040's `Retain` policy and PR15's portb console keep for the next peer, so it goes upstream with this PR)
+- 040 `001b572b6` - virtio_console: add attachment identities and reconnect and disconnect policies (v6.1 038, v6.0 042, v4.0 046, v3.0 055, v2.4 055; folds v2.4 380 (part))
+- 041 `55c415e56` - virtio_console: persist buffered direct-console I/O (v6.1 039, v6.0 043, v4.0 047, v3.0 056, v2.4 056; folds v4.0 219, which tests that a `Retain` console keeps output for the next peer, re-expressed for this commit's harness, and v6.1 240 (part))
+- 042 `0f02e7336` - net_backend: add an endpoint queue quiesce contract (v6.1 040, v6.0 044, v4.0 048, v3.0 057, v2.4 057)
+- 043 `21b2194a4` - net_tap: quiesce queues and retain pending transmit ownership (v6.1 041, v6.0 045, v4.0 049, v3.0 058, v2.4 058; folds v2.4 309 (part) and 379 (part))
+- 044 `cf5d31578` - net_consomme: quiesce endpoint queues (v6.1 042, v6.0 046, v4.0 050, v3.0 059, v2.4 059)
+- 045 `058ad5710` - consomme: add an exact static IPv4 and gateway identity (v6.1 043, v6.0 047, v4.0 051, v3.0 060, v2.4 060)
+- 046 `eb9e0e00b` - virtio_net: persist drained queue state for static-identity NICs (v6.1 044, v6.0 048, v4.0 052, v3.0 061, v2.4 061; folds v6.1 240 (part) and 268)
+- 047 `3daff84aa` - fuse: save and restore negotiated session state (v6.1 045, v6.0 049, v4.0 053, v3.0 062, v2.4 062)
+- 048 `bc4e1fad7` - virtiofs: track inode aliases through link, rename, and unlink (v6.1 046, v6.0 050, v4.0 054, v3.0 063, v2.4 063)
 
 </details>
 
 <details>
 <summary><strong>PR14 - Firmware-less direct boot, loader half (U)</strong> - 1 commit + 4 landed upstream</summary>
 
-- 049 `631aea0ff` - vmm_core: make level-triggered legacy IRQs explicit (v6.1 047, v6.0 054, v4.0 058, v3.0 067, v2.4 067; **not upstream**: microsoft/openvmm#4611 was closed after review suggested combining it with the commit that needs it; folds v2.4 326)
+- 049 `9aa49a98b` - vmm_core: make level-triggered legacy IRQs explicit (v6.1 047, v6.0 054, v4.0 058, v3.0 067, v2.4 067; **not upstream**: microsoft/openvmm#4611 was closed after review suggested combining it with the commit that needs it; folds v2.4 326)
 
 Landed upstream and dropped from the chain:
 
@@ -4480,162 +4590,162 @@ Landed upstream and dropped from the chain:
 <details>
 <summary><strong>PR15 - microVM machine profile and minimal chipset (P)</strong> - 11 commits</summary>
 
-- 050 `a6c338b95` - openvmm_defs: add machine-profile selection (v6.1 048, v6.0 055, v4.0 059, v3.0 068, v2.4 068)
-- 051 `16d19ecd3` - virt: describe the deterministic microVM topology (v6.1 049, v6.0 056, v4.0 060, v3.0 069, v2.4 069)
-- 052 `e040a7a58` - chipset: add an RTC mode seam (v6.1 050, v6.0 057, v4.0 061, v3.0 070, v2.4 070; folds v6.1 271 (part))
-- 053 `89a56fbcd` - vm_manifest_builder: add the minimal microVM base chipset without ACPI (v6.1 051, v6.0 058, v4.0 062, v3.0 071, v2.4 071)
-- 054 `05d872f0b` - vmm_core: add status-bearing guest power-off (v6.1 052, v6.0 059, v4.0 063, v3.0 072, v2.4 072)
-- 055 `974bf5f96` - chipset: add the microVM portb console (v6.1 053, v6.0 060, v4.0 064, v3.0 073, v2.4 073)
-- 056 `30099c8ab` - chipset: add the microVM shutdown and exit-status port (v6.1 054, v6.0 061, v4.0 065, v3.0 074, v2.4 074)
-- 057 `9e3dcbf79` - openvmm_core: boot microVMs through MP-table direct load (v6.1 055, v6.0 062, v4.0 066, v3.0 075, v2.4 075; folds v2.4 315 and 314 (part), and v6.1 263 (part))
-- 058 `78038439c` - openvmm_core: reject host save, pulse save/restore, and worker restart for microVMs (v6.1 056, v6.0 063, v4.0 067, v3.0 076, v2.4 076; folds v2.4 314 (part))
-- 059 `936fb32ef` - openvmm_entry: expose `--machine microvm` (v6.1 057, v6.0 064, v4.0 068, v3.0 077, v2.4 077; folds v2.4 316 (part), 317 (part), and 320 (part))
-- 060 `65258e052` - petri, vmm_tests: add a microVM builder, portb harness, and cold-boot test (v6.1 058, v6.0 065, v4.0 069, v3.0 078, v2.4 078; folds v2.4 380 (part))
+- 050 `a43ebb21f` - openvmm_defs: add machine-profile selection (v6.1 048, v6.0 055, v4.0 059, v3.0 068, v2.4 068)
+- 051 `0ce005036` - virt: describe the deterministic microVM topology (v6.1 049, v6.0 056, v4.0 060, v3.0 069, v2.4 069)
+- 052 `e9efb9201` - chipset: add an RTC mode seam (v6.1 050, v6.0 057, v4.0 061, v3.0 070, v2.4 070; folds v6.1 271 (part))
+- 053 `266989a93` - vm_manifest_builder: add the minimal microVM base chipset without ACPI (v6.1 051, v6.0 058, v4.0 062, v3.0 071, v2.4 071)
+- 054 `443389e4f` - vmm_core: add status-bearing guest power-off (v6.1 052, v6.0 059, v4.0 063, v3.0 072, v2.4 072)
+- 055 `b0f9dced1` - chipset: add the microVM portb console (v6.1 053, v6.0 060, v4.0 064, v3.0 073, v2.4 073)
+- 056 `afb93af63` - chipset: add the microVM shutdown and exit-status port (v6.1 054, v6.0 061, v4.0 065, v3.0 074, v2.4 074)
+- 057 `6dcc237a5` - openvmm_core: boot microVMs through MP-table direct load (v6.1 055, v6.0 062, v4.0 066, v3.0 075, v2.4 075; folds v2.4 315 and 314 (part), and v6.1 263 (part))
+- 058 `5af71b4f2` - openvmm_core: reject host save, pulse save/restore, and worker restart for microVMs (v6.1 056, v6.0 063, v4.0 067, v3.0 076, v2.4 076; folds v2.4 314 (part))
+- 059 `92aba67ea` - openvmm_entry: expose `--machine microvm` (v6.1 057, v6.0 064, v4.0 068, v3.0 077, v2.4 077; folds v2.4 316 (part), 317 (part), and 320 (part))
+- 060 `9ef208a3d` - petri, vmm_tests: add a microVM builder, portb harness, and cold-boot test (v6.1 058, v6.0 065, v4.0 069, v3.0 078, v2.4 078; folds v2.4 380 (part))
 
 </details>
 
 <details>
 <summary><strong>PR16 - Fixed virtio-MMIO ABI and shared interrupt status (P)</strong> - 4 commits</summary>
 
-- 061 `1fd06a7ad` - virtio: allow feature masking for virtio-MMIO devices (v6.1 059, v6.0 066, v4.0 070, v3.0 079, v2.4 079)
-- 062 `fc055e19d` - openvmm: place virtio devices at fixed microVM MMIO slots (v6.1 060, v6.0 067, v4.0 071, v3.0 080, v2.4 080; folds v2.4 314 (part))
-- 063 `5050917eb` - virtio: add shared MMIO interrupt status and ACK doorbells (v6.1 061, v6.0 068, v4.0 072, v3.0 081, v2.4 081)
-- 064 `ddac51484` - openvmm: use shared interrupt status for fixed microVM slots (v6.1 062, v6.0 069, v4.0 073, v3.0 082, v2.4 082)
+- 061 `2ea61a194` - virtio: allow feature masking for virtio-MMIO devices (v6.1 059, v6.0 066, v4.0 070, v3.0 079, v2.4 079)
+- 062 `7a8473d86` - openvmm: place virtio devices at fixed microVM MMIO slots (v6.1 060, v6.0 067, v4.0 071, v3.0 080, v2.4 080; folds v2.4 314 (part))
+- 063 `c26f9975a` - virtio: add shared MMIO interrupt status and ACK doorbells (v6.1 061, v6.0 068, v4.0 072, v3.0 081, v2.4 081)
+- 064 `8b8834095` - openvmm: use shared interrupt status for fixed microVM slots (v6.1 062, v6.0 069, v4.0 073, v3.0 082, v2.4 082)
 
 </details>
 
 <details>
 <summary><strong>PR17 - microVM snapshot capture and authoritative restore (P)</strong> - 11 commits</summary>
 
-- 065 `eefa0d9b4` - vmm_core: stop VPs at a deferred-I/O boundary (v6.1 063, v6.0 070, v4.0 074, v3.0 083, v2.4 083)
-- 066 `8055aa4a3` - chipset: add the microVM snapshot-request port (v6.1 064, v6.0 071, v4.0 075, v3.0 084, v2.4 084)
-- 067 `cc7a4014e` - openvmm_core: establish the post-OUT snapshot boundary in the worker (v6.1 065, v6.0 072, v4.0 076, v3.0 085, v2.4 085; folds v6.1 236 (part))
-- 068 `69cbe3de9` - openvmm_core: fence management mutations during snapshot boundaries (v6.1 066, v6.0 073, v4.0 077, v3.0 086, v2.4 086)
-- 069 `e698936c7` - openvmm_helpers: define the authoritative microVM machine contract (v6.1 067, v6.0 074, v4.0 078, v3.0 087, v2.4 087)
-- 070 `967071f8c` - openvmm_core: propagate the guest TSC frequency for snapshot-capable cold boots (v6.1 068, v6.0 075, v4.0 079, v3.0 088, v2.4 088)
-- 071 `32585c6f0` - openvmm_entry: capture guest-requested microVM snapshots (v6.1 069, v6.0 076, v4.0 080, v3.0 089, v2.4 089; folds v2.4 328 (part), and v6.1 265 (part) and 267 (part))
-- 072 `144d19bf0` - virt: build a reproducible CPU and clock contract for microVM partitions (v6.1 070, v6.0 077, v4.0 081, v3.0 090, v2.4 090)
-- 073 `591f6baca` - openvmm_core: validate restored CPU and clock contracts and apply host downtime (v6.1 071, v6.0 078, v4.0 082, v3.0 091, v2.4 091)
-- 074 `28a204cc9` - openvmm_entry: restore microVMs authoritatively (v6.1 072, v6.0 079, v4.0 083, v3.0 092, v2.4 092)
-- 075 `2bf9417c8` - vmm_tests: check that an unconfigured microVM snapshot request continues (v6.1 073, v6.0 080, v4.0 084, v3.0 093, v2.4 093)
+- 065 `68a2d64c1` - vmm_core: stop VPs at a deferred-I/O boundary (v6.1 063, v6.0 070, v4.0 074, v3.0 083, v2.4 083)
+- 066 `42b523b81` - chipset: add the microVM snapshot-request port (v6.1 064, v6.0 071, v4.0 075, v3.0 084, v2.4 084)
+- 067 `a5be1bab6` - openvmm_core: establish the post-OUT snapshot boundary in the worker (v6.1 065, v6.0 072, v4.0 076, v3.0 085, v2.4 085; folds v6.1 236 (part))
+- 068 `80023de1e` - openvmm_core: fence management mutations during snapshot boundaries (v6.1 066, v6.0 073, v4.0 077, v3.0 086, v2.4 086)
+- 069 `fea77ff0a` - openvmm_helpers: define the authoritative microVM machine contract (v6.1 067, v6.0 074, v4.0 078, v3.0 087, v2.4 087)
+- 070 `d5f854bda` - openvmm_core: propagate the guest TSC frequency for snapshot-capable cold boots (v6.1 068, v6.0 075, v4.0 079, v3.0 088, v2.4 088)
+- 071 `da602812d` - openvmm_entry: capture guest-requested microVM snapshots (v6.1 069, v6.0 076, v4.0 080, v3.0 089, v2.4 089; folds v2.4 328 (part), and v6.1 265 (part) and 267 (part))
+- 072 `7a292f606` - virt: build a reproducible CPU and clock contract for microVM partitions (v6.1 070, v6.0 077, v4.0 081, v3.0 090, v2.4 090)
+- 073 `0da4829c8` - openvmm_core: validate restored CPU and clock contracts and apply host downtime (v6.1 071, v6.0 078, v4.0 082, v3.0 091, v2.4 091)
+- 074 `dee3c30c9` - openvmm_entry: restore microVMs authoritatively (v6.1 072, v6.0 079, v4.0 083, v3.0 092, v2.4 092)
+- 075 `dc9696109` - vmm_tests: check that an unconfigured microVM snapshot request continues (v6.1 073, v6.0 080, v4.0 084, v3.0 093, v2.4 093)
 
 </details>
 
 <details>
 <summary><strong>PR18 - microVM host attachments and device persistence (P)</strong> - 12 commits</summary>
 
-- 076 `8311891a0` - openvmm_entry: add connect= serial backends with bounded timeouts (v6.1 074, v6.0 081, v4.0 085, v3.0 094, v2.4 094; folds v2.4 144)
-- 077 `d39909a99` - openvmm: persist the microVM boot console and rebuild its attachment on restore (v6.1 075, v6.0 082, v4.0 086, v3.0 095, v2.4 095)
-- 078 `e96f8f754` - openvmm: attach a portable Consomme NIC to microVMs (v6.1 076, v6.0 083, v4.0 087, v3.0 096, v2.4 096; folds v2.4 376 and 316 (part), and v6.1 241 (part))
-- 079 `a950df2a0` - openvmm: persist the microVM NIC and restore a fresh endpoint generation (v6.1 077, v6.0 084, v4.0 088, v3.0 097, v2.4 097)
-- 080 `461cd8ac3` - net_tap: support persistent TAP attachments (v6.1 078, v6.0 085, v4.0 089, v3.0 098, v2.4 098)
-- 081 `41686521c` - virtiofs: add the fixed microVM filesystem profile (v6.1 079, v6.0 086, v4.0 090, v3.0 099, v2.4 099)
-- 082 `9100e10f9` - openvmm_entry: expose `--mount` for the microVM HostFs slot (v6.1 080, v6.0 087, v4.0 091, v3.0 100, v2.4 100)
-- 083 `89b7b8daf` - virtiofs: persist microVM FUSE namespaces, handles, and directory cookies (v6.1 081, v6.0 088, v4.0 092, v3.0 101, v2.4 101; folds v2.4 335 (part), and v6.1 240 (part))
-- 084 `804ab23e3` - openvmm: snapshot the microVM filesystem and revalidate it on restore (v6.1 082, v6.0 089, v4.0 093, v3.0 102, v2.4 102)
-- 085 `ad4d90921` - openvmm: reserve a dormant microVM filesystem slot (v6.1 083, v6.0 090, v4.0 094, v3.0 103, v2.4 103; folds v2.4 335 (part))
-- 302 `c02849eec` - microVM: refuse a decoded network identity other than the derived one (microsoft/openvmm#5132; **fold into 078**, its test's configuration into 093, its IPv6 cases into 193)
-- 334 `2f3007255` - virtiofs: preflight a microVM object of another file type as a new node (microsoft/openvmm#5203; **fold into 081**, its tests into 083)
+- 076 `8e55ba5e5` - openvmm_entry: add connect= serial backends with bounded timeouts (v6.1 074, v6.0 081, v4.0 085, v3.0 094, v2.4 094; folds v2.4 144)
+- 077 `e40773d99` - openvmm: persist the microVM boot console and rebuild its attachment on restore (v6.1 075, v6.0 082, v4.0 086, v3.0 095, v2.4 095)
+- 078 `5e75bbdf7` - openvmm: attach a portable Consomme NIC to microVMs (v6.1 076, v6.0 083, v4.0 087, v3.0 096, v2.4 096; folds v2.4 376 and 316 (part), and v6.1 241 (part))
+- 079 `bac21d428` - openvmm: persist the microVM NIC and restore a fresh endpoint generation (v6.1 077, v6.0 084, v4.0 088, v3.0 097, v2.4 097)
+- 080 `fcc19268e` - net_tap: support persistent TAP attachments (v6.1 078, v6.0 085, v4.0 089, v3.0 098, v2.4 098)
+- 081 `4354bcc9e` - virtiofs: add the fixed microVM filesystem profile (v6.1 079, v6.0 086, v4.0 090, v3.0 099, v2.4 099)
+- 082 `87b137fec` - openvmm_entry: expose `--mount` for the microVM HostFs slot (v6.1 080, v6.0 087, v4.0 091, v3.0 100, v2.4 100)
+- 083 `7315c9bf8` - virtiofs: persist microVM FUSE namespaces, handles, and directory cookies (v6.1 081, v6.0 088, v4.0 092, v3.0 101, v2.4 101; folds v2.4 335 (part), and v6.1 240 (part))
+- 084 `af1a62c49` - openvmm: snapshot the microVM filesystem and revalidate it on restore (v6.1 082, v6.0 089, v4.0 093, v3.0 102, v2.4 102)
+- 085 `45704afb4` - openvmm: reserve a dormant microVM filesystem slot (v6.1 083, v6.0 090, v4.0 094, v3.0 103, v2.4 103; folds v2.4 335 (part))
+- 302 `8d71cff3a` - microVM: refuse a decoded network identity other than the derived one (microsoft/openvmm#5132; **fold into 078**, its test's configuration into 093, its IPv6 cases into 193)
+- 333 `2dbfb495a` - virtiofs: preflight a microVM object of another file type as a new node (microsoft/openvmm#5203; **fold into 081**, its tests into 083)
 
 </details>
 
 <details>
 <summary><strong>PR19 - Sandbox block roles and snapshot tiers (N/P)</strong> - 3 commits</summary>
 
-- 086 `8bac7ff2d` - openvmm: add fixed-role microVM sandbox block slots (v6.1 084, v6.0 091, v4.0 095, v3.0 104, v2.4 104; folds v2.4 320 (part))
-- 087 `2ee51e8d0` - openvmm: snapshot sandbox blocks with paired or fresh scratch (v6.1 085, v6.0 092, v4.0 096, v3.0 105, v2.4 105; folds v2.4 317 (part))
-- 088 `e55e6f3c5` - openvmm: add clone and resume tiers with single-use resume claims (v6.1 086, v6.0 093, v4.0 097, v3.0 106, v2.4 106; folds v2.4 320 (part), and v6.1 243 (part))
+- 086 `ef8854204` - openvmm: add fixed-role microVM sandbox block slots (v6.1 084, v6.0 091, v4.0 095, v3.0 104, v2.4 104; folds v2.4 320 (part))
+- 087 `212e73144` - openvmm: snapshot sandbox blocks with paired or fresh scratch (v6.1 085, v6.0 092, v4.0 096, v3.0 105, v2.4 105; folds v2.4 317 (part))
+- 088 `fb80162dd` - openvmm: add clone and resume tiers with single-use resume claims (v6.1 086, v6.0 093, v4.0 097, v3.0 106, v2.4 106; folds v2.4 320 (part), and v6.1 243 (part))
 
 </details>
 
 <details>
 <summary><strong>PR20 - Restore-time processor and memory activation (P)</strong> - 7 commits</summary>
 
-- 089 `5882ada56` - chipset: expose a stable generation ID and restore entropy on portb (v6.1 087, v6.0 094, v4.0 098, v3.0 107, v2.4 107)
-- 090 `ca6c90ca3` - openvmm: gate external input until post-restore repair completes (v6.1 088, v6.0 095, v4.0 099, v3.0 108, v2.4 108; folds v2.4 335 (part), and v6.1 240 (part))
-- 091 `aa5c04360` - vmm_core: instantiate an active VP prefix (v6.1 089, v6.0 096, v4.0 100, v3.0 109, v2.4 109)
-- 092 `5742c2e90` - openvmm: bring a restore-time processor prefix online (v6.1 090, v6.0 097, v4.0 101, v3.0 110, v2.4 110; folds v2.4 141, 142 (part), and 325 (part), and v5.1 148)
-- 093 `9ce0106df` - openvmm_core: back expandable restore RAM with fresh private memory (v6.1 091, v6.0 098, v4.0 102, v3.0 111, v2.4 111; folds v6.1 242 (part))
-- 094 `4619f89c9` - openvmm: add bounded restore-time memory expansion (v6.1 092, v6.0 099, v4.0 103, v3.0 112, v2.4 112; folds v2.4 320 (part))
-- 095 `1c0203d42` - openvmm_entry: pre-expand the Linux descriptor table at startup (v6.1 093, v6.0 100, v4.0 104, v3.0 113, v2.4 113)
+- 089 `a4a9d3270` - chipset: expose a stable generation ID and restore entropy on portb (v6.1 087, v6.0 094, v4.0 098, v3.0 107, v2.4 107)
+- 090 `c320c68e5` - openvmm: gate external input until post-restore repair completes (v6.1 088, v6.0 095, v4.0 099, v3.0 108, v2.4 108; folds v2.4 335 (part), and v6.1 240 (part))
+- 091 `5e915b7ab` - vmm_core: instantiate an active VP prefix (v6.1 089, v6.0 096, v4.0 100, v3.0 109, v2.4 109)
+- 092 `9d41b3bdd` - openvmm: bring a restore-time processor prefix online (v6.1 090, v6.0 097, v4.0 101, v3.0 110, v2.4 110; folds v2.4 141, 142 (part), and 325 (part), and v5.1 148)
+- 093 `c0abe3c97` - openvmm_core: back expandable restore RAM with fresh private memory (v6.1 091, v6.0 098, v4.0 102, v3.0 111, v2.4 111; folds v6.1 242 (part))
+- 094 `efcfa7d17` - openvmm: add bounded restore-time memory expansion (v6.1 092, v6.0 099, v4.0 103, v3.0 112, v2.4 112; folds v2.4 320 (part))
+- 095 `d04c81f37` - openvmm_entry: pre-expand the Linux descriptor table at startup (v6.1 093, v6.0 100, v4.0 104, v3.0 113, v2.4 113)
 
 </details>
 
 <details>
 <summary><strong>PR21 - Network egress policy (P/N)</strong> - 6 commits</summary>
 
-- 096 `545c4646e` - net_backend_resources: define a canonical bound IPv4 egress policy (v6.1 094, v6.0 101, v4.0 105, v3.0 114, v2.4 114)
-- 097 `2fa9f3cc4` - net_backend: let endpoints accept a run-scoped egress policy (v6.1 095, v6.0 102, v4.0 106, v3.0 115, v2.4 115)
-- 098 `eb76cb8b3` - net_consomme: enforce the egress policy on final transmitted bytes (v6.1 096, v6.0 103, v4.0 107, v3.0 116, v2.4 116; folds v2.4 379 (part))
-- 099 `08b3eed54` - net_tap: enforce the egress policy on TAP transmit (v6.1 097, v6.0 104, v4.0 108, v3.0 117, v2.4 117; folds v2.4 309 (part) and 379 (part))
-- 100 `66d7c1e28` - virtio_net: install and prefilter the egress policy (v6.1 098, v6.0 105, v4.0 109, v3.0 118, v2.4 118)
-- 101 `07903debb` - openvmm: add microVM network egress policy and bind it into snapshots (v6.1 099, v6.0 106, v4.0 110, v3.0 119, v2.4 119; folds v2.4 320 (part))
+- 096 `4189a685a` - net_backend_resources: define a canonical bound IPv4 egress policy (v6.1 094, v6.0 101, v4.0 105, v3.0 114, v2.4 114)
+- 097 `5c106c142` - net_backend: let endpoints accept a run-scoped egress policy (v6.1 095, v6.0 102, v4.0 106, v3.0 115, v2.4 115)
+- 098 `438f839d2` - net_consomme: enforce the egress policy on final transmitted bytes (v6.1 096, v6.0 103, v4.0 107, v3.0 116, v2.4 116; folds v2.4 379 (part))
+- 099 `015bea788` - net_tap: enforce the egress policy on TAP transmit (v6.1 097, v6.0 104, v4.0 108, v3.0 117, v2.4 117; folds v2.4 309 (part) and 379 (part))
+- 100 `aff67087d` - virtio_net: install and prefilter the egress policy (v6.1 098, v6.0 105, v4.0 109, v3.0 118, v2.4 118)
+- 101 `16922634e` - openvmm: add microVM network egress policy and bind it into snapshots (v6.1 099, v6.0 106, v4.0 110, v3.0 119, v2.4 119; folds v2.4 320 (part))
 
 </details>
 
 <details>
 <summary><strong>PR22 - Filesystem deny policy (P)</strong> - 2 commits</summary>
 
-- 102 `c6667715c` - virtiofs: enforce denied subtrees by object identity (v6.1 100, v6.0 107, v4.0 111, v3.0 120, v2.4 120)
-- 103 `178c6c66c` - openvmm: add --mount-deny and record denied paths in snapshots (v6.1 101, v6.0 108, v4.0 112, v3.0 121, v2.4 121; folds v2.4 320 (part))
+- 102 `f408ae2bc` - virtiofs: enforce denied subtrees by object identity (v6.1 100, v6.0 107, v4.0 111, v3.0 120, v2.4 120)
+- 103 `6536dff3b` - openvmm: add --mount-deny and record denied paths in snapshots (v6.1 101, v6.0 108, v4.0 112, v3.0 121, v2.4 121; folds v2.4 320 (part))
 
 </details>
 
 <details>
 <summary><strong>PR23 - Authenticated control console (N)</strong> - 10 commits</summary>
 
-- 104 `0b29e9e70` - serial_core: expose local peer identity and active-peer eviction (v6.1 102, v6.0 109, v4.0 113, v3.0 122, v2.4 122)
-- 105 `e9de5441c` - serial_socket: report Unix and named-pipe peer identities (v6.1 103, v6.0 110, v4.0 114, v3.0 123, v2.4 123; folds v2.4 374 (part), and v6.1 262 (part))
-- 106 `70dbb9fab` - virtio_console: define the control-session record protocol (v6.1 104, v6.0 111, v4.0 115, v3.0 124, v2.4 124)
-- 107 `bdac848b0` - virtio_console: add the control-session broker state machine (v6.1 105, v6.0 112, v4.0 116, v3.0 125, v2.4 125)
-- 108 `e87ab71fd` - virtio_console: attach the broker to serial I/O with receive credits (v6.1 106, v6.0 113, v4.0 117, v3.0 126, v2.4 126; folds v2.4 330 (part) and 384, and v6.1 240 (part))
-- 109 `e702c59ca` - virtio_console: save and restore broker state (v6.1 107, v6.0 114, v4.0 118, v3.0 127, v2.4 127)
-- 110 `bbfae6720` - openvmm: reserve the dedicated microVM control-console slot (v6.1 108, v6.0 115, v4.0 119, v3.0 128, v2.4 128)
-- 111 `5fb7392dd` - openvmm_helpers: record the control console in the microVM machine contract (v6.1 109, v6.0 116, v4.0 120, v3.0 129, v2.4 129)
-- 112 `1034eb65a` - openvmm_entry: add authenticated microVM control-console endpoints (v6.1 110, v6.0 117, v4.0 121, v3.0 130, v2.4 130; folds v2.4 330 (part), 374 (part), 385, 317 (part), and 320 (part), and v6.1 262 (part))
-- 113 `6c630a536` - openvmm_entry: restore listener endpoint rebinding (v6.1 111, v6.0 118, v4.0 122, v3.0 131, v2.4 143)
+- 104 `d4401ee18` - serial_core: expose local peer identity and active-peer eviction (v6.1 102, v6.0 109, v4.0 113, v3.0 122, v2.4 122)
+- 105 `7bda926a3` - serial_socket: report Unix and named-pipe peer identities (v6.1 103, v6.0 110, v4.0 114, v3.0 123, v2.4 123; folds v2.4 374 (part), and v6.1 262 (part))
+- 106 `cf8b2eb65` - virtio_console: define the control-session record protocol (v6.1 104, v6.0 111, v4.0 115, v3.0 124, v2.4 124)
+- 107 `669e7db8f` - virtio_console: add the control-session broker state machine (v6.1 105, v6.0 112, v4.0 116, v3.0 125, v2.4 125)
+- 108 `fc1964b37` - virtio_console: attach the broker to serial I/O with receive credits (v6.1 106, v6.0 113, v4.0 117, v3.0 126, v2.4 126; folds v2.4 330 (part) and 384, and v6.1 240 (part))
+- 109 `5f2ed82b4` - virtio_console: save and restore broker state (v6.1 107, v6.0 114, v4.0 118, v3.0 127, v2.4 127)
+- 110 `0098b60ad` - openvmm: reserve the dedicated microVM control-console slot (v6.1 108, v6.0 115, v4.0 119, v3.0 128, v2.4 128)
+- 111 `b28bc3ce8` - openvmm_helpers: record the control console in the microVM machine contract (v6.1 109, v6.0 116, v4.0 120, v3.0 129, v2.4 129)
+- 112 `50e05209c` - openvmm_entry: add authenticated microVM control-console endpoints (v6.1 110, v6.0 117, v4.0 121, v3.0 130, v2.4 130; folds v2.4 330 (part), 374 (part), 385, 317 (part), and 320 (part), and v6.1 262 (part))
+- 113 `a77e320e1` - openvmm_entry: restore listener endpoint rebinding (v6.1 111, v6.0 118, v4.0 122, v3.0 131, v2.4 143)
 
 </details>
 
 <details>
 <summary><strong>PR24 - Managed workload and outcome reporting (N)</strong> - 5 commits</summary>
 
-- 114 `3eec98a5b` - openvmm_entry: drain portb output before guest-requested exit (v6.1 112, v6.0 119, v4.0 123, v3.0 132, v2.4 131; folds v2.4 148 (part))
-- 115 `d15f9c092` - openvmm: add a fixed non-root workload identity (v6.1 113, v6.0 120, v4.0 124, v3.0 133, v2.4 132; folds v2.4 320 (part))
-- 116 `4f74c1bce` - openvmm: support a managed workload lifecycle (v6.1 114, v6.0 121, v4.0 125, v3.0 134, v2.4 133)
-- 117 `700f41686` - openvmm_entry: write bounded microVM outcome reports (v6.1 115, v6.0 122, v4.0 126, v3.0 135, v2.4 134)
-- 118 `443ac87dd` - Guide: describe teardown after a failed snapshot boundary (v6.1 116, v6.0 123, v4.0 127, v3.0 136, v2.4 135)
+- 114 `bab4af583` - openvmm_entry: drain portb output before guest-requested exit (v6.1 112, v6.0 119, v4.0 123, v3.0 132, v2.4 131; folds v2.4 148 (part))
+- 115 `70e54ec37` - openvmm: add a fixed non-root workload identity (v6.1 113, v6.0 120, v4.0 124, v3.0 133, v2.4 132; folds v2.4 320 (part))
+- 116 `d088d9d8d` - openvmm: support a managed workload lifecycle (v6.1 114, v6.0 121, v4.0 125, v3.0 134, v2.4 133)
+- 117 `d53b04670` - openvmm_entry: write bounded microVM outcome reports (v6.1 115, v6.0 122, v4.0 126, v3.0 135, v2.4 134)
+- 118 `5908c8186` - Guide: describe teardown after a failed snapshot boundary (v6.1 116, v6.0 123, v4.0 127, v3.0 136, v2.4 135)
 
 </details>
 
 <details>
 <summary><strong>PR25 - Management plane (P)</strong> - 2 commits</summary>
 
-- 119 `8b3480db6` - vmservice: create, capture, and restore microVMs over the management RPC (v6.1 117, v6.0 124, v4.0 128, v3.0 137, v2.4 136; folds v2.4 137 (part), 142 (part), 145, 148 (part), 310, 321, 377 (part), and 381)
-- 120 `b40f77f22` - ttrpc: propagate nonzero guest exit status (v6.1 118, v6.0 125, v4.0 129, v3.0 138, v2.4 137; folds v2.4 148 (part), and v6.1 266)
+- 119 `c1865e5da` - vmservice: create, capture, and restore microVMs over the management RPC (v6.1 117, v6.0 124, v4.0 128, v3.0 137, v2.4 136; folds v2.4 137 (part), 142 (part), 145, 148 (part), 310, 321, 377 (part), and 381)
+- 120 `0273bb325` - ttrpc: propagate nonzero guest exit status (v6.1 118, v6.0 125, v4.0 129, v3.0 138, v2.4 137; folds v2.4 148 (part), and v6.1 266)
 
 </details>
 
 <details>
 <summary><strong>PR26 - Profiling benchmark (U)</strong> - 1 commit</summary>
 
-- 121 `4a98fcf3a` - openvmm_helpers: add a publication and private-restore benchmark (v6.1 119, v6.0 126, v4.0 130, v3.0 139, v2.4 138; folds v2.4 375 (part), and v6.1 265 (part))
+- 121 `eefb26ccb` - openvmm_helpers: add a publication and private-restore benchmark (v6.1 119, v6.0 126, v4.0 130, v3.0 139, v2.4 138; folds v2.4 375 (part), and v6.1 265 (part))
 
 </details>
 
 <details>
 <summary><strong>PR27 - Safe symlinks for writable microVM shares (U/P)</strong> - 2 commits</summary>
 
-- 125 `f483afc94` - lxutil: add path confinement that never follows symbolic links (v6.1 123, v6.0 130, v4.0 134, v3.0 143, v2.4 146)
-- 126 `c928e8dc1` - virtiofs: allow symlink creation on read-write microVM shares (v6.1 124, v6.0 131, v4.0 135, v3.0 144, v2.4 147)
+- 125 `551d80703` - lxutil: add path confinement that never follows symbolic links (v6.1 123, v6.0 130, v4.0 134, v3.0 143, v2.4 146)
+- 126 `1e4928032` - virtiofs: allow symlink creation on read-write microVM shares (v6.1 124, v6.0 131, v4.0 135, v3.0 144, v2.4 147)
 
 </details>
 
 <details>
 <summary><strong>Fork-only tail (F)</strong> - 3 commits</summary>
 
-- 122 `81bb943b1` - ci: restrict privileged, self-hosted, and publishing jobs to microsoft/openvmm (v6.1 120, v6.0 127, v4.0 131, v3.0 140, v2.4 139; folds v2.4 383)
-- 123 `b0cc5afce` - ci: run the checkin gates on the feature/microvm branches (v6.1 121, v6.0 128, v4.0 132, v3.0 141, v2.4 308)
-- 124 `91dc2f416` - vmservice: keep NVX wire-tag compatibility (v6.1 122, v6.0 129, v4.0 133, v3.0 142, v2.4 140)
+- 122 `c5a107f2e` - ci: restrict privileged, self-hosted, and publishing jobs to microsoft/openvmm (v6.1 120, v6.0 127, v4.0 131, v3.0 140, v2.4 139; folds v2.4 383)
+- 123 `044a5be8b` - ci: run the checkin gates on the feature/microvm branches (v6.1 121, v6.0 128, v4.0 132, v3.0 141, v2.4 308)
+- 124 `b0121fd5d` - vmservice: keep NVX wire-tag compatibility (v6.1 122, v6.0 129, v4.0 133, v3.0 142, v2.4 140)
 
 </details>
