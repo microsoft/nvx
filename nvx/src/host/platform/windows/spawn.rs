@@ -322,7 +322,8 @@ fn spawn_listed(
         }
     }
     let inheritable = InheritableForSpawn::new(&handles[standard_handles..])?;
-    let jobs: Vec<HANDLE> = job.iter().map(raw).collect();
+    let jobs = job.as_ref().map(raw);
+    let jobs = jobs.as_slice();
     // A list cannot be empty: a child that inherits no handle at all is created without one, and
     // without inheritance.
     let lists = u32::from(!handles.is_empty()) + u32::from(!jobs.is_empty());
@@ -366,7 +367,7 @@ fn spawn_listed(
                     0,
                     PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
                     jobs.as_ptr().cast(),
-                    mem::size_of_val(jobs.as_slice()),
+                    mem::size_of_val(jobs),
                     ptr::null_mut(),
                     ptr::null(),
                 )
