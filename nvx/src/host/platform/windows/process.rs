@@ -319,9 +319,12 @@ const MACHINE_GUID_KEY: &str = r"SOFTWARE\Microsoft\Cryptography";
 /// machine GUID that Windows keeps in the registry value `MachineGuid` of [`MACHINE_GUID_KEY`], as
 /// 16 bytes in the order of its text.
 pub(crate) fn host_id() -> io::Result<[u8; 16]> {
+    /// Bounds one registry read in UTF-16 units, including the terminator, with room beyond a
+    /// canonical 36-unit MachineGuid; this is a read budget, not a GUID format limit.
+    const MACHINE_GUID_BUFFER_UNITS: usize = 64;
     let key = wide(MACHINE_GUID_KEY);
     let name = wide("MachineGuid");
-    let mut value = [0u16; 64];
+    let mut value = [0u16; MACHINE_GUID_BUFFER_UNITS];
     let mut size = mem::size_of_val(&value) as u32;
     // SAFETY: the names are NUL-terminated, the type flag admits only a REG_SZ, and the output
     // buffer holds `size` bytes.
