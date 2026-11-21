@@ -740,7 +740,7 @@ fn sandbox_refusals() -> Vec<Refusal> {
 
 /// Returns the refusals of `nvx run`.
 fn run_refusals() -> Vec<Refusal> {
-    let targets = "with several shares, or a shared file";
+    let targets = "each target must be an absolute non-root path";
     let budget = &["--mount", "--cmdline", "1024"][..];
     let overflow = crate::openvmm::two_share_command_line_room() + 1;
     let two_shares = |cmdline: &str| {
@@ -1269,6 +1269,18 @@ fn run_refusals() -> Vec<Refusal> {
             &["--mount target", "\"single.txt\"", targets],
         ),
         refusal(
+            "run: relative target of one share",
+            "unsupported",
+            run_dry(&["--mount", "a,{root/share}"]),
+            &["--mount target", "\"a\"", targets],
+        ),
+        refusal(
+            "run: target of one share with a trailing slash",
+            "unsupported",
+            run_dry(&["--mount", "/data/,{root/share}"]),
+            &["--mount target", "\"/data/\"", targets],
+        ),
+        refusal(
             "run: root target with several shares",
             "unsupported",
             run_dry(&["--mount", "/,{root/share}", "--mount", "/b,{root/share2}"]),
@@ -1399,9 +1411,9 @@ fn run_refusals() -> Vec<Refusal> {
             ]),
             &["--mount targets /workspace/cache and /workspace overlap"],
         ),
-        // The aggregate of the shares is at /run/nvx/shares.
+        // The export takes no guest target of its own, and the guest keeps /run.
         refusal(
-            "run: target containing the aggregate",
+            "run: target containing the guest's /run/nvx",
             "unsupported",
             run_dry(&[
                 "--mount",
@@ -1409,10 +1421,10 @@ fn run_refusals() -> Vec<Refusal> {
                 "--mount",
                 "/b,{root/share2}",
             ]),
-            &["--mount targets /run/nvx/shares and /run/nvx overlap"],
+            &["has the guest target /run/nvx, which would cover the guest's /run"],
         ),
         refusal(
-            "run: target in the aggregate",
+            "run: target in the former aggregate",
             "unsupported",
             run_dry(&[
                 "--mount",
@@ -1420,7 +1432,13 @@ fn run_refusals() -> Vec<Refusal> {
                 "--mount",
                 "/b,{root/share2}",
             ]),
-            &["--mount targets /run/nvx/shares and /run/nvx/shares/x overlap"],
+            &["has the guest target /run/nvx/shares/x, which would cover the guest's /run"],
+        ),
+        refusal(
+            "run: one share at the guest's /run",
+            "unsupported",
+            run_dry(&["--mount", "/run,{root/share}"]),
+            &["has the guest target /run, which would cover the guest's /run"],
         ),
         refusal(
             "run: too many shares for the budget",

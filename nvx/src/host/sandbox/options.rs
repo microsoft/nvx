@@ -6,8 +6,7 @@
 //! - [`sandbox_mounts`]: the shares of the `--mount` options, with each `--mount-deny`,
 //!   `--mount-allow`, and `--mount-write` attributed to its share, and each share's kind.
 //! - [`validate_sandbox_entrypoint`]: the refusal of systemd entrypoints.
-//! - [`validate_run_share_targets`]: the guest targets of several `nvx run` shares, or of a
-//!   shared file.
+//! - [`validate_run_share_targets`]: the guest targets of the `nvx run` shares.
 //! - [`validate_exec_environment`] and [`exec_environment_from_file`]: the environment of a
 //!   managed exec.
 
@@ -17,8 +16,8 @@ use std::io::Read;
 use std::path::Path;
 
 use super::mount::{
-    AGGREGATE_MOUNT_TARGET, MountKind, MountOwner, MountPolicy, POLICY_KINDS, PolicyKind,
-    SandboxMount, has_forbidden_character, has_irregular_component, mount_kind, targets_overlap,
+    MountKind, MountOwner, MountPolicy, POLICY_KINDS, PolicyKind, SandboxMount,
+    has_forbidden_character, has_irregular_component, mount_kind, targets_overlap,
 };
 use super::refused;
 use crate::error::Result;
@@ -302,9 +301,10 @@ fn sandbox_mounts_with(
         .collect()
 }
 
-/// Refuses the guest targets of `nvx run` shares that the guest cannot bind from an
-/// aggregate: targets that would not survive the kernel command line, or that hide each other or
-/// the aggregate itself. `nvx run` checks them when it attaches several shares, or a file.
+/// Refuses the guest targets of `nvx run` shares that the guest cannot bind from the export:
+/// targets that would not survive the kernel command line, or that hide each other. `nvx run`
+/// checks them for every share, since each becomes an `nvx_share=` token; the export's plan then
+/// refuses the targets that would cover the guest's reserved paths, such as `/run`.
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
 pub(crate) fn validate_run_share_targets(targets: &[&str]) -> Result<()> {
@@ -315,12 +315,12 @@ pub(crate) fn validate_run_share_targets(targets: &[&str]) -> Result<()> {
             || has_irregular_component(target)
         {
             return Err(refused(format!(
-                "invalid --mount target {target:?}: with several shares, or a shared file, each target \
-                 must be an absolute non-root path without empty, dot, or parent components, \
-                 whitespace, control characters, quotes, '\\', '=', or ','",
+                "invalid --mount target {target:?}: each target must be an absolute non-root path \
+                 without empty, dot, or parent components, whitespace, control characters, \
+                 quotes, '\\', '=', or ','",
             )));
         }
-        for other in std::iter::once(&AGGREGATE_MOUNT_TARGET).chain(&targets[..index]) {
+        for other in &targets[..index] {
             if targets_overlap(target, other) {
                 return Err(refused(format!(
                     "--mount targets {other} and {target} overlap; a share cannot hide another"

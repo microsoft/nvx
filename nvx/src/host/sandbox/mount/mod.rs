@@ -48,9 +48,6 @@ pub(crate) use self::request::{
 
 /// The tag of OpenVMM's virtio-fs device.
 pub(crate) const MOUNT_TAG: &str = "microvm";
-/// The guest directory at which the guest mounts the aggregate of several shares.
-#[cfg(feature = "cli")]
-pub(crate) const AGGREGATE_MOUNT_TARGET: &str = "/run/nvx/shares";
 /// The most denied, allowed, and writable paths each that OpenVMM accepts for a share.
 #[cfg(feature = "cli")]
 const MAX_MOUNT_POLICY_PATHS: usize = 128;

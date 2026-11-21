@@ -382,12 +382,7 @@ proptest! {
         let first = format!("/first-{suffix}");
         let second = format!("/second-{suffix}");
         validate_run_share_targets(&[&first, &second]).unwrap();
-        for targets in [
-            vec![first.as_str(), first.as_str()],
-            vec![first.as_str(), "/run/nvx/shares"],
-        ] {
-            prop_assert!(validate_run_share_targets(&targets).is_err());
-        }
+        prop_assert!(validate_run_share_targets(&[&first, &first]).is_err());
         let child = format!("{first}/child");
         prop_assert!(validate_run_share_targets(&[&first, &child]).is_err());
         prop_assert!(validate_run_share_targets(&[&child, &first]).is_err());
@@ -1430,38 +1425,46 @@ fn sandbox_mounts_take_the_kind_of_each_host_path() {
     );
 }
 
+/// The refusal of the invalid `nvx run` target `target`.
+fn invalid_run_target(target: &str) -> String {
+    format!(
+        "invalid --mount target {target:?}: each target must be an absolute non-root path without \
+         empty, dot, or parent components, whitespace, control characters, quotes, '\\', '=', or \
+         ','",
+    )
+}
+
 #[test]
-fn run_share_targets_bind_from_an_aggregate() {
+fn run_share_targets_bind_from_the_export() {
     validate_run_share_targets(&["/workspace", "/opt/hostedtoolcache", "/srv/cache"]).unwrap();
     validate_run_share_targets(&["/config/settings.json"]).unwrap();
-    for (targets, expected) in [
-        (
-            &["/workspace", "/workspace/cache"][..],
-            "--mount targets /workspace and /workspace/cache overlap; a share cannot hide another",
-        ),
-        (
-            &["/run/nvx", "/b"],
-            "--mount targets /run/nvx/shares and /run/nvx overlap; a share cannot hide another",
-        ),
-        (
-            &["/run/nvx/shares/x"],
-            "--mount targets /run/nvx/shares and /run/nvx/shares/x overlap; a share cannot hide \
-             another",
-        ),
+    assert_eq!(
+        message(validate_run_share_targets(&[
+            "/workspace",
+            "/workspace/cache"
+        ])),
+        "--mount targets /workspace and /workspace/cache overlap; a share cannot hide another",
+    );
+    // The export takes no guest target of its own that a share could hide: its plan refuses
+    // these targets, as covering the guest's reserved /run.
+    for targets in [
+        &["/run/nvx/shares/x"][..],
+        &["/run/nvx"],
+        &["/run"],
+        &["/run/nvx", "/b"],
     ] {
-        assert_eq!(message(validate_run_share_targets(targets)), expected);
+        validate_run_share_targets(targets).unwrap();
     }
+    // The rules apply to one directory share as to several, or a shared file.
     for target in [
-        "/a b", "relative", "/", "/a//b", "/a/./b", "/a\\b", "/a=b", "/a,b", "/a\"b",
+        "/a b", "relative", "/", "/a//b", "/a/./b", "/a\\b", "/a=b", "/a,b", "/a\"b", "/data/",
     ] {
-        assert_eq!(
-            message(validate_run_share_targets(&[target, "/b"])),
-            format!(
-                "invalid --mount target {target:?}: with several shares, or a shared file, each target \
-                 must be an absolute non-root path without empty, dot, or parent components, \
-                 whitespace, control characters, quotes, '\\', '=', or ','",
-            )
-        );
+        for targets in [&[target][..], &[target, "/b"]] {
+            assert_eq!(
+                message(validate_run_share_targets(targets)),
+                invalid_run_target(target)
+            );
+        }
     }
     // Unlike a sandbox target, a run target has no length limit.
     validate_run_share_targets(&[&format!("/{}", "x".repeat(5000))]).unwrap();
@@ -1480,11 +1483,7 @@ fn run_share_targets_remain_one_kernel_token() {
         let target = format!("/data{separator}x");
         assert_eq!(
             message(validate_run_share_targets(&[&target, "/logs"])),
-            format!(
-                "invalid --mount target {target:?}: with several shares, or a shared file, each target \
-                 must be an absolute non-root path without empty, dot, or parent components, \
-                 whitespace, control characters, quotes, '\\', '=', or ','",
-            )
+            invalid_run_target(&target)
         );
     }
 }
