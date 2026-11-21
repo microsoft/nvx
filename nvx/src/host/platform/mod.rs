@@ -109,10 +109,12 @@ fn refused_open(error: io::Error) -> io::Error {
 }
 
 #[cfg(windows)]
-/// Returns whether Windows marks `metadata` as a reparse point.
+/// Returns whether Windows sets `FILE_ATTRIBUTE_REPARSE_POINT`, its reparse-point attribute.
 pub(crate) fn is_reparse_point(metadata: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
-    metadata.file_attributes() & 0x400 != 0
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 #[cfg(not(windows))]
