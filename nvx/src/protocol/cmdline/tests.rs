@@ -480,6 +480,55 @@ fn a_boot_token_with_one_value_refuses_any_other_and_echoes_it_escaped() {
 }
 
 #[test]
+fn a_boot_token_names_the_one_listed_parameter_that_it_spells_and_has_its_value() {
+    const LISTED: [&str; 2] = ["virtfs_tag", "virtfs_dir"];
+    let token = |name: &'static [u8], value: Option<&'static [u8]>| Token { name, value };
+    assert_eq!(
+        boot_parameter(&LISTED, token(b"virtfs_dir", Some(b"/run"))),
+        Ok(Some(("virtfs_dir", &b"/run"[..])))
+    );
+    // The value may be empty.
+    assert_eq!(
+        boot_parameter(&LISTED, token(b"virtfs_tag", Some(b""))),
+        Ok(Some(("virtfs_tag", &b""[..])))
+    );
+    // The name is compared in full, byte for byte, as the init compares it.
+    for name in [
+        &b"virtfs"[..],
+        b"virtfs_dir2",
+        b"VIRTFS_DIR",
+        b"virtfs-dir",
+        b"",
+    ] {
+        assert_eq!(
+            boot_parameter(&LISTED, token(name, Some(b"x"))),
+            Ok(None),
+            "{}",
+            name.escape_ascii()
+        );
+        assert_eq!(boot_parameter(&LISTED, token(name, None)), Ok(None));
+    }
+    assert_eq!(
+        boot_parameter(&[], token(b"virtfs_dir", Some(b"x"))),
+        Ok(None)
+    );
+    assert_eq!(
+        boot_parameter(&LISTED, token(b"virtfs_tag", None))
+            .unwrap_err()
+            .message(),
+        "the virtfs_tag kernel parameter has no value"
+    );
+}
+
+#[test]
+fn a_repeated_boot_token_is_refused_by_name() {
+    assert_eq!(
+        repeated_parameter("nvx_layer").message(),
+        "the nvx_layer kernel parameter is repeated"
+    );
+}
+
+#[test]
 fn the_dns_server_is_read_as_openvmm_renders_it() {
     let ipv4: IpAddr = "10.0.0.1".parse().unwrap();
     let ipv6: IpAddr = "fd00::a00:1".parse().unwrap();

@@ -27,7 +27,7 @@
 
 use std::fmt;
 
-use super::cmdline::{self, Token};
+use super::cmdline;
 use super::{ProtocolError, violation};
 
 /// The guest directory of the host export, the value of its `virtfs_dir=` token: the directory
@@ -120,23 +120,15 @@ impl HostExport {
         let mut tag = None;
         let mut mode = None;
         let mut aggregate = false;
-        for Token { name, value } in cmdline::init_tokens(command_line) {
-            if name == SHARE.as_bytes() && value.is_some() {
+        for token in cmdline::init_tokens(command_line) {
+            if token.name == SHARE.as_bytes() && token.value.is_some() {
                 return Err(violation(format!(
                     "the {SHARE} kernel parameter binds a live share, but a guest that mounts the \
                      host export maps host paths from its mapping table alone"
                 )));
             }
-            let Some(parameter) = PARAMETERS
-                .into_iter()
-                .find(|parameter| parameter.as_bytes() == name)
-            else {
+            let Some((parameter, value)) = cmdline::boot_parameter(&PARAMETERS, token)? else {
                 continue;
-            };
-            let Some(value) = value else {
-                return Err(violation(format!(
-                    "the {parameter} kernel parameter has no value"
-                )));
             };
             let seen = match parameter {
                 DIRECTORY => directory,
@@ -145,9 +137,7 @@ impl HostExport {
                 _ => aggregate,
             };
             if seen {
-                return Err(violation(format!(
-                    "the {parameter} kernel parameter is repeated"
-                )));
+                return Err(cmdline::repeated_parameter(parameter));
             }
             match parameter {
                 DIRECTORY => {
