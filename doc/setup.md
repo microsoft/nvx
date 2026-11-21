@@ -205,6 +205,8 @@ so the resolver reads the main worktree's. `nvx_hosts.py show PROFILE` resolves 
 `benchmark_series.py` against that checkout, which can predate them. None of them prompts for
 secrets. `run` turns the CRLF line endings of a script for a Linux host into LF and leaves those of
 a script for a Windows host as they are, whatever the workstation's operating system.
+`run` accepts `--file` and `--cwd` after `SCRIPT`; place script arguments after `--` to separate
+them from host-tool options. This works on the supported Python 3.10 and newer.
 
 ## Development
 
