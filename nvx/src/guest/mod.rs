@@ -74,7 +74,7 @@ pub mod device_io;
 #[cfg(target_arch = "x86_64")]
 #[doc(hidden)]
 pub mod exit;
-pub(crate) mod gpt;
+mod gpt;
 #[doc(hidden)]
 pub mod ingress;
 #[cfg(target_arch = "x86_64")]

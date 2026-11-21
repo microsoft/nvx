@@ -1,7 +1,7 @@
 //! GPT disks that the guest's kernel attached as block devices.
 //!
-//! This module is part of the guest's space, nvx-init's internal reference code, private to the
-//! crate, as is [`crate::gpt`], which reads and checks the table.
+//! This module is part of the guest's space, nvx-init's internal reference code, private to
+//! [`guest`](super). The crate-internal [`crate::gpt`] reads and checks the table.
 //!
 //! [`read_disk`] reads the partition table of a disk through the disk's block device, such as
 //! `/dev/vda`, that the caller opened. It asks the device for its logical block size and its
