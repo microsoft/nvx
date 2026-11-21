@@ -52,6 +52,11 @@ pub(crate) fn connect_verified(
     reference: &ProcessRef,
     deadline: Instant,
 ) -> Result<Box<dyn Transport>> {
+    /// Caps an endpoint attempt at 250 ms before rechecking the held VM process.
+    const ATTEMPT_TIMEOUT: Duration = Duration::from_millis(250);
+    /// Pauses at most 25 ms between attempts to avoid spinning on an endpoint that is not ready.
+    const RETRY_PAUSE: Duration = Duration::from_millis(25);
+
     let process = match Process::open(reference)
         .map_err(|error| Error::io("cannot verify the endpoint's VM process").with_source(error))?
     {
@@ -71,11 +76,8 @@ pub(crate) fn connect_verified(
                         .unwrap_or_else(|| io::Error::from(io::ErrorKind::TimedOut)),
                 )
             })?;
-        let attempt = platform::connect_endpoint(
-            endpoint,
-            reference.pid,
-            remaining.min(Duration::from_millis(250)),
-        );
+        let attempt =
+            platform::connect_endpoint(endpoint, reference.pid, remaining.min(ATTEMPT_TIMEOUT));
         check_running(&process)?;
         match attempt {
             Ok(transport) => return Ok(transport),
@@ -107,9 +109,7 @@ pub(crate) fn connect_verified(
                 );
             }
         }
-        thread::sleep(
-            Duration::from_millis(25).min(deadline.saturating_duration_since(Instant::now())),
-        );
+        thread::sleep(RETRY_PAUSE.min(deadline.saturating_duration_since(Instant::now())));
     }
 }
 
