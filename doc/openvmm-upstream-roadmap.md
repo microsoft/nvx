@@ -9,9 +9,10 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c928e8dc1e1673a37c83c10fe145f6611a505cec`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126 and the PR18 fixup at position 302.
-- NVX's pinned OpenVMM revision: `ea3f62ad8ce3102f0a9e3f3f3e8115b306df6679`, position 327, the head
-  of microsoft/openvmm#5194, whose commit follows position 326, `fe7405247`, the head of
-  `feature/microvm/dev`, where microsoft/openvmm#5180 landed position 326 on position 325,
+- NVX's pinned OpenVMM revision: `3eb7500fd7effda2c17d00d3a208c1e29995d421`, position 329, the head
+  of microsoft/openvmm#5195, whose commits follow position 327, `ea3f62ad8`, the head of
+  `feature/microvm/dev`, where microsoft/openvmm#5194 landed position 327 on position 326,
+  `fe7405247`, where microsoft/openvmm#5180 landed position 326 on position 325,
   `91360acfc`, where microsoft/openvmm#5177 landed position 325 on position 324,
   `9ea35e853`, where microsoft/openvmm#5176 landed position 324 on position 323,
   `f391801de`, where microsoft/openvmm#5175 landed position 323 on position 322,
@@ -27,8 +28,8 @@
   microsoft/openvmm#5136, microsoft/openvmm#5140, and microsoft/openvmm#5141 landed after it. It
   added a fixup at its tip, position 316. Every commit keeps its position, and only positions 060
   and 277, which conflicted with upstream, and position 007, whose context upstream changed, changed
-  their patches; see [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The pin is 201
-  commits past the mapped tip on the same first-parent chain. Positions 127-301 and 303-327 are not
+  their patches; see [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The pin is 203
+  commits past the mapped tip on the same first-parent chain. Positions 127-301 and 303-329 are not
   yet assigned to PRs, position 302 is a PR18 fixup, and position 317 backports upstream's
   microsoft/openvmm#5160, which the next rebase drops; see [Commits after the mapped
   tip](#commits-after-the-mapped-tip).
@@ -1483,7 +1484,9 @@ The physical branch is one first-parent chain:
   -> FUSE replies whose length counts their data [325]
   -> EIO replies for out-of-range FUSE error codes [326]
   -> FUSE replies longer than their header can describe refused [327]
-  -> ea3f62ad8 (NVX pin)
+  -> one reply checked for each FUSE session test request [328]
+  -> EIO replies for FUSE data longer than its request allows [329]
+  -> 3eb7500fd (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1512,7 +1515,7 @@ position 069 and position 133.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 201 later commits, position
+The NVX pin extends the chain past position 126 without merges. Of its 203 later commits, position
 302 is a PR18 fixup, position 316 is the fixup of the v7.1 rebase, position 317 backports an
 upstream commit, and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
@@ -1521,13 +1524,13 @@ commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 a
 of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 followed the v5.0
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
-v7.0 reorganization, position 316 is the v7.1 rebase's fixup, and positions 317-327 followed the
+v7.0 reorganization, position 316 is the v7.1 rebase's fixup, and positions 317-329 followed the
 v7.1 rebase, so they combine none, apart from position 215, which combines v5.1 positions 222 and
 223, and the commits that the v7.0 reorganization folded into them. Each commit has the position
 that it had in v7.0, since the v7.1 rebase dropped none. Each commit's v6.1 position is its v6.0
 position less seven, the number of commits that the v6.1 rebase dropped before it, and its v6.0
 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and positions
-297-327 have no earlier position; see
+297-329 have no earlier position; see
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.1 position counts in
@@ -1740,6 +1743,8 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 325 | `91360acfc` | - | - | - | - | - | - | fuse: count the data in the length of an argument-and-data reply (microsoft/openvmm#5177) |
 | 326 | `fe7405247` | - | - | - | - | - | - | fuse: reply EIO for an error code that a reply cannot carry (microsoft/openvmm#5180) |
 | 327 | `ea3f62ad8` | - | - | - | - | - | - | fuse: refuse a reply longer than its header can describe (microsoft/openvmm#5194) |
+| 328 | `e21dcb5c9` | - | - | - | - | - | - | fuse: check that a session sends one reply to each test request (microsoft/openvmm#5195) |
+| 329 | `3eb7500fd` | - | - | - | - | - | - | fuse: fail a reply longer than the request allows with EIO (microsoft/openvmm#5195) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -1748,7 +1753,8 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`
 2026-11-17, for positions 307-312, `2640ad182`, upstream main later that day, for positions
 313-315, `715927303`, upstream main on 2026-11-18, for positions 317-321, `5cf28492b`, upstream
 main on 2026-11-19, for positions 322-325, `78af54a51`, upstream main on 2026-11-20, for position
-326, and `d83f87209`, upstream main later that day, for position 327.
+326, `d83f87209`, upstream main later that day, for position 327, and `265f0a73f`, upstream main
+later still, for positions 328 and 329.
 They name the positions that the commits have now, but neither the v7.1 rebase on `9a875b563` nor
 the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the earlier
 ones on `7d90c4104`.
@@ -3930,6 +3936,32 @@ the defect, in the same `make_header`. Replaying it on upstream main conflicts i
 `send_arg_data` and `send_error` lack the changes of positions 325 and 326, in `reply/tests.rs`,
 which upstream main lacks, and in `session.rs`, whose test module lacks the tests of PR13's
 position 047 and positions 324 and 326, so it cannot go upstream on its own as it is.
+
+Position 328 has the session's test harness, which position 324 adds, keep every reply that the
+session sends to a request, and fail the request unless it gets exactly one. Each request that the
+tests send through it should get one reply: the harness returns the reply, so the tests never send
+it `FUSE_FORGET` or `FUSE_BATCH_FORGET`, which get none. Its `dispatch_request` read the reply
+through `CapturingSender`, which keeps only the last buffer sent, so a session that sent a reply's
+data and then an error reply to the same request passed. Each of those requests gets one reply, so
+the tests pass as before. It changes only that harness, which position 325 also changes, and
+nothing that a mapped PR adds or that the microVM runs. Upstream main lacks the harness, so it
+cannot go upstream on its own.
+
+Position 329 has `Session::send_max_size`, which sends the replies to `FUSE_READ`, `FUSE_READDIR`,
+`FUSE_READDIRPLUS`, `FUSE_GETXATTR`, and `FUSE_LISTXATTR`, fail a file system's reply that is longer
+than its request allows with `EIO`, as the Linux FUSE driver does, and log it with a rate-limited
+error (microsoft/nvx#1629). It asserted the bound, so a file system that returned even one byte
+more panicked, which aborts the VMM. It changes code that upstream main has, `send_max_size` in
+`session.rs`, which no earlier chain commit changes, and documents the bound on the five `Fuse`
+methods in `lib.rs`, which PR13's position 047 and positions 324 and 326 also change, none of the
+lines that they change. Its tests, which use the session's test harness of positions 324 and 328,
+are in a new file that it declares in the session's test module. It changes nothing that a mapped
+PR adds. NVX's virtio-fs servers send no such reply: `VirtioFs` sizes its read, directory, and
+extended-attribute buffers from the request, and `SectionFs` and the dormant microVM file system
+implement none of these requests, so the microVM behaves as it did. Upstream main has the defect,
+in the same `send_max_size`. Replaying it on upstream main conflicts in `session.rs`, whose test
+module lacks the tests of PR13's position 047 and positions 324, 326, and 327, and its tests need
+the harness, which upstream main lacks, so it cannot go upstream on its own as it is.
 
 ## PR summary
 
