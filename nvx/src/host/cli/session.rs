@@ -176,6 +176,13 @@ struct ProbedTransport {
 /// Returns whether `error` tells that the endpoint closed the stream, as Python's
 /// `_PEER_CLOSED` and `_PIPE_CLOSED_ERRORS` do.
 pub(super) fn closes(error: &io::Error) -> bool {
+    /// Win32 reports that the pipe has ended with this code.
+    const ERROR_BROKEN_PIPE: i32 = 109;
+    /// Win32 reports that the pipe is being closed with this code.
+    const ERROR_NO_DATA: i32 = 232;
+    /// Win32 reports that no process is on the other end of the pipe with this code.
+    const ERROR_PIPE_NOT_CONNECTED: i32 = 233;
+
     matches!(
         error.kind(),
         io::ErrorKind::BrokenPipe
@@ -183,7 +190,11 @@ pub(super) fn closes(error: &io::Error) -> bool {
             | io::ErrorKind::ConnectionAborted
             | io::ErrorKind::WriteZero
             | io::ErrorKind::UnexpectedEof
-    ) || (cfg!(windows) && matches!(error.raw_os_error(), Some(109 | 232 | 233)))
+    ) || (cfg!(windows)
+        && matches!(
+            error.raw_os_error(),
+            Some(ERROR_BROKEN_PIPE | ERROR_NO_DATA | ERROR_PIPE_NOT_CONNECTED)
+        ))
 }
 
 impl ProbedTransport {
