@@ -363,10 +363,12 @@ pub(crate) fn host_id() -> io::Result<[u8; 16]> {
 /// Returns the host's monotonic time, as OpenVMM measures the downtime of a capture within one
 /// boot: the interrupt time, which counts the time that the host was asleep, in nanoseconds.
 pub(crate) fn monotonic_ns() -> io::Result<u64> {
+    /// Nanoseconds per interrupt-time unit: `QueryInterruptTimePrecise` returns 100-nanosecond units.
+    const NANOS_PER_INTERRUPT_TICK: u64 = 100;
     let mut intervals = 0u64;
     // SAFETY: the output pointer is valid.
     unsafe { QueryInterruptTimePrecise(&mut intervals) };
     intervals
-        .checked_mul(100)
+        .checked_mul(NANOS_PER_INTERRUPT_TICK)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "the interrupt time overflows"))
 }
