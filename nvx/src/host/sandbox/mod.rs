@@ -87,8 +87,8 @@ pub(crate) fn refused(message: impl Into<String>) -> Error {
 /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
 #[cfg(feature = "cli")]
 pub(crate) fn parse_workload_identity(value: &str) -> Result<(u32, u32)> {
-    let fields: Vec<&str> = value.split(':').collect();
-    let [uid, gid] = fields[..] else {
+    let mut fields = value.split(':');
+    let (Some(uid), Some(gid), None) = (fields.next(), fields.next(), fields.next()) else {
         return Err(refused("--workload-user must be UID:GID"));
     };
     if [uid, gid]
