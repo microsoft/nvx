@@ -1454,13 +1454,16 @@ fn managed_boot_diagnostics_arrive_before_the_control_endpoint() {
     use std::process::Stdio;
 
     let root = Root::new();
+    let gate = root.below("build/foreground-gate");
+    std::fs::create_dir(&gate).unwrap();
     let mut process = root
         .command(&[
             "run",
             "--cmdline",
             "nvx_mode=managed nvx_identity=1001:1001 fake_boot_diagnostics=1 \
-             fake_boot_delay_ms=2000 fake_crash_after_ms=100",
+             fake_foreground_gate=boot fake_exit_during_attach=3",
         ])
+        .env("NVX_TEST_FOREGROUND_GATE_DIR", &gate)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1469,6 +1472,7 @@ fn managed_boot_diagnostics_arrive_before_the_control_endpoint() {
     let mut command = String::new();
     stdout.read_line(&mut command).unwrap();
     assert!(command.starts_with(">> "), "{command}");
+    let _native = gated_native(&mut process, &gate);
     let mut console = String::new();
     stdout.read_line(&mut console).unwrap();
     let mut stderr = process.stderr.take().unwrap();
@@ -1486,6 +1490,7 @@ fn managed_boot_diagnostics_arrive_before_the_control_endpoint() {
             })
     };
     let before_attach = !attached();
+    std::fs::write(gate.join("release"), b"go").unwrap();
     let output = process.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(3), "{output:?}");
     assert_eq!(console, "boot-console before control\n");
@@ -1497,6 +1502,34 @@ fn managed_boot_diagnostics_arrive_before_the_control_endpoint() {
     assert!(
         before_attach,
         "boot diagnostics were withheld until control attachment"
+    );
+}
+
+#[test]
+fn a_boot_gate_refuses_a_release_that_is_not_a_file() {
+    let root = Root::new();
+    root.write(
+        "build/foreground-gate/release/child",
+        "not a release file\n",
+    );
+    let outcome = root.nvx_with(
+        &[
+            "run",
+            "--cmdline",
+            "nvx_mode=managed nvx_identity=1001:1001 fake_foreground_gate=boot",
+        ],
+        &[(
+            "NVX_TEST_FOREGROUND_GATE_DIR",
+            "{root/build/foreground-gate}",
+        )],
+    );
+    assert_eq!(outcome.status, Some(1), "{}", outcome.describe());
+    assert!(
+        outcome
+            .stderr()
+            .contains("foreground gate release is not a file"),
+        "{}",
+        outcome.describe()
     );
 }
 
