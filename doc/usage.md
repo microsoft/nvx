@@ -442,12 +442,16 @@ reported category, such as `capture-continued`, rather than wait out
 command's verified VM without finishing it. The next capture command using this
 store ends and removes an interrupted attempt through ordinary launch recovery,
 without resuming or publishing it. Indeterminate recovery retains its evidence
-and reports an error. Unknown files or nonempty unjournaled capture-slot
-contents are kept for inspection, not deleted; an empty launch lock alone is
-harmless. Known host and OpenVMM atomic staging files are recovered only with a
-valid launch journal. Captures in one store serialize, and one that waits for
-another longer than `--timeout` fails with `sandbox-busy`; snapshot locks
-remain separate from their immutable directories.
+and reports an error. Unknown files, and nonempty capture-slot contents that
+neither a valid launch journal nor a removal marker covers, are kept for
+inspection, not deleted; an empty launch lock alone is harmless. Known host and
+OpenVMM atomic staging files are recovered only under either. Before recovery
+deletes a valid journal, the command marks the slot with an empty `removing`
+file, which it deletes after every other slot entry, so the next capture command
+finishes a removal that failed or was interrupted partway. Captures in one
+store serialize, and one that waits for another longer than `--timeout` fails
+with `sandbox-busy`; snapshot locks remain separate from their immutable
+directories.
 [`snapshot restore`](#snapshot-restore) starts managed sandboxes from them.
 
 ### `snapshot restore`

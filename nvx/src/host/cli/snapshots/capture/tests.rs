@@ -746,6 +746,118 @@ fn interrupted_atomic_outputs_are_recovered_only_after_their_vm_exits() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn a_removal_that_fails_after_recovery_is_finished_by_the_next_command() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // Read and write sharing, without delete sharing, as a scanner may hold a file.
+    const SHARE_READ_WRITE: u32 = 0x1 | 0x2;
+    let fixture = Fixture::new();
+    interrupted(&fixture);
+    let image = fixture.vm_dir().join("capture-image.raw");
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(SHARE_READ_WRITE)
+        .open(&image)
+        .unwrap();
+    let missing_artifacts = fixture.root.path().join("missing-artifacts");
+    let error = run(missing_artifacts.to_str(), fixture.options("next")).unwrap_err();
+    assert!(
+        error.message().unwrap().contains("os error 32"),
+        "{error:?}"
+    );
+    assert!(matches!(
+        Process::open(&fixture.references()[0]).unwrap(),
+        Opened::Exited(_)
+    ));
+    assert!(!fixture.vm_dir().join("launch.json").exists());
+    assert!(image.exists());
+    drop(held);
+    let error = run(missing_artifacts.to_str(), fixture.options("next")).unwrap_err();
+    assert!(
+        !error.message().unwrap().contains("unowned capture content"),
+        "{error:?}"
+    );
+    assert!(!fixture.vm_dir().exists(), "{error:?}");
+    assert_eq!(
+        fs::read_dir(fixture.store().entries.dir()).unwrap().count(),
+        0
+    );
+}
+
+#[test]
+fn a_marked_removal_finishes_without_its_journal() {
+    let fixture = Fixture::new();
+    let store = fixture.store();
+    StateDir::create(&fixture.vm_dir()).unwrap();
+    for file in [
+        REMOVING,
+        "capture-image.raw",
+        "openvmm.log",
+        KEY_FILE,
+        ".tmpAb3xY9",
+        ".outcome.json.7.tmp",
+    ] {
+        fs::write(fixture.vm_dir().join(file), b"").unwrap();
+    }
+    StateDir::create(&fixture.vm_dir().join(OPENVMM_DIR)).unwrap();
+    fs::write(
+        fixture.vm_dir().join(OPENVMM_DIR).join("state.bin"),
+        b"partial snapshot",
+    )
+    .unwrap();
+    let missing_artifacts = fixture.root.path().join("missing-artifacts");
+    let error = run(missing_artifacts.to_str(), fixture.options("next")).unwrap_err();
+    assert!(
+        !error.message().unwrap().contains("unowned capture content"),
+        "{error:?}"
+    );
+    assert!(!fixture.vm_dir().exists(), "{error:?}");
+    assert_eq!(fs::read_dir(store.entries.dir()).unwrap().count(), 0);
+}
+
+#[test]
+fn a_marked_removal_preserves_unknown_content() {
+    let fixture = Fixture::new();
+    let store = fixture.store();
+    StateDir::create(&fixture.vm_dir()).unwrap();
+    fs::write(fixture.vm_dir().join(REMOVING), b"").unwrap();
+    fs::write(fixture.vm_dir().join("capture-image.raw"), b"").unwrap();
+    let personal = fixture.vm_dir().join("personal.txt");
+    fs::write(&personal, b"preserve user content").unwrap();
+    let missing_artifacts = fixture.root.path().join("missing-artifacts");
+    let error = run(missing_artifacts.to_str(), fixture.options("next")).unwrap_err();
+    assert!(error.message().unwrap().contains("unowned capture content"));
+    assert_eq!(fs::read(personal).unwrap(), b"preserve user content");
+    assert!(fixture.vm_dir().join(REMOVING).exists());
+    assert!(fixture.vm_dir().join("capture-image.raw").exists());
+    assert_eq!(fs::read_dir(store.entries.dir()).unwrap().count(), 0);
+}
+
+#[test]
+fn only_an_empty_regular_removal_marker_grants_ownership() {
+    for directory in [true, false] {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        StateDir::create(&fixture.vm_dir()).unwrap();
+        let marker = fixture.vm_dir().join(REMOVING);
+        if directory {
+            StateDir::create(&marker).unwrap();
+        } else {
+            fs::write(&marker, b"user content").unwrap();
+        }
+        let image = fixture.vm_dir().join("capture-image.raw");
+        fs::write(&image, b"preserve user content").unwrap();
+        let missing_artifacts = fixture.root.path().join("missing-artifacts");
+        let error = run(missing_artifacts.to_str(), fixture.options("next")).unwrap_err();
+        assert!(error.message().unwrap().contains("unowned capture content"));
+        assert_eq!(fs::read(&image).unwrap(), b"preserve user content");
+        assert_eq!(marker.is_dir(), directory);
+        assert_eq!(fs::read_dir(store.entries.dir()).unwrap().count(), 0);
+    }
+}
+
 #[test]
 fn journaled_unknown_and_near_miss_names_are_preserved_without_recovery_or_publication() {
     for entry in [
