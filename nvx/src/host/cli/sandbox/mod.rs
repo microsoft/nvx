@@ -515,7 +515,7 @@ fn refuse_own_files(
 /// Windows path that only that prefix names, such as one whose name ends in a period: its
 /// components would otherwise differ from those of a path that it lies inside. A network path
 /// keeps its prefix, since no share is one.
-fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+pub(super) fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
     match path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
         Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
         _ => path,
