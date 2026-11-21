@@ -154,6 +154,28 @@ fn guest_paths_follow_the_mxc_convention() {
     assert_eq!(guest_path(Path::new("..")), None);
 }
 
+/// Verifies that a verbatim Windows path with a `/` in a name has no guest path: Windows keeps
+/// the `/` in the name, which no Windows file system allows, so the path names no object, and
+/// the `.`, `..`, and empty parts between its slashes must not reach a guest path.
+#[cfg(windows)]
+#[test]
+fn verbatim_names_with_slashes_have_no_guest_path() {
+    for path in [
+        r"\\?\C:\a/../../../etc",
+        r"\\?\C:\work/../Windows",
+        r"\\?\C:\a/./b",
+        r"\\?\C:\a//b",
+        r"\\?\C:\a/b",
+        r"\\?\C:\a\b/",
+    ] {
+        assert_eq!(guest_path(Path::new(path)), None, "{path}");
+    }
+    assert_eq!(
+        guest_path(Path::new(r"\\?\C:\a\b")).as_deref(),
+        Some("/mnt/c/a/b")
+    );
+}
+
 /// Verifies that a guest path is within itself and its ancestors only, comparing whole
 /// components, as the reserved targets here and the sandbox's share checks require.
 #[test]

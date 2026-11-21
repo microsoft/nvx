@@ -12,7 +12,8 @@ pub(super) fn guest_source(child: usize, source: &str) -> String {
 }
 
 /// Returns the guest path at which a sandbox exposes the host path `path`, or `None` if it
-/// has no guest equivalent (relative paths, UNC paths, or paths that are not valid UTF-8).
+/// has no guest equivalent (relative paths, UNC paths, paths that are not valid UTF-8, or
+/// verbatim Windows paths with a `/` in a name, which no Windows file system allows).
 ///
 /// A Windows path `C:\work\src` maps to `/mnt/c/work/src`, and an absolute Linux path maps to
 /// itself. `.` components are dropped; `..` components are rejected.
@@ -39,8 +40,11 @@ pub fn guest_path(path: &Path) -> Option<String> {
     for component in components {
         match component {
             Component::Normal(name) => {
+                // A verbatim Windows path splits only at `\`, so a name can hold a `/`, and the
+                // `.`, `..`, or empty parts around it would reach the guest path.
+                let name = name.to_str().filter(|name| !name.contains('/'))?;
                 guest.push('/');
-                guest.push_str(name.to_str()?);
+                guest.push_str(name);
             }
             Component::CurDir => {}
             _ => return None,
