@@ -86,8 +86,10 @@ impl SandboxLayer {
     /// The UUID must be canonical: lowercase hexadecimal digits in hyphenated groups of
     /// 8, 4, 4, 4, and 12. Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
     pub(crate) fn parse(value: &str) -> Result<Self> {
-        let fields: Vec<&str> = value.split(',').collect();
-        let [role, path, uuid] = fields[..] else {
+        let mut fields = value.split(',');
+        let (Some(role), Some(path), Some(uuid), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
             return Err(refused("--layer must be ROLE,PATH,EROFS_UUID"));
         };
         let Some(role) = LayerRole::from_name(role) else {
