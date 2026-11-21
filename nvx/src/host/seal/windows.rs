@@ -86,12 +86,14 @@ pub(super) fn seal(file: &File) -> io::Result<FileSeal> {
 
 /// Returns the time of a `FILETIME`, in seconds and nanoseconds since the Unix epoch.
 fn time(time: FILETIME) -> SealTime {
+    /// Windows FILETIME counts 100-nanosecond intervals.
+    const NANOS_PER_FILETIME_TICK: i128 = 100;
     let ticks = ((i128::from(time.dwHighDateTime) << 32) | i128::from(time.dwLowDateTime))
         - UNIX_EPOCH_TICKS;
     SealTime {
         // A `FILETIME` spans fewer than 2^41 seconds, and the remainder is below a second.
         seconds: ticks.div_euclid(TICKS_PER_SECOND) as i64,
-        nanoseconds: (ticks.rem_euclid(TICKS_PER_SECOND) * 100) as u32,
+        nanoseconds: (ticks.rem_euclid(TICKS_PER_SECOND) * NANOS_PER_FILETIME_TICK) as u32,
     }
 }
 
