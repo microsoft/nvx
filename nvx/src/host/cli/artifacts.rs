@@ -18,7 +18,7 @@ use crate::ErrorCode;
 use crate::host::artifacts::{ArtifactDir, ArtifactPaths, MANIFEST_NAME, absolute};
 
 /// The environment variable that names the OpenVMM executable to run instead of the root's.
-pub(crate) const OPENVMM_VARIABLE: &str = "NVX_OPENVMM";
+pub(super) const OPENVMM_VARIABLE: &str = "NVX_OPENVMM";
 
 /// The usage and help of the parser.
 pub(super) const SYNTAX: Syntax = Syntax {
