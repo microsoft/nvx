@@ -893,8 +893,10 @@ own. OpenVMM's `file` flag marks a child that is a shared file, so OpenVMM
 refuses a directory that replaced the file rather than export all of it.
 OpenVMM refuses a colon or a backslash in every path of a share, and so a
 file child whose name contains one, such as a Windows path that names an
-alternate data stream, which the guest could never reach; NVX rejects such a
-file child before boot. A
+alternate data stream, or a mapping inside a mapped directory with one in a
+name below that directory, which the guest could never reach; NVX rejects
+either before boot. A mapped directory's own path may contain one, since
+OpenVMM opens the directory by its host path. A
 child is read-write only if it holds a read-write mapping, and OpenVMM then
 limits its writes to its read-write mappings, which NVX passes as
 `--mount-write` paths when they lie inside a read-only one. A read-only
