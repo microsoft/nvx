@@ -13,7 +13,7 @@ use crate::{Error, Result};
 impl LockedState {
     /// Returns whether a launch process may still run. Only a released claim proves exit;
     /// failure to examine it proves neither, and preserves the original error.
-    pub(crate) fn claim_held(&self, journal: &LaunchJournal) -> Result<bool> {
+    pub(super) fn claim_held(&self, journal: &LaunchJournal) -> Result<bool> {
         let path = self.path(StateFile::Log);
         if journal.vm_dir != self.dir() || journal.log != path {
             return Err(Error::io(
@@ -26,7 +26,7 @@ impl LockedState {
 
     /// Holds the server of the recorded endpoint, rechecks its ownership, and on Linux proves
     /// that this very process also holds the launch's log. An error is not proof of exit.
-    pub(crate) fn endpoint_owner(
+    pub(super) fn endpoint_owner(
         &self,
         journal: &LaunchJournal,
         deadline: Instant,
