@@ -22,13 +22,26 @@ use crate::protocol::view::{MachineIdMode, View};
 /// host's `PING`, its request for Ready, as a restored clone whose restore packet carried its
 /// record does. It records each request in `trace`, and the step at which it stalls in `stage`.
 const PEER: &str = r#"
-import json, os, socket, struct, sys, time
+import json, os, socket, struct, subprocess, sys, time
 case, endpoint, ready, trace, stage, activation = sys.argv[1:]
+hold_control = case.startswith('exit-')
+case = case.removeprefix('exit-')
 capability = sys.stdin.buffer.read()
 def stall(value):
     with open(stage, 'w', encoding='ascii') as out: out.write(value)
     time.sleep(3600)
     sys.exit(0)
+def stall_control_read(stream):
+    if hold_control:
+        # Killing this peer must not also give the pending host read EOF. Keep the authenticated
+        # stream open in a helper until the host drops its end; neither process sends a reply.
+        subprocess.run([sys.executable, '-c', """
+import sys
+with open(sys.argv[1], 'w', encoding='ascii') as out: out.write(sys.argv[2])
+sys.stdin.buffer.read(1)
+""", stage, case], stdin=stream, check=True)
+    else:
+        stall(case)
 if os.name == 'nt':
     import ctypes, msvcrt
     from ctypes import wintypes
@@ -101,7 +114,7 @@ for session in range(1, 4):
         header = exact(stream, 44)
         assert header[:4] == b'NVXS' and header[6] == 2
         assert exact(stream, struct.unpack('<I', header[40:])[0]) == capability
-        if case == 'attach-read': stall(case)
+        if case == 'attach-read': stall_control_read(stream)
         record(stream, 7, session, 0)
         sequence = 1
         while True:
@@ -114,7 +127,7 @@ for session in range(1, 4):
                                       'payload': payload.hex()}) + '\n')
             if kind == 1:
                 assert payload == b''
-                if case == 'ping-read': stall(case)
+                if case == 'ping-read': stall_control_read(stream)
                 if case == 'incompatible':
                     reply(stream, 0xff, rid, 95, b'unsupported-operation', session, sequence)
                     stall(case)
@@ -128,7 +141,10 @@ for session in range(1, 4):
                 reply(stream, 0x81, rid, 0, b'\x02' + bytes.fromhex(activation), session,
                       sequence)
             elif kind == 6:
-                if case == 'maps-read': stall(case)
+                if case == 'maps-read': stall_control_read(stream)
+                if case == 'maps-closed':
+                    stream.close()
+                    stall(case)
                 if case == 'maps-error':
                     reply(stream, 0xff, rid, 5, b'mapping-failed', session, sequence)
                     stall(case)
@@ -471,7 +487,8 @@ const STALLS: [(&str, Option<RestorePhase>); 6] = [
 /// Restores against a peer that stalls at `case`, ends the restore as `end` says once the peer
 /// stalls, and checks how and when the restore fails.
 fn check_ended(case: &str, phase: Option<RestorePhase>, end: End) {
-    let mut peer = Peer::start(case);
+    let exit_case = format!("exit-{case}");
+    let mut peer = Peer::start(if end == End::Exit { &exit_case } else { case });
     let cancel = Cancel::new(false);
     let stage = peer.stage.clone();
     let vm = reopen(&peer.vm.launched.process);
@@ -621,7 +638,7 @@ fn the_deadline_cancellation_and_the_verified_exit_end_a_pending_write() {
 
 #[test]
 fn mapping_and_start_failures_are_told_apart_from_the_machines() {
-    for case in ["maps-error", "start-error", "maps-count"] {
+    for case in ["maps-error", "maps-closed", "start-error", "maps-count"] {
         let mut peer = Peer::start(case);
         let mut workload = workload();
         if case == "start-error" {
@@ -643,6 +660,9 @@ fn mapping_and_start_failures_are_told_apart_from_the_machines() {
         .err()
         .unwrap();
         match (case, &error) {
+            ("maps-closed", ControlRestoreError::Maps(SessionError::Closed)) => {
+                assert!(!peer.vm.launched.process.has_exited().unwrap());
+            }
             ("maps-error" | "maps-count", ControlRestoreError::Maps(SessionError::Protocol(_)))
             | ("start-error", ControlRestoreError::Start(SessionError::Protocol(_))) => {}
             (case, error) => panic!("{case}: {error:?}"),
