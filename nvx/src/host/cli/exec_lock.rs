@@ -12,11 +12,11 @@ use crate::ErrorCode;
 use crate::host::platform;
 
 /// The name of the exec lock in a sandbox's state directory.
-pub(crate) const NAME: &str = "exec.lock";
+pub(super) const NAME: &str = "exec.lock";
 
 /// The held exec lock of a sandbox, which dropping it releases.
 #[derive(Debug)]
-pub(crate) struct ExecLock {
+pub(super) struct ExecLock {
     file: File,
 }
 
@@ -24,7 +24,7 @@ impl ExecLock {
     /// Tries the exec lock of the sandbox whose lifecycle lock `state` holds, without waiting, and
     /// returns `None` while another exec holds it. The lock file is created and checked as the
     /// store's own lock file is, and refused once its entry no longer names the locked file.
-    pub(crate) fn try_acquire(state: &LockedState) -> Result<Option<Self>> {
+    pub(super) fn try_acquire(state: &LockedState) -> Result<Option<Self>> {
         check_interrupt()?;
         let directory = state.directory()?;
         let guard = Self {
