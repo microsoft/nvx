@@ -361,6 +361,13 @@ fn disk_geometry(dir: &VmDir) -> Result<BlockGeometry> {
     Ok(geometry)
 }
 
+/// Marks, as an empty file, a capture directory whose launch journal proved it owned, until its
+/// removal ends.
+///
+/// Recovery deletes the journal before the directory's other files go, so this marker keeps them
+/// owned when their removal fails or is interrupted partway.
+const REMOVING: &str = "removing";
+
 /// Normal launch recovery must prove exit before the reserved capture directory can be removed.
 fn remove_capture(store: &Store, deadline: Deadline) -> Result {
     let path = store.root.dir().join("capture");
@@ -373,6 +380,14 @@ fn remove_capture(store: &Store, deadline: Deadline) -> Result {
         .path(StateFile::Journal)
         .try_exists()
         .map_err(Exit::from_os_error)?;
+    let marker = path.join(REMOVING);
+    // Only the empty regular file that a removal creates proves ownership.
+    let marked = match fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata.file_type().is_file() && metadata.len() == 0,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(Exit::from_os_error(error)),
+    };
+    let owned = journaled || marked;
     for entry in fs::read_dir(&path).map_err(Exit::from_os_error)? {
         let entry = entry.map_err(Exit::from_os_error)?;
         let name = entry.file_name();
@@ -388,12 +403,13 @@ fn remove_capture(store: &Store, deadline: Deadline) -> Result {
             ]
             .iter()
             .any(|file| name == *file)
+            || (marked && name == REMOVING)
             || name.to_str().is_some_and(|name| {
-                name.starts_with(".openvmm") || (journaled && capture_temporary(name))
+                name.starts_with(".openvmm") || (owned && capture_temporary(name))
             });
         let empty_lock = name == StateFile::Lock.name()
             && entry.metadata().map_err(Exit::from_os_error)?.len() == 0;
-        if !known || name == StateFile::Config.name() || (!journaled && !empty_lock) {
+        if !known || name == StateFile::Config.name() || (!owned && !empty_lock) {
             return Err(Exit::error(
                 ErrorCode::Io,
                 format!(
@@ -403,12 +419,39 @@ fn remove_capture(store: &Store, deadline: Deadline) -> Result {
             ));
         }
     }
+    if journaled {
+        if !marked {
+            crate::host::platform::create_new(&marker)
+                .map_err(|error| io_error(ErrorCode::Io, &error, &marker))?;
+        }
+        // An earlier attempt may have created the marker without making it durable.
+        crate::host::platform::sync_dir(&path).map_err(error_with_cause)?;
+    }
     let locked: LockedState = state.lock(deadline)?;
     if locked.runtime()?.is_some() {
         return Err(Exit::error(
             ErrorCode::Io,
             "a capture directory cannot hold a committed VM",
         ));
+    }
+    for entry in fs::read_dir(&path).map_err(Exit::from_os_error)? {
+        let entry = entry.map_err(Exit::from_os_error)?;
+        let name = entry.file_name();
+        if name == StateFile::Lock.name() || name == REMOVING {
+            continue;
+        }
+        let kind = entry.file_type().map_err(Exit::from_os_error)?;
+        let entry = entry.path();
+        let removed = if kind.is_dir() {
+            fs::remove_dir_all(&entry)
+        } else {
+            fs::remove_file(&entry)
+        };
+        removed.map_err(|error| io_error(ErrorCode::Io, &error, &entry))?;
+    }
+    if owned {
+        crate::host::platform::sync_dir(&path).map_err(error_with_cause)?;
+        fs::remove_file(&marker).map_err(|error| io_error(ErrorCode::Io, &error, &marker))?;
     }
     drop(locked);
     fs::remove_dir_all(&path).map_err(|error| io_error(ErrorCode::Io, &error, &path))
