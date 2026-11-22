@@ -461,8 +461,10 @@ where
 
 /// Parses the value of the image's token, `distro,0xd0003000,FORMAT[:IDENTITY]`.
 fn parse_image(value: &[u8]) -> Result<RootImage, ProtocolError> {
-    let fields: Vec<&[u8]> = value.split(|&byte| byte == b',').collect();
-    let [role, address, image] = fields[..] else {
+    let mut fields = value.split(|&byte| byte == b',');
+    let (Some(role), Some(address), Some(image), None) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
         return Err(violation(format!(
             "the {LAYER} kernel parameter must be \
              {DISTRO_ROLE},{DISTRO_MMIO_BASE:#x},FORMAT[:IDENTITY], not '{}'",
