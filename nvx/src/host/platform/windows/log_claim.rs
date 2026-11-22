@@ -176,6 +176,8 @@ pub(super) fn object_name(handle: HANDLE) -> io::Result<Vec<u16>> {
         STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_INFO_LENGTH_MISMATCH,
     };
 
+    /// `UNICODE_STRING::Length` counts bytes; each UTF-16 code unit occupies two bytes.
+    const UTF16_CODE_UNIT_BYTES: usize = 2;
     /// Bounds the first query's allocation to 1 KiB; larger names use the size Windows reports.
     const INITIAL_OBJECT_NAME_BYTES: u32 = 1024;
     let mut len = INITIAL_OBJECT_NAME_BYTES;
@@ -210,8 +212,12 @@ pub(super) fn object_name(handle: HANDLE) -> io::Result<Vec<u16>> {
             return Ok(Vec::new());
         }
         // SAFETY: the name's units lie in the buffer, which outlives this borrow of them.
-        let units =
-            unsafe { std::slice::from_raw_parts(name.Buffer, usize::from(name.Length) / 2) };
+        let units = unsafe {
+            std::slice::from_raw_parts(
+                name.Buffer,
+                usize::from(name.Length) / UTF16_CODE_UNIT_BYTES,
+            )
+        };
         return Ok(units.to_vec());
     }
 }
