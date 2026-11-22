@@ -26,7 +26,7 @@ pub(crate) enum StateFile {
 }
 
 impl StateFile {
-    pub(crate) fn owns_temporary(name: &str) -> bool {
+    pub(in crate::host::cli) fn owns_temporary(name: &str) -> bool {
         name.strip_prefix(".tmp").is_some_and(|suffix| {
             suffix.len() == 6 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
         }) || name
@@ -43,7 +43,7 @@ impl StateFile {
     }
 
     /// Every file that the sandbox commands keep in a state directory.
-    pub(crate) const ALL: [Self; 9] = [
+    pub(in crate::host::cli) const ALL: [Self; 9] = [
         Self::Config,
         Self::Lock,
         Self::Journal,
@@ -56,7 +56,7 @@ impl StateFile {
     ];
 
     /// Returns the name of the file in the state directory.
-    pub(crate) const fn name(self) -> &'static str {
+    pub(in crate::host::cli) const fn name(self) -> &'static str {
         match self {
             Self::Config => "config.json",
             Self::Lock => "sandbox.lock",
