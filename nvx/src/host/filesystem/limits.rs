@@ -39,6 +39,15 @@ pub(super) fn check_root(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Explains why OpenVMM cannot export the file `file` alone, as a child, or returns `None` if it
+/// can. OpenVMM reaches the file by its name, in which it refuses a colon or a backslash, as in
+/// every path of an export, such as a Windows path that names an alternate data stream of a file.
+pub(super) fn file_name_problem(file: &Path) -> Option<&'static str> {
+    file.file_name()
+        .is_some_and(|name| name.to_string_lossy().contains([':', '\\']))
+        .then_some("has a colon or a backslash in its name")
+}
+
 /// Applies OpenVMM's rules for the paths that it is to `action` in the exported directory `root`,
 /// so a policy that OpenVMM would refuse fails at provision rather than at every start: those of
 /// [`policy_limits`], and on the host, no link or reparse point below `root` and no other file

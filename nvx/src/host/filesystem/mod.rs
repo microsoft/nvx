@@ -87,7 +87,7 @@ pub(crate) use self::host_path::{canonicalize, is_reparse_point};
 #[cfg(feature = "cli")]
 use self::host_path::{identity, relative_text};
 #[cfg(feature = "cli")]
-use self::limits::{check_policy_paths, check_root};
+use self::limits::{check_policy_paths, check_root, file_name_problem};
 #[cfg(feature = "cli")]
 use self::policy::{
     Writable, allowed_paths, canonicals, check_allowed_paths, check_read_only, check_write_paths,
@@ -360,7 +360,8 @@ pub(crate) struct ExportRequest<'a> {
 /// target is mapped once, read-only if either mapping is. Two objects never share a target, and a
 /// target inside another mapping's must show the very object that the other mapping shows there.
 /// A whole volume cannot be mapped, and a policy that would need more children than OpenVMM
-/// offers is refused.
+/// offers is refused. A file that a child exports alone must not have a colon or a backslash in
+/// its name, which OpenVMM refuses in every path of an export.
 ///
 /// A read-only path must not lie inside a writable part, where the host could not keep it
 /// read-only: inside a read-write directory, unless write paths narrow that directory's writes
@@ -496,6 +497,14 @@ pub(crate) fn plan(request: &ExportRequest<'_>) -> Result<Option<PlannedExport>>
         let child_allowed = inside(&allowed);
         let child_denied = needed_denied_paths(&inside(&denied), &child_allowed);
         check_root(root)?;
+        if !own.directory
+            && let Some(problem) = file_name_problem(root)
+        {
+            return unsupported(format!(
+                "OpenVMM cannot export {}, which {problem}",
+                root.display()
+            ));
+        }
         policy_bytes += check_policy_paths(root, &child_denied, "hide")?;
         policy_bytes += check_policy_paths(root, &child_allowed, "show again")?;
         policy_bytes += check_policy_paths(root, &part.write, "make writable")?;
