@@ -64,6 +64,7 @@ use super::sandbox::{
 use super::session::{AttachmentCancellation, Session};
 use super::shell::format_command;
 use super::snapshots::{self, Name};
+use super::store::StateFile;
 use super::{Exit, Result, check_interrupt, output};
 use crate::ErrorCode;
 use crate::host::artifacts::compatibility::compatibility;
@@ -674,17 +675,31 @@ fn cold_vm_config(
     Ok(config)
 }
 
+/// Removes the temporary VM directory of a cold run, with what its VM left in it: OpenVMM's log
+/// and outcome report, its control and boot-console sockets on Linux, and the staging file of a
+/// report that OpenVMM did not finish writing, which [`StateFile::owns_temporary`] names.
 fn remove_vm_directory(dir: &VmDir) -> Result {
+    let remove = |path: &Path| match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Exit::from_os_error(error)),
+    };
     for name in [
         "openvmm.log",
         "outcome.json",
         "control.sock",
         "console.sock",
     ] {
-        match fs::remove_file(dir.path().join(name)) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(Exit::from_os_error(error)),
+        remove(&dir.path().join(name))?;
+    }
+    for entry in fs::read_dir(dir.path()).map_err(Exit::from_os_error)? {
+        let entry = entry.map_err(Exit::from_os_error)?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(StateFile::owns_temporary)
+        {
+            remove(&entry.path())?;
         }
     }
     fs::remove_dir(dir.path()).map_err(Exit::from_os_error)
