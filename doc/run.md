@@ -1570,14 +1570,16 @@ OpenVMM's user belongs to no other group; every other operation fails with
 `EPERM`. Hosts commonly grant access to `/dev/kvm` or `/dev/mshv` through such
 a group, so `caller` usually needs both capabilities. In a user namespace that
 does not map every group, Linux reports each unmapped group as its overflow
-GID, 65534 by default, which is also the default workload's group, so there
-OpenVMM counts a group of its own that reads as the overflow GID as another
-group, even for a caller with that GID. A managed sandbox's guest agent maps
-the shares before any workload runs, as guest root, which `caller` squashes to
-the owner of the host directory, so a managed sandbox whose OpenVMM cannot
-assume that identity fails to start. Grant OpenVMM no other capabilities:
-`CAP_SETUID` lets it assume any host identity, which `caller` mode confines to
-its export.
+GID, 65534 by default, which is also the default workload's group. OpenVMM can
+neither keep such a group nor regain it after dropping it, so there every
+operation that runs as its caller fails with `EPERM`, even with both
+capabilities, while one of OpenVMM's groups reads as the overflow GID, as in a
+rootless container that keeps the host user's groups; start OpenVMM there
+without such groups. A managed sandbox's guest agent maps the shares before
+any workload runs, as guest root, which `caller` squashes to the owner of the
+host directory, so a managed sandbox whose OpenVMM cannot assume that identity
+fails to start. Grant OpenVMM no other capabilities: `CAP_SETUID` lets it
+assume any host identity, which `caller` mode confines to its export.
 
 The guest kernel reports each caller's identity, and guest root may assume any
 identity inside the guest, so guest root and a compromised guest kernel can act
