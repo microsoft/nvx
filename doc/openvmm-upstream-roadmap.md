@@ -9,9 +9,10 @@
 - Mapped fork tip: `1e492803287f04b40bb7c17e8648c4b96af52ecc`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR18 fixups at positions 302,
   333, 342, 345, 347, 351, and 365, and the PR13 fixups at positions 340 and 349.
-- NVX's pinned OpenVMM revision: `78ddb8044c15e8d45276c902d31b6465e1bcbf6c`, position 365, the head
-  of microsoft/openvmm#5225, whose commits, positions 364 and 365, follow position 363,
-  `7671411e8`, the head of `feature/microvm/dev`, where microsoft/openvmm#5224 landed positions
+- NVX's pinned OpenVMM revision: `e3b20aef886998af0aa56af65efca655bb6170e5`, position 367, the head
+  of microsoft/openvmm#5226, whose commits, positions 366 and 367, follow position 365,
+  `78ddb8044`, the head of `feature/microvm/dev`, where microsoft/openvmm#5225 landed positions
+  364 and 365 on position 363, `7671411e8`, where microsoft/openvmm#5224 landed positions
   358-363 on position 357, `49fc14eeb`, where microsoft/openvmm#5223 landed position 357 on
   position 356, `21b1a55d0`, where microsoft/openvmm#5222 landed position 356 on position 355,
   `655bc319d`, where microsoft/openvmm#5221 landed position 355 on position 354, `afa67d6a6`, where
@@ -36,10 +37,11 @@
   landed, so each later commit's position is one less than before, and it added five fixups at its
   tip, positions 335-339. Of the 334 replayed commits, 47 conflicted with upstream and 13 replayed
   with new context; see [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase). The pin is
-  239 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
-  341, 343, 344, 346, 348, 350, and 352-364 are not yet assigned to PRs, positions 302, 333, 342,
-  345, 347, 351, and 365 are PR18 fixups, positions 340 and 349 are PR13 fixups, and positions 316
-  and 335-339 are rebase fixups; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
+  241 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
+  341, 343, 344, 346, 348, 350, 352-364, 366, and 367 are not yet assigned to PRs, positions 302,
+  333, 342, 345, 347, 351, and 365 are PR18 fixups, positions 340 and 349 are PR13 fixups, and
+  positions 316 and 335-339 are rebase fixups; see
+  [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -1654,7 +1656,8 @@ bf353460f
   -> Windows virtio-fs names reach entries only by their stored names [358-363]
   -> virtio-fs handle and node IDs kept below u64::MAX [364]
   -> PR18 fixup [365]
-  -> 78ddb8044 (NVX pin)
+  -> writes through virtio-fs handles not open for writing refused [366-367]
+  -> e3b20aef8 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1716,7 +1719,7 @@ handle table whose first handle it keeps, and its test into position 364, whose 
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 239 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 241 later commits, positions
 302, 333, 342, 345, 347, 351, and 365 are PR18 fixups, positions 340 and 349 are PR13 fixups,
 position 316 is the fixup of the v7.1 rebase, positions 335-339 are the fixups of the v7.2 rebase,
 and the others are not yet classified or assigned to PRs.
@@ -1727,7 +1730,7 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
 v7.0 reorganization, position 316 is the v7.1 rebase's fixup, positions 317-334 followed the
-v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-365 followed the
+v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-367 followed the
 v7.2 rebase, so they combine none, apart from
 position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0
 reorganization folded into them. Each commit through position 316 has the position that it had in
@@ -1735,7 +1738,7 @@ v7.0 and v7.1, and each of positions 317-334 is its v7.1 position less one, sinc
 dropped v7.1 position 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each
 commit's v6.1 position is its v6.0 position less seven, the number of commits that the v6.1 rebase
 dropped before it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1
-position 149 on, and positions 297-365 have no earlier position; see
+position 149 on, and positions 297-367 have no earlier position; see
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
@@ -1987,6 +1990,8 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 363 | `7671411e8` | - | - | - | - | - | - | virtiofs: skip a Windows READDIRPLUS name whose case has changed (microsoft/openvmm#5224) |
 | 364 | `959168a93` | - | - | - | - | - | - | virtiofs: never hand out u64::MAX, the synthetic root's handle (microsoft/openvmm#5225) |
 | 365 | `78ddb8044` | - | - | - | - | - | - | virtiofs: restart a restored microVM's handles at 1 on a reset (microsoft/openvmm#5225); fold into 083, its test into 364 |
+| 366 | `a1cf71a35` | - | - | - | - | - | - | lxutil: keep O_TRUNC from making a Windows handle writable (microsoft/openvmm#5226) |
+| 367 | `e3b20aef8` | - | - | - | - | - | - | virtiofs: refuse a write through a handle not open for writing (microsoft/openvmm#5226) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -1997,7 +2002,7 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`
 main on 2026-11-19, for positions 321-324, `78af54a51`, upstream main on 2026-11-20, for position
 325, `d83f87209`, upstream main later that day, for position 326, `265f0a73f`, upstream main
 later still, for positions 327 and 328, and `bf353460f`, upstream main on 2026-11-21 and the v7.2
-fork base, for positions 329-334 and 340-365.
+fork base, for positions 329-334 and 340-367.
 They name the positions that the commits have now, but neither the v7.2 rebase on `bf353460f`, the
 v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did
 the v6.1 rebase check the earlier ones on `7d90c4104`.
@@ -5061,6 +5066,50 @@ table of position 364, which the test restores and then resets, so it is a PR18 
 position 083, and its test into position 364. Upstream main lacks the defect, since it lacks the
 microVM's restore. Replaying the commit there conflicts in the microVM's `fs.rs` and `fs_tests.rs`,
 which upstream main lacks, so it follows PR18 upstream.
+
+Position 366 has lxutil's Windows `LxVolume::open` keep the access of the file that it opens to its
+access mode and `O_APPEND`, and truncate an existing file for `O_TRUNC` through a handle reopened
+with `FILE_WRITE_DATA` for the truncation alone when that access lacks it (microsoft/nvx#1609).
+Windows truncates only through a handle with write access, so upstream's
+`open_flags_to_access_mask` added `FILE_WRITE_DATA` to every `O_TRUNC` open, whose file kept that
+handle and recorded that access: an `O_RDONLY | O_TRUNC` or `O_NOACCESS | O_TRUNC` file could be
+written with `pwrite` and truncated with `set_attr`, where a Linux descriptor fails with `EBADF`
+and `EINVAL`, and `O_APPEND | O_TRUNC` got back the `FILE_WRITE_DATA` that `O_APPEND` strips, so
+its writes went to their offsets rather than to the end of the file. A virtio-fs or virtio-9p guest
+that opened a file `O_RDONLY | O_TRUNC` could thus keep writing it, and a microVM restore, which
+reopens the handle without `O_TRUNC`, took that access away. The open still needs write access to
+truncate, as on Linux, and Linux hosts are unchanged. It changes upstream's
+`open_flags_to_access_mask` in `windows/util.rs` and the truncation of upstream's `LxVolume::open`
+in `windows/mod.rs`, which upstream has had since `304657e9a` and `f0c2e7814`
+(microsoft/openvmm#2181) and no chain commit changes, though position 358 changes both files and
+PR27's position 125 changes `windows/mod.rs`, and it adds two tests to lxutil's `lib.rs`, after
+upstream's `readonly_truncate`; PR27's position 125 and positions 158 and 358 also change that
+file. It changes nothing that a chain commit adds, so it is not yet assigned to a PR. Upstream main
+has the defect, in the same two functions. Replaying the commit there applies, and
+`cargo check -p lxutil` and the tests of `lxutil` pass on the result on Windows, so it can go
+upstream on its own.
+
+Position 367 has `VirtioFs::write` fail with `EBADF`, before it checks whether the guest may write
+the file, unless the access mode of the open flags that the handle records, and a microVM snapshot
+saves, is `O_WRONLY` or `O_RDWR` (microsoft/nvx#1609). `write` checked the file first, which fails
+with `EROFS` on a read-only share or child or outside a microVM's writable paths, and left the
+handle's access mode to the host, so a `FUSE_WRITE` through an `O_RDONLY` handle of a file that the
+guest may not write failed with `EROFS` on every host, where Linux's `write(2)` fails with `EBADF`
+first, and whether one through such a handle of a writable file failed depended on the host's
+handle, which position 366 makes read-only on Windows. A guest kernel writes only through handles
+that it opened for writing, so only a guest that drives the queue itself sees the change. It
+changes upstream's `write` in `lib.rs`, between the `get_file` that position 346 changes and the
+`check_writable` call that `a5f055dd7` (microsoft/openvmm#3821) adds; PR06's position 010 also
+changes `write`, and PR13's position 048, PR18's positions 081 and 083, PR27's position 126,
+positions 158, 160, 164, 322, 331, 332, 344, 356, 357, and 364, PR18's fixups at positions 333,
+342, and 347, and PR13's fixups at positions 340 and 349 change the file. It adds a test to the
+microVM's `policy_tests.rs`, before the first, which position 160 adds and positions 164, 194,
+344, 346, 352, 357, 359, 360, 362, and 363 and PR18's fixup at position 351 change. It changes
+nothing that a chain commit adds, and it fixes no defect of position 160, whose policy only adds
+another `EROFS` that upstream's order put first, so it is not yet assigned to a PR. Upstream main
+has the defect, in the same `write`. Replaying the commit there conflicts in `lib.rs`, next to the
+`get_file` of position 346, and in the microVM's `policy_tests.rs`, which upstream main lacks, so
+it cannot go upstream on its own as it is.
 
 ## PR summary
 
