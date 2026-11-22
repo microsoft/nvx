@@ -9,8 +9,9 @@
 - Mapped fork tip: `1e492803287f04b40bb7c17e8648c4b96af52ecc`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR18 fixups at positions 302,
   333, 342, 345, 347, and 351, and the PR13 fixups at positions 340 and 349.
-- NVX's pinned OpenVMM revision: `655bc319da7e145bbd3a0272fcb830980dab0694`, position 355, the head
-  of microsoft/openvmm#5221, whose commit follows position 354, `afa67d6a6`, the head of
+- NVX's pinned OpenVMM revision: `21b1a55d01bcd7bd916e1cc92c05c70c7d5c80e1`, position 356, the head
+  of microsoft/openvmm#5222, whose commit follows position 355, `655bc319d`, the head of
+  microsoft/openvmm#5221, whose commit follows position 354, `afa67d6a6`, the head of
   microsoft/openvmm#5220, whose commit follows position 353, `de700ffc2`, the head of
   microsoft/openvmm#5219, whose commit follows position 352, `3aefff9ba`, the head of
   microsoft/openvmm#5218, whose commit follows position 351, `8bea555db`, the head of
@@ -32,8 +33,8 @@
   landed, so each later commit's position is one less than before, and it added five fixups at its
   tip, positions 335-339. Of the 334 replayed commits, 47 conflicted with upstream and 13 replayed
   with new context; see [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase). The pin is
-  229 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
-  341, 343, 344, 346, 348, 350, and 352-355 are not yet assigned to PRs, positions 302, 333, 342,
+  230 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
+  341, 343, 344, 346, 348, 350, and 352-356 are not yet assigned to PRs, positions 302, 333, 342,
   345, 347, and 351 are PR18 fixups, positions 340 and 349 are PR13 fixups, and positions 316 and
   335-339 are rebase fixups; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
@@ -1645,7 +1646,8 @@ bf353460f
   -> microVM file children attached through relative paths and symbolic links [353]
   -> virtio-fs aggregate root link counts that leave out file children [354]
   -> caller requests refused while host groups may be unmapped [355]
-  -> 655bc319d (NVX pin)
+  -> virtio-fs aggregate root syncs acknowledged through the root's handle [356]
+  -> 21b1a55d0 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1705,7 +1707,7 @@ tests.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 229 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 230 later commits, positions
 302, 333, 342, 345, 347, and 351 are PR18 fixups, positions 340 and 349 are PR13 fixups, position
 316 is the fixup of the v7.1 rebase, positions 335-339 are the fixups of the v7.2 rebase, and the
 others are not yet classified or assigned to PRs.
@@ -1716,7 +1718,7 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
 v7.0 reorganization, position 316 is the v7.1 rebase's fixup, positions 317-334 followed the
-v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-355 followed the
+v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-356 followed the
 v7.2 rebase, so they combine none, apart from
 position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0
 reorganization folded into them. Each commit through position 316 has the position that it had in
@@ -1724,7 +1726,7 @@ v7.0 and v7.1, and each of positions 317-334 is its v7.1 position less one, sinc
 dropped v7.1 position 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each
 commit's v6.1 position is its v6.0 position less seven, the number of commits that the v6.1 rebase
 dropped before it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1
-position 149 on, and positions 297-355 have no earlier position; see
+position 149 on, and positions 297-356 have no earlier position; see
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
@@ -1966,6 +1968,7 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 353 | `de700ffc2` | - | - | - | - | - | - | virtiofs: resolve a microVM file child's path as its identity does (microsoft/openvmm#5219) |
 | 354 | `afa67d6a6` | - | - | - | - | - | - | virtiofs: count only child directories in the synthetic root's nlink (microsoft/openvmm#5220) |
 | 355 | `655bc319d` | - | - | - | - | - | - | lxutil: fail closed before dropping groups it cannot restore (microsoft/openvmm#5221) |
+| 356 | `21b1a55d0` | - | - | - | - | - | - | virtiofs: accept FSYNCDIR through the synthetic root's handle (microsoft/openvmm#5222) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -1976,7 +1979,7 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`
 main on 2026-11-19, for positions 321-324, `78af54a51`, upstream main on 2026-11-20, for position
 325, `d83f87209`, upstream main later that day, for position 326, `265f0a73f`, upstream main
 later still, for positions 327 and 328, and `bf353460f`, upstream main on 2026-11-21 and the v7.2
-fork base, for positions 329-334 and 340-355.
+fork base, for positions 329-334 and 340-356.
 They name the positions that the commits have now, but neither the v7.2 rebase on `bf353460f`, the
 v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did
 the v6.1 rebase check the earlier ones on `7d90c4104`.
@@ -4819,6 +4822,34 @@ no PR maps, so it is not yet assigned to a PR either and follows position 348. U
 the defect, since it lacks caller ownership and `credentials.rs`. Replaying the commit there
 conflicts in `credentials.rs` and the Guide's virtio-fs page, which upstream main lacks, so it
 cannot go upstream on its own.
+
+Position 356 has `VirtioFs::fsync_dir`, which answers `FUSE_FSYNCDIR`, succeed for the handle that
+`FUSE_OPENDIR` returns for an aggregate's synthetic root, with the root's node, as `release_dir`
+does, since the root keeps its entries only in memory and has nothing to write back
+(microsoft/nvx#1624). It looked that handle, the sentinel `SYNTHETIC_ROOT_FH`, up in the handle
+map, which never holds it, so `fsync` and `fdatasync` of a descriptor of the root, as `sync DIR`
+calls, failed with `EBADF`, which POSIX reserves for a descriptor that is not open, although
+`READDIR`, `READDIRPLUS`, `RELEASEDIR`, and `GETATTR` and `STATX` through a handle recognize the
+sentinel. It does not answer `ENOSYS`, which the Linux client takes for the whole mount, after which
+it would stop sending `FSYNCDIR` for the children's directories too, and every other handle and
+node reaches `get_file` as before. It changes upstream's `fsync_dir` in `lib.rs`, which no chain
+commit changes but position 346, which passes it the request's node for `get_file`, and the
+comments on the sentinel in `aggregate.rs` and in `open_dir`, which no chain commit changes, though
+PR06's position 010, PR13's position 048, PR18's positions 081 and 083, PR27's position 126,
+positions 158, 160, 164, 322, 331, 332, and 344, and the fixups at positions 333, 340, 342, 347, and
+349 also change `lib.rs`, and PR18's position 081 and positions 164, 165, 332, 341, 350, and 354
+also change `aggregate.rs`. It adds a test and a request helper to upstream's `aggregate_tests.rs`,
+on an aggregate of upstream's `VirtioFs::new_aggregate` and `add_child`, with imports next to those
+that position 350 adds; position 332 also changes the file, none of the code that the test uses.
+It changes nothing that a mapped PR adds, and it fixes no defect of position 346, which only passes
+the node, so it is not yet assigned to a PR. In NVX's guest, `sync` and `sync -d` of an aggregate's
+root failed with `Bad file descriptor`. Upstream main has the defect, in the same `fsync_dir`, which
+`a5f055dd7` (microsoft/openvmm#3821) adds with the sentinel. Replaying the commit there conflicts in
+`lib.rs`, where position 346 passes `fsync_dir` the request's node, and in `aggregate_tests.rs`,
+among the imports of position 350. The same change made on upstream's `fsync_dir` and imports
+applies there without conflicts, and `virtiofs` type-checks there with its tests on Windows, where
+the new test fails without the change and all of them pass with it, so it can go upstream on its own
+in that form.
 
 ## PR summary
 
