@@ -1458,7 +1458,10 @@ or link reaches the share:
 
 - `--mount-deny HOST_PATH` hides a path and everything below it. It may name
   the share's root itself when allowed paths inside it remain, so the share
-  exposes only those paths.
+  exposes only those paths. A rename whose source or destination has a denied
+  path below it fails with `EROFS` (`Read-only file system`), since it would
+  move hidden entries where the workload can see them, or the workload's
+  entries into the denied path.
 - `--mount-allow HOST_PATH` exposes a path inside a denied path, and
   everything below it, again. The hidden directories on the way to it are
   traverse-only: the workload can enter and list them, but the listing shows
