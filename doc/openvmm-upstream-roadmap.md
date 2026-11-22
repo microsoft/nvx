@@ -8,24 +8,25 @@
   `feature/microvm/release/v7.1` rebase had moved it; see [Upstream status](#upstream-status).
 - Mapped fork tip: `1e492803287f04b40bb7c17e8648c4b96af52ecc`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR18 fixups at positions 302,
-  333, 342, and 345, and the PR13 fixup at position 340.
-- NVX's pinned OpenVMM revision: `c819952cf5047b24f360f071169538efbd20400b`, position 346, the head
-  of microsoft/openvmm#5212, whose commit follows position 345, `8986cc537`, the head of
+  333, 342, 345, and 347, and the PR13 fixup at position 340.
+- NVX's pinned OpenVMM revision: `a533d6a55e782f420b215dda1f282ece0478a40f`, position 347, the head
+  of microsoft/openvmm#5213, whose commit follows position 346, `c819952cf`, the head of
+  microsoft/openvmm#5212, whose commit follows position 345, `8986cc537`, the head of
   microsoft/openvmm#5211, whose commit follows position 344, `076889dbb`, the head of
-  microsoft/openvmm#5210, whose commit follows position 343, `afa0e9c20`, the head of
-  microsoft/openvmm#5209, whose commit follows position 342, `5c82edac4`, the head of
-  microsoft/openvmm#5208, whose commit follows position 341, `ed2d7e3a1`, the head of
-  `feature/microvm/dev`, where microsoft/openvmm#5207 landed position 341 on position 340,
-  `32888344a`, where microsoft/openvmm#5206 landed position 340 on position 339, `b51f9156c`, the
-  head of the `feature/microvm/release/v7.2` branch of microsoft/openvmm. The
+  `feature/microvm/dev`, where microsoft/openvmm#5210 landed position 344 on position 343,
+  `afa0e9c20`, where microsoft/openvmm#5209 landed position 343 on position 342, `5c82edac4`, where
+  microsoft/openvmm#5208 landed position 342 on position 341, `ed2d7e3a1`, where
+  microsoft/openvmm#5207 landed position 341 on position 340, `32888344a`, where
+  microsoft/openvmm#5206 landed position 340 on position 339, `b51f9156c`, the head of the
+  `feature/microvm/release/v7.2` branch of microsoft/openvmm. The
   v7.2 rebase moved the 335 commits of `feature/microvm/dev` at `30fe00786`, the pin before it,
   onto `bf353460f`. It dropped position 317, upstream's microsoft/openvmm#5160, which upstream had
   landed, so each later commit's position is one less than before, and it added five fixups at its
   tip, positions 335-339. Of the 334 replayed commits, 47 conflicted with upstream and 13 replayed
   with new context; see [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase). The pin is
-  220 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
-  341, 343, 344, and 346 are not yet assigned to PRs, positions 302, 333, 342, and 345 are PR18
-  fixups, position 340 is a PR13 fixup, and positions 316 and 335-339 are rebase fixups; see
+  221 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
+  341, 343, 344, and 346 are not yet assigned to PRs, positions 302, 333, 342, 345, and 347 are
+  PR18 fixups, position 340 is a PR13 fixup, and positions 316 and 335-339 are rebase fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1406,7 +1407,7 @@ flowchart TB
         P15["PR15<br/>Machine profile<br/>P - 11 commits"]
         P16["PR16<br/>Fixed virtio-MMIO ABI<br/>P - 4 commits"]
         P17["PR17<br/>Capture + authoritative restore<br/>P - 11 commits"]
-        P18["PR18<br/>Host attachments<br/>P - 10 commits + 4 fixups"]
+        P18["PR18<br/>Host attachments<br/>P - 10 commits + 5 fixups"]
         P19["PR19<br/>Block roles + tiers<br/>N/P - 3 commits"]
         P20["PR20<br/>Restore activation<br/>P - 7 commits"]
         P21["PR21<br/>Network egress policy<br/>P/N - 6 commits"]
@@ -1627,7 +1628,8 @@ bf353460f
   -> microVM creates of existing names held to the write rule of opens [344]
   -> PR18 fixup [345]
   -> microVM handles served only for their held nodes [346]
-  -> c819952cf (NVX pin)
+  -> PR18 fixup [347]
+  -> a533d6a55 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1667,14 +1669,19 @@ position 083 before submission, which adds the `READDIRPLUS` of a listing whose 
 with its tests, one of which calls the `track_inodes_up_to_the_limit` that position 333's tests add
 to position 083; there, an entry takes its lookup reference before the check that its name still
 reaches the listed object, so the fold also releases the reference of an entry that fails that
-check, which position 332 takes only after it.
+check, which position 332 takes only after it. Fold position 347 into PR18's position 081 before
+submission, which adds the microVM paths of `mknod` and `rename` that let the guest make a device
+node, with its checks after the writability checks that position 160 adds, whose
+`RENAME_EXCHANGE` the rename check also names, and before the early return of position 340, and
+its tests into position 164, which lets the policy tests share the `request` and `name` helpers
+that they call.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 220 later commits, positions
-302, 333, 342, and 345 are PR18 fixups, position 340 is a PR13 fixup, position 316 is the fixup of
-the v7.1 rebase, positions 335-339 are the fixups of the v7.2 rebase, and the others are not yet
-classified or assigned to PRs.
+The NVX pin extends the chain past position 126 without merges. Of its 221 later commits, positions
+302, 333, 342, 345, and 347 are PR18 fixups, position 340 is a PR13 fixup, position 316 is the
+fixup of the v7.1 rebase, positions 335-339 are the fixups of the v7.2 rebase, and the others are
+not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 are the ABI restart
@@ -1682,7 +1689,7 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
 v7.0 reorganization, position 316 is the v7.1 rebase's fixup, positions 317-334 followed the
-v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-346 followed the
+v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-347 followed the
 v7.2 rebase, so they combine none, apart from
 position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0
 reorganization folded into them. Each commit through position 316 has the position that it had in
@@ -1690,7 +1697,7 @@ v7.0 and v7.1, and each of positions 317-334 is its v7.1 position less one, sinc
 dropped v7.1 position 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each
 commit's v6.1 position is its v6.0 position less seven, the number of commits that the v6.1 rebase
 dropped before it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1
-position 149 on, and positions 297-346 have no earlier position; see
+position 149 on, and positions 297-347 have no earlier position; see
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
@@ -1923,6 +1930,7 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 344 | `076889dbb` | - | - | - | - | - | - | virtiofs: apply open's write rule to a create of an existing name (microsoft/openvmm#5210) |
 | 345 | `8986cc537` | - | - | - | - | - | - | virtiofs: stop failed microVM READDIRPLUS from leaking lookup references (microsoft/openvmm#5211); fold into 083 |
 | 346 | `c819952cf` | - | - | - | - | - | - | virtiofs: serve a handle only for its node while the guest holds it (microsoft/openvmm#5212) |
+| 347 | `a533d6a55` | - | - | - | - | - | - | virtiofs: refuse device nodes and whiteouts on a microVM share (microsoft/openvmm#5213); fold into 081, its tests into 164 |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -1933,7 +1941,7 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`
 main on 2026-11-19, for positions 321-324, `78af54a51`, upstream main on 2026-11-20, for position
 325, `d83f87209`, upstream main later that day, for position 326, `265f0a73f`, upstream main
 later still, for positions 327 and 328, and `bf353460f`, upstream main on 2026-11-21 and the v7.2
-fork base, for positions 329-334 and 340-346.
+fork base, for positions 329-334 and 340-347.
 They name the positions that the commits have now, but neither the v7.2 rebase on `bf353460f`, the
 v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did
 the v6.1 rebase check the earlier ones on `7d90c4104`.
@@ -4517,6 +4525,46 @@ Replaying the commit there conflicts in `lib.rs`, next to the bounds and the war
 in `read`, `write`, and `get_file`, and in the microVM's `fs_tests.rs`, `policy_tests.rs`, and
 `symlink_tests.rs`, which upstream main lacks, so it cannot go upstream on its own.
 
+Position 347 has a microVM share refuse to make a device node (microsoft/nvx#1612): `mknod` makes
+only regular files, FIFOs, and sockets, and fails a character or block device with `EPERM` and any
+other type as `mknod(2)` fails it, and a rename passes the host no flag, `RENAME_NOREPLACE`, or
+`RENAME_EXCHANGE`, and fails any other flag, `RENAME_WHITEOUT` among them, with `EINVAL`. PR18's
+position 081 makes the guest untrusted and adds the microVM preflights of `VirtioFs::mknod` and
+`VirtioFs::rename`, but they passed the guest's file type and device number to `mknodat`, and its
+rename flags to `renameat2`, as upstream's server does by design. Since Linux 5.8, a caller without
+`CAP_MKNOD` may make a whiteout, character device 0:0, with `mknodat` or with `RENAME_WHITEOUT`,
+which leaves one at the old name, so on a Linux host even an unprivileged OpenVMM made one in a
+writable share at the guest's request, which host overlay mounts take for a deleted file, and an
+OpenVMM with `CAP_MKNOD` made any character or block device that the guest asked for; a whiteout's
+rename also left a node at the old name that the inode table did not track. A microVM volume on
+Windows makes only regular files and rejects every rename flag, so Windows hosts already refused
+both. The commit adds `validate_mknod_type` and `validate_rename_flags` to the microVM's `fs.rs`,
+next to the `validate_symlink_target` of PR27's position 126, and calls them after the writability
+checks that position 160 adds and before the microVM preflights of position 081, the rename check
+also before the early return of PR13's fixup at position 340; the rename check names the
+`RENAME_EXCHANGE` that position 160 adds. The saved state keeps its format. It changes `mknod` and
+`rename` in `lib.rs`, upstream's code, to which PR13's position 048 adds the names that `rename`
+keeps, PR18's position 081 the preflights, position 160 the writability checks, and position 340
+the early return, and none of the code that they add; PR06's position 010, PR18's position 083,
+PR27's position 126, positions 158, 164, 322, 331, 332, 344, and 346, and the fixups at positions
+333 and 342 also change the file. It adds the two functions to the microVM's `fs.rs`, which
+position 081 adds and PR18's positions 083 and 085, PR22's position 102, PR27's position 126,
+positions 158, 160, 164, 165, 194, 332, 343, and 344, and PR18's fixup at position 342 also change.
+It adds a test module, whose tests call the `request` and `name` helpers that position 164 shares
+from the policy tests, to the microVM's module list, which position 081 adds and PR18's position
+083, PR27's position 126, and positions 158, 160, 164, and 166 also change. In the Guide's virtio-fs
+page, which PR18's position 085 adds, it adds a row for device nodes after the row for symbolic
+links that PR27's position 126 adds, rewrites the row for rename flags that position 166 adds, and
+adds a paragraph to the security model of position 085. It fixes a defect of position 081 and needs
+nothing that a later position adds but the writability checks and `RENAME_EXCHANGE` of position
+160, the early return of position 340, the helpers of position 164, and the Guide's rows, so it is
+a PR18 fixup: fold it into position 081, with its checks after the writability checks that position
+160 adds, and its tests into position 164. Upstream main lacks the defect, since it lacks the
+microVM profile; its standard server passes the type and the flags through by design. Replaying the
+commit there conflicts in `lib.rs`, next to the code of positions 081, 160, and 340, and in the
+microVM's `fs.rs` and `mod.rs` and the Guide's virtio-fs page, which upstream main lacks, so it
+follows PR18 upstream.
+
 ## PR summary
 
 Each count is of v7.2 commits, which include the fixups that the v3.0, v4.0, v5.0, v6.0, and v7.0
@@ -4545,7 +4593,7 @@ reorganizations folded into them; see [The v7.0 reorganization](#the-v70-reorgan
 | PR15 | P | microVM machine profile and minimal chipset | 050-060 | `a43ebb21f..9ef208a3d` | 11 | Foundation fan-in |
 | PR16 | P | Fixed virtio-MMIO ABI and shared interrupt status | 061-064 | `2ea61a194..8b8834095` | 4 | PR15 |
 | PR17 | P | microVM snapshot capture and authoritative restore | 065-075 | `68a2d64c1..dc9696109` | 11 | PR16 |
-| PR18 | P | microVM host attachments and device persistence | 076-085; 302, 333, 342, 345 (fixups) | `8e55ba5e5..45704afb4`; `8d71cff3a`, `2dbfb495a`, `5c82edac4`, `8986cc537` | 14 | PR17 |
+| PR18 | P | microVM host attachments and device persistence | 076-085; 302, 333, 342, 345, 347 (fixups) | `8e55ba5e5..45704afb4`; `8d71cff3a`, `2dbfb495a`, `5c82edac4`, `8986cc537`, `a533d6a55` | 15 | PR17 |
 | PR19 | N/P | Sandbox block roles and snapshot tiers | 086-088 | `ef8854204..fb80162dd` | 3 | PR18 |
 | PR20 | P | Restore-time processor and memory activation | 089-095 | `a4a9d3270..d04c81f37` | 7 | PR19 |
 | PR21 | P/N | Network egress policy | 096-101 | `4189a685a..16922634e` | 6 | PR20; core can start after PR13 |
@@ -4564,7 +4612,7 @@ the commit, its v6.0 position, which it had in v5.0 and v5.1 too, the v4.0 posit
 v2.4 positions that v4.0 recorded, and the v2.4, v5.1, and v6.1 fixups that it folds; "(part)"
 marks a fixup that split across commits. Positions 016 and 017, which followed the v6.0
 reorganization and the v6.1 rebase, positions 302 and 333, which followed the v7.0
-reorganization and the v7.1 rebase, and positions 340, 342, and 345, which followed the v7.2
+reorganization and the v7.1 rebase, and positions 340, 342, 345, and 347, which followed the v7.2
 rebase, name their OpenVMM pull request instead of earlier positions; position 333 was v7.1
 position 334. A v6.1
 position counts in `feature/microvm/dev` at `fe61f9cbf`, whose first
@@ -4878,7 +4926,7 @@ Landed upstream and dropped from the chain:
 </details>
 
 <details>
-<summary><strong>PR18 - microVM host attachments and device persistence (P)</strong> - 14 commits</summary>
+<summary><strong>PR18 - microVM host attachments and device persistence (P)</strong> - 15 commits</summary>
 
 - 076 `8e55ba5e5` - openvmm_entry: add connect= serial backends with bounded timeouts (v6.1 074, v6.0 081, v4.0 085, v3.0 094, v2.4 094; folds v2.4 144)
 - 077 `e40773d99` - openvmm: persist the microVM boot console and rebuild its attachment on restore (v6.1 075, v6.0 082, v4.0 086, v3.0 095, v2.4 095)
@@ -4894,6 +4942,7 @@ Landed upstream and dropped from the chain:
 - 333 `2dbfb495a` - virtiofs: preflight a microVM object of another file type as a new node (microsoft/openvmm#5203; **fold into 081**, its tests into 083)
 - 342 `5c82edac4` - virtiofs: bound microVM directory snapshots in total when listing (microsoft/openvmm#5208; **fold into 083**, its budget in `new_microvm_aggregate` and its tests into 164)
 - 345 `8986cc537` - virtiofs: stop failed microVM READDIRPLUS from leaking lookup references (microsoft/openvmm#5211; **fold into 083**)
+- 347 `a533d6a55` - virtiofs: refuse device nodes and whiteouts on a microVM share (microsoft/openvmm#5213; **fold into 081**, its tests into 164)
 
 </details>
 
