@@ -137,7 +137,7 @@ fn describe_generations(catalog: &[Profile]) -> String {
 /// identifies one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
-pub(crate) struct HostCpu {
+pub(super) struct HostCpu {
     /// The vendor string of CPUID leaf 0, such as `GenuineIntel`.
     vendor: String,
     /// The display family.
@@ -153,7 +153,7 @@ pub(crate) struct HostCpu {
 impl HostCpu {
     /// Identifies the CPU that this process runs on, or returns `None` on a host without CPUID,
     /// which is not an x86-64 host.
-    pub(crate) fn current() -> Option<Self> {
+    pub(super) fn current() -> Option<Self> {
         #[cfg(target_arch = "x86_64")]
         {
             Some(Self::from_cpuid(cpuid))
@@ -288,7 +288,7 @@ fn encode_query_value(value: &str) -> String {
 /// `openvmm` is the OpenVMM executable, quoted for the shell. Returns `None` unless no built-in
 /// profile serves the CPU and the profile is `auto`, or `host` on a CPU of a vendor that host
 /// profiles do not serve either, and where the CPU is unknown.
-pub(crate) fn guidance(
+pub(super) fn guidance(
     cpu_profile: Option<&str>,
     host: Option<&HostCpu>,
     openvmm: &str,
