@@ -22,7 +22,7 @@ use crate::host::network::policy::MAX_JSON_DEPTH;
 use crate::host::network::policy::json::{ReadError, read_document};
 
 /// A JSON object.
-pub(crate) type Object = Map<String, Value>;
+pub(super) type Object = Map<String, Value>;
 
 /// Reads the JSON object at `path`, which messages call `description`, such as `sandbox
 /// configuration`, and whose member `version_field` is one of the integers `versions`.
@@ -32,7 +32,7 @@ pub(crate) type Object = Map<String, Value>;
 /// field, as in `failed to read DESCRIPTION: PATH: layers[0] has duplicate field "path"`, or the
 /// array or object that nests too deep. Another value than an object, or another version, fails as
 /// `DESCRIPTION has an unsupported format: PATH`, with [`ErrorCode::FormatUnsupported`].
-pub(crate) fn read_object(
+pub(super) fn read_object(
     path: &Path,
     description: &str,
     version_field: &str,
@@ -80,13 +80,13 @@ pub(crate) fn read_object(
 
 /// Returns `value` as `serde_json`'s pretty printer writes it, with the members of every object
 /// sorted by name, and without a final line end.
-pub(crate) fn pretty(value: &Value) -> String {
+pub(super) fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(&Sorted(value)).expect("a JSON value serializes")
 }
 
 /// Returns the serde form of `value` as [`pretty`] writes it, or the error that `description`
 /// names if it has no JSON form.
-pub(crate) fn pretty_serde(value: &impl Serialize, description: &str) -> Result<String> {
+pub(super) fn pretty_serde(value: &impl Serialize, description: &str) -> Result<String> {
     serde_json::to_value(value)
         .map(|value| pretty(&value))
         .map_err(|error| {
