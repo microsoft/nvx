@@ -53,18 +53,16 @@
 //! execution that ended get no answer; and standard input beyond the window, or after its end,
 //! ends the session.
 
-use crate::protocol::{OUTER_MAX_PAYLOAD, ProtocolError, array, violation};
+use crate::protocol::{APP_HEADER_LEN, OUTER_MAX_PAYLOAD, ProtocolError, array, violation};
 
 /// Version of the frame format and of the protocol, which each header and each `READY` carry.
 pub(crate) const VERSION: u8 = 2;
 /// Largest payload of a frame, which fits one outer data record with its header.
-pub(crate) const MAX_PAYLOAD: usize = OUTER_MAX_PAYLOAD - HEADER_LEN;
+pub(crate) const MAX_PAYLOAD: usize = OUTER_MAX_PAYLOAD - APP_HEADER_LEN;
 /// Most bytes of an execution's standard input that the host may have sent in `STDIN` frames and
 /// the guest agent not yet acknowledged with `STDIN_ACK`.
 pub(crate) const STDIN_WINDOW: u32 = 64 * 1024;
 
-/// Length of a frame's header.
-const HEADER_LEN: usize = 24;
 /// Magic of every frame.
 const MAGIC: [u8; 4] = *b"NVXC";
 /// Kind of [`Frame::Ping`].
@@ -238,7 +236,7 @@ impl<'a> Frame<'a> {
         if length > MAX_PAYLOAD {
             return Err(violation("an NVXC frame must fit one outer data record"));
         }
-        let mut frame = Vec::with_capacity(HEADER_LEN + length);
+        let mut frame = Vec::with_capacity(APP_HEADER_LEN + length);
         frame.extend_from_slice(&MAGIC);
         frame.extend_from_slice(&[VERSION, kind, 0, 0]);
         frame.extend_from_slice(&request_id.to_le_bytes());
@@ -258,7 +256,7 @@ impl<'a> Frame<'a> {
     /// an `EXIT` whose text names no [`Outcome`]; and what [`Frame::encode`] refuses.
     pub(crate) fn decode(frame: &'a [u8]) -> Result<(u64, Self), ProtocolError> {
         let (header, payload) = frame
-            .split_at_checked(HEADER_LEN)
+            .split_at_checked(APP_HEADER_LEN)
             .filter(|_| frame.len() <= OUTER_MAX_PAYLOAD)
             .ok_or_else(malformed)?;
         if header[..4] != MAGIC || header[4] != VERSION {
