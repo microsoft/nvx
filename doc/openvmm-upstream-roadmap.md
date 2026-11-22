@@ -9,8 +9,9 @@
 - Mapped fork tip: `1e492803287f04b40bb7c17e8648c4b96af52ecc`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR18 fixups at positions 302,
   333, 342, 345, and 347, and the PR13 fixups at positions 340 and 349.
-- NVX's pinned OpenVMM revision: `2a483a06f31fcea8736efa59e2e9c600a0529d52`, position 349, the head
-  of microsoft/openvmm#5215, whose commit follows position 348, `1270a975b`, the head of
+- NVX's pinned OpenVMM revision: `189dc519ffcf30c5b9cfea4805e5b917c1556b1b`, position 350, the head
+  of microsoft/openvmm#5216, whose commit follows position 349, `2a483a06f`, the head of
+  microsoft/openvmm#5215, whose commit follows position 348, `1270a975b`, the head of
   microsoft/openvmm#5214, whose commit follows position 347, `a533d6a55`, the head of
   microsoft/openvmm#5213, whose commit follows position 346, `c819952cf`, the head of
   microsoft/openvmm#5212, whose commit follows position 345, `8986cc537`, the head of
@@ -26,10 +27,10 @@
   landed, so each later commit's position is one less than before, and it added five fixups at its
   tip, positions 335-339. Of the 334 replayed commits, 47 conflicted with upstream and 13 replayed
   with new context; see [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase). The pin is
-  223 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
-  341, 343, 344, 346, and 348 are not yet assigned to PRs, positions 302, 333, 342, 345, and 347
-  are PR18 fixups, positions 340 and 349 are PR13 fixups, and positions 316 and 335-339 are rebase
-  fixups; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
+  224 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
+  341, 343, 344, 346, 348, and 350 are not yet assigned to PRs, positions 302, 333, 342, 345, and
+  347 are PR18 fixups, positions 340 and 349 are PR13 fixups, and positions 316 and 335-339 are
+  rebase fixups; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -1633,7 +1634,8 @@ bf353460f
   -> PR18 fixup [347]
   -> unmapped host groups no longer taken for a caller's overflow GID [348]
   -> PR13 fixup [349]
-  -> 2a483a06f (NVX pin)
+  -> virtio-fs aggregate root reads too small for their next entry refused [350]
+  -> 189dc519f (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1687,7 +1689,7 @@ the exchange's that position 160 adds, and its `names_one_object` in the impl of
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 223 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 224 later commits, positions
 302, 333, 342, 345, and 347 are PR18 fixups, positions 340 and 349 are PR13 fixups, position 316 is
 the fixup of the v7.1 rebase, positions 335-339 are the fixups of the v7.2 rebase, and the others
 are not yet classified or assigned to PRs.
@@ -1698,7 +1700,7 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
 v7.0 reorganization, position 316 is the v7.1 rebase's fixup, positions 317-334 followed the
-v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-349 followed the
+v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-350 followed the
 v7.2 rebase, so they combine none, apart from
 position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0
 reorganization folded into them. Each commit through position 316 has the position that it had in
@@ -1706,7 +1708,7 @@ v7.0 and v7.1, and each of positions 317-334 is its v7.1 position less one, sinc
 dropped v7.1 position 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each
 commit's v6.1 position is its v6.0 position less seven, the number of commits that the v6.1 rebase
 dropped before it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1
-position 149 on, and positions 297-349 have no earlier position; see
+position 149 on, and positions 297-350 have no earlier position; see
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
@@ -1942,6 +1944,7 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 347 | `a533d6a55` | - | - | - | - | - | - | virtiofs: refuse device nodes and whiteouts on a microVM share (microsoft/openvmm#5213); fold into 081, its tests into 164 |
 | 348 | `1270a975b` | - | - | - | - | - | - | lxutil: do not mistake unmapped groups for the overflow GID (microsoft/openvmm#5214) |
 | 349 | `2a483a06f` | - | - | - | - | - | - | virtiofs: keep node names when renaming one hard link onto another (microsoft/openvmm#5215); fold into 048, its test into 166 |
+| 350 | `189dc519f` | - | - | - | - | - | - | virtiofs: fail a synthetic root read too small for its next entry (microsoft/openvmm#5216) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -1952,7 +1955,7 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`
 main on 2026-11-19, for positions 321-324, `78af54a51`, upstream main on 2026-11-20, for position
 325, `d83f87209`, upstream main later that day, for position 326, `265f0a73f`, upstream main
 later still, for positions 327 and 328, and `bf353460f`, upstream main on 2026-11-21 and the v7.2
-fork base, for positions 329-334 and 340-349.
+fork base, for positions 329-334 and 340-350.
 They name the positions that the commits have now, but neither the v7.2 rebase on `bf353460f`, the
 v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did
 the v6.1 rebase check the earlier ones on `7d90c4104`.
@@ -4640,6 +4643,27 @@ position 340's. Upstream main lacks the defect, since it lacks the names that po
 Replaying the commit there conflicts in `lib.rs`, next to the names and checks of positions 048 and
 160, in `inode.rs`, next to the `root_device_nr` of position 332, and in the microVM's
 `exchange_tests.rs`, which upstream main lacks, so it follows PR13 upstream.
+
+Position 350 has `VirtioFs::read_synthetic_root_dir_with`, which answers `FUSE_READDIR` and
+`FUSE_READDIRPLUS` on an aggregate's synthetic root, fail a read whose buffer cannot hold the next
+entry with `EINVAL`, as the reads of every other directory do, rather than return an empty reply,
+which the guest takes for the end of the directory (microsoft/nvx#1617). It stopped at the first
+entry that did not fit and returned what it had written, even nothing, so a read from the start with
+a buffer too small for `.` listed an empty root, and a listing whose buffer held the entries before
+a child with a longer name ended before that child without an error. A read that fits some entries
+still returns them, a read at the end of the root still returns an empty reply, even with a buffer
+too small for an entry, and `READDIRPLUS` checks that an entry fits before it looks the child up, so
+the failed read takes no lookup reference. It changes only the `!fit` branch of the loop that
+upstream's `a5f055dd7` (microsoft/openvmm#3821) adds, which no chain commit changes, though PR18's
+position 081, positions 164, 165, and 332, and position 341, which bounds the reply buffer of the
+same function, also change `aggregate.rs`. It adds a test after the last of upstream's
+`aggregate_tests.rs`, on an aggregate of upstream's `VirtioFs::new_aggregate` and `add_child`, with
+only upstream's `read_synthetic_root_dir` and `decode_dir_entries`; position 332 also changes the
+file, none of the code that the test uses. It changes nothing that a mapped PR adds. NVX's Linux
+guest reads directories with buffers of at least a page, which holds any entry, so the microVM
+behaves as it did. Upstream main has the defect, in the same loop. Replaying the commit there
+applies without conflicts, and `virtiofs` type-checks there with its tests on Windows, where the new
+test fails without the change and all of them pass with it, so it can go upstream on its own.
 
 ## PR summary
 
