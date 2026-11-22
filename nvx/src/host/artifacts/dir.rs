@@ -298,31 +298,31 @@ impl ArtifactDir {
 #[non_exhaustive]
 pub(crate) struct ArtifactPaths {
     /// The directory's layout.
-    pub(crate) layout: Layout,
+    layout: Layout,
     /// The absolute directory.
-    pub(crate) root: PathBuf,
+    root: PathBuf,
     /// The OpenVMM executable.
     pub(crate) openvmm: PathBuf,
     /// The guest kernel.
-    pub(crate) kernel: PathBuf,
+    kernel: PathBuf,
     /// The artifacts of each guest, in the order of [`Guest::ALL`].
-    pub(crate) guests: Vec<GuestPaths>,
+    guests: Vec<GuestPaths>,
 }
 
 /// The paths of the artifacts of one guest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
-pub(crate) struct GuestPaths {
+struct GuestPaths {
     /// The guest's name, [`Guest::name`].
-    pub(crate) name: &'static str,
+    name: &'static str,
     /// The guest's distribution, [`Guest::distribution`].
-    pub(crate) distribution: &'static str,
+    distribution: &'static str,
     /// The initramfs.
-    pub(crate) initramfs: PathBuf,
+    initramfs: PathBuf,
     /// The package manifest of the initramfs.
-    pub(crate) package_manifest: PathBuf,
+    package_manifest: PathBuf,
     /// The distro layer, if the guest provides one.
-    pub(crate) distro_layer: Option<PathBuf>,
+    distro_layer: Option<PathBuf>,
     /// The manifest of the distro layer, if the guest provides one.
-    pub(crate) distro_manifest: Option<PathBuf>,
+    distro_manifest: Option<PathBuf>,
 }
