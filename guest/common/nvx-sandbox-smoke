@@ -261,6 +261,57 @@ check_machine_id() {
 # The workload can neither use the processor's I/O ports, whose read ends
 # the reader with SIGSEGV without the permission, nor obtain the permission.
 check_ports() {
+    case "${1:-x86_64}" in
+        x86_64) ;;
+        aarch64)
+            # ARM has no userspace I/O-port instruction or permission syscall.
+            # Its restricted platform device, like raw memory, must stay outside
+            # the private /dev; the capability and device-creation checks above
+            # also prevent a workload from recreating access.
+            dd if=/dev/zero of=/dev/null bs=1 count=1 2>/dev/null ||
+                fail "the permitted private-device read did not work"
+            descriptor_root=/proc/$$/fd
+            [ -d "$descriptor_root" ] && [ -r "$descriptor_root" ] &&
+                [ -x "$descriptor_root" ] ||
+                fail "the workload descriptor view is unavailable"
+            descriptor_stdout=$(readlink "$descriptor_root/1") ||
+                fail "cannot inspect the workload stdout descriptor"
+            [ -n "$descriptor_stdout" ] ||
+                fail "the workload stdout descriptor has no target"
+            descriptors_checked=0
+            descriptor_stdout_checked=false
+            for descriptor in "$descriptor_root"/[0-9]*; do
+                [ -L "$descriptor" ] || continue
+                if descriptor_target=$(readlink "$descriptor"); then
+                    [ -n "$descriptor_target" ] ||
+                        fail "workload descriptor $descriptor has no target"
+                    descriptors_checked=$((descriptors_checked + 1))
+                    [ "$descriptor" != "$descriptor_root/1" ] ||
+                        descriptor_stdout_checked=true
+                    case "$descriptor_target" in
+                        /dev/nvx-platform* | /dev/mem* | /dev/port*)
+                            fail "the workload inherited raw-device descriptor $descriptor"
+                            ;;
+                    esac
+                elif [ -L "$descriptor" ]; then
+                    fail "cannot inspect workload descriptor $descriptor"
+                fi
+            done
+            [ "$descriptors_checked" -gt 0 ] && [ "$descriptor_stdout_checked" = true ] ||
+                fail "the workload descriptor scan did not cover stdout"
+            for raw_device in /dev/nvx-platform /dev/mem /dev/port; do
+                if [ -e "$raw_device" ] || [ -L "$raw_device" ]; then
+                    fail "the workload can see raw device $raw_device"
+                fi
+                raw_status=0
+                dd if="$raw_device" of=/dev/null bs=1 count=1 2>/dev/null || raw_status=$?
+                [ "$raw_status" -eq 1 ] ||
+                    fail "a raw-device read of $raw_device ended with status $raw_status"
+            done
+            return 0
+            ;;
+        *) fail "unsupported workload architecture $1" ;;
+    esac
     port_status=0
     # The shell reports the signal on standard error, so silence it.
     { /sbin/nvx-time test port-probe snapshot; } 2>/dev/null || port_status=$?
@@ -315,6 +366,108 @@ check_image() {
         fail "the write to the upper did not persist"
     [ "$(stat -f -c %T /tmp/nvx-ubuntu-sandbox-smoke)" = overlayfs ] ||
         fail "the write to the upper did not land in the overlay"
+}
+
+remove_ram_fill() {
+    rm -f "$ram_fill_directory/fill" ||
+        fail "cannot remove the RAM upper's owned filler"
+    rmdir "$ram_fill_directory" ||
+        fail "cannot remove the RAM upper's owned fill directory"
+}
+
+# Exercises the default RAM upper through the workload's real overlay, without
+# leaving its filler behind on a failed write or check.
+check_ram_fill() {
+    require_mount / overlay rw
+    case ",$mount_super," in
+        *",upperdir=/run/nvx/tmpfs/upper,"*) ;;
+        *) fail "the fill probe requires the RAM upper: $mount_super" ;;
+    esac
+    ram_tokens=0
+    cap_tokens=0
+    kernel_command_line=$(cat /proc/cmdline)
+    set -f
+    # Kernel command-line tokens are deliberately split on whitespace.
+    # shellcheck disable=SC2086
+    for token in $kernel_command_line; do
+        case "$token" in
+            nvx_overlay_upper=ramfs) ram_tokens=$((ram_tokens + 1)) ;;
+            nvx_ram_upper_percent=50) cap_tokens=$((cap_tokens + 1)) ;;
+            nvx_ram_upper_percent=* | nvx_scratch=*)
+                fail "the fill probe requires the default RAM upper alone"
+                ;;
+        esac
+    done
+    set +f
+    [ "$ram_tokens:$cap_tokens" = 1:1 ] ||
+        fail "the fill probe requires exactly one RAM upper and default cap"
+    ram_fill_directory=$(mktemp -d /tmp/nvx-ram-fill.XXXXXX) ||
+        fail "cannot create the RAM upper's owned fill directory"
+    # The exit status is assigned inside the quoted trap handler.
+    # shellcheck disable=SC2154
+    trap 'fill_exit=$?; trap - EXIT; remove_ram_fill; exit "$fill_exit"' EXIT
+    trap 'exit 1' HUP INT TERM
+    [ "$(stat -f -c %T "$ram_fill_directory")" = overlayfs ] ||
+        fail "the filler is not on the root overlay"
+    space=$(stat -f -c '%S %b %a' "$ram_fill_directory") ||
+        fail "cannot read the RAM upper's capacity"
+    set -f
+    # stat prints three decimal counters.
+    # shellcheck disable=SC2086
+    set -- $space
+    set +f
+    [ "$#" -eq 3 ] || fail "the RAM upper's capacity counters are $space"
+    page=$(getconf PAGESIZE) || fail "cannot read the guest's page size"
+    memory=$(awk '$1 == "MemTotal:" && NF == 3 && $3 == "kB" && $2 ~ /^[0-9]+$/ {
+        printf "%.0f\n", $2 * 1024; found++
+    } END { if (found != 1) exit 1 }' /proc/meminfo) ||
+        fail "the guest has no single MemTotal in kB"
+    for number in "$1" "$2" "$3" "$page" "$memory"; do
+        case "$number" in
+            '' | *[!0-9]*) fail "the RAM fill counter is not numeric: $number" ;;
+        esac
+    done
+    [ "$page" -eq 4096 ] || fail "the guest's page size is $page, expected 4096"
+    total=$(($1 * $2))
+    available=$(($1 * $3))
+    # An explicit tmpfs size=50% rounds the percentage up to a full page.
+    # shellcheck disable=SC2017
+    expected_total=$(((memory / page + 1) / 2 * page))
+    [ "$total" -eq "$expected_total" ] && [ "$total" -gt 0 ] ||
+        fail "the RAM upper has $total bytes, expected $expected_total"
+    [ "$available" -gt 0 ] && [ "$available" -le "$total" ] ||
+        fail "the RAM upper has $available bytes available of $total"
+    # Two extra chunks must reach ENOSPC, but a broken cap cannot make the
+    # probe write without a bound until the guest runs out of memory.
+    count=$((available / 1048576 + 2))
+    dd_status=0
+    dd_error=$(LC_ALL=C dd if=/dev/zero of="$ram_fill_directory/fill" \
+        bs=1M count="$count" conv=excl status=none 2>&1) || dd_status=$?
+    printf 'NVX-UBUNTU-SANDBOX-RAM-FILL-DD status=%s\n%s\n' "$dd_status" "$dd_error"
+    [ "$dd_status" -eq 1 ] || fail "the RAM fill ended with dd status $dd_status"
+    case "$dd_error" in
+        *'No space left on device'*) ;;
+        *) fail "the RAM fill did not end with ENOSPC: $dd_error" ;;
+    esac
+    written=$(stat -c %s "$ram_fill_directory/fill") ||
+        fail "cannot read the actual filler byte count"
+    case "$written" in
+        '' | *[!0-9]*) fail "the filler byte count is not numeric: $written" ;;
+    esac
+    [ "$written" -gt 0 ] && [ "$written" -le "$available" ] &&
+        [ "$((available - written))" -lt 1048576 ] ||
+        fail "the filler wrote $written bytes of $available available"
+    rm "$ram_fill_directory/fill" || fail "cannot delete the full RAM filler"
+    printf nvx-ram-upper >"$ram_fill_directory/fill" ||
+        fail "the RAM upper cannot write after deleting its filler"
+    after=$(cat "$ram_fill_directory/fill") ||
+        fail "the RAM upper cannot read its recovered write"
+    [ "$after" = nvx-ram-upper ] || fail "the recovered RAM write is $after"
+    [ "$(stat -c %s "$ram_fill_directory/fill")" -eq "${#after}" ] ||
+        fail "the recovered RAM write has different bytes"
+    remove_ram_fill
+    trap - EXIT HUP INT TERM
+    echo "NVX-UBUNTU-SANDBOX-RAM-FILL-OK page=$page memory=$memory total=$total available=$available written=$written dd_status=$dd_status error=ENOSPC after=$after cleanup=complete"
 }
 
 # Starts sleepers until a fork fails or $2 have started, then stops and reaps
@@ -637,14 +790,15 @@ check_mounts
 check_devices
 check_device_creation
 check_machine_id
-check_ports
+check_ports "$(uname -m)"
 [ "$nvx_init" = true ] || check_cgroup
 check_image
 echo "NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534"
 # Each share is a TARGET MODE pair; a final TARGET alone is read-only. A MODE
 # of file-ro or file-rw checks a shared file.
 # `limits MEMORY_MAX PIDS_MAX` checks the workload's resource limits, and
-# `entry` what a managed execution's entry adds.
+# `entry` what a managed execution's entry adds. `ram-fill` checks the default
+# RAM upper's ENOSPC, byte accounting, and recovery after deleting the filler.
 rw_share=
 ro_share=
 while [ "$#" -gt 0 ]; do
@@ -656,6 +810,11 @@ while [ "$#" -gt 0 ]; do
     fi
     if [ "$1" = entry ]; then
         check_entry
+        shift
+        continue
+    fi
+    if [ "$1" = ram-fill ]; then
+        check_ram_fill
         shift
         continue
     fi

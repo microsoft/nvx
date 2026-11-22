@@ -47,6 +47,8 @@ pub(crate) use self::guest::Guest;
 #[cfg(all(feature = "cli", windows))]
 pub(crate) use self::identity::check_arm64_pe;
 #[cfg(feature = "cli")]
+pub(crate) use self::identity::check_release_architecture;
+#[cfg(feature = "cli")]
 pub(crate) use self::require::{require_artifact, require_existing};
 
 /// Name of the release manifest at the root of a release archive or repository checkout.

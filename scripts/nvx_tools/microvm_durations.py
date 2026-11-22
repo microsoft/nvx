@@ -113,6 +113,9 @@ class DurationReport:
         kernel: str,
         processors: Sequence[int],
         scenarios: Sequence[str],
+        architecture: str = "x86_64",
+        scope: str = "full",
+        deferred_restore_tails: Sequence[str] = (),
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
         started: float | None = None,
@@ -128,6 +131,12 @@ class DurationReport:
         if started is None:
             started = now - max(0.0, process_age_seconds() or 0.0)
         self._dimensions = {"guest": guest, "backend": backend, "kernel": kernel}
+        if architecture not in ("x86_64", "aarch64") or scope not in ("full", "cold"):
+            raise ValueError(
+                f"unsupported correctness dimensions: {architecture}/{scope}"
+            )
+        if architecture != "x86_64" or scope != "full":
+            self._dimensions.update(architecture=architecture, scope=scope)
         self._span: dict[str, object] = {"record": "setup"}
         self._span_started = started
         self._write(
@@ -139,6 +148,11 @@ class DurationReport:
                 **self._dimensions,
                 "processors": [*dict.fromkeys(processors)],
                 "scenarios": list(scenarios),
+                **(
+                    {"deferred_restore_tails": list(deferred_restore_tails)}
+                    if deferred_restore_tails
+                    else {}
+                ),
                 "github": github_job(os.environ),
             },
             mode="w",

@@ -9,7 +9,46 @@ use serde_json::Value;
 
 use super::{MAX_METADATA_LEN, PROVENANCE_FORMAT};
 use crate::error::{Error, Result};
-use crate::host::runtime::ArtifactIdentity;
+use crate::host::runtime::{ArtifactIdentity, GuestArchitecture};
+
+/// Checks the explicit ISA of a release, retaining untagged legacy x86 packages.
+pub(crate) fn check_release_architecture(
+    manifest: &Value,
+    architecture: GuestArchitecture,
+) -> Result<()> {
+    let declared = manifest
+        .get("distribution")
+        .and_then(|section| section.get("architecture"));
+    let matches = match declared {
+        None => architecture == GuestArchitecture::X86_64,
+        Some(Value::String(value)) => value == architecture.as_str(),
+        _ => false,
+    };
+    if !matches {
+        return Err(Error::unsupported(format!(
+            "release manifest does not declare the selected {} package ISA",
+            architecture.as_str()
+        )));
+    }
+    if architecture == GuestArchitecture::Aarch64 {
+        if manifest
+            .get("nvx")
+            .and_then(|section| section.get("target"))
+            .and_then(Value::as_str)
+            != Some("aarch64-pc-windows-msvc")
+        {
+            return Err(Error::unsupported(
+                "ARM release manifest does not declare the Windows ARM64 NVX target",
+            ));
+        }
+        if manifest.get("azurelinux").is_some() {
+            return Err(Error::unsupported(
+                "ARM release packages do not support Azure Linux artifacts",
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Returns the identity of an artifact whose SHA-256 digest is `digest`, if it holds 64 lowercase
 /// hexadecimal digits, as `nvx.py` writes digests and requires them.

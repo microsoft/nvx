@@ -13,6 +13,7 @@ import argparse
 import ctypes
 import hashlib
 import itertools
+import json
 import math
 import os
 import platform
@@ -25,27 +26,42 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import nvx_cli
 from .benchmark import run_guest_script, workload_boot_command
-from .build_constants import AlpineBuildConstants, BuildConstants, KernelBuildConstants
+from .build_config import KernelBuildConfig
+from .build_constants import (
+    AlpineBuildConstants,
+    BuildConstants,
+    KernelBuildConstants,
+    OpenVMMBuildConstants,
+)
 from .ci import OPENVMM_TEST_BACKENDS
 from .common import (
     ScriptError,
+    architecture_kwargs,
     artifact_path,
     openvmm_binary_path,
+    openvmm_git_state,
+    require_success,
     require_tool,
+    run_capture,
 )
 from .time_abi import (
     CI_WARP_GAPS,
     LAPIC_HZ,
     MAX_TSC_HZ,
     MIN_TSC_HZ,
+    OPENVMM_CPU_PROFILES,
     QUALIFICATION_WARP_GAPS,
     WARP_BOUND_NS,
     WARP_PROBE_COMPLETION_MARKER,
+    ArmCpuProfile,
     HostCpu,
     TimeAbiFailure,
     TimeAbiMonitor,
+    arm_cpu_profile,
     check_warp_probe,
+    counter_hz_is_valid,
     cpu_generation,
     describe_cpu_generations,
     is_catalog_profile_id,
@@ -181,6 +197,9 @@ class DoctorContext:
     # when qualification runs without OpenVMM.
     fingerprint: Path | None = None
     schedule: Schedule = QUALIFICATION_SCHEDULE
+    architecture: str = "x86_64"
+    no_openvmm: bool = False
+    arm_preflight: CheckResult | None = None
 
 
 def host_is_windows() -> bool:
@@ -200,16 +219,20 @@ def _annotation(text: str) -> str:
     return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
-def probe_path(directory: Path) -> Path:
+def probe_path(directory: Path, *, architecture: str = "x86_64") -> Path:
     """Return the cached host probe binary for the current probe source."""
     digest = hashlib.sha256(PROBE_SOURCE.read_bytes()).hexdigest()[:16]
     suffix = ".exe" if os.name == "nt" else ""
-    return directory / f"nvx-host-time-probe-{digest}{suffix}"
+    isa = f"{architecture}-" if architecture != "x86_64" else ""
+    return directory / f"nvx-host-time-probe-{isa}{digest}{suffix}"
 
 
-def build_probe(directory: Path) -> Path:
+def build_probe(directory: Path, *, architecture: str = "x86_64") -> Path:
     """Build the host probe once per source version with rustc."""
-    target = probe_path(directory)
+    target = probe_path(
+        directory,
+        **(architecture_kwargs(architecture)),
+    )
     if target.is_file():
         return target
     rustc = require_tool("rustc", "rustc is required to build the host time probe")
@@ -218,6 +241,11 @@ def build_probe(directory: Path) -> Path:
     completed = subprocess.run(
         [
             rustc,
+            *(
+                ["--target", nvx_cli.ARM_WINDOWS_RELEASE_TARGET]
+                if architecture == "aarch64"
+                else []
+            ),
             "--edition=2021",
             "-C",
             "opt-level=2",
@@ -256,7 +284,10 @@ def run_probe(
     timeout allows on top of ``context.timeout``.
     """
     if context.probe is None:
-        context.probe = build_probe(context.probe_directory)
+        context.probe = build_probe(
+            context.probe_directory,
+            **(architecture_kwargs(context.architecture)),
+        )
     completed = subprocess.run(
         [os.fspath(context.probe), *arguments],
         capture_output=True,
@@ -431,7 +462,290 @@ def check_backend(context: DoctorContext) -> CheckResult:
     return CheckResult("H1", True, f"{device} is readable and writable")
 
 
+def _arm64_host_counter(
+    context: DoctorContext, records: Sequence[tuple[str, dict[str, str]]]
+) -> int:
+    cpu = _probe_record(records, "cpu")
+    if cpu.get("architecture") != "aarch64" or cpu.get("counter") != "cntvct_el0":
+        raise ScriptError("ARM64 qualification requires a native CNTVCT_EL0 probe")
+    try:
+        frequency = int(cpu["counter_hz"])
+    except (KeyError, ValueError) as error:
+        raise ScriptError(
+            "host probe reported no valid CNTFRQ_EL0 frequency"
+        ) from error
+    if not counter_hz_is_valid(frequency, architecture="aarch64"):
+        raise ScriptError(f"host probe reported an invalid CNTFRQ_EL0: {frequency}")
+    context.facts.update(
+        architecture="aarch64", counter="cntvct_el0", host_counter_hz=str(frequency)
+    )
+    return frequency
+
+
+def _check_openvmm_preflight(context: DoctorContext) -> CheckResult:
+    for path, description in (
+        (context.openvmm, "OpenVMM"),
+        (context.kernel, "guest kernel"),
+        (context.initrd, "guest initramfs"),
+    ):
+        if not path.is_file():
+            return CheckResult("H3", False, f"{description} was not found at {path}")
+    if context.architecture == "aarch64":
+        nvx_cli.check_target(context.openvmm, nvx_cli.ARM_WINDOWS_RELEASE_TARGET)
+    command = [
+        os.fspath(context.openvmm),
+        "--machine",
+        "microvm",
+        "--processors",
+        str(_guest_vcpus()),
+        "--hypervisor",
+        context.backend,
+        "--kernel",
+        os.fspath(context.kernel),
+        "--initrd",
+        os.fspath(context.initrd),
+        *context.openvmm_args,
+        "--x-time-abi-verify",
+    ]
+    environment = os.environ.copy()
+    environment["OPENVMM_LOG"] = "off"
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=context.timeout,
+        env=environment,
+        check=False,
+    )
+    output = f"{completed.stdout}\n{completed.stderr}"
+    lines = [
+        line.strip()
+        for line in output.splitlines()
+        if line.strip().startswith(VERIFY_PREFIX)
+    ]
+    if context.architecture == "aarch64" and len(lines) > 1:
+        return CheckResult("H3", False, "OpenVMM emitted multiple verification records")
+    verify = next(iter(lines), None)
+    if verify is None:
+        last = next(
+            (line.strip() for line in reversed(output.splitlines()) if line.strip()),
+            "no output",
+        )
+        if "unexpected argument '--x-time-abi-verify'" in output:
+            last = "this OpenVMM predates the time ABI's --x-time-abi-verify mode"
+        return CheckResult(
+            "H3",
+            False,
+            f"OpenVMM verification exited {completed.returncode} without a "
+            f"verification line: {last}",
+        )
+    fields = parse_fields(verify.removeprefix(VERIFY_PREFIX).strip())
+    if fields.get("status") != "ok" or completed.returncode != 0:
+        code = fields.get("code", "none")
+        prefix = f"[{code}] " if code.startswith("E_") else ""
+        return CheckResult(
+            "H3",
+            False,
+            f"{prefix}OpenVMM verification failed (exit {completed.returncode}): "
+            f"{fields.get('detail', verify)}",
+        )
+    if context.architecture == "aarch64":
+        return _check_arm_preflight(context, fields)
+    problems: list[str] = []
+    if fields.get("backend") != context.backend:
+        problems.append(f"OpenVMM verified backend {fields.get('backend')}")
+    for name in ("tsc_hz", "native_tsc_hz"):
+        try:
+            rate = int(fields.get(name, ""))
+            if not MIN_TSC_HZ <= rate <= MAX_TSC_HZ:
+                problems.append(f"[E_TSC_RATE_IMPLAUSIBLE] {name}={rate}")
+        except ValueError:
+            problems.append(f"{name}={fields.get(name)!r} is not an integer")
+    expected_lapic = LAPIC_HZ[context.backend]
+    if fields.get("lapic_hz") != str(expected_lapic):
+        problems.append(
+            f"[E_LAPIC_RATE_MISMATCH] lapic_hz={fields.get('lapic_hz')} is not "
+            f"{expected_lapic}"
+        )
+    expected_profile = context.facts.get("profile", "none")
+    selected_profile = fields.get("cpu_profile") or "none"
+    # A missing, host, or malformed profile fails even when H2 doesn't run
+    # with H3. Which generations have profiles is OpenVMM's to decide.
+    if not is_catalog_profile_id(selected_profile):
+        problems.append(
+            "OpenVMM verified no catalog CPU profile: "
+            f"cpu_profile={selected_profile}"
+            + (
+                " (a host profile, to which --cpu-profile auto falls back on a "
+                "CPU that no built-in profile serves, and which qualification "
+                "never accepts)"
+                if is_host_profile_id(selected_profile)
+                else ""
+            )
+        )
+    elif expected_profile != "none" and not _same_profile_lineage(
+        selected_profile, expected_profile
+    ):
+        problems.append(
+            f"OpenVMM selected CPU profile {selected_profile}, but H2 maps the "
+            f"host to {expected_profile}"
+        )
+    detail = " ".join(f"{name}={value}" for name, value in fields.items())
+    context.facts.update(
+        {
+            "tsc_hz": fields.get("tsc_hz", ""),
+            "native_tsc_hz": fields.get("native_tsc_hz", ""),
+            "lapic_hz": fields.get("lapic_hz", ""),
+            "profile": selected_profile,
+            "route": fields.get("msr_route", ""),
+            "sync": fields.get("sync", ""),
+        }
+    )
+    if problems:
+        return CheckResult("H3", False, "; ".join(problems) + f"; {detail}")
+    return CheckResult("H3", True, detail)
+
+
+def _check_arm_preflight(
+    context: DoctorContext, fields: Mapping[str, str]
+) -> CheckResult:
+    """Validate the existing verifier's observed ARM admission, not UTC authority."""
+    problems: list[str] = []
+    expected = {
+        "v": "1",
+        "architecture": "aarch64",
+        "backend": context.backend,
+        "feature_bank_count": "2",
+        "backend_readback": "verified",
+        "effective_cpu": "verified",
+        "guest_started": "false",
+    }
+    for name, value in expected.items():
+        if fields.get(name) != value:
+            problems.append(f"{name}={fields.get(name)!r}, expected {value}")
+    legacy = {
+        "tsc_hz",
+        "native_tsc_hz",
+        "lapic_hz",
+        "msr_route",
+        "sync",
+    } & fields.keys()
+    if legacy:
+        problems.append(
+            "ARM verification contains x86/UTC aliases: " + ", ".join(sorted(legacy))
+        )
+    catalog = _arm_profile_catalog(context)
+    profile = catalog.get(fields.get("cpu_profile", ""))
+    if profile is None:
+        problems.append("OpenVMM verified no pinned ARM CPU profile")
+    elif fields.get("cpu_profile_sha256") != profile.sha256:
+        problems.append("ARM CPU profile digest differs from the pinned identity")
+    numbers: dict[str, int] = {}
+    for name, maximum in (
+        ("counter_hz", (1 << 32) - 1),
+        ("backend_usable_gpa_bits", 64),
+        ("configured_gpa_bits", 64),
+        ("architectural_pa_bits", 64),
+        ("effective_parange", 15),
+        ("feature_bank0", (1 << 64) - 1),
+        ("feature_bank1", (1 << 64) - 1),
+        ("cpu_id_registers_verified", (1 << 32) - 1),
+    ):
+        value = fields.get(name, "")
+        if re.fullmatch(r"[0-9]+", value) is None or int(value) > maximum:
+            problems.append(f"{name}={value!r} is not a bounded unsigned integer")
+        else:
+            numbers[name] = int(value)
+    if not problems and profile is not None:
+        if "host_counter_hz" not in context.facts:
+            _arm64_host_counter(context, run_probe(context, "cpu"))
+        if numbers["counter_hz"] != int(context.facts["host_counter_hz"]):
+            problems.append("WHP counter frequency differs from host CNTFRQ_EL0")
+        bits = profile.physical_address_bits
+        parange = (32, 36, 40, 42, 44, 48, 52).index(bits)
+        if (
+            numbers["configured_gpa_bits"] != bits
+            or numbers["architectural_pa_bits"] != bits
+            or numbers["backend_usable_gpa_bits"] < bits
+            or numbers["effective_parange"] != parange
+        ):
+            problems.append(
+                "ARM address-width readbacks differ from the pinned contract"
+            )
+        if numbers["cpu_id_registers_verified"] != len(profile.registers):
+            problems.append("ARM verification did not check every pinned ID register")
+    detail = " ".join(f"{name}={value}" for name, value in fields.items())
+    if problems:
+        return CheckResult("H3", False, "; ".join(problems) + f"; {detail}")
+    context.facts.update(fields)
+    context.facts["profile"] = fields["cpu_profile"]
+    context.facts["profile_digest"] = fields["cpu_profile_sha256"]
+    return CheckResult(
+        "H3",
+        True,
+        detail
+        + "; partition/VP objects may be created; no guest execution or UTC authority is claimed",
+    )
+
+
+def _arm_profile_catalog(context: DoctorContext) -> dict[str, ArmCpuProfile]:
+    directory = OpenVMMBuildConstants.DIRECTORY
+    revision, source_clean = openvmm_git_state(directory)
+    if not source_clean:
+        raise ScriptError(
+            "ARM profile admission requires the clean pinned OpenVMM source"
+        )
+    environment = dict(os.environ, GIT_NO_LAZY_FETCH="1", GIT_OPTIONAL_LOCKS="0")
+    listed = run_capture(
+        [
+            "git",
+            "-C",
+            directory,
+            "ls-tree",
+            "-r",
+            "--name-only",
+            revision,
+            "--",
+            OPENVMM_CPU_PROFILES.as_posix(),
+        ],
+        env=environment,
+    )
+    require_success(listed, "pinned ARM profile catalog query")
+    profiles: dict[str, ArmCpuProfile] = {}
+    for path in listed.stdout.decode("utf-8").splitlines():
+        if not path.endswith(".json"):
+            continue
+        blob = run_capture(
+            ["git", "-C", directory, "cat-file", "blob", f"{revision}:{path}"],
+            env=environment,
+        )
+        require_success(blob, f"pinned ARM profile read for {path}")
+        profile = arm_cpu_profile(json.loads(blob.stdout))
+        if profile is not None:
+            if profile.profile_id in profiles:
+                raise ScriptError(f"duplicate pinned ARM profile {profile.profile_id}")
+            profiles[profile.profile_id] = profile
+    if not profiles:
+        raise ScriptError(f"OpenVMM {revision} pins no ARM CPU profile")
+    context.facts["profile_source_revision"] = revision
+    return profiles
+
+
 def check_cpu(context: DoctorContext) -> CheckResult:
+    if context.architecture == "aarch64":
+        frequency = _arm64_host_counter(context, run_probe(context, "cpu"))
+        context.facts.update(cpu="aarch64", os=sys.platform)
+        context.facts.setdefault("profile", "unverified")
+        if not context.no_openvmm:
+            result = check_openvmm_preflight(context)
+            return CheckResult("H2", result.passed, result.detail)
+        return CheckResult(
+            "H2",
+            False,
+            "ARM64 CPU/profile admission is unsupported without OpenVMM: "
+            "the existing --x-time-abi-verify report is required; "
+            f"host CNTFRQ_EL0={frequency} Hz is evidence only",
+        )
     info = host_cpu(context)
     signature = f"{info['vendor']} {info['family']}/{info['model']}/{info['stepping']}"
     context.facts.update(
@@ -614,123 +928,12 @@ def _guest_vcpus() -> int:
 
 
 def check_openvmm_preflight(context: DoctorContext) -> CheckResult:
-    for path, description in (
-        (context.openvmm, "OpenVMM"),
-        (context.kernel, "guest kernel"),
-        (context.initrd, "guest initramfs"),
-    ):
-        if not path.is_file():
-            return CheckResult("H3", False, f"{description} was not found at {path}")
-    command = [
-        os.fspath(context.openvmm),
-        "--machine",
-        "microvm",
-        "--processors",
-        str(_guest_vcpus()),
-        "--hypervisor",
-        context.backend,
-        "--kernel",
-        os.fspath(context.kernel),
-        "--initrd",
-        os.fspath(context.initrd),
-        *context.openvmm_args,
-        "--x-time-abi-verify",
-    ]
-    environment = os.environ.copy()
-    environment["OPENVMM_LOG"] = "off"
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=context.timeout,
-        env=environment,
-        check=False,
-    )
-    output = f"{completed.stdout}\n{completed.stderr}"
-    verify = next(
-        (
-            line.strip()
-            for line in output.splitlines()
-            if line.strip().startswith(VERIFY_PREFIX)
-        ),
-        None,
-    )
-    if verify is None:
-        last = next(
-            (line.strip() for line in reversed(output.splitlines()) if line.strip()),
-            "no output",
-        )
-        if "unexpected argument '--x-time-abi-verify'" in output:
-            last = "this OpenVMM predates the time ABI's --x-time-abi-verify mode"
-        return CheckResult(
-            "H3",
-            False,
-            f"OpenVMM verification exited {completed.returncode} without a "
-            f"verification line: {last}",
-        )
-    fields = parse_fields(verify.removeprefix(VERIFY_PREFIX).strip())
-    if fields.get("status") != "ok" or completed.returncode != 0:
-        code = fields.get("code", "none")
-        prefix = f"[{code}] " if code.startswith("E_") else ""
-        return CheckResult(
-            "H3",
-            False,
-            f"{prefix}OpenVMM verification failed (exit {completed.returncode}): "
-            f"{fields.get('detail', verify)}",
-        )
-    problems: list[str] = []
-    if fields.get("backend") != context.backend:
-        problems.append(f"OpenVMM verified backend {fields.get('backend')}")
-    for name in ("tsc_hz", "native_tsc_hz"):
-        try:
-            rate = int(fields.get(name, ""))
-            if not MIN_TSC_HZ <= rate <= MAX_TSC_HZ:
-                problems.append(f"[E_TSC_RATE_IMPLAUSIBLE] {name}={rate}")
-        except ValueError:
-            problems.append(f"{name}={fields.get(name)!r} is not an integer")
-    expected_lapic = LAPIC_HZ[context.backend]
-    if fields.get("lapic_hz") != str(expected_lapic):
-        problems.append(
-            f"[E_LAPIC_RATE_MISMATCH] lapic_hz={fields.get('lapic_hz')} is not "
-            f"{expected_lapic}"
-        )
-    expected_profile = context.facts.get("profile", "none")
-    selected_profile = fields.get("cpu_profile") or "none"
-    # A missing, host, or malformed profile fails even when H2 doesn't run
-    # with H3. Which generations have profiles is OpenVMM's to decide.
-    if not is_catalog_profile_id(selected_profile):
-        problems.append(
-            "OpenVMM verified no catalog CPU profile: "
-            f"cpu_profile={selected_profile}"
-            + (
-                " (a host profile, to which --cpu-profile auto falls back on a "
-                "CPU that no built-in profile serves, and which qualification "
-                "never accepts)"
-                if is_host_profile_id(selected_profile)
-                else ""
-            )
-        )
-    elif expected_profile != "none" and not _same_profile_lineage(
-        selected_profile, expected_profile
-    ):
-        problems.append(
-            f"OpenVMM selected CPU profile {selected_profile}, but H2 maps the "
-            f"host to {expected_profile}"
-        )
-    detail = " ".join(f"{name}={value}" for name, value in fields.items())
-    context.facts.update(
-        {
-            "tsc_hz": fields.get("tsc_hz", ""),
-            "native_tsc_hz": fields.get("native_tsc_hz", ""),
-            "lapic_hz": fields.get("lapic_hz", ""),
-            "profile": selected_profile,
-            "route": fields.get("msr_route", ""),
-            "sync": fields.get("sync", ""),
-        }
-    )
-    if problems:
-        return CheckResult("H3", False, "; ".join(problems) + f"; {detail}")
-    return CheckResult("H3", True, detail)
+    if context.architecture == "aarch64" and context.arm_preflight is not None:
+        return context.arm_preflight
+    result = _check_openvmm_preflight(context)
+    if context.architecture == "aarch64":
+        context.arm_preflight = result
+    return result
 
 
 def _rate_points(
@@ -1088,6 +1291,9 @@ def check_rate(context: DoctorContext) -> CheckResult:
         str(schedule.rate_interval_ms),
         duration=(schedule.rate_samples - 1) * schedule.rate_interval_ms / 1000,
     )
+    counter_hz: int | None = None
+    if context.architecture == "aarch64":
+        counter_hz = _arm64_host_counter(context, records)
     clocks = {fields.get("role"): fields for kind, fields in records if kind == "clock"}
     for role in ("rate", "stability"):
         if role not in clocks:
@@ -1120,6 +1326,10 @@ def check_rate(context: DoctorContext) -> CheckResult:
     agreement_ppm = (max(rates) - min(rates)) / stable_rate * 1e6
     uncertainty_ppm = max(uncertainties_ppm)
     declared = context.facts.get("native_tsc_hz") or context.facts.get("tsc_hz")
+    declared_source = "backend"
+    if declared is None and counter_hz is not None:
+        declared = str(counter_hz)
+        declared_source = "host CNTFRQ_EL0"
     declared_hz = None if declared is None else int(declared)
     # Over the window, CLOCK_MONOTONIC also carries the slew with which
     # chronyd removes its current offset, which reaches hundreds of ppm for
@@ -1180,8 +1390,9 @@ def check_rate(context: DoctorContext) -> CheckResult:
     context.facts["measured_tsc_hz"] = f"{measured:.0f}"
     context.facts["rate_agreement_ppm"] = f"{agreement_ppm:.3f}"
     context.facts["rate_uncertainty_ppm"] = f"{uncertainty_ppm:.3f}"
+    counter_name = "cntvct_el0" if context.architecture == "aarch64" else "tsc"
     detail = (
-        f"tsc_hz={measured:.0f} {reference} from {len(samples)} "
+        f"{counter_name}_hz={measured:.0f} {reference} from {len(samples)} "
         f"samples {schedule.rate_interval_ms / 1000:g} s apart; against "
         f"{stability_clock['name']} (resolution "
         f"{float(stability_clock['resolution_ns']):g} ns) the interval rates agree "
@@ -1190,7 +1401,7 @@ def check_rate(context: DoctorContext) -> CheckResult:
     )
     problems: list[str] = []
     warning = ""
-    if not MIN_TSC_HZ <= measured <= MAX_TSC_HZ:
+    if not counter_hz_is_valid(measured, architecture=context.architecture):
         problems.append(f"[E_TSC_RATE_IMPLAUSIBLE] measured {measured:.0f} Hz")
     if uncertainty_ppm > RATE_UNCERTAINTY_PPM:
         problems.append(
@@ -1209,7 +1420,9 @@ def check_rate(context: DoctorContext) -> CheckResult:
     else:
         deviation_ppm = abs(_deviation_ppm(measured, declared_hz))
         context.facts["rate_deviation_ppm"] = f"{deviation_ppm:.3f}"
-        detail += f"; {deviation_ppm:.3f} ppm from the backend's {declared} Hz"
+        detail += (
+            f"; {deviation_ppm:.3f} ppm from the {declared_source}'s {declared} Hz"
+        )
         if isinstance(chrony, ChronyFrequency):
             # The rate passes only when the whole range within chronyd's skew
             # lies within the limit.
@@ -1223,18 +1436,18 @@ def check_rate(context: DoctorContext) -> CheckResult:
             within = ""
         if nearest > RATE_TOLERANCE_PPM:
             problems.append(
-                f"the backend rate is {deviation_ppm:.3f} ppm from the measured "
+                f"the {declared_source} rate is {deviation_ppm:.3f} ppm from the measured "
                 f"rate{within} (limit {RATE_TOLERANCE_PPM:g} ppm)"
             )
         elif farthest > RATE_TOLERANCE_PPM:
             problems.append(
-                f"the measurement is inconclusive: the backend rate is "
+                f"the measurement is inconclusive: the {declared_source} rate is "
                 f"{deviation_ppm:.3f} ppm from the measured rate{within}, which "
                 f"straddles the limit of {RATE_TOLERANCE_PPM:g} ppm{reread_problem}"
             )
         elif deviation_ppm > RATE_WARNING_PPM:
             warning = (
-                f"the backend rate is {deviation_ppm:.3f} ppm from the measured "
+                f"the {declared_source} rate is {deviation_ppm:.3f} ppm from the measured "
                 f"rate, more than {RATE_WARNING_PPM:g} ppm: the host's clock "
                 f"correction uses {deviation_ppm / RATE_TOLERANCE_PPM:.0%} of the "
                 f"guest's {RATE_TOLERANCE_PPM:g} ppm budget, and one run can't "
@@ -1339,6 +1552,7 @@ def _warp_guest(
         GUEST_MEMORY_MIB,
         "quiet loglevel=0",
         processors=vcpus,
+        **(architecture_kwargs(context.architecture)),
     )
     command.extend(context.openvmm_args)
     result = run_guest_script(
@@ -1347,8 +1561,12 @@ def _warp_guest(
         WARP_PROBE_COMPLETION_MARKER,
         timeout=context.timeout,
         time_abi_status=True,
+        **(architecture_kwargs(context.architecture)),
     )
-    monitor = TimeAbiMonitor(command)
+    monitor = TimeAbiMonitor(
+        command,
+        **(architecture_kwargs(context.architecture)),
+    )
     monitor.feed(result["text"].encode())
     monitor.finish()
     monitor.require_status("the warp probe")
@@ -1398,8 +1616,12 @@ def check_guest_warp(context: DoctorContext) -> CheckResult:
         return max(int(warp[name]) for warp in rounds)
 
     context.facts["guest_warp_ns"] = str(worst("max_abs_offset_ns"))
-    context.facts.setdefault("tsc_hz", boots[0]["tsc_hz"])
-    context.facts.setdefault("lapic_hz", boots[0]["lapic_hz"])
+    if context.architecture == "aarch64":
+        # The guest marker's shared counter slot keeps its legacy name.
+        context.facts.setdefault("counter_hz", boots[0]["tsc_hz"])
+    else:
+        context.facts.setdefault("tsc_hz", boots[0]["tsc_hz"])
+        context.facts.setdefault("lapic_hz", boots[0]["lapic_hz"])
     return CheckResult(
         "H6",
         True,
@@ -1541,6 +1763,9 @@ def summary_markdown(
                 ("", f"**{result.check} warning:** {_escape_markdown(result.warning)}")
             )
     reported = (
+        ("architecture", "Counter architecture"),
+        ("counter", "Counter"),
+        ("host_counter_hz", "Host counter frequency (Hz, not VMM readback)"),
         ("generation", "Generation"),
         ("cpu", "CPU"),
         ("microcode", "Microcode"),
@@ -1574,6 +1799,20 @@ def summary_markdown(
 def run(args: argparse.Namespace) -> int:
     if args.backend not in OPENVMM_TEST_BACKENDS:
         raise ScriptError(f"unsupported backend {args.backend!r}")
+    architecture = getattr(args, "architecture", "x86_64")
+    if architecture == "aarch64":
+        if (
+            args.backend != "whp"
+            or not host_is_windows()
+            or platform.machine().lower() not in ("arm64", "aarch64")
+        ):
+            raise ScriptError(
+                "ARM64 host qualification requires native Windows ARM64/WHP"
+            )
+        if args.cpu_fingerprint is not None:
+            raise ScriptError(
+                "--cpu-fingerprint is x86-only; ARM admission requires the existing OpenVMM verifier"
+            )
     checks = tuple(dict.fromkeys(args.checks or CHECK_IDS))
     if args.no_openvmm:
         booting = [check for check in checks if check in OPENVMM_CHECKS]
@@ -1583,21 +1822,33 @@ def run(args: argparse.Namespace) -> int:
             )
     probe_directory = args.probe_dir or default_probe_directory()
     fingerprint: Path | None = None
-    if not args.no_openvmm:
+    if not args.no_openvmm and architecture == "x86_64":
         fingerprint = args.cpu_fingerprint or (
             probe_directory / f"nvx-cpu-fingerprint-{args.backend}.json"
         )
     context = DoctorContext(
         backend=args.backend,
         openvmm=args.openvmm or openvmm_binary_path(),
-        kernel=args.kernel or artifact_path(KernelBuildConstants.BINARY_NAME),
-        initrd=args.initrd or artifact_path(AlpineBuildConstants.INITRAMFS_NAME),
+        kernel=args.kernel
+        or (
+            KernelBuildConfig.for_architecture(architecture).output
+            if architecture == "aarch64"
+            else artifact_path(KernelBuildConstants.BINARY_NAME)
+        ),
+        initrd=args.initrd
+        or artifact_path(
+            AlpineBuildConstants.INITRAMFS_NAME, **architecture_kwargs(architecture)
+        ),
         openvmm_args=tuple(args.openvmm_arg),
         probe_directory=probe_directory,
         timeout=args.timeout,
         fingerprint=fingerprint,
         schedule=CI_SCHEDULE if args.ci_schedule else QUALIFICATION_SCHEDULE,
+        architecture=architecture,
+        no_openvmm=args.no_openvmm,
     )
+    if architecture != "x86_64":
+        context.facts["architecture"] = architecture
     results = run_checks(context, checks)
     failed = [result.check for result in results if not result.passed]
     generation = context.facts.get("generation")
@@ -1627,6 +1878,12 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         "Qualify this host for the NVX time ABI (doc/ci.md, 'Host qualification')."
     )
     parser.add_argument("--backend", choices=OPENVMM_TEST_BACKENDS, required=True)
+    parser.add_argument(
+        "--architecture",
+        choices=("x86_64", "aarch64"),
+        default="x86_64",
+        help="explicit counter/artifact ISA (default: x86_64 on every host)",
+    )
     parser.add_argument(
         "--checks",
         nargs="+",

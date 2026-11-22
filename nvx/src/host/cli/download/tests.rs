@@ -154,6 +154,7 @@ fn options_default_to_the_integration_repository_and_the_host_hypervisor() {
             Options {
                 repository: "microsoft/nvx".to_owned(),
                 hypervisor: "auto",
+                architecture: GuestArchitecture::X86_64,
             },
             Vec::new()
         )
@@ -163,6 +164,25 @@ fn options_default_to_the_integration_repository_and_the_host_hypervisor() {
     assert_eq!(options.repository, "octo/nvx");
     assert_eq!(options.hypervisor, "mshv");
     assert_eq!(unrecognized, ["extra"]);
+}
+
+#[test]
+fn arm_packages_require_explicit_isa_and_native_windows() {
+    let (options, unknown) = parse(&["--architecture=aarch64".to_owned()]).unwrap();
+    assert_eq!(options.architecture, GuestArchitecture::Aarch64);
+    assert!(unknown.is_empty());
+    assert_eq!(
+        platform_for_architecture("whp", options.architecture).is_ok(),
+        cfg!(all(windows, target_arch = "aarch64"))
+    );
+    if cfg!(all(windows, target_arch = "aarch64")) {
+        assert_eq!(
+            platform_for_architecture("auto", options.architecture).unwrap(),
+            "windows-whp-aarch64"
+        );
+    }
+    assert!(platform_for_architecture("kvm", options.architecture).is_err());
+    assert!(parse(&["--architecture=arm".to_owned()]).is_err());
 }
 
 #[test]

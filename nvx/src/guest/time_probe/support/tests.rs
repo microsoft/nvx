@@ -66,6 +66,7 @@ fn options_take_inline_or_following_values() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn kernel_numbers_are_read_in_the_kernels_form() {
     assert_eq!(parse_kernel_decimal(b" 2194.843"), Some(2194.843));
     assert_eq!(parse_kernel_decimal(b"    3.000000"), Some(3.0));
@@ -97,6 +98,7 @@ fn kernel_numbers_are_read_in_the_kernels_form() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn rate_sources_print_their_tokens() {
     assert_eq!(
         TscRateSource::SysfsTscFreqKhz.to_string(),
@@ -104,6 +106,28 @@ fn rate_sources_print_their_tokens() {
     );
     let rate = detect_tsc_rate(Some(2.5e9));
     assert_eq!((rate.hz, rate.source), (2.5e9, TscRateSource::Option));
+}
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn arm_rate_keeps_full_hz_and_refuses_an_override_of_the_admitted_binding() {
+    for hz in [19_200_000, 1_000_000_001, u64::from(u32::MAX)] {
+        let declared = std::num::NonZeroU64::new(hz).unwrap();
+        let rate = checked_arm_rate(declared, None).unwrap();
+        assert_eq!(rate.hz, hz as f64);
+        assert_eq!(rate.source, TscRateSource::ArmBinding);
+        let explicit = checked_arm_rate(declared, Some(hz as f64)).unwrap();
+        assert_eq!(explicit.hz, hz as f64);
+        assert_eq!(explicit.source, TscRateSource::Option);
+        for requested in [
+            0.0,
+            hz as f64 + 0.5,
+            (hz / 1000 * 1000) as f64 + 0.25,
+            f64::NAN,
+        ] {
+            assert!(checked_arm_rate(declared, Some(requested)).is_err());
+        }
+    }
 }
 
 #[test]

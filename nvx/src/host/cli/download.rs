@@ -53,11 +53,12 @@ use super::sandbox::HYPERVISORS;
 use super::{Exit, Result, check_interrupt, io_error, output};
 use crate::ErrorCode;
 use crate::host::artifacts::{ArtifactDir, Guest, Layout, MANIFEST_NAME, REPO_BUILD_DIR};
+use crate::host::runtime::GuestArchitecture;
 
 /// The usage and help of the parser.
 pub(super) const SYNTAX: Syntax = Syntax {
     command: "download",
-    arguments: "[-h] [--repository OWNER/REPOSITORY] [--hypervisor {auto,whp,kvm,mshv}]",
+    arguments: "[-h] [--repository OWNER/REPOSITORY] [--hypervisor {auto,whp,kvm,mshv}] [--architecture {x86_64,aarch64}]",
     help: "\
 Download the NVX release package of this host's platform that CI built from
 the checkout's HEAD, or else from its nearest first-parent ancestor that has
@@ -72,6 +73,9 @@ options:
   --hypervisor {auto,whp,kvm,mshv}
                         the hypervisor of the package: auto selects whp on
                         Windows and kvm on Linux (default: auto)
+  --architecture {x86_64,aarch64}
+                        explicit package/guest ISA (default: x86_64 on every host);
+                        aarch64 currently requires native Windows ARM64/WHP
 
 environment:
   GH_TOKEN, GITHUB_TOKEN
@@ -80,7 +84,11 @@ environment:
 };
 
 /// The options of `nvx download`.
-pub(super) const OPTIONS: [Spec; 2] = [Spec::one("--repository"), Spec::one("--hypervisor")];
+pub(super) const OPTIONS: [Spec; 3] = [
+    Spec::one("--repository"),
+    Spec::one("--hypervisor"),
+    Spec::one("--architecture"),
+];
 
 /// The GitHub repository whose releases a download installs, unless `--repository` names another.
 pub(crate) const DEFAULT_REPOSITORY: &str = "microsoft/nvx";
@@ -102,6 +110,8 @@ pub(crate) struct Options {
     pub(crate) repository: String,
     /// `--hypervisor`, `auto` by default.
     pub(crate) hypervisor: &'static str,
+    /// The explicitly selected package and guest ISA.
+    pub(crate) architecture: GuestArchitecture,
 }
 
 impl Default for Options {
@@ -109,6 +119,7 @@ impl Default for Options {
         Self {
             repository: DEFAULT_REPOSITORY.to_owned(),
             hypervisor: "auto",
+            architecture: GuestArchitecture::X86_64,
         }
     }
 }
@@ -121,6 +132,11 @@ impl Receiver for Options {
                 return Err(format!("expected OWNER/REPOSITORY, not {value:?}"));
             }
             self.repository = value.to_owned();
+        } else if name == "--architecture" {
+            self.architecture = match choice(value, &["x86_64", "aarch64"])? {
+                "aarch64" => GuestArchitecture::Aarch64,
+                _ => GuestArchitecture::X86_64,
+            };
         } else {
             self.hypervisor = choice(value, &HYPERVISORS)?;
         }
@@ -151,7 +167,10 @@ pub(super) fn run(root: Option<&str>, options: &Options) -> Result {
             ),
         ));
     }
-    let platform = platform(options.hypervisor)?;
+    let dir = dir
+        .with_architecture(options.architecture)
+        .map_err(Exit::from)?;
+    let platform = platform_for_architecture(options.hypervisor, options.architecture)?;
     let (history, commits) = read_history(&dir)?;
     let _lock = DownloadLock::acquire(&dir, Report::Stdout)?;
     install_release(
@@ -218,6 +237,28 @@ fn platform(hypervisor: &str) -> Result<&'static str> {
                 format!("{selected} is not supported on {host}"),
             )
         })
+}
+
+fn platform_for_architecture(
+    hypervisor: &str,
+    architecture: GuestArchitecture,
+) -> Result<&'static str> {
+    if architecture == GuestArchitecture::X86_64 {
+        return platform(hypervisor);
+    }
+    if !cfg!(all(windows, target_arch = "aarch64")) {
+        return Err(Exit::error(
+            ErrorCode::Unsupported,
+            "ARM release downloads currently require native Windows ARM64/WHP",
+        ));
+    }
+    if !matches!(hypervisor, "auto" | "whp") {
+        return Err(Exit::error(
+            ErrorCode::Unsupported,
+            format!("{hypervisor} is not supported for ARM Windows packages"),
+        ));
+    }
+    Ok("windows-whp-aarch64")
 }
 
 /// The package of a release, as the GitHub REST API describes its asset.
@@ -784,7 +825,7 @@ pub(crate) fn ensure_under(
         }
         Action::Download => drop(held),
     }
-    let platform = platform(hypervisor)?;
+    let platform = platform_for_architecture(hypervisor, dir.architecture())?;
     output::print_stderr(&format!(
         ">> {} holds no NVX artifacts, so nvx downloads its release; set \
          {AUTO_DOWNLOAD_VARIABLE}=0 to skip that",

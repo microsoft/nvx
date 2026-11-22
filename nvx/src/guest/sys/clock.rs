@@ -26,7 +26,6 @@ pub(crate) enum Clock {
     MonotonicRaw,
     /// The monotonic clock as the kernel saved it at the last scheduler tick, which a read
     /// returns without reading the clocksource, so that it advances once per tick.
-    #[cfg(any(test, target_arch = "x86_64"))]
     MonotonicCoarse,
     /// The time since boot, with suspend.
     Boottime,
@@ -42,7 +41,6 @@ impl Clock {
             Self::Monotonic => ClockId::CLOCK_MONOTONIC,
             #[cfg(any(test, target_arch = "x86_64"))]
             Self::MonotonicRaw => ClockId::CLOCK_MONOTONIC_RAW,
-            #[cfg(any(test, target_arch = "x86_64"))]
             Self::MonotonicCoarse => ClockId::CLOCK_MONOTONIC_COARSE,
             Self::Boottime => ClockId::CLOCK_BOOTTIME,
             Self::ProcessCpuTime => ClockId::CLOCK_PROCESS_CPUTIME_ID,

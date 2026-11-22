@@ -1,0 +1,83 @@
+name: Build native ARM64 NVX
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: nvx binary / Windows ARM64 MSVC
+    runs-on: [self-hosted, windows, ARM64, whp, virtual-machine, general]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Verify native Windows ARM64 toolchain
+        if: runner.os == 'Windows'
+        shell: python {0}
+        env:
+          RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          import os
+          import platform
+          import subprocess
+          import sys
+          import sysconfig
+
+          if (
+              sys.platform != "win32"
+              or platform.machine().lower() not in ("aarch64", "arm64")
+              or sysconfig.get_platform() != "win-arm64"
+              or os.environ["RUNNER_ARCH"] != "ARM64"
+          ):
+              raise SystemExit("A native Windows ARM64 Python and runner are required")
+          subprocess.run([sys.executable, r"scripts\nvx.py", "verify"], check=True)
+          version = subprocess.run(["rustc", "-vV"], check=True, capture_output=True, text=True)
+          if "host: aarch64-pc-windows-msvc" not in version.stdout.splitlines():
+              raise SystemExit("rustc must target native aarch64-pc-windows-msvc")
+
+      - name: Build and record native ARM64 NVX
+        if: runner.os == 'Windows'
+        shell: python {0}
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          subprocess.run([
+              "cargo", "build", "--release", "--locked", "--features", "cli",
+              "--manifest-path", r"nvx\Cargo.toml", "--target-dir", r"nvx\target",
+              "--target", "aarch64-pc-windows-msvc",
+          ], check=True)
+          destination = Path(r"nvx\target\release\nvx.exe")
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copyfile(Path(r"nvx\target\aarch64-pc-windows-msvc\release\nvx.exe"), destination)
+          subprocess.run([
+              sys.executable, r"scripts\nvx.py", "record-nvx-provenance",
+              "--target", "aarch64-pc-windows-msvc",
+          ], check=True)
+          subprocess.run([str(Path(r"nvx\target\release\nvx.exe").resolve()), "--help"], check=True)
+
+      - name: Upload ARM64 NVX executable
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nvx-windows-arm64-executable
+          path: nvx/target/release/nvx.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload ARM64 NVX provenance
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nvx-windows-arm64-provenance
+          path: build/nvx.provenance.json
+          if-no-files-found: error
+          retention-days: 1

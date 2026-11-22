@@ -44,6 +44,7 @@ from .collect_ubuntu_sources import collect_ubuntu_sources
 from .common import (
     ScriptError,
     VerifiedChecksumInventory,
+    architecture_kwargs,
     artifact_path,
     openvmm_binary_path,
     openvmm_git_state,
@@ -86,6 +87,25 @@ GUEST_ARTIFACT_COMPONENTS: Mapping[str, tuple[str, ...]] = {
         AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME,
     ),
 }
+
+
+def _kernel_artifact_names(architecture: str) -> tuple[str, str, str]:
+    if architecture == "x86_64":
+        return (
+            KernelBuildConstants.BINARY_NAME,
+            KernelBuildConstants.CONFIG_NAME,
+            KernelBuildConstants.PROVENANCE_NAME,
+        )
+    kernel = KernelBuildConfig.for_architecture(architecture).output.name
+    return kernel, f"{kernel}.config", f"{kernel}.provenance.json"
+
+
+def _guest_artifact_components(architecture: str) -> dict[str, tuple[str, ...]]:
+    components = dict(GUEST_ARTIFACT_COMPONENTS)
+    components["kernel"] = _kernel_artifact_names(architecture)
+    if architecture == "aarch64":
+        del components["azurelinux"]
+    return components
 
 
 class _ReleaseRestoreError(ScriptError):
@@ -545,7 +565,13 @@ def _project_source_archive(
     output: Path,
     version: str,
     package_manifests: list[Path],
+    *,
+    architecture: str = "x86_64",
 ) -> None:
+    _, config_name, _ = _kernel_artifact_names(architecture)
+    build_directory = Path(BuildConstants.BUILD_DIRECTORY_NAME)
+    if architecture == "aarch64":
+        build_directory /= architecture
     root = f"nvx-project-source-{version}"
     inputs = [
         (BuildConstants.REPO_ROOT / relative, f"{root}/{relative}")
@@ -554,14 +580,14 @@ def _project_source_archive(
     inputs.extend(
         (
             manifest,
-            f"{root}/build/{manifest.name}",
+            f"{root}/{build_directory.as_posix()}/{manifest.name}",
         )
         for manifest in package_manifests
     )
     inputs.append(
         (
-            artifact_path(KernelBuildConstants.CONFIG_NAME),
-            f"{root}/{BuildConstants.BUILD_DIRECTORY_NAME}/{KernelBuildConstants.CONFIG_NAME}",
+            artifact_path(config_name, **architecture_kwargs(architecture)),
+            f"{root}/{build_directory.as_posix()}/{config_name}",
         )
     )
     _create_source_archive(output, inputs)
@@ -694,19 +720,41 @@ def _validate_azurelinux_manifest(manifest_path: Path, initramfs: Path) -> None:
 def _guest_release_inputs(
     *,
     include_azurelinux: bool,
+    architecture: str = "x86_64",
 ) -> tuple[list[str], list[Path], list[Path], list[Path]]:
+    kernel_name, config_name, _ = _kernel_artifact_names(architecture)
+    if architecture == "aarch64" and include_azurelinux:
+        raise ScriptError("ARM packages have no Azure Linux guest artifact contract")
+    renamed = {
+        KernelBuildConstants.BINARY_NAME: kernel_name,
+        KernelBuildConstants.CONFIG_NAME: config_name,
+    }
     guest_names = [
-        name
+        renamed.get(name, name)
         for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES
         if include_azurelinux
         or name not in ReleaseBuildConstants.AZURELINUX_ARTIFACT_NAMES
     ]
     for name in guest_names:
-        require_file(artifact_path(name), f"required guest artifact {name}")
-    alpine_manifests = [artifact_path(AlpineBuildConstants.PACKAGE_MANIFEST_NAME)]
+        require_file(
+            artifact_path(name, **architecture_kwargs(architecture)),
+            f"required guest artifact {name}",
+        )
+    alpine_manifests = [
+        artifact_path(
+            AlpineBuildConstants.PACKAGE_MANIFEST_NAME,
+            **architecture_kwargs(architecture),
+        )
+    ]
     ubuntu_manifests = [
-        artifact_path(UbuntuBuildConstants.PACKAGE_MANIFEST_NAME),
-        artifact_path(UbuntuBuildConstants.DISTRO_MANIFEST_NAME),
+        artifact_path(
+            UbuntuBuildConstants.PACKAGE_MANIFEST_NAME,
+            **architecture_kwargs(architecture),
+        ),
+        artifact_path(
+            UbuntuBuildConstants.DISTRO_MANIFEST_NAME,
+            **architecture_kwargs(architecture),
+        ),
     ]
     azurelinux_manifests: list[Path] = []
     if include_azurelinux:
@@ -717,14 +765,22 @@ def _guest_release_inputs(
             azurelinux_manifests[0],
             artifact_path(AzureLinuxBuildConstants.INITRAMFS_NAME),
         )
-    expected_input_sha256 = converter_input_sha256(customization_files())
+    expected_input_sha256 = (
+        converter_input_sha256(
+            customization_files(architecture=architecture), architecture=architecture
+        )
+        if architecture != "x86_64"
+        else converter_input_sha256(customization_files())
+    )
     for artifact_name, manifest in zip(
         (UbuntuBuildConstants.INITRAMFS_NAME, UbuntuBuildConstants.DISTRO_NAME),
         ubuntu_manifests,
         strict=True,
     ):
         _validate_ubuntu_manifest(
-            artifact_path(artifact_name), manifest, expected_input_sha256
+            artifact_path(artifact_name, **architecture_kwargs(architecture)),
+            manifest,
+            expected_input_sha256,
         )
     return guest_names, alpine_manifests, ubuntu_manifests, azurelinux_manifests
 
@@ -786,6 +842,8 @@ def _read_json_object(path: Path, description: str) -> dict[str, object]:
 def _validate_openvmm_provenance(
     binary: Path,
     provenance_path: Path,
+    *,
+    architecture: str = "x86_64",
 ) -> dict[str, object]:
     provenance = _read_json_object(provenance_path, "OpenVMM build provenance")
     revision, source_clean = openvmm_git_state(OpenVMMBuildConstants.DIRECTORY)
@@ -800,6 +858,8 @@ def _validate_openvmm_provenance(
             "OpenVMM build provenance does not match the current clean pinned "
             "source and executable"
         )
+    if architecture == "aarch64":
+        nvx_cli.check_target(binary, nvx_cli.ARM_WINDOWS_RELEASE_TARGET)
     return provenance
 
 
@@ -807,9 +867,15 @@ def _validate_kernel_provenance(
     kernel: Path,
     kernel_config: Path,
     provenance_path: Path,
+    *,
+    architecture: str = "x86_64",
 ) -> dict[str, object]:
     provenance = _read_json_object(provenance_path, "kernel build provenance")
-    expected_inputs = kernel_provenance_inputs()
+    expected_inputs = (
+        kernel_provenance_inputs(architecture)
+        if architecture != "x86_64"
+        else kernel_provenance_inputs()
+    )
     if (
         provenance.get("format") != KernelBuildConstants.PROVENANCE_FORMAT
         or provenance.get("source") != expected_inputs["source"]
@@ -821,7 +887,10 @@ def _validate_kernel_provenance(
             "kernel build provenance does not match the current source, config, "
             "and vmlinux"
         )
-    assert_required_kernel_config(kernel_config)
+    assert_required_kernel_config(
+        kernel_config,
+        **(architecture_kwargs(architecture)),
+    )
     return provenance
 
 
@@ -829,6 +898,8 @@ def _validate_initramfs_provenance(
     initramfs: Path,
     package_manifest: Path,
     provenance_path: Path,
+    *,
+    architecture: str = "x86_64",
 ) -> dict[str, object]:
     provenance = _read_json_object(
         provenance_path,
@@ -836,7 +907,12 @@ def _validate_initramfs_provenance(
     )
     if (
         provenance.get("format") != InitramfsBuildConstants.PROVENANCE_FORMAT
-        or provenance.get("inputs") != initramfs_provenance_inputs()
+        or provenance.get("inputs")
+        != (
+            initramfs_provenance_inputs(architecture)
+            if architecture != "x86_64"
+            else initramfs_provenance_inputs()
+        )
         or provenance.get("initramfs_sha256") != sha256_file(initramfs)
         or provenance.get("package_manifest_sha256") != sha256_file(package_manifest)
     ):
@@ -847,18 +923,24 @@ def _validate_initramfs_provenance(
     return provenance
 
 
-def _require_runtime_provenance_paths() -> tuple[Path, Path, Path]:
+def _require_runtime_provenance_paths(
+    *, architecture: str = "x86_64"
+) -> tuple[Path, Path, Path]:
+    kernel_provenance_name = _kernel_artifact_names(architecture)[2]
     return (
         require_file(
             artifact_path(OpenVMMBuildConstants.PROVENANCE_NAME),
             "OpenVMM build provenance",
         ),
         require_file(
-            artifact_path(KernelBuildConstants.PROVENANCE_NAME),
+            artifact_path(kernel_provenance_name, **architecture_kwargs(architecture)),
             "kernel build provenance",
         ),
         require_file(
-            artifact_path(InitramfsBuildConstants.PROVENANCE_NAME),
+            artifact_path(
+                InitramfsBuildConstants.PROVENANCE_NAME,
+                **architecture_kwargs(architecture),
+            ),
             "initramfs build provenance",
         ),
     )
@@ -902,6 +984,8 @@ def _validate_nvx_provenance(
             "from the current nvx sources; build nvx from them, and record "
             "its provenance with `nvx.py record-nvx-provenance`"
         )
+    if target == nvx_cli.ARM_WINDOWS_RELEASE_TARGET:
+        nvx_cli.check_target(executable, target)
     return provenance
 
 
@@ -917,71 +1001,103 @@ def _require_runtime_nvx() -> tuple[Path, Path]:
     return executable, provenance
 
 
-def validate_runtime_artifact_provenance() -> None:
+def validate_runtime_artifact_provenance(*, architecture: str = "x86_64") -> None:
     """Check that OpenVMM, the kernel, the Alpine initramfs, and the nvx
     that nvx.py runs match their build provenance and this checkout's
     sources, so that nothing stale runs, such as an nvx left from before a
     change of its sources, which nvx.py never rebuilds."""
+    kernel_name, config_name, _ = _kernel_artifact_names(architecture)
     binary = require_file(openvmm_binary_path(), "OpenVMM release binary")
     kernel = require_file(
-        artifact_path(KernelBuildConstants.BINARY_NAME),
+        artifact_path(kernel_name, **architecture_kwargs(architecture)),
         "required guest artifact vmlinux",
     )
     initramfs = require_file(
-        artifact_path(AlpineBuildConstants.INITRAMFS_NAME),
+        artifact_path(
+            AlpineBuildConstants.INITRAMFS_NAME, **architecture_kwargs(architecture)
+        ),
         "required guest artifact initramfs.cpio.gz",
     )
     package_manifest = require_file(
-        artifact_path(AlpineBuildConstants.PACKAGE_MANIFEST_NAME),
+        artifact_path(
+            AlpineBuildConstants.PACKAGE_MANIFEST_NAME,
+            **architecture_kwargs(architecture),
+        ),
         "initramfs package manifest",
     )
     kernel_config = require_file(
-        artifact_path(KernelBuildConstants.CONFIG_NAME),
+        artifact_path(config_name, **architecture_kwargs(architecture)),
         "required guest artifact vmlinux.config",
     )
     (
         openvmm_provenance_path,
         kernel_provenance_path,
         initramfs_provenance_path,
-    ) = _require_runtime_provenance_paths()
+    ) = _require_runtime_provenance_paths(**(architecture_kwargs(architecture)))
     nvx_executable, nvx_provenance_path = _require_runtime_nvx()
-    _validate_openvmm_provenance(binary, openvmm_provenance_path)
-    _validate_kernel_provenance(kernel, kernel_config, kernel_provenance_path)
+    _validate_openvmm_provenance(
+        binary,
+        openvmm_provenance_path,
+        **(architecture_kwargs(architecture)),
+    )
+    _validate_kernel_provenance(
+        kernel,
+        kernel_config,
+        kernel_provenance_path,
+        **(architecture_kwargs(architecture)),
+    )
     _validate_initramfs_provenance(
         initramfs,
         package_manifest,
         initramfs_provenance_path,
+        **(architecture_kwargs(architecture)),
     )
-    _validate_nvx_provenance(nvx_executable, nvx_provenance_path, target=None)
+    _validate_nvx_provenance(
+        nvx_executable,
+        nvx_provenance_path,
+        target=nvx_cli.release_target(architecture=architecture)
+        if architecture == "aarch64"
+        else None,
+    )
 
 
-def validate_guest_artifacts(directory: Path, components: Collection[str]) -> None:
+def validate_guest_artifacts(
+    directory: Path, components: Collection[str], *, architecture: str = "x86_64"
+) -> None:
     """Check that the files of the guest artifact `components` in `directory`
     match their provenance and manifests and were built from this checkout's
     sources, as `package` checks those in build/. The sandbox scratch template
     has neither, so it need only be there."""
-    unknown = sorted(set(components) - GUEST_ARTIFACT_COMPONENTS.keys())
+    inventory = _guest_artifact_components(architecture)
+    unknown = sorted(set(components) - inventory.keys())
     if unknown:
         raise ScriptError(f"unknown guest artifact component: {', '.join(unknown)}")
     if not components:
         raise ScriptError("no guest artifact component to validate")
     for component in components:
-        for name in GUEST_ARTIFACT_COMPONENTS[component]:
+        for name in inventory[component]:
             require_file(directory / name, f"guest artifact {name}")
     if "kernel" in components:
         _validate_kernel_provenance(
-            directory / KernelBuildConstants.BINARY_NAME,
-            directory / KernelBuildConstants.CONFIG_NAME,
-            directory / KernelBuildConstants.PROVENANCE_NAME,
+            *(directory / name for name in inventory["kernel"]),
+            **(architecture_kwargs(architecture)),
         )
     if "alpine" in components:
         _validate_initramfs_provenance(
             directory / AlpineBuildConstants.INITRAMFS_NAME,
             directory / AlpineBuildConstants.PACKAGE_MANIFEST_NAME,
             directory / InitramfsBuildConstants.PROVENANCE_NAME,
+            **(architecture_kwargs(architecture)),
         )
     if "ubuntu" in components:
-        input_sha256 = converter_input_sha256(customization_files())
+        input_sha256 = (
+            converter_input_sha256(
+                customization_files(architecture=architecture),
+                architecture=architecture,
+            )
+            if architecture != "x86_64"
+            else converter_input_sha256(customization_files())
+        )
         for artifact_name, manifest_name in (
             (
                 UbuntuBuildConstants.INITRAMFS_NAME,
@@ -1002,7 +1118,9 @@ def validate_guest_artifacts(directory: Path, components: Collection[str]) -> No
         )
 
 
-def _require_release_nvx() -> tuple[Path, Path, dict[str, object]]:
+def _require_release_nvx(
+    *, architecture: str = "x86_64"
+) -> tuple[Path, Path, dict[str, object]]:
     """Return the nvx that a package ships, its provenance path, and its
     provenance, which must show a build for the release target of this
     operating system: on Linux, the static musl executable that runs on every
@@ -1011,7 +1129,7 @@ def _require_release_nvx() -> tuple[Path, Path, dict[str, object]]:
     provenance_path = require_file(
         artifact_path(nvx_cli.PROVENANCE_NAME), "nvx build provenance"
     )
-    target = nvx_cli.release_target()
+    target = nvx_cli.release_target(**(architecture_kwargs(architecture)))
     provenance = _validate_nvx_provenance(executable, provenance_path, target=target)
     nvx_cli.check_target(executable, target)
     return executable, provenance_path, provenance
@@ -1027,6 +1145,7 @@ def _packaged_source_manifest(
     nvx_name: str,
     *,
     include_azurelinux: bool,
+    architecture: str = "x86_64",
 ) -> bytes:
     distribution = root_manifest.get("distribution")
     openvmm = root_manifest.get("openvmm")
@@ -1044,17 +1163,59 @@ def _packaged_source_manifest(
     linux_section = cast(dict[str, object], linux)
     alpine_section = cast(dict[str, object], alpine)
     ubuntu_section = cast(dict[str, object], ubuntu)
+    kernel_name, config_name, _ = _kernel_artifact_names(architecture)
+    if architecture == "aarch64":
+        distribution_section["architecture"] = architecture
+        architectures = cast(dict[str, object], linux_section["architectures"])
+        linux_section.update(cast(dict[str, object], architectures[architecture]))
+        alpine_section.update(
+            architecture=architecture,
+            minirootfs_url=AlpineBuildConstants.ARM_MINIROOTFS_URL,
+            minirootfs_sha256=AlpineBuildConstants.ARM_MINIROOTFS_SHA256,
+            package_manifests=[
+                (
+                    Path("build")
+                    / architecture
+                    / AlpineBuildConstants.PACKAGE_MANIFEST_NAME
+                ).as_posix()
+            ],
+        )
+        ubuntu_section.update(
+            architecture="arm64",
+            base_url=UbuntuBuildConstants.BASE_URL.rsplit("/", 1)[0]
+            + f"/ubuntu-base-{UbuntuBuildConstants.VERSION}-base-arm64.tar.gz",
+            base_sha256=UbuntuBuildConstants.ARM_BASE_SHA256,
+            package_lock=UbuntuBuildConstants.ARM_PACKAGE_LOCK.relative_to(
+                BuildConstants.REPO_ROOT
+            ).as_posix(),
+            package_lock_sha256=package_lock_sha256(
+                UbuntuBuildConstants.ARM_PACKAGE_LOCK
+            ),
+            guest_sources=[
+                UbuntuBuildConstants.ARM_PACKAGE_LOCK.relative_to(
+                    BuildConstants.REPO_ROOT
+                ).as_posix()
+                if path == UbuntuBuildConstants.PACKAGE_LOCK_RELATIVE_PATH.as_posix()
+                else path
+                for path in cast(list[str], ubuntu_section["guest_sources"])
+            ],
+            package_manifests=[
+                (Path("build") / architecture / name).as_posix()
+                for name in (
+                    UbuntuBuildConstants.PACKAGE_MANIFEST_NAME,
+                    UbuntuBuildConstants.DISTRO_MANIFEST_NAME,
+                )
+            ],
+        )
+        guest_rust = cast(dict[str, object], root_manifest["guest_rust"])
+        guest_rust["target"] = GuestRustBuildConstants.ARM_TARGET
     distribution_section["version"] = release_version
     openvmm_section["source_revision"] = openvmm_provenance["source_revision"]
     openvmm_section["executable_sha256"] = sha256_file(
         release_root / "bin" / binary_name
     )
-    linux_section["kernel_sha256"] = sha256_file(
-        release_root / "guest" / KernelBuildConstants.BINARY_NAME
-    )
-    linux_section["config_sha256"] = sha256_file(
-        release_root / "guest" / KernelBuildConstants.CONFIG_NAME
-    )
+    linux_section["kernel_sha256"] = sha256_file(release_root / "guest" / kernel_name)
+    linux_section["config_sha256"] = sha256_file(release_root / "guest" / config_name)
     alpine_section["initramfs_sha256"] = sha256_file(
         release_root / "guest" / AlpineBuildConstants.INITRAMFS_NAME
     )
@@ -1133,7 +1294,30 @@ def _validate_root_manifest_contract(manifest: dict[str, object]) -> None:
 def _validate_source_manifest_metadata(
     manifest: dict[str, object],
     kernel_inputs: dict[str, object],
+    *,
+    architecture: str = "x86_64",
 ) -> list[str]:
+    if architecture == "aarch64":
+        expected = kernel_provenance_inputs(architecture)
+        if any(kernel_inputs.get(field) != value for field, value in expected.items()):
+            raise ScriptError(
+                "ARM kernel provenance differs from the selected build inputs"
+            )
+        # The repository manifest retains its legacy x86 fields beside explicit
+        # ARM metadata; validate both, not the ARM kernel against x86 fields.
+        _validate_source_manifest_metadata(manifest, kernel_provenance_inputs())
+        linux = cast(dict[str, object], manifest["linux"])
+        if not isinstance(linux.get("architectures"), dict):
+            raise ScriptError(
+                "ARM packaging requires architecture-qualified Linux source metadata"
+            )
+        source = cast(dict[str, object], expected["source"])
+        return [
+            cast(str, patch["path"])
+            for patch in cast(list[dict[str, object]], source["patches"])
+        ]
+    if architecture != "x86_64":
+        raise ScriptError(f"unsupported source-manifest architecture: {architecture}")
     _validate_root_manifest_contract(manifest)
     if manifest.get("format") != ReleaseBuildConstants.SOURCE_MANIFEST_FORMAT:
         raise ScriptError("SOURCE-MANIFEST.json format must be 1")
@@ -1429,21 +1613,40 @@ def package_release(
     destination: Path | None,
     include_source: bool,
     force: bool,
+    architecture: str = "x86_64",
 ) -> None:
+    kernel_name, config_name, kernel_provenance_name = _kernel_artifact_names(
+        architecture
+    )
+    include_azurelinux = not include_source and architecture == "x86_64"
     guest_names, alpine_manifests, ubuntu_manifests, azurelinux_manifests = (
-        _guest_release_inputs(include_azurelinux=not include_source)
+        _guest_release_inputs(
+            include_azurelinux=include_azurelinux,
+            **(architecture_kwargs(architecture)),
+        )
     )
-    linux_source_archive = (
-        BuildConstants.SOURCE_DIR
-        / KernelBuildConstants.SOURCE_DIRECTORY_NAME
-        / KernelBuildConstants.SOURCE_ARCHIVE_NAME
-    )
+    if architecture == "aarch64":
+        linux_source_archive = (
+            BuildConstants.SOURCE_DIR
+            / KernelBuildConstants.SOURCE_DIRECTORY_NAME
+            / architecture
+            / f"nvx-linux-source-{KernelBuildConstants.VERSION}-{architecture}.tar.gz"
+        )
+    else:
+        linux_source_archive = (
+            BuildConstants.SOURCE_DIR
+            / KernelBuildConstants.SOURCE_DIRECTORY_NAME
+            / KernelBuildConstants.SOURCE_ARCHIVE_NAME
+        )
     alpine_executables: frozenset[str] = frozenset()
     if include_source:
         alpine_executables = _validate_alpine_sources(alpine_manifests)
         _validate_ubuntu_sources(ubuntu_manifests)
         require_file(linux_source_archive, "Linux corresponding-source archive")
-        _validate_linux_source_archive(linux_source_archive)
+        _validate_linux_source_archive(
+            linux_source_archive,
+            **(architecture_kwargs(architecture)),
+        )
         print(
             "!! source-inclusive package omits the Azure Linux guest: "
             "collect-sources does not collect its corresponding source",
@@ -1473,48 +1676,62 @@ def package_release(
     ).resolve()
     _validate_release_replacement(release_destination, force)
     binary = require_file(openvmm_binary_path(), "OpenVMM release binary")
-    nvx_binary, nvx_provenance_path, nvx_provenance = _require_release_nvx()
+    nvx_binary, nvx_provenance_path, nvx_provenance = _require_release_nvx(
+        **(architecture_kwargs(architecture))
+    )
     kernel = require_file(
-        artifact_path(KernelBuildConstants.BINARY_NAME),
+        artifact_path(kernel_name, **architecture_kwargs(architecture)),
         "required guest artifact vmlinux",
     )
     kernel_config = require_file(
-        artifact_path(KernelBuildConstants.CONFIG_NAME),
+        artifact_path(config_name, **architecture_kwargs(architecture)),
         "required guest artifact vmlinux.config",
     )
     initramfs = require_file(
-        artifact_path(AlpineBuildConstants.INITRAMFS_NAME),
+        artifact_path(
+            AlpineBuildConstants.INITRAMFS_NAME, **architecture_kwargs(architecture)
+        ),
         "required guest artifact initramfs.cpio.gz",
     )
     package_manifest = require_file(
-        artifact_path(AlpineBuildConstants.PACKAGE_MANIFEST_NAME),
+        artifact_path(
+            AlpineBuildConstants.PACKAGE_MANIFEST_NAME,
+            **architecture_kwargs(architecture),
+        ),
         "initramfs package manifest",
     )
     (
         openvmm_provenance_path,
         kernel_provenance_path,
         initramfs_provenance_path,
-    ) = _require_runtime_provenance_paths()
+    ) = _require_runtime_provenance_paths(**(architecture_kwargs(architecture)))
     openvmm_provenance = _validate_openvmm_provenance(
         binary,
         openvmm_provenance_path,
+        **(architecture_kwargs(architecture)),
     )
     kernel_provenance = _validate_kernel_provenance(
         kernel,
         kernel_config,
         kernel_provenance_path,
+        **(architecture_kwargs(architecture)),
     )
     initramfs_provenance = _validate_initramfs_provenance(
         initramfs,
         package_manifest,
         initramfs_provenance_path,
+        **(architecture_kwargs(architecture)),
     )
     root_manifest_path = require_file(
         BuildConstants.REPO_ROOT / "SOURCE-MANIFEST.json",
         "source manifest",
     )
     root_manifest = _read_json_object(root_manifest_path, "source manifest")
-    _validate_source_manifest_metadata(root_manifest, kernel_provenance)
+    _validate_source_manifest_metadata(
+        root_manifest,
+        kernel_provenance,
+        **(architecture_kwargs(architecture)),
+    )
     for name in ("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"):
         require_file(BuildConstants.REPO_ROOT / name, name)
     require_file(OpenVMMBuildConstants.DIRECTORY / "LICENSE", "OpenVMM license")
@@ -1534,14 +1751,17 @@ def package_release(
         _copy_release_file(binary, staging / "bin" / binary.name)
         _copy_release_file(nvx_binary, staging / "bin" / nvx_binary.name)
         for name in guest_names:
-            _copy_release_file(artifact_path(name), staging / "guest" / name)
+            _copy_release_file(
+                artifact_path(name, **architecture_kwargs(architecture)),
+                staging / "guest" / name,
+            )
         _copy_release_file(
             openvmm_provenance_path,
             staging / "provenance" / OpenVMMBuildConstants.PROVENANCE_NAME,
         )
         _copy_release_file(
             kernel_provenance_path,
-            staging / "provenance" / KernelBuildConstants.PROVENANCE_NAME,
+            staging / "provenance" / kernel_provenance_name,
         )
         _copy_release_file(
             initramfs_provenance_path,
@@ -1571,6 +1791,7 @@ def package_release(
                 source_destination / f"nvx-project-source-{release_version}.tar.gz",
                 release_version,
                 package_manifests,
+                **architecture_kwargs(architecture),
             )
             _alpine_source_archive(
                 source_destination / f"nvx-alpine-source-{release_version}.tar.gz",
@@ -1584,8 +1805,8 @@ def package_release(
                 ubuntu_manifests,
             )
         packaged_binary = staging / "bin" / binary.name
-        packaged_kernel = staging / "guest" / KernelBuildConstants.BINARY_NAME
-        packaged_config = staging / "guest" / KernelBuildConstants.CONFIG_NAME
+        packaged_kernel = staging / "guest" / kernel_name
+        packaged_config = staging / "guest" / config_name
         packaged_initramfs = staging / "guest" / AlpineBuildConstants.INITRAMFS_NAME
         packaged_package_manifest = (
             staging / "guest" / AlpineBuildConstants.PACKAGE_MANIFEST_NAME
@@ -1593,9 +1814,7 @@ def package_release(
         packaged_openvmm_provenance = (
             staging / "provenance" / OpenVMMBuildConstants.PROVENANCE_NAME
         )
-        packaged_kernel_provenance = (
-            staging / "provenance" / KernelBuildConstants.PROVENANCE_NAME
-        )
+        packaged_kernel_provenance = staging / "provenance" / kernel_provenance_name
         packaged_initramfs_provenance = (
             staging / "provenance" / InitramfsBuildConstants.PROVENANCE_NAME
         )
@@ -1665,7 +1884,8 @@ def package_release(
                 binary.name,
                 nvx_provenance,
                 nvx_binary.name,
-                include_azurelinux=not include_source,
+                include_azurelinux=include_azurelinux,
+                **(architecture_kwargs(architecture)),
             )
         )
         write_sha256_sums(staging)

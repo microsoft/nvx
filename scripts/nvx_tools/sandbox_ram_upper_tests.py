@@ -12,16 +12,20 @@ A managed sandbox records the RAM upper without a scratch image, and passes the
 probe's managed checks. Its guest has one virtio block device and declares the
 RAM upper, and a later request reads a file that an earlier one wrote. Once the
 sandbox stops and starts again, the file is gone.
+The managed probe also fills the real default RAM upper to ENOSPC, checks its
+half-memory capacity and actual byte accounting, deletes only its owned
+filler, and proves that a subsequent write can be read.
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
-from .managed_exec_tests import load_workload_artifacts
+from .managed_exec_tests import load_workload_artifacts, workload_architecture_options
 from .sandbox_lifecycle_tests import (
     CONFIG,
     OUTCOME,
@@ -30,6 +34,7 @@ from .sandbox_lifecycle_tests import (
     STOPPED_ENTRIES,
     LifecycleAcceptance,
     Refusal,
+    check_cycle_count,
     check_managed_report,
     managed_report,
     run_acceptance,
@@ -51,6 +56,72 @@ STATE_PATH = "/tmp/nvx-ram-upper-state"
 STATE_CONTENT = b"kept in RAM\n"
 # The guest's block devices, one per line, then its kernel command line.
 VIEW_SCRIPT = "ls /sys/block && cat /proc/cmdline"
+RAM_FILL_MARKER = b"NVX-UBUNTU-SANDBOX-RAM-FILL-OK"
+
+
+def check_ram_fill(result: subprocess.CompletedProcess[bytes]) -> dict[str, int | str]:
+    """Validate actual guest fill counters; failed commands cannot supply credit."""
+    lines = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith(RAM_FILL_MARKER + b" ")
+    ]
+    if result.returncode != 0 or result.stderr or len(lines) != 1:
+        raise RuntimeError(
+            f"the RAM-upper fill returned {result.returncode}, stderr "
+            f"{result.stderr!r}, and {len(lines)} complete observations"
+        )
+    fields: dict[str, str] = {}
+    try:
+        for word in lines[0][len(RAM_FILL_MARKER) + 1 :].decode("ascii").split():
+            name, value = word.split("=", 1)
+            if name in fields:
+                raise ValueError(f"duplicate {name}")
+            fields[name] = value
+    except (UnicodeDecodeError, ValueError) as error:
+        raise RuntimeError("the RAM-upper fill observation is malformed") from error
+    numeric = ("page", "memory", "total", "available", "written", "dd_status")
+    if set(fields) != {*numeric, "error", "after", "cleanup"}:
+        raise RuntimeError(f"the RAM-upper fill fields are {fields!r}")
+    numbers: dict[str, int] = {}
+    for name in numeric:
+        value = fields[name]
+        if not value.isascii() or not value.isdecimal() or int(value) > (1 << 64) - 1:
+            raise RuntimeError(f"the RAM-upper fill {name} is not a u64: {value!r}")
+        numbers[name] = int(value)
+    if (
+        numbers["dd_status"] != 1
+        or fields["error"] != "ENOSPC"
+        or fields["after"] != "nvx-ram-upper"
+        or fields["cleanup"] != "complete"
+    ):
+        raise RuntimeError(
+            f"the RAM-upper fill did not prove ENOSPC and recovery: {fields!r}"
+        )
+    page = numbers["page"]
+    memory = numbers["memory"]
+    total = numbers["total"]
+    available = numbers["available"]
+    written = numbers["written"]
+    if (
+        page != 4096
+        or memory == 0
+        or total != (memory // 4096 + 1) // 2 * 4096
+        or total == 0
+    ):
+        raise RuntimeError(
+            f"the RAM-upper fill capacity is not page-rounded half-memory: {fields!r}"
+        )
+    if not 0 < written <= available <= total or available - written >= 1 << 20:
+        raise RuntimeError(
+            f"the RAM-upper fill byte accounting exceeds its original slack: {fields!r}"
+        )
+    return {
+        **numbers,
+        "error": fields["error"],
+        "after": fields["after"],
+        "cleanup": fields["cleanup"],
+    }
 
 
 def probe_markers(*, entry: bool) -> tuple[bytes, ...]:
@@ -104,9 +175,11 @@ def check_run_report(path: Path, backend: str) -> None:
 
 class RamUpperAcceptance(LifecycleAcceptance):
     evidence_prefix = "sandbox-ram-upper-"
+    default_start_stop_cycles = 2
 
     def ram_options(self) -> list[str]:
         return [
+            *workload_architecture_options(self.architecture),
             "--hypervisor",
             self.backend,
             "--layer",
@@ -220,20 +293,54 @@ class RamUpperAcceptance(LifecycleAcceptance):
             name: config[name] for name in ("format", "upper", "scratch_binding")
         }
         if recorded != {
-            "format": 10,
+            "format": 10 if self.architecture == "x86_64" else 11,
             "upper": {"kind": "ram", "max_memory_percent": 50},
             "scratch_binding": None,
         } or any(name in config for name in ("layers", "scratch")):
             raise RuntimeError(f"provision recorded the RAM upper as {recorded!r}")
+        if (
+            self.architecture != "x86_64"
+            and config.get("architecture") != self.architecture
+        ):
+            raise RuntimeError("provision recorded another ISA for the RAM upper")
         self.start(description="first start")
-        result = self.exec(PROBE, "--arg=init", "--arg=entry")
+        result = self.exec(
+            PROBE, "--arg=init", "--arg=entry", "--arg=ram-fill", expected=None
+        )
         self.save_evidence("probe.log", result.stdout + result.stderr)
+        fill = check_ram_fill(result)
+        self.save_evidence(
+            "ram-fill.json", (json.dumps(fill, indent=2) + "\n").encode()
+        )
         for marker in probe_markers(entry=True):
             if marker not in result.stdout:
                 raise RuntimeError(
                     f"the managed RAM-upper probe did not report {marker.decode()}"
                 )
         self.check_guest_view()
+        self.check_warm_ram_state()
+        self.stop_sandbox("first stop")
+        for cycle in range(1, self.start_stop_cycles):
+            # A new start begins with an empty upper.
+            self.start(
+                description="start after the stop"
+                if cycle == 1
+                else f"cycle {cycle + 1} start"
+            )
+            result = self.exec(
+                "/bin/sh", "--arg=-c", f"--arg=test ! -e {STATE_PATH}", expected=None
+            )
+            self.require_output(result, b"", "the restarted sandbox's empty upper")
+            if cycle + 1 < self.start_stop_cycles:
+                self.check_warm_ram_state()
+            self.stop_sandbox(
+                "second stop" if cycle == 1 else f"cycle {cycle + 1} stop"
+            )
+        self.invoke("deprovision", state=self.state)
+        if self.state.exists():
+            raise RuntimeError("deprovision kept the RAM-upper sandbox's state")
+
+    def check_warm_ram_state(self) -> None:
         result = self.exec(
             "/bin/sh",
             "--arg=-c",
@@ -243,17 +350,6 @@ class RamUpperAcceptance(LifecycleAcceptance):
         self.require_output(result, b"", "the RAM upper's state-writing request")
         result = self.exec("/bin/cat", f"--arg={STATE_PATH}", expected=None)
         self.require_output(result, STATE_CONTENT, "the RAM upper's state")
-        self.stop_sandbox("first stop")
-        # A new start begins with an empty upper.
-        self.start(description="start after the stop")
-        result = self.exec(
-            "/bin/sh", "--arg=-c", f"--arg=test ! -e {STATE_PATH}", expected=None
-        )
-        self.require_output(result, b"", "the restarted sandbox's empty upper")
-        self.stop_sandbox("second stop")
-        self.invoke("deprovision", state=self.state)
-        if self.state.exists():
-            raise RuntimeError("deprovision kept the RAM-upper sandbox's state")
 
     def check_guest_view(self) -> None:
         """The guest of a RAM upper has one virtio block device, the distro
@@ -282,8 +378,25 @@ class RamUpperAcceptance(LifecycleAcceptance):
         self.require_processes((), f"after the {description}")
 
 
-def run_sandbox_ram_upper(backend: str, *, timeout: float, output_dir: Path) -> None:
-    artifacts = load_workload_artifacts()
+def run_sandbox_ram_upper(
+    backend: str,
+    *,
+    timeout: float,
+    output_dir: Path,
+    architecture: str = "x86_64",
+    start_stop_cycles: int = 2,
+) -> None:
+    check_cycle_count(start_stop_cycles, minimum=2)
+    artifacts = (
+        load_workload_artifacts()
+        if architecture == "x86_64"
+        else load_workload_artifacts(architecture=architecture)
+    )
+    selection: dict[str, Any] = {}
+    if architecture != "x86_64":
+        selection["architecture"] = architecture
+    if start_stop_cycles != 2:
+        selection["start_stop_cycles"] = start_stop_cycles
     output_dir.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="nvx-public-ram-upper-"))
     run_acceptance(
@@ -293,5 +406,6 @@ def run_sandbox_ram_upper(backend: str, *, timeout: float, output_dir: Path) -> 
             output_dir=output_dir,
             artifacts=artifacts,
             root=root,
+            **selection,
         )
     )

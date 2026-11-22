@@ -20,6 +20,7 @@ PLATFORMS = (
     ("linux-kvm", ".tar.gz"),
     ("linux-mshv", ".tar.gz"),
     ("windows-whp", ".zip"),
+    ("windows-whp-aarch64", ".zip"),
 )
 
 
@@ -62,6 +63,7 @@ def main() -> None:
         target_sha,
         version,
         tuple(packages.values()),
+        include_arm64=True,
     )
 
 

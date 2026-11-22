@@ -662,6 +662,7 @@ class DevelopmentReleaseTests(unittest.TestCase):
             TARGET,
             "1.2.3",
             tuple(packages.values()),
+            include_arm64=True,
         )
 
         self.assertEqual(
@@ -671,6 +672,9 @@ class DevelopmentReleaseTests(unittest.TestCase):
                 "create",
                 "read",
                 "upload",
+                "read",
+                "upload",
+                "read",
                 "read",
                 "upload",
                 "read",
@@ -697,6 +701,26 @@ class DevelopmentReleaseTests(unittest.TestCase):
         self.assertIn(f"retrying in 10s: {_reason(failure)}\n", output)
         self.assertIn(f"development release {TAG} is release {release.id}", output)
         self.assertIn(f"published development prerelease {TAG}", output)
+
+    def test_arm_package_count_is_opt_in_and_strict(self):
+        packages = self._packages()
+        arm = self._package("nvx-windows-whp-aarch64.zip", b"arm64")
+        for selected, options, count in (
+            ([*packages, arm], {}, "three"),
+            (packages, {"include_arm64": True}, "four"),
+        ):
+            with (
+                self.subTest(count=count),
+                self.assertRaisesRegex(ScriptError, f"exactly {count} packages"),
+            ):
+                development_release.publish_development_release(
+                    REPOSITORY,
+                    TARGET,
+                    "1.2.3",
+                    [package.path for package in selected],
+                    **options,
+                )
+        self.assertEqual(self.github.operations, [])
 
     def test_publication_addresses_its_release_by_id(self):
         packages = self._packages()
@@ -1417,6 +1441,9 @@ class DevelopmentReleasePackageTests(unittest.TestCase):
                 "linux-kvm": Path("dist") / "nvx-1.2.3-linux-kvm.tar.gz",
                 "linux-mshv": Path("dist") / "nvx-1.2.3-linux-mshv.tar.gz",
                 "windows-whp": Path("dist") / "nvx-1.2.3-windows-whp.zip",
+                "windows-whp-aarch64": (
+                    Path("dist") / "nvx-1.2.3-windows-whp-aarch64.zip"
+                ),
             },
         )
 
@@ -1435,6 +1462,11 @@ class DevelopmentReleasePackageTests(unittest.TestCase):
                 # Windows packages ship Windows executables.
                 (
                     "windows-whp",
+                    {"bin/openvmm.exe": b"openvmm", "bin/nvx": b"nvx"},
+                    "bin/nvx.exe",
+                ),
+                (
+                    "windows-whp-aarch64",
                     {"bin/openvmm.exe": b"openvmm", "bin/nvx": b"nvx"},
                     "bin/nvx.exe",
                 ),
@@ -1479,6 +1511,7 @@ class DevelopmentReleasePackageTests(unittest.TestCase):
                         tuple(
                             Path("dist") / package.name for package in packages.values()
                         ),
+                        include_arm64=True,
                     )
                     publish.reset_mock()
                     _write_package(packages["windows-whp"], {"bin/openvmm.exe": b""})

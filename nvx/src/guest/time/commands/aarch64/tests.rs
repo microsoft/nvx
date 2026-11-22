@@ -8,6 +8,24 @@ use std::time::Instant;
 struct TrapOps;
 
 #[test]
+fn shared_clear_phase_hook_keeps_its_exact_operation_and_argument_contract_on_arm() {
+    let mut adjusted = false;
+    clear_phase_with(&[], |adjustment| {
+        assert!(matches!(adjustment, ClockAdjustment::ClearPhase));
+        adjusted = true;
+        Ok(())
+    })
+    .unwrap();
+    assert!(adjusted);
+    assert!(matches!(
+        clear_phase_with(&[b"extra"], |_| panic!(
+            "invalid arguments reached adjtimex"
+        )),
+        Err(CommandError::Usage)
+    ));
+}
+
+#[test]
 fn unsupported_arm_capture_command_cannot_truncate_or_create_entropy_output() {
     let directory = tempfile::tempdir().unwrap();
     let existing = directory.path().join("existing");

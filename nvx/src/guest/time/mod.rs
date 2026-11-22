@@ -117,12 +117,13 @@ const USAGE: &[u8] = br#"usage: nvx-time [--report-only] COMMAND
 "#;
 
 #[cfg(target_arch = "aarch64")]
-/// ARM cold-boot commands; capture, restore and x86 test hooks are not admitted.
+/// ARM cold-boot commands; capture, restore and x86-specific test hooks are not admitted.
 const USAGE: &[u8] = br#"usage: nvx-time [--report-only] COMMAND
   boot
   status
   sample
   generation-id
+  test clear-phase
 "#;
 
 /// Runs `nvx-time` with the process's arguments. It exits with 0 on success, 1 when a command
@@ -155,11 +156,22 @@ fn run(args: &[CString], out: &mut dyn Write, err: &mut dyn Write) -> Result<(),
         return test_mode::run(_rest, out);
         #[cfg(target_arch = "aarch64")]
         {
+            if _rest.first() == Some(&b"clear-phase".as_slice()) {
+                return commands::clear_phase_with(&_rest[1..], |adjustment| {
+                    sys::adjust_clock(adjustment).map(drop)
+                });
+            }
             sys::report(err, &[b"nvx-time: ARM x86 test hooks are unsupported\n"]);
             return Err(CommandError::Operation);
         }
     }
     commands::run(&arguments, report_only, out, err)
+}
+
+#[cfg(target_arch = "aarch64")]
+/// Reuses complete platform/clocksource/CNTFRQ admission before a counter probe starts.
+pub(crate) fn probe_clock_context() -> Result<super::counter::ClockContext, system::SampleError> {
+    system::Runtime::new(&system::RealOps, false).validated_arm_clock_context()
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]

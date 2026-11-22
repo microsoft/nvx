@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from . import nvx_cli
+from . import nvx_cli, release, ubuntu
 from .build_constants import BuildConstants, UbuntuBuildConstants
 from .common import ScriptError, artifact_path, require_file
 
@@ -35,11 +35,22 @@ class WorkloadArtifacts:
     scratch_template: Path
 
 
-def workload_artifact_paths() -> tuple[tuple[Path, str], ...]:
+def workload_artifact_paths(
+    *, architecture: str = "x86_64"
+) -> tuple[tuple[Path, str], ...]:
     """Return the paths of the Ubuntu workload layer, its manifest, and the
     sandbox scratch template, which the public scenarios read, each with its
     description."""
-    distro = artifact_path(UbuntuBuildConstants.DISTRO_NAME)
+    if architecture == "x86_64":
+        distro = artifact_path(UbuntuBuildConstants.DISTRO_NAME)
+        scratch = artifact_path(UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME)
+    else:
+        distro = artifact_path(
+            UbuntuBuildConstants.DISTRO_NAME, architecture=architecture
+        )
+        scratch = artifact_path(
+            UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME, architecture=architecture
+        )
     return (
         (distro, "Ubuntu workload layer"),
         (
@@ -47,16 +58,20 @@ def workload_artifact_paths() -> tuple[tuple[Path, str], ...]:
             "Ubuntu layer manifest",
         ),
         (
-            artifact_path(UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME),
+            scratch,
             "sandbox scratch template",
         ),
     )
 
 
-def load_workload_artifacts() -> WorkloadArtifacts:
+def load_workload_artifacts(*, architecture: str = "x86_64") -> WorkloadArtifacts:
+    paths = (
+        workload_artifact_paths()
+        if architecture == "x86_64"
+        else workload_artifact_paths(architecture=architecture)
+    )
     distro, manifest_path, scratch_template = (
-        require_file(path, description)
-        for path, description in workload_artifact_paths()
+        require_file(path, description) for path, description in paths
     )
     try:
         manifest: object = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -64,10 +79,33 @@ def load_workload_artifacts() -> WorkloadArtifacts:
         raise ScriptError(f"invalid Ubuntu layer manifest: {manifest_path}") from error
     if not isinstance(manifest, dict):
         raise ScriptError("Ubuntu layer manifest must contain a UUID string")
-    layer_uuid = cast(dict[str, object], manifest).get("uuid")
+    manifest = cast(dict[str, object], manifest)
+    layer_uuid = manifest.get("uuid")
     if not isinstance(layer_uuid, str):
         raise ScriptError("Ubuntu layer manifest must contain a UUID string")
+    if architecture != "x86_64":
+        if architecture != "aarch64" or manifest.get("architecture") != "arm64":
+            raise ScriptError("Ubuntu layer manifest does not declare the selected ISA")
+        input_sha256 = ubuntu.converter_input_sha256(
+            ubuntu.customization_files(architecture=architecture),
+            architecture=architecture,
+        )
+        release._validate_ubuntu_manifest(  # pyright: ignore[reportPrivateUsage]
+            distro, manifest_path, input_sha256
+        )
+        if layer_uuid != ubuntu.erofs_uuid(input_sha256):
+            raise ScriptError("Ubuntu layer manifest UUID does not match its inputs")
     return WorkloadArtifacts(distro, layer_uuid, scratch_template)
+
+
+def workload_architecture_options(architecture: str) -> list[str]:
+    """Select the ISA on run/provision; the current sandbox CLI selects its
+    ARM auto CPU profile and later transitions use the recorded ISA."""
+    if architecture == "x86_64":
+        return []
+    if architecture == "aarch64":
+        return ["--architecture", architecture]
+    raise ScriptError(f"unsupported workload architecture: {architecture}")
 
 
 def bounded_text(value: bytes) -> str:
@@ -174,9 +212,18 @@ def format_errors(errors: list[Exception]) -> str:
 
 
 def run_managed_exec_configuration(
-    backend: str, *, timeout: float, output_dir: Path
+    backend: str,
+    *,
+    timeout: float,
+    output_dir: Path,
+    architecture: str = "x86_64",
 ) -> None:
-    artifacts = load_workload_artifacts()
+    architecture_options = workload_architecture_options(architecture)
+    artifacts = (
+        load_workload_artifacts()
+        if architecture == "x86_64"
+        else load_workload_artifacts(architecture=architecture)
+    )
     distro = artifacts.distro
     layer_uuid = artifacts.layer_uuid
     scratch_template = artifacts.scratch_template
@@ -287,6 +334,7 @@ def run_managed_exec_configuration(
 
         invoke(
             "provision",
+            *architecture_options,
             "--layer",
             f"distro,{distro},{layer_uuid}",
             "--scratch",

@@ -26,6 +26,7 @@ from collections.abc import Generator
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .managed_exec_tests import bounded_text, load_workload_artifacts
 from .sandbox_lifecycle_tests import (
@@ -496,8 +497,21 @@ class ProxyOnlyAcceptance(LifecycleAcceptance):
                 )
 
 
-def run_sandbox_proxy_only(backend: str, *, timeout: float, output_dir: Path) -> None:
-    artifacts = load_workload_artifacts()
+def run_sandbox_proxy_only(
+    backend: str,
+    *,
+    timeout: float,
+    output_dir: Path,
+    architecture: str = "x86_64",
+) -> None:
+    artifacts = (
+        load_workload_artifacts()
+        if architecture == "x86_64"
+        else load_workload_artifacts(architecture=architecture)
+    )
+    selection: dict[str, Any] = {}
+    if architecture != "x86_64":
+        selection["architecture"] = architecture
     output_dir.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="nvx-public-proxy-"))
     run_acceptance(
@@ -507,5 +521,6 @@ def run_sandbox_proxy_only(backend: str, *, timeout: float, output_dir: Path) ->
             output_dir=output_dir,
             artifacts=artifacts,
             root=root,
+            **selection,
         )
     )

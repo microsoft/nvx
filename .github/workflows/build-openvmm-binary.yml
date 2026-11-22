@@ -3,6 +3,11 @@ name: Build OpenVMM binary
 on:
   workflow_call:
     inputs:
+      architecture:
+        description: Native producer and executable architecture
+        required: false
+        type: string
+        default: x86_64
       display-name:
         description: Platform name shown in the job list
         required: true
@@ -45,6 +50,7 @@ jobs:
       - name: Validate runner
         uses: ./.github/actions/validate-runner
         with:
+          architecture: ${{ inputs.architecture }}
           backend: ${{ inputs.backend }}
 
       - name: Prepare sccache
@@ -55,6 +61,7 @@ jobs:
       - name: Build OpenVMM
         uses: ./.github/actions/build-openvmm
         with:
+          architecture: ${{ inputs.architecture }}
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
           backend: ${{ inputs.backend }}
           binary-path: ${{ inputs.binary }}
@@ -64,6 +71,21 @@ jobs:
         uses: ./.github/actions/sccache
         with:
           operation: stop
+
+      - name: Download ARM profile admission guest artifacts
+        if: runner.os == 'Windows' && inputs.architecture == 'aarch64'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: guest-aarch64
+          path: build/aarch64
+
+      - name: Admit built ARM64 OpenVMM profile
+        if: runner.os == 'Windows' && inputs.architecture == 'aarch64'
+        uses: ./.github/actions/validate-runner
+        with:
+          architecture: aarch64
+          backend: ${{ inputs.backend }}
+          verify-openvmm: "true"
 
       - name: Upload OpenVMM executable
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

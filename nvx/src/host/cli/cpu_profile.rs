@@ -3,7 +3,7 @@
 //!
 //! OpenVMM presents each guest a CPU profile, by default the built-in profile of the host CPU's
 //! generation (`doc/usage.md`, "CPU profiles"). `cpu_generations.json` copies the identity of
-//! every profile that OpenVMM pins, from its document in `vmm_core/cpu_profile/profiles/` of the
+//! every x86 profile that OpenVMM pins, from its document in `vmm_core/cpu_profile/profiles/` of the
 //! OpenVMM submodule: its ID, the vendor of its CPUs, and its generation's name and CPU models,
 //! each a display family, a display model, and the first and last of its steppings. The revisions
 //! of a generation's profile share its generation, which the guidance lists once.

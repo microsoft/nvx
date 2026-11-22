@@ -2,6 +2,10 @@ name: Package release
 description: Build an NVX binary release for one platform, and upload it for publication
 
 inputs:
+  architecture:
+    description: Guest and executable architecture to validate and package
+    required: false
+    default: x86_64
   platform:
     description: Platform suffix used in the package and artifact names
     required: true
@@ -15,6 +19,29 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Check package architecture selection
+      shell: python {0}
+      env:
+        ARCHITECTURE: ${{ inputs.architecture }}
+        PLATFORM: ${{ inputs.platform }}
+        RUNNER_OS: ${{ runner.os }}
+        RUNNER_ARCH: ${{ runner.arch }}
+      run: |
+        import os
+
+        architecture = os.environ["ARCHITECTURE"]
+        if architecture not in ("x86_64", "aarch64"):
+            raise SystemExit("Unsupported release architecture")
+        if architecture == "aarch64":
+            if (
+                os.environ["RUNNER_OS"] != "Windows"
+                or os.environ["RUNNER_ARCH"] != "ARM64"
+                or os.environ["PLATFORM"] != "windows-whp-aarch64"
+            ):
+                raise SystemExit("ARM releases require the native Windows ARM64 WHP package identity")
+        elif os.environ["PLATFORM"].endswith("-aarch64"):
+            raise SystemExit("An x86 package cannot use an ARM release identity")
+
     # Every package ships the nvx that the nvx build job of its OS built
     # and its NVX CLI job tested, with its provenance, from where nvx.py
     # package looks for them.
@@ -36,7 +63,7 @@ runs:
       run: chmod +x nvx/target/release/nvx
 
     - name: Rematerialize canonical kernel inputs
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && inputs.architecture == 'x86_64'
       shell: powershell
       run: |
         python scripts\nvx.py materialize-kernel-provenance-inputs
@@ -60,7 +87,7 @@ runs:
           --destination "dist/${package}.tar.gz"
 
     - name: Package Windows release
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && inputs.architecture == 'x86_64'
       shell: powershell
       env:
         PLATFORM: ${{ inputs.platform }}
@@ -76,6 +103,45 @@ runs:
           --source "dist\$Package" `
           --destination "dist\$Package.zip"
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Package native Windows ARM64 release
+      if: runner.os == 'Windows' && inputs.architecture == 'aarch64'
+      shell: python {0}
+      env:
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        import json
+        import os
+        import struct
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        for path in (Path(r"nvx\target\release\nvx.exe"), Path(r"openvmm\target\release\openvmm.exe")):
+            data = path.read_bytes()
+            if data[:2] != b"MZ" or len(data) < 64:
+                raise SystemExit(f"{path} is not a Windows ARM64 PE executable")
+            offset = struct.unpack_from("<I", data, 0x3c)[0]
+            if data[offset:offset + 4] != b"PE\0\0" or struct.unpack_from("<H", data, offset + 4)[0] != 0xaa64:
+                raise SystemExit(f"{path} has the wrong executable ISA for an ARM64 release")
+        provenance = json.loads(Path(r"build\nvx.provenance.json").read_text(encoding="utf-8"))
+        if provenance.get("target") != "aarch64-pc-windows-msvc":
+            raise SystemExit("ARM64 release NVX provenance must name aarch64-pc-windows-msvc")
+        subprocess.run([
+            sys.executable, r"scripts\nvx.py", "materialize-kernel-provenance-inputs",
+            "--architecture", "aarch64",
+        ], check=True)
+        version = Path("VERSION").read_text(encoding="ascii").strip()
+        package = f"nvx-{version}-{os.environ['PLATFORM']}"
+        destination = Path("dist") / package
+        subprocess.run([
+            sys.executable, r"scripts\nvx.py", "package", "--architecture", "aarch64",
+            "--version", version, "--destination", str(destination), "--binary-only",
+        ], check=True)
+        subprocess.run([
+            sys.executable, r"scripts\nvx.py", "archive-release",
+            "--source", str(destination), "--destination", str(destination.parent / f"{package}.zip"),
+        ], check=True)
 
     - name: Upload Linux release
       if: runner.os != 'Windows' && inputs.upload == 'true'

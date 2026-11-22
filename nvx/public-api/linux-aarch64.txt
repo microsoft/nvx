@@ -165,6 +165,8 @@ method nvx::guest::time::Violation::code
 method nvx::guest::time::Violation::detail
 method nvx::guest::time::Violation::status
 fn nvx::guest::time::main (hidden)
+mod nvx::guest::time_probe (hidden)
+fn nvx::guest::time_probe::main (hidden)
 fn nvx::guest_path
 mod nvx::guest_restore
 struct nvx::guest_restore::Configuration

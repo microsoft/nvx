@@ -9,6 +9,9 @@ that the CLI of artifacts of another runtime identity drives no VM that these
 started and its stop terminates OpenVMM, and that stop, a crash, and
 deprovision leave no OpenVMM process, control endpoint, capability, or runtime
 record behind while the supplied layer and scratch artifacts stay intact.
+An image copied into the private fixture also exercises a stale staged binding:
+start refuses without a runtime, then the same image is re-provisioned and
+must run the real guest probe and stop with a successful teardown report.
 """
 
 from __future__ import annotations
@@ -30,13 +33,14 @@ from pathlib import Path
 from typing import Any, cast
 
 from . import nvx_cli
+from .build_config import KernelBuildConfig
 from .build_constants import (
     BuildConstants,
     InitramfsBuildConstants,
     KernelBuildConstants,
     OpenVMMBuildConstants,
 )
-from .common import sha256_file
+from .common import ScriptError, artifact_path, sha256_file
 from .managed_exec_tests import (
     WorkloadArtifacts,
     bounded_text,
@@ -44,6 +48,7 @@ from .managed_exec_tests import (
     format_errors,
     load_workload_artifacts,
     read_exec_outcome,
+    workload_architecture_options,
 )
 
 PROBE = "/sbin/nvx-sandbox-smoke"
@@ -62,6 +67,56 @@ FOREIGN_NAME = "operator-note.txt"
 FOREIGN_CONTENT = "operator data\n"
 EVIDENCE_PREFIX = "sandbox-lifecycle-"
 EVIDENCE_LIMIT = 64 * 1024
+
+
+def check_changed_layer_start(
+    result: subprocess.CompletedProcess[bytes], image: str
+) -> None:
+    """Check the actual pre-spawn refusal, not a successful mock observation."""
+    refusal = Refusal(
+        "unavailable",
+        (
+            image,
+            "changed after its distro binding was made",
+            "modification time differs",
+            "deprovision the sandbox and provision it again",
+        ),
+    )
+    if result.returncode != 1 or result.stdout or not refusal.matches(result.stderr):
+        raise RuntimeError(
+            f"the changed layer start returned {result.returncode}, "
+            f"stdout={bounded_text(result.stdout)!r}, "
+            f"stderr={bounded_text(result.stderr)!r}, expected {refusal}"
+        )
+
+
+def check_restage_bindings(before: bytes, after: bytes, image: str) -> None:
+    """Require new accepted binding data for the very same owned image."""
+    bindings: list[dict[str, object]] = []
+    for raw in (before, after):
+        try:
+            config = json.loads(raw)
+        except (UnicodeDecodeError, ValueError) as error:
+            raise RuntimeError("the restaged configuration is malformed") from error
+        if not isinstance(config, dict):
+            raise RuntimeError("the restaged configuration is not an object")
+        recorded_image = config.get("image")
+        binding = config.get("distro_binding")
+        policy = binding.get("policy") if isinstance(binding, dict) else None
+        if (
+            not isinstance(recorded_image, dict)
+            or recorded_image.get("path") != image
+            or not isinstance(binding, dict)
+            or policy != {"revision": 1, "result": "accepted"}
+            or not isinstance(policy, dict)
+            or type(policy.get("revision")) is not int
+        ):
+            raise RuntimeError(
+                "restage did not bind the same owned image with an accepted policy"
+            )
+        bindings.append(binding)
+    if bindings[0] == bindings[1]:
+        raise RuntimeError("re-provision kept the stale distro binding")
 # A sandbox's VM starts without an OpenVMM lifecycle option, since nvx-init
 # owns its lifecycle, so OpenVMM reports its operation as a run.
 MANAGED_SUCCESS = {"operation": "run", "category": "success", "status_code": 0}
@@ -158,12 +213,24 @@ def is_other_runtime_termination(stderr: bytes, pid: int) -> bool:
     )
 
 
-def read_build_provenance() -> dict[str, dict[str, Any]]:
+def read_build_provenance(*, architecture: str = "x86_64") -> dict[str, dict[str, Any]]:
     """Returns the build provenance from which nvx reads the runtime identity
-    of the checkout, by file name."""
+    of the checkout, by file name. Only guest provenance is ISA-qualified;
+    OpenVMM's host provenance stays in the shared build directory."""
     provenance: dict[str, dict[str, Any]] = {}
-    for name in PROVENANCE_NAMES:
-        path = BuildConstants.BUILD_DIR / name
+    names = PROVENANCE_NAMES
+    if architecture != "x86_64":
+        names = (
+            OpenVMMBuildConstants.PROVENANCE_NAME,
+            KernelBuildConfig.for_architecture(architecture).provenance_name,
+            InitramfsBuildConstants.PROVENANCE_NAME,
+        )
+    for name in names:
+        path = (
+            BuildConstants.BUILD_DIR / name
+            if architecture == "x86_64" or name == OpenVMMBuildConstants.PROVENANCE_NAME
+            else artifact_path(name, architecture=architecture)
+        )
         try:
             value: object = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -364,7 +431,7 @@ def bounded_evidence(data: bytes, omitted: int = 0) -> bytes:
     return data
 
 
-def read_runtime(state: Path) -> dict[str, Any]:
+def read_runtime(state: Path, *, architecture: str = "x86_64") -> dict[str, Any]:
     path = state / RUNTIME
     try:
         value: object = json.loads(path.read_text(encoding="utf-8"))
@@ -373,7 +440,18 @@ def read_runtime(state: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RuntimeError(f"sandbox runtime record is not an object: {path}")
     runtime = cast(dict[str, Any], value)
-    if frozenset(runtime) != RUNTIME_FIELDS:
+    fields = RUNTIME_FIELDS
+    if "version" in runtime or "architecture" in runtime or architecture != "x86_64":
+        fields |= {"version", "architecture"}
+        if (
+            type(runtime.get("version")) is not int
+            or runtime.get("version") != 2
+            or runtime.get("architecture") != architecture
+        ):
+            raise RuntimeError(
+                f"sandbox runtime record has an invalid ISA/version: {path}"
+            )
+    if frozenset(runtime) != fields:
         raise RuntimeError(f"sandbox runtime record has unexpected fields: {path}")
     vm_dir = runtime["vmDir"]
     capability = runtime["capability"]
@@ -405,9 +483,15 @@ def read_runtime(state: Path) -> dict[str, Any]:
     return runtime
 
 
+def check_cycle_count(cycles: int, *, minimum: int) -> None:
+    if type(cycles) is not int or cycles < minimum:
+        raise ScriptError(f"start_stop_cycles must be at least {minimum}")
+
+
 class LifecycleAcceptance:
     # The prefix of the evidence files in the output directory.
     evidence_prefix = EVIDENCE_PREFIX
+    default_start_stop_cycles = 1
 
     def __init__(
         self,
@@ -417,7 +501,18 @@ class LifecycleAcceptance:
         output_dir: Path,
         artifacts: WorkloadArtifacts,
         root: Path,
+        architecture: str = "x86_64",
+        start_stop_cycles: int | None = None,
     ) -> None:
+        workload_architecture_options(architecture)
+        cycles = (
+            self.default_start_stop_cycles
+            if start_stop_cycles is None
+            else start_stop_cycles
+        )
+        check_cycle_count(cycles, minimum=self.default_start_stop_cycles)
+        self.architecture = architecture
+        self.start_stop_cycles = cycles
         self.backend = backend
         self.timeout = timeout
         self.output_dir = output_dir
@@ -432,12 +527,13 @@ class LifecycleAcceptance:
         # The state directories that hold the exec lock of an earlier exec.
         self.exec_locks: set[Path] = set()
 
-    def launch_options(self, scratch: Path) -> list[str]:
+    def launch_options(self, scratch: Path, *, distro: Path | None = None) -> list[str]:
         return [
+            *workload_architecture_options(self.architecture),
             "--hypervisor",
             self.backend,
             "--layer",
-            f"distro,{self.artifacts.distro},{self.artifacts.layer_uuid}",
+            f"distro,{self.artifacts.distro if distro is None else distro},{self.artifacts.layer_uuid}",
             "--scratch",
             str(scratch),
             "--memory-mib",
@@ -591,6 +687,7 @@ class LifecycleAcceptance:
         layer_digest = sha256_file(self.artifacts.distro)
         self.check_identity_admission()
         self.check_unprovisioned()
+        self.check_restaged_layer()
         self.provision()
         runtime = self.start(description="first start")
         self.check_running_transitions(runtime)
@@ -598,7 +695,7 @@ class LifecycleAcceptance:
         self.check_security_profile()
         self.check_bounded_results()
         self.check_deprovision_while_running(runtime)
-        self.stop(runtime, layer_digest)
+        self.check_start_stop_cycles(runtime, layer_digest)
         restarted = self.start_overlapping()
         result = self.exec("/bin/cat", f"--arg={STATE_PATH}", expected=None)
         self.require_output(result, STATE_CONTENT, "the restarted sandbox's state")
@@ -611,6 +708,18 @@ class LifecycleAcceptance:
         if sha256_file(self.artifacts.distro) != layer_digest:
             raise RuntimeError("the sandbox lifecycle modified the EROFS layer")
         self.require_processes((), "after deprovision")
+
+    def check_start_stop_cycles(
+        self, runtime: dict[str, Any], layer_digest: str
+    ) -> None:
+        """Stop/restart the same provision, retaining its scratch contents."""
+        self.stop(runtime, layer_digest)
+        for cycle in range(1, self.start_stop_cycles):
+            runtime = self.start(description=f"cycle {cycle + 1} start")
+            result = self.exec("/bin/cat", f"--arg={STATE_PATH}", expected=None)
+            self.require_output(result, STATE_CONTENT, "the restarted sandbox's state")
+            self.stop(runtime, layer_digest)
+            self.copy_evidence(self.state / OUTCOME, f"cycle-{cycle + 1}-outcome.json")
 
     def check_identity_admission(self) -> None:
         # The CLI rejects a root identity before it creates any state.
@@ -691,6 +800,124 @@ class LifecycleAcceptance:
             if self.state.exists():
                 raise RuntimeError(f"{operation} created unprovisioned sandbox state")
 
+    def check_restaged_layer(self) -> None:
+        """Refuse a changed private image, then actually boot its fresh binding."""
+        source = self.artifacts.distro
+        source_stat = source.stat()
+        source_digest = sha256_file(source)
+        source_manifest = source.with_name(source.name + ".manifest.json")
+        manifest_stat = source_manifest.stat() if source_manifest.is_file() else None
+        manifest_digest = (
+            sha256_file(source_manifest) if manifest_stat is not None else None
+        )
+
+        def source_metadata(value: os.stat_result) -> tuple[int, ...]:
+            return (
+                value.st_dev, value.st_ino, value.st_mode, value.st_size,
+                value.st_mtime_ns, value.st_ctime_ns,
+            )
+
+        def require_protected_source() -> None:
+            current = source.stat()
+            if (
+                sha256_file(source) != source_digest
+                or source_metadata(current) != source_metadata(source_stat)
+                or (
+                    manifest_stat is not None
+                    and (
+                        sha256_file(source_manifest) != manifest_digest
+                        or source_metadata(source_manifest.stat())
+                        != source_metadata(manifest_stat)
+                    )
+                )
+                or (manifest_digest is None and source_manifest.exists())
+            ):
+                raise RuntimeError("restage modified a protected source")
+
+        directory = self.root / "restage-image"
+        directory.mkdir(mode=0o700)
+        image = directory / source.name
+        shutil.copyfile(source, image)
+        manifest = image.with_name(image.name + ".manifest.json")
+        if manifest_digest is not None:
+            shutil.copyfile(source_manifest, manifest)
+        shutil.copyfile(self.artifacts.scratch_template, self.scratch)
+        options = (
+            *self.launch_options(self.scratch, distro=image),
+            "--hostname",
+            HOSTNAME,
+        )
+        self.invoke("provision", *options, state=self.state)
+        self.require_entries(self.state, PROVISIONED_ENTRIES, "before the image change")
+        before = (self.state / CONFIG).read_bytes()
+        self.save_evidence("restage-before-config.json", before)
+        staged_stat = image.stat()
+        os.utime(
+            image, ns=(staged_stat.st_atime_ns, staged_stat.st_mtime_ns + 1_000_000_000)
+        )
+        if image.stat().st_mtime_ns == staged_stat.st_mtime_ns:
+            raise RuntimeError("the owned image's modification time did not change")
+        result = self.invoke("start", state=self.state, expected=None)
+        self.save_evidence("restage-refusal.log", result.stdout + result.stderr)
+        check_changed_layer_start(result, str(image))
+        self.require_entries(
+            self.state, PROVISIONED_ENTRIES, "after the stale image refusal"
+        )
+        if (self.state / CONFIG).read_bytes() != before:
+            raise RuntimeError("a stale image start changed its saved configuration")
+        self.require_processes((), "after the stale image refusal")
+        self.exec(PROBE, "--arg=init", expected=1, refusal=NOT_RUNNING)
+        require_protected_source()
+        self.invoke("deprovision", state=self.state)
+        if self.state.exists():
+            raise RuntimeError("deprovision kept the stale sandbox state")
+        self.invoke("provision", *options, state=self.state)
+        after = (self.state / CONFIG).read_bytes()
+        self.save_evidence("restage-after-config.json", after)
+        check_restage_bindings(before, after, str(image))
+        runtime = self.start(description="restaged image start")
+        result = self.exec(PROBE, "--arg=init", "--arg=entry", expected=None)
+        self.save_evidence("restage-probe.log", result.stdout + result.stderr)
+        if result.returncode != 0 or result.stderr:
+            raise RuntimeError("the restaged image's guest probe failed")
+        for marker in (
+            b"NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534",
+            b"NVX-UBUNTU-SANDBOX-ENTRY-OK",
+            b"NVX-UBUNTU-SANDBOX-OK uid=65534 gid=65534",
+        ):
+            if marker not in result.stdout:
+                raise RuntimeError(
+                    f"the sandbox security probe did not report {marker.decode()}"
+                )
+        self.require_entries(self.state, RUNNING_ENTRIES, "after restaged guest exec")
+        self.stop(runtime, source_digest)
+        self.copy_evidence(self.state / OUTCOME, "restage-outcome.json")
+        self.invoke("deprovision", state=self.state)
+        if self.state.exists():
+            raise RuntimeError("deprovision kept the restaged sandbox state")
+        self.require_processes((), "after the restaged image stop")
+        require_protected_source()
+        if sha256_file(image) != source_digest:
+            raise RuntimeError("the restaged guest modified its owned image contents")
+        image.unlink()
+        if manifest_digest is not None:
+            manifest.unlink()
+        directory.rmdir()
+        self.save_evidence(
+            "restage-source.json",
+            (
+                json.dumps(
+                    {
+                        "protected_image_sha256": source_digest,
+                        "protected_manifest_sha256": manifest_digest,
+                        "owned_image": str(image),
+                        "same_fixture_reprovision": True,
+                    },
+                    indent=2,
+                ) + "\n"
+            ).encode(),
+        )
+
     def provision(self) -> None:
         shutil.copyfile(self.artifacts.scratch_template, self.scratch)
         options = (
@@ -758,7 +985,11 @@ class LifecycleAcceptance:
 
     def require_started(self, description: str) -> dict[str, Any]:
         self.require_entries(self.state, RUNNING_ENTRIES, f"after the {description}")
-        runtime = read_runtime(self.state)
+        runtime = (
+            read_runtime(self.state)
+            if self.architecture == "x86_64"
+            else read_runtime(self.state, architecture=self.architecture)
+        )
         evidence = {
             name: value for name, value in runtime.items() if name != "capability"
         }
@@ -917,7 +1148,12 @@ class LifecycleAcceptance:
         there that differs from the checkout's in the initramfs."""
         build = self.other_root / BuildConstants.BUILD_DIRECTORY_NAME
         build.mkdir(parents=True)
-        for name, provenance in read_build_provenance().items():
+        records = (
+            read_build_provenance()
+            if self.architecture == "x86_64"
+            else read_build_provenance(architecture=self.architecture)
+        )
+        for name, provenance in records.items():
             if name == InitramfsBuildConstants.PROVENANCE_NAME:
                 digest = provenance.get(INITRAMFS_DIGEST)
                 if not isinstance(digest, str):
@@ -926,7 +1162,14 @@ class LifecycleAcceptance:
                     **provenance,
                     INITRAMFS_DIGEST: hashlib.sha256(digest.encode()).hexdigest(),
                 }
-            (build / name).write_text(json.dumps(provenance), encoding="utf-8")
+            directory = build
+            if (
+                self.architecture != "x86_64"
+                and name != OpenVMMBuildConstants.PROVENANCE_NAME
+            ):
+                directory /= self.architecture
+                directory.mkdir(exist_ok=True)
+            (directory / name).write_text(json.dumps(provenance), encoding="utf-8")
 
     def check_other_runtime(self, runtime: dict[str, Any]) -> None:
         # The CLI of other artifacts, as after an upgrade, reattaches to the VM
@@ -1050,7 +1293,11 @@ class LifecycleAcceptance:
         for state, _ in states:
             try:
                 if (state / RUNTIME).is_file():
-                    runtime = read_runtime(state)
+                    runtime = (
+                        read_runtime(state)
+                        if self.architecture == "x86_64"
+                        else read_runtime(state, architecture=self.architecture)
+                    )
                     self.run_cli("stop", state=state)
                     kill_openvmm(runtime, self.timeout, self.root.name)
             except Exception as error:
@@ -1120,8 +1367,25 @@ def run_acceptance(acceptance: LifecycleAcceptance) -> None:
     shutil.rmtree(acceptance.root)
 
 
-def run_sandbox_lifecycle(backend: str, *, timeout: float, output_dir: Path) -> None:
-    artifacts = load_workload_artifacts()
+def run_sandbox_lifecycle(
+    backend: str,
+    *,
+    timeout: float,
+    output_dir: Path,
+    architecture: str = "x86_64",
+    start_stop_cycles: int = 1,
+) -> None:
+    check_cycle_count(start_stop_cycles, minimum=1)
+    artifacts = (
+        load_workload_artifacts()
+        if architecture == "x86_64"
+        else load_workload_artifacts(architecture=architecture)
+    )
+    selection: dict[str, Any] = {}
+    if architecture != "x86_64":
+        selection["architecture"] = architecture
+    if start_stop_cycles != 1:
+        selection["start_stop_cycles"] = start_stop_cycles
     output_dir.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="nvx-public-lifecycle-"))
     run_acceptance(
@@ -1131,5 +1395,6 @@ def run_sandbox_lifecycle(backend: str, *, timeout: float, output_dir: Path) -> 
             output_dir=output_dir,
             artifacts=artifacts,
             root=root,
+            **selection,
         )
     )
