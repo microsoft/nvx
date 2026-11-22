@@ -39,18 +39,18 @@ const USAGE_PREFIX: &str = "usage: ";
 pub(crate) struct Syntax {
     /// The command of the parser after the program's name, such as `sandbox`, or nothing for the
     /// top-level parser.
-    pub(crate) command: &'static str,
+    pub(super) command: &'static str,
     /// What the usage shows after the parser's name: its options, such as `[-h] [--root PATH]`,
     /// or `[OPTIONS]` for a parser with many, and its positionals, such as `PATH`.
-    pub(crate) arguments: &'static str,
+    pub(super) arguments: &'static str,
     /// The help after the usage and its blank line: the description and the sections of the
     /// arguments, without a final line end.
-    pub(crate) help: &'static str,
+    pub(super) help: &'static str,
 }
 
 impl Syntax {
     /// Returns the parser's name, such as `nvx sandbox`, which starts its usage errors.
-    pub(crate) fn prog(&self) -> String {
+    pub(super) fn prog(&self) -> String {
         if self.command.is_empty() {
             PROGRAM.to_owned()
         } else {
@@ -59,12 +59,12 @@ impl Syntax {
     }
 
     /// Returns the usage, `usage: PROG ARGUMENTS`, on one line without a line end.
-    pub(crate) fn usage(&self) -> String {
+    pub(super) fn usage(&self) -> String {
         format!("{USAGE_PREFIX}{} {}", self.prog(), self.arguments)
     }
 
     /// Returns the help: the usage, a blank line, and the rest.
-    pub(crate) fn help(&self) -> String {
+    pub(super) fn help(&self) -> String {
         format!("{}\n\n{}", self.usage(), self.help)
     }
 }
