@@ -949,6 +949,16 @@ data. An `ro` mapping rejects link creation with `EROFS`. On Windows, links
 are WSL-style reparse points, which Windows path resolution never follows.
 Treat links in a writable share as untrusted when host software later reads
 the directory.
+On a Windows host, the guest reaches an existing entry of a mapped directory
+only by the name that Windows stores for it, as on Linux, although Windows
+also resolves a name in another case and the 8.3 short name of a long name,
+such as `CREDEN~1.JSO` for `credentials.json`. Another name of the entry fails
+with `ENOENT`, or with `EACCES` when the request would open or replace the
+entry, an exclusive create under it fails with `EEXIST`, since Windows holds
+the name, and renaming an entry to its own name in another case changes its
+case. A name that differs from a `--mount-deny` or `--mount-allow` path only
+in case is as restricted as that path, but it never exposes an allowed path
+or makes a writable path writable.
 On a Linux host, the guest can also swap two names in an `rw` mapping
 atomically with `renameat2(RENAME_EXCHANGE)`, as `exch` does. A Windows host
 rejects rename flags with `EINVAL` and changes neither name. On every host,
