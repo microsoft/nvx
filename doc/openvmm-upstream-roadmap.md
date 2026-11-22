@@ -9,9 +9,10 @@
 - Mapped fork tip: `1e492803287f04b40bb7c17e8648c4b96af52ecc`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR18 fixups at positions 302,
   333, 342, 345, 347, 351, and 365, and the PR13 fixups at positions 340 and 349.
-- NVX's pinned OpenVMM revision: `e3b20aef886998af0aa56af65efca655bb6170e5`, position 367, the head
-  of microsoft/openvmm#5226, whose commits, positions 366 and 367, follow position 365,
-  `78ddb8044`, the head of `feature/microvm/dev`, where microsoft/openvmm#5225 landed positions
+- NVX's pinned OpenVMM revision: `eff41b13f03d5f72439b420279521793134c4036`, position 368, the head
+  of microsoft/openvmm#5227, whose commit follows position 367, `e3b20aef8`, the head of
+  `feature/microvm/dev`, where microsoft/openvmm#5226 landed positions 366 and 367 on position 365,
+  `78ddb8044`, where microsoft/openvmm#5225 landed positions
   364 and 365 on position 363, `7671411e8`, where microsoft/openvmm#5224 landed positions
   358-363 on position 357, `49fc14eeb`, where microsoft/openvmm#5223 landed position 357 on
   position 356, `21b1a55d0`, where microsoft/openvmm#5222 landed position 356 on position 355,
@@ -37,8 +38,8 @@
   landed, so each later commit's position is one less than before, and it added five fixups at its
   tip, positions 335-339. Of the 334 replayed commits, 47 conflicted with upstream and 13 replayed
   with new context; see [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase). The pin is
-  241 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
-  341, 343, 344, 346, 348, 350, 352-364, 366, and 367 are not yet assigned to PRs, positions 302,
+  242 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
+  341, 343, 344, 346, 348, 350, 352-364, and 366-368 are not yet assigned to PRs, positions 302,
   333, 342, 345, 347, 351, and 365 are PR18 fixups, positions 340 and 349 are PR13 fixups, and
   positions 316 and 335-339 are rebase fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1657,7 +1658,8 @@ bf353460f
   -> virtio-fs handle and node IDs kept below u64::MAX [364]
   -> PR18 fixup [365]
   -> writes through virtio-fs handles not open for writing refused [366-367]
-  -> e3b20aef8 (NVX pin)
+  -> virtio-fs nodes whose names are all gone reached only through their handles [368]
+  -> eff41b13f (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1719,7 +1721,7 @@ handle table whose first handle it keeps, and its test into position 364, whose 
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 241 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 242 later commits, positions
 302, 333, 342, 345, 347, 351, and 365 are PR18 fixups, positions 340 and 349 are PR13 fixups,
 position 316 is the fixup of the v7.1 rebase, positions 335-339 are the fixups of the v7.2 rebase,
 and the others are not yet classified or assigned to PRs.
@@ -1730,7 +1732,7 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
 v7.0 reorganization, position 316 is the v7.1 rebase's fixup, positions 317-334 followed the
-v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-367 followed the
+v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-368 followed the
 v7.2 rebase, so they combine none, apart from
 position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0
 reorganization folded into them. Each commit through position 316 has the position that it had in
@@ -1738,7 +1740,7 @@ v7.0 and v7.1, and each of positions 317-334 is its v7.1 position less one, sinc
 dropped v7.1 position 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each
 commit's v6.1 position is its v6.0 position less seven, the number of commits that the v6.1 rebase
 dropped before it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1
-position 149 on, and positions 297-367 have no earlier position; see
+position 149 on, and positions 297-368 have no earlier position; see
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
@@ -1992,6 +1994,7 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 365 | `78ddb8044` | - | - | - | - | - | - | virtiofs: restart a restored microVM's handles at 1 on a reset (microsoft/openvmm#5225); fold into 083, its test into 364 |
 | 366 | `a1cf71a35` | - | - | - | - | - | - | lxutil: keep O_TRUNC from making a Windows handle writable (microsoft/openvmm#5226) |
 | 367 | `e3b20aef8` | - | - | - | - | - | - | virtiofs: refuse a write through a handle not open for writing (microsoft/openvmm#5226) |
+| 368 | `eff41b13f` | - | - | - | - | - | - | virtiofs: reach a node whose last name is gone only through its handles (microsoft/openvmm#5227) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2002,7 +2005,7 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`
 main on 2026-11-19, for positions 321-324, `78af54a51`, upstream main on 2026-11-20, for position
 325, `d83f87209`, upstream main later that day, for position 326, `265f0a73f`, upstream main
 later still, for positions 327 and 328, and `bf353460f`, upstream main on 2026-11-21 and the v7.2
-fork base, for positions 329-334 and 340-367.
+fork base, for positions 329-334 and 340-368.
 They name the positions that the commits have now, but neither the v7.2 rebase on `bf353460f`, the
 v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did
 the v6.1 rebase check the earlier ones on `7d90c4104`.
@@ -5110,6 +5113,44 @@ another `EROFS` that upstream's order put first, so it is not yet assigned to a 
 has the defect, in the same `write`. Replaying the commit there conflicts in `lib.rs`, next to the
 `get_file` of position 346, and in the microVM's `policy_tests.rs`, which upstream main lacks, so
 it cannot go upstream on its own as it is.
+
+Position 368 has every request about a node whose names the guest has all removed, other than those
+through the node's open handles, fail with `ENOENT`, as one through an unlinked file's former name
+does and as Linux refuses to look up or create an entry of a removed directory, rather than reach
+whatever object has since appeared at the node's last name (microsoft/nvx#1623). Position 352 made
+`FUSE_LINK` take its target's path from `VirtioFsInode::object_path`, but every other operation of
+`VirtioFsInode` that reaches its object by its path still used upstream's `get_path`, which yields
+the name that position 048 keeps when it drops a node's last name: `GETATTR`, `STATX`, `SETATTR`,
+`OPEN`, `READLINK`, `STATFS`, and the extended-attribute requests acted on that object, and a
+removed directory's node listed, looked up, created, moved, and removed the entries of the directory
+created in its place. Through a file's node whose last name a host hard link of a read-only file had
+taken, writable through that name, the guest could truncate the read-only file, which a request
+through the file's own node refuses since position 160's policy. Those operations, upstream's
+`check_directory_handle` and `child_path`, through which the requests about a directory's entries
+reach them, and position 083's `object_stat` now take the path from `object_path`, which now checks
+that the path is one of the node's names rather than that the node has one. Position 048's
+`add_alias` makes a link's new name the path when the path is no longer one of the names, as when an
+unlink of the node's other name on another request queue drops that name first, and the microVM's
+`validate_confined_paths` no longer checks the former name, which PR27's position 126 added to its
+checks and no operation now uses. The requests through a handle, which position 346 serves without a
+path, still reach the node's object. The saved state keeps its format. In `inode.rs`, it changes
+upstream's operations, in lines that no chain commit changes, and upstream's `child_path`, which
+position 048 makes `pub(crate)`, as well as position 083's `object_stat`, position 048's
+`add_alias`, and position 352's `object_path`; PR06's position 010, PR18's position 081, PR22's
+position 102, PR27's position 126, positions 160, 165, 322, 331, 332, 334, and 360, and PR13's fixup
+at position 349 also change the file. In the microVM's `inode.rs`, it changes the names that PR27's
+position 126 has `validate_confined_paths` check, which PR18's position 081 adds and PR18's position
+083, PR22's position 102, positions 160, 165, 332, 357, and 360-363 also change. It adds a test to
+`inode.rs` and two to the microVM's `policy_tests.rs`, after position 352's, which position 160 adds
+and positions 164, 194, 344, 346, 352, 357, 359, 360, 362, 363, and 367 and PR18's fixup at position
+351 also change. Assigning it to a PR therefore revisits PR13, PR18, and PR27, but it fixes no
+defect of positions 048, 083, or 126: the defect is upstream's, whose nodes keep the name of their
+last lookup through removals and whose operations use it, and the names of position 048 only tell
+that a node's names are gone. It needs position 352's `object_path`, so it is not yet assigned to a
+PR either and follows position 352. Upstream main has the defect, in the same operations. Replaying
+the commit there conflicts in `inode.rs`, in the microVM's `inode.rs`, and in its `policy_tests.rs`,
+which upstream main lacks, and it reads the names that position 048 adds, which upstream main lacks
+too, so it cannot go upstream on its own.
 
 ## PR summary
 
