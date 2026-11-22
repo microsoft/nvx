@@ -76,6 +76,48 @@ fn package_of(directory: &Path, manifest: &Value) -> PathBuf {
     root
 }
 
+#[test]
+fn arm_installation_uses_selected_names_and_preserves_the_x86_namespace() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut metadata = manifest(&["linux", "alpine", "ubuntu"], true);
+    metadata["distribution"] = json!({"architecture": "aarch64"});
+    metadata["nvx"] = json!({"target": "aarch64-pc-windows-msvc"});
+    let package = package_of(temporary.path(), &metadata);
+    for (old, new) in [
+        ("guest/vmlinux", "guest/Image"),
+        ("guest/vmlinux.config", "guest/Image.config"),
+        (
+            "provenance/vmlinux.provenance.json",
+            "provenance/Image.provenance.json",
+        ),
+    ] {
+        fs::rename(package.join(old), package.join(new)).unwrap();
+    }
+    let sums = package.join(CHECKSUMS_NAME);
+    fs::write(
+        &sums,
+        fs::read_to_string(&sums)
+            .unwrap()
+            .replace("vmlinux", "Image"),
+    )
+    .unwrap();
+    let x86 = checkout(temporary.path());
+    let x86_before = fs::read(x86.kernel()).unwrap();
+    assert!(plan(&package, &x86).is_err());
+    let arm = x86
+        .clone()
+        .with_architecture(GuestArchitecture::Aarch64)
+        .unwrap();
+    let plan = plan(&package, &arm).unwrap();
+    assert!(plan.compatible());
+    assert_eq!(commit(&plan, "arm", Mode::Replace).unwrap(), Installed::All);
+    assert_eq!(fs::read(x86.kernel()).unwrap(), x86_before);
+    assert!(arm.kernel().is_file());
+    assert!(arm.artifact("Image.config").is_file());
+    assert!(arm.artifact("Image.provenance.json").is_file());
+    assert!(!arm.artifact("vmlinux").exists());
+}
+
 /// Returns each file below `directory`, by its path relative to it with `/` separators, and its
 /// content.
 fn tree(directory: &Path) -> BTreeMap<String, String> {

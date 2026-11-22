@@ -39,3 +39,18 @@ fn the_shared_statuses_keep_the_probes_contract() {
         assert_eq!(ExitStatus::from(result) as u8, status, "{result:?}");
     }
 }
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn arm_does_not_dispatch_x86_latency_or_clock_msr_probes() {
+    for arguments in [&[&b"latency"[..]][..], &[&b"clock"[..], &b"--msr"[..]]] {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        assert_eq!(
+            run(&args(arguments), &mut out, &mut err),
+            Err(CommandError::Usage)
+        );
+        assert!(out.is_empty());
+        assert_eq!(err, USAGE);
+    }
+}

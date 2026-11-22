@@ -29,6 +29,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import ExitStack, nullcontext, redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -403,6 +404,137 @@ class HostLoopbackHttpFixtureTests(unittest.TestCase):
 
 
 class MicrovmTestParserTests(unittest.TestCase):
+    def test_arm_boot_requires_observed_cpu_and_kernel_ram_not_requested_arguments(
+        self,
+    ):
+        prefix = "NVX-GUEST-RESOURCES "
+        valid = "online=2 memtotal_kib=120000 kernel_memory=131072K\n"
+        for name, output, passing in (
+            ("observed", prefix + valid, True),
+            ("cpu", prefix + valid.replace("online=2", "online=1"), False),
+            ("kernel-ram", prefix + valid.replace("131072K", "131071K"), False),
+            ("usable-zero", prefix + valid.replace("120000", "0"), False),
+            ("usable-over-total", prefix + valid.replace("120000", "131073"), False),
+            ("missing", "", False),
+        ):
+            with (
+                self.subTest(name=name),
+                patch.object(
+                    microvm_tests, "run_guest_script", return_value={"output": output}
+                ),
+            ):
+                if passing:
+                    microvm_tests.run_guest_boot(
+                        Path("openvmm"),
+                        Path("Image"),
+                        Path("initrd"),
+                        "whp",
+                        microvm_tests.guest_descriptor("alpine"),
+                        memory_mib=128,
+                        timeout=30,
+                        log_path=Path("owned.log"),
+                        processors=2,
+                        architecture="aarch64",
+                    )
+                else:
+                    with self.assertRaises(RuntimeError):
+                        microvm_tests.run_guest_boot(
+                            Path("openvmm"),
+                            Path("Image"),
+                            Path("initrd"),
+                            "whp",
+                            microvm_tests.guest_descriptor("alpine"),
+                            memory_mib=128,
+                            timeout=30,
+                            log_path=Path("owned.log"),
+                            processors=2,
+                            architecture="aarch64",
+                        )
+
+    def test_guest_architecture_never_defaults_to_the_native_host(self):
+        with patch.object(microvm_tests.platform, "machine", return_value="ARM64"):
+            args = nvx.parse_args(["test-microvm", "--backend", "whp"])
+        self.assertEqual(args.architecture, "x86_64")
+        self.assertFalse(args.cold_only)
+
+    def test_arm_restore_selection_is_refused_before_artifact_admission(self):
+        for scenario, cold_only in (
+            ("filesystem-snapshot", True),
+            ("filesystem-shares", False),
+        ):
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--architecture",
+                    "aarch64",
+                    "--scenario",
+                    scenario,
+                    *(["--cold-only"] if cold_only else []),
+                ]
+            )
+            with (
+                self.subTest(scenario=scenario),
+                patch.object(microvm_tests, "sys", SimpleNamespace(platform="win32")),
+                patch.object(microvm_tests.platform, "machine", return_value="ARM64"),
+                patch.object(
+                    microvm_tests, "validate_openvmm_test_backend"
+                ) as validate_backend,
+                patch.object(microvm_tests, "require_file") as require_file,
+            ):
+                with self.assertRaisesRegex(common.ScriptError, "unsupported cold/ARM"):
+                    microvm_tests.run(args)
+                validate_backend.assert_called_once_with("whp")
+                require_file.assert_not_called()
+
+    def test_arm_mixed_projection_reports_its_deferred_tail(self):
+        def admitted_file(path: Path, _description: str) -> Path:
+            return path
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--architecture",
+                    "aarch64",
+                    "--scenario",
+                    "filesystem-shares",
+                    "--cold-only",
+                    "--output-dir",
+                    str(output),
+                ]
+            )
+            with (
+                patch.object(microvm_tests, "sys", SimpleNamespace(platform="win32")),
+                patch.object(microvm_tests.platform, "machine", return_value="ARM64"),
+                patch.object(
+                    microvm_tests, "validate_openvmm_test_backend"
+                ) as validate_backend,
+                patch.object(microvm_tests, "require_file", side_effect=admitted_file),
+                patch.object(microvm_tests, "_run_scenarios") as run_scenarios,
+                redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+            validate_backend.assert_called_once_with("whp")
+            header = json.loads(
+                (output / microvm_tests.REPORT_NAME).read_text().splitlines()[0]
+            )
+            self.assertEqual(
+                (header["architecture"], header["scope"]), ("aarch64", "cold")
+            )
+            self.assertEqual(header["deferred_restore_tails"], ["filesystem-shares"])
+            self.assertIn(
+                "snapshot tails NOT RUN: filesystem-shares", stdout.getvalue()
+            )
+            self.assertEqual(run_scenarios.call_args.kwargs["kernel"].name, "Image")
+            self.assertEqual(
+                run_scenarios.call_args.kwargs["initrd"].parent.name, "aarch64"
+            )
+
     def test_parser_defaults_to_all_correctness_scenarios(self):
         args = nvx.parse_args(["test-microvm", "--backend", "mshv"])
 
@@ -1181,13 +1313,27 @@ class _FakeSandboxCli:
             return self._error("sandbox-provisioned", "sandbox is already provisioned")
         state.mkdir(parents=True, exist_ok=True)
         (state / "sandbox.lock").touch()
+        config: dict[str, object] = {
+            "user": values.get("--workload-user", "65534:65534"),
+            "hypervisor": values["--hypervisor"],
+        }
+        image = Path(values["--layer"].split(",")[1])
+        if image.parent.name == "restage-image":
+            binding = {
+                "image": {"mtime_ns": image.stat().st_mtime_ns},
+                "policy": {"revision": 1, "result": "accepted"},
+            }
+            if (
+                "restage-keeps-binding" in self.faults
+                and hasattr(self, "first_restage_binding")
+            ):
+                binding = self.first_restage_binding
+            elif not hasattr(self, "first_restage_binding"):
+                self.first_restage_binding = binding
+            config["image"] = {"path": str(image)}
+            config["distro_binding"] = binding
         (state / "config.json").write_text(
-            json.dumps(
-                {
-                    "user": values.get("--workload-user", "65534:65534"),
-                    "hypervisor": values["--hypervisor"],
-                }
-            ),
+            json.dumps(config),
             encoding="utf-8",
         )
         return 0, b"", b""
@@ -1199,6 +1345,15 @@ class _FakeSandboxCli:
         refusal = self._missing(state)
         if refusal is not None:
             return refusal
+        config = json.loads((state / "config.json").read_text(encoding="utf-8"))
+        if "distro_binding" in config and "ignores-stale-layer" not in self.faults:
+            image = Path(config["image"]["path"])
+            if image.stat().st_mtime_ns != config["distro_binding"]["image"]["mtime_ns"]:
+                return self._error(
+                    "unavailable",
+                    f"{image} changed after its distro binding was made: its modification time "
+                    "differs; deprovision the sandbox and provision it again",
+                )
         runtime_path = state / "runtime.json"
         if runtime_path.exists() and "duplicate-start" not in self.faults:
             runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
@@ -1573,7 +1728,19 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
         "exec",
         "stop",
         "deprovision",
+        # A changed owned image refuses, then its new binding boots and stops.
+        "provision",
+        "start",
+        "exec",
+        "deprovision",
         # Provision, and the operations that need a running sandbox.
+        "provision",
+        "start",
+        "exec",
+        "stop",
+        "exec",
+        "stop",
+        "deprovision",
         "provision",
         "provision",
         "exec",
@@ -1709,6 +1876,12 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
                 "sandbox-lifecycle-streamed-output-outcome.json",
                 "sandbox-lifecycle-outcome.json",
                 "sandbox-lifecycle-openvmm.log",
+                "sandbox-lifecycle-restage-before-config.json",
+                "sandbox-lifecycle-restage-after-config.json",
+                "sandbox-lifecycle-restage-refusal.log",
+                "sandbox-lifecycle-restage-probe.log",
+                "sandbox-lifecycle-restage-outcome.json",
+                "sandbox-lifecycle-restage-source.json",
             },
         )
         self.assertEqual(
@@ -1778,7 +1951,9 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
             ),
             "duplicate-start": "start returned 0, expected 1",
             "exec-loses-state": "the state-reading request returned status 1",
-            "probe-fails": "exec returned 1, expected 0",
+            "probe-fails": "the restaged image's guest probe failed",
+            "ignores-stale-layer": "the changed layer start returned 0",
+            "restage-keeps-binding": "re-provision kept the stale distro binding",
             "capped-output": "exec returned 125, expected 0",
             "short-output": "the streamed output forwarded 2064384 stdout",
             "overwrite-report": "exec returned 0, expected 1",
@@ -1811,9 +1986,9 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
                 "after exec of a crashed sandbox: the state directory holds"
             ),
             "exec-skips-lock": (
-                "after exec before start: the state directory holds "
-                "['config.json', 'sandbox.lock'], expected "
-                "['config.json', 'exec.lock', 'sandbox.lock']"
+                "after restaged guest exec: the state directory holds "
+                f"{sorted(sandbox_lifecycle_tests.RUNNING_ENTRIES)}, expected "
+                f"{sorted(sandbox_lifecycle_tests.RUNNING_ENTRIES | {sandbox_lifecycle_tests.EXEC_LOCK})}"
             ),
             "deprovision-removes-foreign": "deprovision returned 0, expected 1",
         }
@@ -1861,7 +2036,7 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
             fake = _FakeSandboxCli("probe-fails", "cleanup-deprovision-fails")
             with self.assertRaisesRegex(
                 RuntimeError,
-                "(?s)exec returned 1, expected 0.*fixture preserved for recovery",
+                "(?s)the restaged image's guest probe failed.*fixture preserved for recovery",
             ) as raised:
                 self._run(root, fake)
             fixtures = list(root.glob("nvx-public-lifecycle-*"))
@@ -2532,6 +2707,64 @@ class _EchoingGuestConsole:
         chunks.put(None)
 
 
+class RawArmEvidenceTests(unittest.TestCase):
+    def test_explicit_arm_capture_binds_inputs_and_requests_a_fresh_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "openvmm.exe"
+            kernel = root / "Image"
+            initrd = root / "initramfs.cpio.gz"
+            for path in (executable, kernel, initrd):
+                path.write_bytes(path.name.encode())
+            command = [
+                str(executable),
+                "--kernel",
+                str(kernel),
+                f"--initrd={initrd}",
+            ]
+            log = root / "evidence" / "guest.log"
+            captured = benchmark.prepare_arm_vm_evidence(command, log, "aarch64")
+            self.assertEqual(list(captured[:-2]), command)
+            self.assertEqual(captured[-2], "--microvm-report")
+            report = Path(captured[-1])
+            self.assertEqual(report.parent, log.parent)
+            self.assertFalse(report.exists())
+            record = json.loads(next(log.parent.glob("*.launch.json")).read_bytes())
+            self.assertEqual(record["command"], captured)
+            self.assertEqual(record["report_path"], str(report))
+            for role, path in (
+                ("executable", executable),
+                ("kernel", kernel),
+                ("initrd", initrd),
+            ):
+                self.assertEqual(
+                    record["inputs"][role],
+                    {
+                        "path": str(path.resolve()),
+                        "sha256": benchmark.sha256_file(path),
+                    },
+                )
+            again = benchmark.prepare_arm_vm_evidence(command, log, "aarch64")
+            self.assertNotEqual(again[-1], captured[-1])
+
+    def test_capture_preserves_x86_and_scenario_owned_report_commands(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "evidence" / "guest.log"
+            command = ["openvmm", "--kernel", "deliberately-missing"]
+            self.assertIs(
+                benchmark.prepare_arm_vm_evidence(command, log, "x86_64"), command
+            )
+            for report in (
+                ["--microvm-report", "scenario-owned.json"],
+                ["--microvm-report=scenario-owned.json"],
+            ):
+                owned = [*command, *report]
+                self.assertIs(
+                    benchmark.prepare_arm_vm_evidence(owned, log, "aarch64"), owned
+                )
+            self.assertFalse(log.parent.exists())
+
+
 class GuestConsoleEchoTests(unittest.TestCase):
     """The guest's terminal echoes console input that arrives while a command
     runs into what the command prints (#785); no scenario may parse it."""
@@ -2748,6 +2981,12 @@ class _FakeRamUpperSandboxCli(_FakeSandboxCli):
         + b"NVX-UBUNTU-SANDBOX-ENTRY-OK\n"
         + b"NVX-UBUNTU-SANDBOX-OK uid=65534 gid=65534\n"
     )
+    SMOKE_FILL = (
+        sandbox_ram_upper_tests.RAM_FILL_MARKER
+        + b" page=4096 memory=268435456 total=134217728 available=134213632"
+        + b" written=134213632 dd_status=1 error=ENOSPC after=nvx-ram-upper"
+        + b" cleanup=complete\n"
+    )
 
     def _command_line(self) -> str:
         upper = (
@@ -2852,6 +3091,21 @@ class _FakeRamUpperSandboxCli(_FakeSandboxCli):
     ) -> _CliResult:
         assert state is not None
         state_path = sandbox_ram_upper_tests.STATE_PATH
+        if (
+            values["--entrypoint"] == sandbox_lifecycle_tests.PROBE
+            and "ram-fill" in arguments
+        ):
+            _, refusal = self._running(state)
+            if refusal is not None:
+                return refusal
+            fill = b"" if "drops-fill" in self.faults else self.SMOKE_FILL
+            if "fill-never-enospc" in self.faults:
+                fill = fill.replace(b"dd_status=1", b"dd_status=0")
+            if "fill-bad-accounting" in self.faults:
+                fill = fill.replace(b"written=134213632", b"written=134217729")
+            if "fill-no-recovery" in self.faults:
+                fill = fill.replace(b"after=nvx-ram-upper", b"after=wrong")
+            return 0, self.SMOKE_RUN + fill, b""
         if values["--entrypoint"] != "/bin/sh" or arguments[1].startswith("test ! -e "):
             return super()._exec(state, values, arguments)
         _, refusal = self._running(state)
@@ -2970,6 +3224,7 @@ class PublicSandboxRamUpperTests(unittest.TestCase):
                 "sandbox-ram-upper-run.log",
                 "sandbox-ram-upper-run-outcome.json",
                 "sandbox-ram-upper-probe.log",
+                "sandbox-ram-upper-ram-fill.json",
                 "sandbox-ram-upper-view.log",
                 "sandbox-ram-upper-first-stop-outcome.json",
                 "sandbox-ram-upper-second-stop-outcome.json",
@@ -3009,6 +3264,10 @@ class PublicSandboxRamUpperTests(unittest.TestCase):
             "records-old-format": "provision recorded the RAM upper as",
             "records-other-cap": "provision recorded the RAM upper as",
             "has-scratch-device": "has the virtio block devices ['vda', 'vdb']",
+            "drops-fill": "0 complete observations",
+            "fill-never-enospc": "did not prove ENOSPC and recovery",
+            "fill-bad-accounting": "byte accounting exceeds its original slack",
+            "fill-no-recovery": "did not prove ENOSPC and recovery",
             "keeps-state": "the restarted sandbox's empty upper returned status 1",
         }
         for fault, message in regressions.items():
@@ -3152,6 +3411,38 @@ class _FakeGptLayerSandboxCli(_FakeSandboxCli):
 
 
 class PublicSandboxGptLayerTests(unittest.TestCase):
+    def test_arm_gpt_threads_isa_through_disk_boot_and_public_root_options(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            distro = root / "distro.erofs"
+            distro.write_bytes(b"owned fixture")
+            artifacts = managed_exec_tests.WorkloadArtifacts(
+                distro, "12345678-1234-1234-1234-123456789abc", root / "scratch"
+            )
+            acceptance = microvm_tests.GptLayerAcceptance(
+                "whp",
+                timeout=30,
+                output_dir=root / "results",
+                artifacts=artifacts,
+                root=root,
+                executable=Path("openvmm"),
+                kernel=Path("Image"),
+                initrd=Path("initrd"),
+                architecture="aarch64",
+            )
+            with (
+                patch.object(
+                    microvm_tests, "write_gpt_disk", return_value="owned-guid"
+                ),
+                patch.object(microvm_tests, "run_guest_script") as guest,
+            ):
+                acceptance.write_disk()
+            self.assertEqual(guest.call_args.kwargs["architecture"], "aarch64")
+            boot = guest.call_args.args[0]
+            self.assertEqual(boot[boot.index("--cpu-profile") + 1], "auto")
+            options = acceptance.options("ram", "unused")
+            self.assertEqual(options[options.index("--architecture") + 1], "aarch64")
+
     # A run of each upper, then a managed sandbox: the probe and the guest's
     # view.
     EXPECTED_OPERATIONS = [
@@ -5034,6 +5325,157 @@ class FilesystemOwnerTests(unittest.TestCase):
                 )
 
 
+class LayeredBootScenarioTests(unittest.TestCase):
+    def _run(
+        self, *, ignored: bool = False, wrong_name: bool = False
+    ) -> list[list[str]]:
+        commands: list[list[str]] = []
+        scripts: list[str] = []
+
+        class FakeProcess:
+            def __init__(
+                self, command: list[str], _path: Path, **options: object
+            ) -> None:
+                self.command = command
+                commands.append(command)
+                self.options = options
+
+            def __enter__(self) -> "FakeProcess":
+                return self
+
+            def __exit__(self, *_exception: object) -> None:
+                pass
+
+            def wait_for(self, marker: bytes, _timeout: float) -> None:
+                if marker != b"# ":
+                    raise AssertionError(marker)
+
+            def send_bytes(self, data: bytes) -> None:
+                scripts.append(data.decode())
+
+            def wait(self, _timeout: float) -> openvmm_process.OpenvmmProcessResult:
+                script = scripts[-1]
+                report_path = Path(
+                    self.command[self.command.index("--microvm-report") + 1]
+                )
+                report_path.write_text("{}", encoding="utf-8")
+                found = re.search(r"--exact (guest::init::boot::tests::\w+)", script)
+                if found is None:
+                    raise AssertionError(script)
+                name = "another_test" if wrong_name else found.group(1)
+                result = (
+                    "test result: ok. 0 passed; 0 failed; 1 ignored;"
+                    if ignored
+                    else "test result: ok. 1 passed; 0 failed; 0 ignored;"
+                )
+                return openvmm_process.OpenvmmProcessResult(
+                    0,
+                    (
+                        f"test {name} ... ok\n{result}\n"
+                        "NVX-GUEST-RESOURCES online=1 memtotal_kib=500000 kernel_memory=524288K\n"
+                    ).encode(),
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            elf, distro, scratch = (
+                root / name for name in ("test-elf", "distro", "scratch")
+            )
+            for path in (elf, distro, scratch):
+                path.write_bytes(b"owned unit fixture")
+            output = root / "logs"
+            output.mkdir()
+            artifacts = microvm_tests.WorkloadArtifacts(
+                distro, "1af08ed4-4bd0-41a3-a6c1-7f6a90d4345b", scratch
+            )
+            with (
+                patch.object(microvm_tests, "check_static_executables") as check_elf,
+                patch.object(
+                    microvm_tests, "load_workload_artifacts", return_value=artifacts
+                ),
+                patch.object(microvm_tests, "OpenvmmProcess", FakeProcess),
+                patch.object(microvm_tests, "_read_outcome_report") as report,
+                patch.object(microvm_tests, "check_run_report") as check_report,
+            ):
+                microvm_tests.run_layered_boot(
+                    Path("openvmm"),
+                    Path("Image"),
+                    Path("initrd"),
+                    "whp",
+                    test_elf=elf,
+                    timeout=30,
+                    output_dir=output,
+                    architecture="aarch64",
+                )
+                check_elf.assert_called_once_with([elf], expected_machine=183)
+                self.assertEqual(report.call_count, 4)
+                self.assertEqual(check_report.call_count, 4)
+            self.assertEqual(len(list(output.glob("*.inputs.json"))), 4)
+        self.assertEqual(len(commands), 4)
+        self.assertEqual(
+            len(
+                {
+                    Path(command[command.index("--microvm-report") + 1]).name
+                    for command in commands
+                }
+            ),
+            4,
+        )
+        for command, script in zip(commands, scripts, strict=True):
+            self.assertEqual(command[command.index("--processors") + 1], "1")
+            self.assertEqual(command[command.index("--memory") + 1], "512M")
+            self.assertEqual(
+                command[command.index("--microvm-control-console") + 1], "none"
+            )
+            self.assertIn("rdinit=/bin/sh", command[command.index("--cmdline") + 1])
+            self.assertNotIn("--restore-snapshot", command)
+            self.assertIn("NVX_LAYERED_BOOT_TEST=1", script)
+            self.assertIn(
+                "--ignored --exact guest::init::boot::tests::layered_cold_boot_", script
+            )
+            self.assertIn("/sbin/nvx-time boot", script)
+            self.assertIn("/sbin/nvx-time status", script)
+        return commands
+
+    def test_explicit_fixture_keeps_both_real_tests_and_separate_roots(self):
+        commands = self._run()
+        scratch = [
+            command
+            for command in commands
+            if "nvx_scratch=" in command[command.index("--cmdline") + 1]
+        ]
+        ram = [command for command in commands if command not in scratch]
+        self.assertEqual(len(scratch), 2)
+        self.assertEqual(len(ram), 2)
+        self.assertTrue(
+            all(command.count("--microvm-sandbox-block") == 2 for command in scratch)
+        )
+        self.assertTrue(
+            all(
+                microvm_tests.SCRATCH_UPPER_TOKEN
+                in command[command.index("--cmdline") + 1].split()
+                for command in scratch
+            )
+        )
+        self.assertTrue(
+            all(command.count("--microvm-sandbox-block") == 1 for command in ram)
+        )
+        self.assertEqual(sum("--mount-aggregate" in command for command in commands), 2)
+        self.assertEqual(sum("--mount" in command for command in commands), 2)
+        self.assertIn("layered-boot", microvm_tests.MICROVM_EXPLICIT_SCENARIOS)
+        self.assertNotIn("layered-boot", microvm_tests.MICROVM_TEST_SCENARIOS)
+        self.assertIn("layered-boot", microvm_tests.COLD_EXPLICIT_SCENARIOS)
+        self.assertNotIn("layered-boot", microvm_tests.COLD_ONLY_SCENARIOS)
+
+    def test_an_ignored_test_is_not_an_executed_pass(self):
+        with self.assertRaisesRegex(RuntimeError, "did not execute and pass"):
+            self._run(ignored=True)
+
+    def test_a_different_test_name_is_not_the_requested_test(self):
+        with self.assertRaisesRegex(RuntimeError, "did not execute and pass"):
+            self._run(wrong_name=True)
+
+
 class FilesystemSharesScenarioTests(unittest.TestCase):
     """The filesystem-shares scenario with OpenVMM and the guest simulated."""
 
@@ -5056,6 +5498,7 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
         guest_writes_toolcache: bool = False,
         guest_links_children: bool = False,
         guest_writes_settings: bool = False,
+        cold_only: bool = False,
     ) -> list[list[str]]:
         launched: list[list[str]] = []
         children = self._children
@@ -5192,6 +5635,7 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
                 memory_mib=128,
                 timeout=40,
                 output_dir=Path(temporary),
+                cold_only=cold_only,
             )
         link, target = symlink.call_args.args
         self.assertEqual(
@@ -5281,6 +5725,18 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
         self.assertEqual(self._children(launched[15]), every)
         self.assertEqual(self._children(launched[16]), every)
 
+    def test_cold_projection_retains_every_share_and_all_nine_preboot_refusals(self):
+        launched = self._run(cold_only=True)
+        self.assertEqual(len(launched), 10)
+        self.assertTrue(
+            all("--snapshot-destination" not in command for command in launched)
+        )
+        self.assertTrue(
+            all("--restore-snapshot" not in command for command in launched)
+        )
+        with self.assertRaisesRegex(RuntimeError, "modified the read-only share"):
+            self._run(cold_only=True, guest_writes_toolcache=True)
+
     def test_scenario_rejects_a_write_to_the_read_only_share(self):
         with self.assertRaisesRegex(RuntimeError, "modified the read-only share"):
             self._run(guest_writes_toolcache=True)
@@ -5292,6 +5748,68 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
     def test_scenario_rejects_a_hard_link_between_children(self):
         with self.assertRaisesRegex(RuntimeError, "hard link joined two children"):
             self._run(guest_links_children=True)
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX shell and file modes")
+    def test_read_only_chmod_attempts_a_real_change_and_requires_its_refusal(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("requires a POSIX shell")
+        script = microvm_tests._read_script("filesystem-shares.sh")
+        expect = script[
+            script.index("expect_read_only() {") : script.index("\n\n# One virtio")
+        ]
+        check = script[
+            script.index("readonly_mode=") : script.index(
+                "[ ! -e /run/nvx/shares/0/secrets ]"
+            )
+        ]
+        for mode, allows, message, mutates, status in (
+            ("777", False, "Read-only file system", False, 0),
+            ("444", False, "Read-only file system", False, 0),
+            ("4755", False, "Read-only file system", False, 0),
+            ("777", True, "", False, 77),
+            ("777", False, "Permission denied", False, 78),
+            ("777", False, "Read-only file system", True, 107),
+        ):
+            with self.subTest(
+                mode=mode, allows=allows, message=message, mutates=mutates
+            ):
+                with tempfile.TemporaryDirectory() as temporary:
+                    record = Path(temporary) / "requested-mode"
+                    quoted = shlex.quote(record.as_posix())
+                    controls = (
+                        f"record={quoted}\n"
+                        "stat() {\n"
+                        f'  if [ "{int(mutates)}" = 1 ] && [ -f "$record" ]; then\n'
+                        '    cat "$record"\n'
+                        f"  else printf '%s\\n' {mode}; fi\n"
+                        "}\n"
+                        "chmod() {\n"
+                        '  printf "%s\\n" "$1" >"$record"\n'
+                        f'  if [ "$1" = "{mode}" ] || [ "{int(allows)}" = 1 ]; then return 0; fi\n'
+                        f"  printf '%s\\n' {shlex.quote(message)} >&2\n"
+                        "  return 1\n"
+                        "}\n"
+                    )
+                    result = subprocess.run(
+                        [
+                            shell,
+                            "-c",
+                            'set -eu\nfail() { exit "$1"; }\n'
+                            + expect
+                            + "\n"
+                            + controls
+                            + check,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    self.assertNotEqual(
+                        int(record.read_text(encoding="utf-8").strip(), 8),
+                        int(mode, 8),
+                    )
 
     def test_scenario_is_a_default_correctness_scenario(self):
         self.assertIn("filesystem-shares", microvm_tests.MICROVM_TEST_SCENARIOS)
@@ -9246,7 +9764,7 @@ class MicrovmTests(unittest.TestCase):
             and node.name == "run_managed_lifecycle"
         )
         self.assertIn(
-            "TimeAbiMonitor(command)",
+            "TimeAbiMonitor(command, **architecture_kwargs(architecture))",
             [
                 ast.unparse(node)
                 for node in ast.walk(managed)
@@ -9942,7 +10460,7 @@ class MicrovmTests(unittest.TestCase):
             self.skipTest("POSIX shell is unavailable")
 
         script = microvm_tests._read_script("lifecycle.sh")
-        prologue, separator, _ = script.partition("\nprintf '\\013' | dd")
+        prologue, separator, _ = script.partition("\narchitecture=")
         self.assertTrue(separator)
         prologue = prologue.replace("nvx-exit", "record_exit")
         result = subprocess.run(
@@ -10041,6 +10559,41 @@ class MicrovmTests(unittest.TestCase):
                         result.stdout.splitlines(),
                         [f"NVX-LIFECYCLE-FAIL code={code}"],
                     )
+
+    def test_lifecycle_arm_early_console_checks_do_not_accept_x86_messages(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        script = microvm_tests._read_script("lifecycle.sh")
+        start = script.index("check_early_console() {\n")
+        end = script.index("\n}\n", start) + len("\n}\n")
+        function = script[start:end]
+        enabled = "bootconsole [nvx-mmio0] enabled"
+        disabled = "bootconsole [nvx-mmio0] disabled"
+        for log, code in (
+            (f"{enabled}\n{disabled}\n", 0),
+            ("bootconsole [earlyxe90] enabled\nbootconsole [earlyxe90] disabled\n", 44),
+            (f"{enabled}\n", 45),
+            (
+                f'{enabled}\n{disabled}\nUnknown kernel command line parameters "earlycon=nvx-mmio"\n',
+                46,
+            ),
+        ):
+            with self.subTest(code=code):
+                result = subprocess.run(
+                    [shell],
+                    input=(
+                        "set -eu\nearly_console=nvx-mmio0\n"
+                        'fail() { exit "$1"; }\n'
+                        f"dmesg() {{ cat <<'NVX_LOG'\n{log}NVX_LOG\n}}\n"
+                        f"{function}check_early_console\n"
+                    ),
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, code, result.stderr)
 
     def test_smp_uses_requested_processor_count(self):
         text = (
@@ -10153,7 +10706,9 @@ class MicrovmTests(unittest.TestCase):
 
     def test_smp_lapic_remains_an_explicit_scenario(self):
         # #286 keeps `test-microvm --scenario smp-lapic` for local use.
-        self.assertEqual(microvm_tests.MICROVM_EXPLICIT_SCENARIOS, ("smp-lapic",))
+        self.assertEqual(
+            microvm_tests.MICROVM_EXPLICIT_SCENARIOS, ("smp-lapic", "layered-boot")
+        )
         args = nvx.parse_args(
             ["test-microvm", "--backend", "kvm", "--scenario", "smp-lapic"]
         )
@@ -18750,6 +19305,8 @@ class MicrovmTests(unittest.TestCase):
                     "--backend",
                     "kvm",
                     *(f"--scenario={scenario}" for scenario in scenarios),
+                    "--guest-test-elf",
+                    "guest-libtest",
                     "--processors",
                     "1",
                     "2",
@@ -18790,6 +19347,8 @@ class MicrovmTests(unittest.TestCase):
                     "--backend",
                     "whp",
                     *(f"--scenario={scenario}" for scenario in scenarios),
+                    "--guest-test-elf",
+                    "guest-libtest",
                     "--processors",
                     "2",
                     "1",
@@ -18958,6 +19517,73 @@ class MicrovmTests(unittest.TestCase):
 
 class TimeHostCorrectionTests(unittest.TestCase):
     """The time-host-correction scenario and its guest report."""
+
+    def test_arm_correction_keeps_full_hz_instead_of_x86_khz_rounding(self):
+        self.assertEqual(
+            microvm_tests.time_host_correction_guest_ppm(
+                120, 2_194_804_321, architecture="aarch64"
+            ),
+            120,
+        )
+        self.assertNotEqual(
+            microvm_tests.time_host_correction_guest_ppm(120, 2_194_804_321),
+            120,
+        )
+        with self.assertRaisesRegex(RuntimeError, "ARM counter rate"):
+            microvm_tests.time_host_correction_guest_ppm(
+                120, 0x1_0000_0000, architecture="aarch64"
+            )
+
+    def test_arm_cold_projection_runs_both_cold_checks_but_never_captures(self):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                microvm_tests, "run_guest_script", return_value={"output": "observed"}
+            ) as run,
+            patch.object(
+                microvm_tests,
+                "time_host_correction_host",
+                return_value=(0.0, 19_200_001),
+            ),
+            patch.object(
+                microvm_tests, "check_time_host_correction", return_value="checked"
+            ) as check,
+            patch.object(microvm_tests, "capture_snapshot") as capture,
+            redirect_stdout(io.StringIO()),
+        ):
+            microvm_tests.run_time_host_correction(
+                Path("openvmm"),
+                Path("Image"),
+                Path("initrd"),
+                "whp",
+                cold_only=True,
+                memory_mib=256,
+                timeout=30,
+                output_dir=Path(temporary),
+                architecture="aarch64",
+            )
+            self.assertEqual(run.call_count, 2)
+            self.assertTrue(
+                all(
+                    call.kwargs["architecture"] == "aarch64"
+                    for call in run.call_args_list
+                )
+            )
+            self.assertEqual(check.call_args.kwargs["architecture"], "aarch64")
+            capture.assert_not_called()
+            run.reset_mock()
+            with self.assertRaisesRegex(common.ScriptError, "explicit cold projection"):
+                microvm_tests.run_time_host_correction(
+                    Path("openvmm"),
+                    Path("Image"),
+                    Path("initrd"),
+                    "whp",
+                    memory_mib=256,
+                    timeout=30,
+                    output_dir=Path(temporary),
+                    architecture="aarch64",
+                )
+            run.assert_not_called()
 
     # Host UTC of the first sample, and the declared TSC rate; the samples are
     # 5 s of the guest TSC apart.
@@ -19217,6 +19843,36 @@ class TimeHostCorrectionTests(unittest.TestCase):
             microvm_tests.time_host_correction_frequency_allowance_ppb(tsc_hz, 200_000),
             1_998,
         )
+
+    def test_arm_held_frequency_has_no_x86_khz_allowance(self):
+        rate = 19_200_001
+        for scaled, reported in ((13_107_229, 200_000), (13_107_250, 200_001)):
+            for sign in (-1, 1):
+                with self.subTest(scaled=sign * scaled):
+                    output = self.report(
+                        frequency_ppb=sign * reported,
+                        correction_ppb=sign * reported,
+                        tsc_hz=rate,
+                        samples=((1_000, sign * scaled), (1_500, sign * scaled)),
+                        host_ppm=sign * scaled / 65_536,
+                    )
+                    microvm_tests.check_time_host_correction(
+                        output, context="ARM phase", architecture="aarch64"
+                    )
+        output = self.report(frequency_ppb=200_000, correction_ppb=200_000, tsc_hz=rate)
+        changed = output.replace("frequency_ppb=200000", "frequency_ppb=201000")
+        self.assertNotEqual(changed, output)
+        self.assertGreater(
+            microvm_tests.time_host_correction_frequency_allowance_ppb(rate, 200_000),
+            1_000,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"holds a frequency correction of 201000 ppb.*allowance 0 ppb",
+        ):
+            microvm_tests.check_time_host_correction(
+                changed, context="ARM phase", architecture="aarch64"
+            )
 
     def test_a_guest_that_does_not_run_at_the_published_rate_fails(self):
         with self.assertRaisesRegex(

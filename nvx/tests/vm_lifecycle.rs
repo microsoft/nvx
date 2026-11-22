@@ -8,7 +8,7 @@
 //! and [`vm::stop`] stops the VM through a request to its guest: the VM must exit on its own,
 //! before any forced termination, and report its success and a complete teardown. The guest is
 //! nvx-init, NVX's reference init, over the layered root that `nvx sandbox start` boots: the
-//! Ubuntu EROFS layer over an ext4 scratch upper.
+//! Ubuntu EROFS layer over an ext4 scratch upper, or a RAM upper without `scratch`.
 //!
 //! `scripts/nvx.py test-microvm --scenario vm-lifecycle` runs it on the selected backend, with
 //! `NVX_VM_LIFECYCLE` set to the JSON object of its [`Inputs`], and then checks the outcome report
@@ -55,6 +55,10 @@ struct Inputs {
     architecture: Option<GuestArchitecture>,
     /// The selected VMM CPU profile, or the VMM default for legacy x86 inputs.
     cpu_profile: Option<String>,
+    /// The requested processor count; absent legacy input keeps one processor.
+    processors: Option<u32>,
+    /// The requested memory in MiB; absent legacy input keeps 256 MiB.
+    memory_mib: Option<u64>,
     /// The OpenVMM executable.
     openvmm: PathBuf,
     /// The SHA-256 digest of the OpenVMM executable, its identity in the runtime's.
@@ -179,8 +183,8 @@ fn a_cold_vm_is_attached_from_saved_values_and_stopped() {
     };
     let image_uuid = Uuid::parse(&inputs.image_uuid).expect("the layer's UUID");
     let config = VmConfig {
-        processors: 1,
-        memory_mib: 256,
+        processors: inputs.processors.unwrap_or(1),
+        memory_mib: inputs.memory_mib.unwrap_or(256),
         root: RootConfig::Layered(LayeredRoot {
             image: inputs.image,
             format: RootImage::erofs(Some(image_uuid)),

@@ -3,6 +3,11 @@ name: Package NVX platform
 on:
   workflow_call:
     inputs:
+      architecture:
+        description: Guest and executable architecture of this package
+        required: false
+        type: string
+        default: x86_64
       display-name:
         description: Platform name shown in the job list
         required: true
@@ -66,34 +71,46 @@ jobs:
 
       # The package ships every guest image and the sandbox scratch template.
       - name: Download guest kernel
+        if: inputs.architecture == 'x86_64'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-kernel
           path: build
 
       - name: Download Alpine initramfs
+        if: inputs.architecture == 'x86_64'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-alpine
           path: build
 
       - name: Download Ubuntu initramfs
+        if: inputs.architecture == 'x86_64'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-ubuntu
           path: build
 
       - name: Download Ubuntu distro layer and scratch template
+        if: inputs.architecture == 'x86_64'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-ubuntu-distro
           path: build
 
       - name: Download Azure Linux initramfs
+        if: inputs.architecture == 'x86_64'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-azurelinux
           path: build
+
+      - name: Download ARM guest artifacts
+        if: inputs.architecture == 'aarch64'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: guest-aarch64
+          path: build/aarch64
 
       - name: Download OpenVMM executable
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -117,6 +134,7 @@ jobs:
       - name: Package release
         uses: ./.github/actions/package-release
         with:
+          architecture: ${{ inputs.architecture }}
           platform: ${{ inputs.release-platform }}
           nvx-artifact: ${{ inputs.nvx-artifact }}
           upload: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}

@@ -19,7 +19,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from http.client import HTTPMessage
 from pathlib import Path, PurePosixPath
-from typing import IO, cast
+from typing import IO, TypedDict, cast
 
 from .build_constants import (
     BuildConstants,
@@ -97,8 +97,24 @@ def bytes_to_mib(value: int | float) -> float:
     return value / (1024 * 1024)
 
 
-def artifact_path(name: str) -> Path:
-    return BuildConstants.BUILD_DIR / name
+class ArchitectureKwargs(TypedDict, total=False):
+    architecture: str
+
+
+def architecture_kwargs(architecture: str) -> ArchitectureKwargs:
+    """Forward explicit ARM context while preserving legacy x86 call shapes."""
+    if architecture not in ("x86_64", "aarch64"):
+        raise ScriptError(f"unsupported guest architecture: {architecture}")
+    return {} if architecture == "x86_64" else {"architecture": architecture}
+
+
+def artifact_path(name: str, *, architecture: str = "x86_64") -> Path:
+    if architecture not in ("x86_64", "aarch64"):
+        raise ScriptError(f"unsupported artifact architecture: {architecture}")
+    directory = BuildConstants.BUILD_DIR
+    if architecture == "aarch64":
+        directory /= architecture
+    return directory / name
 
 
 def path_exists(path: Path) -> bool:

@@ -1,0 +1,182 @@
+name: Run native ARM64 WHP cold scenarios
+
+on:
+  workflow_call:
+    inputs:
+      guest:
+        description: Alpine or Ubuntu cold guest
+        required: false
+        type: string
+        default: alpine
+      debug-kernel:
+        description: Exercise the ARM debug kernel's cold time scenarios
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      OPENVMM_DEPLOY_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  NVX_AUTO_DOWNLOAD: "0"
+
+jobs:
+  test:
+    name: NVX microVM tests / Windows ARM64 / WHP / ${{ inputs.guest }}${{ inputs.debug-kernel && ' / Debug' || '' }}
+    runs-on: [self-hosted, windows, ARM64, whp, virtual-machine, general]
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Checkout OpenVMM
+        uses: ./.github/actions/checkout-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Verify source pins
+        if: runner.os == 'Windows'
+        shell: python {0}
+        run: |
+          import subprocess
+          import sys
+
+          subprocess.run([sys.executable, r"scripts\nvx.py", "verify"], check=True)
+
+      - name: Download ARM guest artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: guest-aarch64
+          path: build/aarch64
+
+      - name: Download ARM64 OpenVMM executable
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: openvmm-windows-arm64-executable
+          path: openvmm/target/release
+
+      - name: Download ARM64 OpenVMM provenance
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: openvmm-windows-arm64-provenance
+          path: build
+
+      - name: Download ARM64 NVX executable
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nvx-windows-arm64-executable
+          path: nvx/target/release
+
+      - name: Download ARM64 NVX provenance
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nvx-windows-arm64-provenance
+          path: build
+
+      - name: Validate native ARM64 runner
+        uses: ./.github/actions/validate-runner
+        with:
+          architecture: aarch64
+          backend: whp
+          verify-openvmm: "true"
+
+      # Explicit shared scenarios, not the x86 shard plan or its restore tails.
+      - name: Run shared ARM cold scenarios
+        if: runner.os == 'Windows'
+        shell: python {0}
+        env:
+          GUEST: ${{ inputs.guest }}
+          DEBUG_KERNEL: ${{ inputs.debug-kernel }}
+        run: |
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "scripts")
+          from nvx_tools.guests import guest_descriptor
+          from nvx_tools.microvm_tests import (
+              COLD_PROJECTION_SCENARIOS,
+              SANDBOX_CONTROL_SCENARIOS,
+              UBUNTU_UNSUPPORTED_SCENARIOS,
+          )
+
+          guest = os.environ["GUEST"]
+          debug = os.environ["DEBUG_KERNEL"] == "true"
+          if guest not in ("alpine", "ubuntu"):
+              raise SystemExit("Native ARM WHP supports Alpine or Ubuntu only")
+          descriptor = guest_descriptor(guest)
+          scenarios = (
+              ["smp", "time-host-correction"]
+              if debug else [
+                  "command-line-limit", "denied-filesystem-paths",
+                  "directional-network-policy", "filesystem-comma-paths",
+                  "filesystem-owner", "filesystem-policy", "filesystem-shares",
+                  "guest-boot", "guest-identity", "host-loopback-policy",
+                  "interrupt-map", "ipv6-egress-policy", "lifecycle", "l3-l4-egress-policy",
+                  "l3-l4-egress-port-ranges", "l3-l4-egress-protocols",
+                  "managed-lifecycle", "managed-exec-config", "private-network-ingress",
+                  "sandbox-blocks", "sandbox-gpt-layer", "sandbox-lifecycle",
+                  "sandbox-proxy-only", "sandbox-ram-upper", "smp",
+                  "structured-outcome", "time-host-correction",
+                  "virtio-features", "virtio-net", "vm-lifecycle",
+                  "workload-identity",
+              ]
+          )
+          omitted = {}
+          for scenario in scenarios:
+              reasons = []
+              if guest == "ubuntu" and scenario in UBUNTU_UNSUPPORTED_SCENARIOS:
+                  reasons.append("Ubuntu-specific correctness exclusion")
+              if not descriptor.sandbox_control and scenario in SANDBOX_CONTROL_SCENARIOS:
+                  reasons.append("GuestDescriptor.sandbox_control is false; this scenario requires the sandbox-control channel")
+              if reasons:
+                  omitted[scenario] = "; ".join(reasons)
+          scenarios = [scenario for scenario in scenarios if scenario not in omitted]
+          output_dir = Path(rf"build\test-results\microvm-whp-aarch64-{guest}{'-debug' if debug else ''}")
+          output_dir.mkdir(parents=True, exist_ok=True)
+          selection = {
+              "architecture": "aarch64",
+              "backend": "whp",
+              "guest": guest,
+              "scope": "cold-only",
+              "selection": "debug-cold-subset" if debug else "normal-cold",
+              "selected_scenarios": scenarios,
+              "omitted_guest_scenarios": omitted,
+              "deferred_restore_tails": sorted(set(scenarios) & COLD_PROJECTION_SCENARIOS),
+              "architecture_exclusions": {
+                  "console-exit": "Every case restores a captured console",
+                  "time-abi-conformance": "Guest commands.rs rejects ARM exhaustive x86 CPUID/MSR X1-X6",
+                  "untiered-network-policy": "Named snapshot capture/restore is outside ARM cold qualification",
+              },
+          }
+          (output_dir / "ci-selection.json").write_text(
+              json.dumps(selection, indent=2) + "\n", encoding="utf-8"
+          )
+          print(json.dumps(selection, sort_keys=True), flush=True)
+          command = [
+              sys.executable, r"scripts\nvx.py", "test-microvm",
+              "--architecture", "aarch64", "--backend", "whp", "--cold-only",
+              "--guest", guest, "--processors", "1", "2", "4", "8",
+              "--output-dir", str(output_dir),
+          ]
+          if debug:
+              command.append("--debug-kernel")
+          for scenario in scenarios:
+              command.extend(("--scenario", scenario))
+          subprocess.run(command, check=True)
+
+      - name: Upload ARM cold scenario evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: microvm-whp-aarch64-${{ inputs.guest }}${{ inputs.debug-kernel && '-debug' || '' }}
+          path: build/test-results/microvm-whp-aarch64-*
+          if-no-files-found: warn
+          retention-days: 7

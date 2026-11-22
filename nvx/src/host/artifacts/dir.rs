@@ -7,12 +7,14 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::compatibility::compatibility;
-use super::identity::{provenance_identity, read_metadata, sha256_identity};
+use super::identity::{
+    check_release_architecture, provenance_identity, read_metadata, sha256_identity,
+};
 use super::require::required;
 use super::{
     CHECKSUMS_NAME, Guest, INITRAMFS_PROVENANCE_NAME, KERNEL_NAME, KERNEL_PROVENANCE_NAME,
-    OPENVMM_PROVENANCE_NAME, RELEASE_BIN_DIR, RELEASE_GUEST_DIR, REPO_BUILD_DIR, REPO_OPENVMM_DIR,
-    absolute, is_release_dir, openvmm_executable,
+    MANIFEST_NAME, OPENVMM_PROVENANCE_NAME, RELEASE_BIN_DIR, RELEASE_GUEST_DIR, REPO_BUILD_DIR,
+    REPO_OPENVMM_DIR, absolute, is_release_dir, openvmm_executable,
 };
 use crate::error::{Error, Result};
 use crate::host::runtime::{ArtifactIdentity, GuestArchitecture, RuntimeIdentity};
@@ -34,8 +36,8 @@ pub(crate) enum Layout {
 /// `scripts/nvx_tools/common.py` give for a checkout.
 ///
 /// Paths are joined to the directory, made absolute, without checking that they exist; the
-/// `require_*` methods check them with the messages of `nvx.py`. Nothing here reads the release's
-/// `SOURCE-MANIFEST.json`, which `nvx.py` does not check either.
+/// `require_*` methods check them with the messages of `nvx.py`. Explicit ARM releases also
+/// require an architecture-qualified source manifest; legacy x86 construction is unchanged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ArtifactDir {
     /// The absolute directory.
@@ -92,9 +94,17 @@ impl ArtifactDir {
     /// Selects guest products without changing the native OpenVMM location.
     pub(crate) fn with_architecture(mut self, architecture: GuestArchitecture) -> Result<Self> {
         if architecture == GuestArchitecture::Aarch64 && self.layout == Layout::Release {
-            return Err(Error::unsupported(
-                "AArch64 release artifacts are not qualified; use explicit local ARM products",
-            ));
+            let path = self.root.join(MANIFEST_NAME);
+            let metadata = read_metadata(
+                &path,
+                "ARM release manifest",
+                "use an architecture-qualified Windows ARM64 package",
+            )?;
+            let manifest = serde_json::from_str(&metadata).map_err(|error| {
+                Error::unavailable(format!("invalid ARM release manifest {}", path.display()))
+                    .with_source(error)
+            })?;
+            check_release_architecture(&manifest, architecture)?;
         }
         self.architecture = architecture;
         Ok(self)
@@ -151,7 +161,7 @@ impl ArtifactDir {
     }
 
     /// Selects the kernel filename from the explicit guest ISA, never from the host CPU.
-    fn kernel_name(&self) -> &'static str {
+    pub(crate) fn kernel_name(&self) -> &'static str {
         match self.architecture {
             GuestArchitecture::X86_64 => KERNEL_NAME,
             GuestArchitecture::Aarch64 => "Image",

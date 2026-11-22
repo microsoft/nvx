@@ -33,9 +33,11 @@ use crate::host::artifacts::compatibility::{
 };
 use crate::host::artifacts::{
     ArtifactDir, CHECKSUMS_NAME, Guest, INITRAMFS_PROVENANCE_NAME, KERNEL_NAME,
-    KERNEL_PROVENANCE_NAME, MANIFEST_NAME, OPENVMM_PROVENANCE_NAME, openvmm_executable,
+    KERNEL_PROVENANCE_NAME, MANIFEST_NAME, OPENVMM_PROVENANCE_NAME, check_release_architecture,
+    openvmm_executable,
 };
 use crate::host::cli::{Exit, Result, io_error, io_message, output};
+use crate::host::runtime::GuestArchitecture;
 use crate::host::snapshot::manifest::{MICROVM_ABI_VERSION, TIME_ABI_VERSION};
 
 /// The suffix of the name of the kernel's configuration, which lies beside the kernel.
@@ -100,12 +102,32 @@ fn all_guest_names() -> Vec<String> {
     guest_artifact_names(true)
 }
 
+fn selected_name(name: &str, dir: &ArtifactDir) -> String {
+    if name == KERNEL_NAME {
+        dir.kernel_name().to_owned()
+    } else if name == format!("{KERNEL_NAME}{KERNEL_CONFIG_SUFFIX}") {
+        format!("{}{KERNEL_CONFIG_SUFFIX}", dir.kernel_name())
+    } else if name == KERNEL_PROVENANCE_NAME {
+        format!("{}.provenance.json", dir.kernel_name())
+    } else {
+        name.to_owned()
+    }
+}
+
 /// Returns each file of the checkout `dir` that installing a release writes or removes: the
 /// OpenVMM executable, every guest artifact, and the build provenance of the artifacts.
 pub(super) fn destinations(dir: &ArtifactDir) -> Vec<PathBuf> {
     let mut paths = vec![dir.openvmm()];
-    paths.extend(all_guest_names().iter().map(|name| dir.artifact(name)));
-    paths.extend(PROVENANCE.iter().map(|name| dir.artifact(name)));
+    paths.extend(
+        all_guest_names()
+            .iter()
+            .map(|name| dir.artifact(&selected_name(name, dir))),
+    );
+    paths.extend(
+        PROVENANCE
+            .iter()
+            .map(|name| dir.artifact(&selected_name(name, dir))),
+    );
     paths
 }
 
@@ -221,11 +243,20 @@ fn manifest_mismatches(manifest: &Value) -> Vec<String> {
 /// provenance of its artifacts, or that its `SHA256SUMS` does not list.
 pub(super) fn plan(package: &Path, dir: &ArtifactDir) -> Result<Plan> {
     let manifest = read_manifest(&package.join(MANIFEST_NAME))?;
+    if let Some(manifest) = &manifest {
+        check_release_architecture(manifest, dir.architecture()).map_err(Exit::from)?;
+    } else if dir.architecture() == GuestArchitecture::Aarch64 {
+        return Err(Exit::error(
+            ErrorCode::Unsupported,
+            "ARM release packages require an explicit architecture-qualified source manifest",
+        ));
+    }
     let names = match &manifest {
         Some(manifest) => declared_names(manifest)?,
         // A package without a manifest predates the sandbox scratch template.
         None => guest_artifact_names(false),
     };
+    let names: Vec<_> = names.iter().map(|name| selected_name(name, dir)).collect();
     let digests = read_digests(package)?;
     let item = |directory: &str, name: &str, destination: PathBuf, description: &str| {
         let source = required(package.join(directory).join(name), description)?;
@@ -258,15 +289,17 @@ pub(super) fn plan(package: &Path, dir: &ArtifactDir) -> Result<Plan> {
         )?);
     }
     for name in PROVENANCE {
+        let name = selected_name(name, dir);
         items.push(item(
             PROVENANCE_DIR,
-            name,
-            dir.artifact(name),
+            &name,
+            dir.artifact(&name),
             &format!("packaged provenance artifact {name}"),
         )?);
     }
     let removals = all_guest_names()
         .into_iter()
+        .map(|name| selected_name(&name, dir))
         .filter(|name| !names.contains(name))
         .map(|name| dir.artifact(&name))
         .collect();

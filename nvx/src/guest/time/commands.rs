@@ -33,7 +33,7 @@ use crate::guest::parse::parse_decimal;
 use crate::guest::status::CommandError;
 #[cfg(target_arch = "aarch64")]
 use crate::guest::sys::FinishTimeAccess;
-use crate::guest::sys::{self, TimeAccessError, TimeWindow};
+use crate::guest::sys::{self, ClockAdjustment, Errno, TimeAccessError, TimeWindow};
 #[cfg(target_arch = "x86_64")]
 use crate::hex::parse_hex;
 #[cfg(target_arch = "aarch64")]
@@ -54,6 +54,17 @@ fn report(err: &mut dyn Write, parts: &[&[u8]]) {
 fn usage(err: &mut dyn Write, line: &[u8]) -> Result<(), CommandError> {
     report(err, &[line]);
     Err(CommandError::Usage)
+}
+
+/// Clears only the guest PLL's phase offset, preserving its frequency and status.
+pub(super) fn clear_phase_with(
+    arguments: &[&[u8]],
+    adjust: impl FnOnce(ClockAdjustment) -> Result<(), Errno>,
+) -> Result<(), CommandError> {
+    if !arguments.is_empty() {
+        return Err(CommandError::Usage);
+    }
+    adjust(ClockAdjustment::ClearPhase).map_err(|_| CommandError::Operation)
 }
 
 /// Reports why the thread could not take, or give up, its permission for the time ABI's ports,

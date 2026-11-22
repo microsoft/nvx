@@ -184,6 +184,7 @@ class GuestRustBuildConstants:
         "nvx-managed-agent",
         "nvx-ingress",
         "nvx-time",
+        "nvx-time-probe",
         "nvx-init",
     )
     # Executables that earlier builds produced. A build removes them from the output

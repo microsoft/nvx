@@ -462,7 +462,7 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     let refused = cold_preflight(&options, &rules).is_err();
     let mut located = locate(root)?;
     located.dir = located.dir.with_architecture(options.architecture)?;
-    let hold = if refused || options.architecture == GuestArchitecture::Aarch64 {
+    let hold = if refused {
         download::hold(&located)?
     } else {
         download::ensure(&located, Some(options.guest), options.hypervisor)?

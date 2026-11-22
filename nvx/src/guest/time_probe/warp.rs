@@ -4,10 +4,15 @@ use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 
+use super::counter;
 use super::format::{f0, f1};
+#[cfg(target_arch = "aarch64")]
+use super::support::arm_counter_rate;
+#[cfg(target_arch = "x86_64")]
+use super::support::detect_tsc_rate;
 use super::support::{
     Arguments, NANOSECONDS_PER_SECOND, TscRate, affinity_cpus, check_cpus_allowed, cycles_to_ns,
-    detect_tsc_rate, format_cpu_list, parse_cpu_list, parse_rate, round_ll, setup_failure,
+    format_cpu_list, parse_cpu_list, parse_rate, round_ll, setup_failure,
 };
 use crate::guest::parse::parse_u64;
 use crate::guest::status::CommandError;
@@ -221,7 +226,7 @@ fn barrier(ready: &AtomicU32, abort: &AtomicBool, failed: bool) -> bool {
     }
     ready.fetch_add(1, Ordering::SeqCst);
     while ready.load(Ordering::SeqCst) < 2 {
-        sys::x86::pause();
+        counter::spin_hint();
     }
     !abort.load(Ordering::SeqCst)
 }
@@ -250,7 +255,7 @@ fn warp_worker(
     if !barrier(&state.ready.0, &state.abort, pinned.is_err()) {
         return pinned.map(|()| 0);
     }
-    let end = sys::x86::rdtsc_lfence().wrapping_add(budget_cycles);
+    let end = counter::load_ordered_ticks().wrapping_add(budget_cycles);
     let deadline = coarse_ns().wrapping_add(
         (cycles_to_ns(budget_cycles as f64, rate) + STALL_SECONDS * NANOSECONDS_PER_SECOND) as u64,
     );
@@ -258,11 +263,11 @@ fn warp_worker(
     loop {
         while state.lock.0.swap(true, Ordering::Acquire) {
             while state.lock.0.load(Ordering::Relaxed) {
-                sys::x86::pause();
+                counter::spin_hint();
             }
         }
         let previous = state.last_tsc.load(Ordering::Relaxed);
-        let now = sys::x86::rdtsc_lfence();
+        let now = counter::load_ordered_ticks();
         state.last_tsc.store(now, Ordering::Relaxed);
         if previous > now {
             state.max_warp.fetch_max(previous - now, Ordering::Relaxed);
@@ -271,7 +276,7 @@ fn warp_worker(
         state.lock.0.store(false, Ordering::Release);
         if iteration & WARP_CHECK_MASK == 0 {
             if leader
-                && (sys::x86::rdtsc() > end
+                && (counter::ticks() > end
                     || (iteration & WARP_STALL_CHECK_MASK == 0 && coarse_ns() > deadline))
             {
                 state.stop.store(true, Ordering::Relaxed);
@@ -314,7 +319,7 @@ fn ping_leader(
     if !barrier(&state.ready.0, &state.abort, pinned.is_err()) {
         return Err(pinned.err().unwrap_or(Errno::EINVAL));
     }
-    let end = sys::x86::rdtsc_lfence().wrapping_add(budget_cycles);
+    let end = counter::load_ordered_ticks().wrapping_add(budget_cycles);
     let mut result = LeaderResult {
         rounds: 0,
         min_rtt: u64::MAX,
@@ -326,18 +331,18 @@ fn ping_leader(
     let mut round = 1_u64;
     loop {
         let mut spins = 0_u64;
-        let t1 = sys::x86::rdtsc_fenced();
+        let t1 = counter::ordered_ticks();
         state.sequence.0.store(2 * round - 1, Ordering::Release);
         while state.sequence.0.load(Ordering::Acquire) != 2 * round {
             spins += 1;
-            if spins & SPIN_CHECK_MASK == 0 && sys::x86::rdtsc().wrapping_sub(t1) > stall_cycles {
+            if spins & SPIN_CHECK_MASK == 0 && counter::ticks().wrapping_sub(t1) > stall_cycles {
                 result.stalled = true;
                 state.sequence.0.store(PP_STOP, Ordering::Release);
                 return Ok(result);
             }
-            sys::x86::pause();
+            counter::spin_hint();
         }
-        let t3 = sys::x86::rdtsc_lfence();
+        let t3 = counter::load_ordered_ticks();
         let t2 = state.t2.load(Ordering::Relaxed);
         let rtt = t3.wrapping_sub(t1);
         let lo = t2.wrapping_sub(t3) as i64;
@@ -352,7 +357,7 @@ fn ping_leader(
             offsets.push(lo.wrapping_add(hi));
         }
         result.rounds = round;
-        if round & PING_CHECK_MASK == 0 && sys::x86::rdtsc() > end {
+        if round & PING_CHECK_MASK == 0 && counter::ticks() > end {
             state.sequence.0.store(PP_STOP, Ordering::Release);
             return Ok(result);
         }
@@ -381,16 +386,16 @@ fn ping_follower(state: &PingState, cpu: usize, stall_cycles: u64) -> Result<(),
             }
             spins += 1;
             if spins & SPIN_CHECK_MASK == 0 {
-                let now = sys::x86::rdtsc();
+                let now = counter::ticks();
                 if wait_start == 0 {
                     wait_start = now;
                 } else if now.wrapping_sub(wait_start) > stall_cycles {
                     return Ok(());
                 }
             }
-            sys::x86::pause();
+            counter::spin_hint();
         }
-        state.t2.store(sys::x86::rdtsc_fenced(), Ordering::Relaxed);
+        state.t2.store(counter::ordered_ticks(), Ordering::Relaxed);
         state.sequence.0.store(2 * round, Ordering::Release);
         round += 1;
     }
@@ -510,7 +515,10 @@ pub(super) fn run(
             )
         })?;
     check_cpus_allowed(b"warp", &cpus, err)?;
+    #[cfg(target_arch = "x86_64")]
     let rate = detect_tsc_rate(override_hz);
+    #[cfg(target_arch = "aarch64")]
+    let rate = arm_counter_rate(override_hz, err)?;
     if rate.hz <= 0.0 {
         return Err(setup_failure(
             b"warp",

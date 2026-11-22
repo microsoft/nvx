@@ -4241,6 +4241,19 @@ class CiConfigurationTests(unittest.TestCase):
             )
 
         jobs: dict[str, dict[str, Any]] = load("ci.yml")["jobs"]
+        # ARM has one namespaced handoff, checked by test_arm_ci; retain the
+        # original independent x86 component/consumer equality below.
+        arm_jobs = {
+            "artifacts-arm64",
+            "build-nvx-windows-arm64",
+            "nvx-cli-windows-arm64",
+            "build-openvmm-windows-arm64",
+            "nvx-microvm-tests-whp-arm64",
+            "nvx-microvm-debug-whp-arm64",
+            "package-whp-arm64",
+        }
+        self.assertTrue(arm_jobs <= jobs.keys())
+        jobs = {name: job for name, job in jobs.items() if name not in arm_jobs}
         scratch = UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME
         components = {
             "guest-kernel": {
@@ -4460,10 +4473,11 @@ class CiConfigurationTests(unittest.TestCase):
                 ) and str(arguments.get("name", arguments.get("pattern"))).startswith(
                     "guest-"
                 ):
+                    if not holds(step.get("if"), context):
+                        continue
                     self.assertNotIn("pattern", arguments)
                     self.assertEqual(arguments["path"], "build")
-                    if holds(step.get("if"), context):
-                        downloads.add(arguments["name"])
+                    downloads.add(arguments["name"])
             if not downloads:
                 return None
             read: set[str] = set()
@@ -5159,6 +5173,11 @@ class CiConfigurationTests(unittest.TestCase):
                 (*ci.REQUIRED_CI_PLATFORM_JOBS, *ci.REQUIRED_CI_PACKAGE_JOBS),
                 "run-benchmarks",
             ),
+            "artifacts-arm64": "run-guest-artifacts",
+            "build-openvmm-windows-arm64": "run-openvmm-binaries",
+            "nvx-microvm-tests-whp-arm64": "run-microvm-tests",
+            "nvx-microvm-debug-whp-arm64": "run-microvm-tests",
+            "package-whp-arm64": "run-benchmarks",
         }
         self.assertEqual(set(selections.values()), set(ci.CI_CHANGE_OUTPUTS))
         for job_name, output in selections.items():
@@ -5673,8 +5692,9 @@ class CiConfigurationTests(unittest.TestCase):
                         continue
                 writes[source] = writes.get(source, 0) + 1
 
+        arm_action = "actions/build-arm64-guest-artifacts/action.yml"
         self.assertEqual(
-            writes,
+            {source: count for source, count in writes.items() if source != arm_action},
             {
                 "actions/build-openvmm/action.yml": 6,
                 "actions/build-guest-artifacts/action.yml": 6,
@@ -5682,26 +5702,41 @@ class CiConfigurationTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            save_cache_actions,
+            {source: count for source, count in writes.items() if source == arm_action},
+            {arm_action: 1},
+        )
+        self.assertEqual(
+            save_cache_actions - {arm_action},
             {
                 "actions/build-guest-artifacts/action.yml",
                 "actions/check-quality/action.yml",
             },
         )
+        self.assertIn(arm_action, save_cache_actions)
         save_cache_calls = [
-            (name, arguments)
+            (name, callee, arguments)
             for name, callee, arguments in calls
             if callee in save_cache_actions
         ]
-        self.assertEqual(len(save_cache_calls), 4)
-        for name, arguments in save_cache_calls:
+        self.assertEqual(
+            sum(callee != arm_action for _, callee, _ in save_cache_calls), 4
+        )
+        self.assertEqual(
+            sum(callee == arm_action for _, callee, _ in save_cache_calls), 1
+        )
+        for name, _, arguments in save_cache_calls:
             with self.subTest(call=name):
                 self.assertEqual(arguments.get("save-cache"), save_cache)
         # No other push-only job condition is allowed in this workflow: only
         # the release, performance persistence, the four save-cache arguments,
-        # and the two reuse arguments name the push event; ci.yml itself writes
-        # no cache.
-        self.assertEqual(workflow.count("github.event_name == 'push'"), 8)
+        # and the two reuse arguments name the push event by default. ARM adds
+        # exactly its own save-cache argument; ci.yml itself writes no cache.
+        arm_artifacts = _workflow_job(workflow, "artifacts-arm64")
+        self.assertEqual(
+            workflow.replace(arm_artifacts, "", 1).count("github.event_name == 'push'"),
+            8,
+        )
+        self.assertEqual(arm_artifacts.count("github.event_name == 'push'"), 1)
 
     def test_ci_change_classification_selects_suites_by_input(self):
         guest, binaries, openvmm_ci, microvm, benchmarks = ci.CI_CHANGE_OUTPUTS
@@ -7109,7 +7144,7 @@ python3() {
         }
         self.assertEqual(
             workflow.count("uses: ./.github/workflows/build-openvmm-binary.yml"),
-            len(producers),
+            len(producers) + 1,
         )
         for job_name, (backend, artifact) in producers.items():
             with self.subTest(producer=job_name):
@@ -7119,6 +7154,30 @@ python3() {
                 self.assertNotIn("target:", job)
                 self.assertNotIn("build-mode:", job)
                 self.assertNotIn("strategy:", job)
+                self.assertNotIn("architecture:", job)
+
+        arm_producer = "build-openvmm-windows-arm64"
+        arm_job = _workflow_job(workflow, arm_producer)
+        self.assertIn("architecture: aarch64", arm_job)
+        self.assertIn("backend: whp", arm_job)
+        self.assertIn("artifact: openvmm-windows-arm64", arm_job)
+        self.assertIn('"ARM64"', arm_job)
+        self.assertIn("artifacts-arm64", arm_job)
+        arm_microvm = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "run-arm64-whp.yml"
+        ).read_text(encoding="utf-8")
+        for job_name in ("nvx-microvm-tests-whp-arm64", "nvx-microvm-debug-whp-arm64"):
+            arm_consumer = _workflow_job(workflow, job_name)
+            self.assertIn(arm_producer, arm_consumer)
+            self.assertIn("build-nvx-windows-arm64", arm_consumer)
+            self.assertIn("uses: ./.github/workflows/run-arm64-whp.yml", arm_consumer)
+            for x86_producer in producers:
+                self.assertNotIn(x86_producer, arm_consumer)
+        for suffix in ("executable", "provenance"):
+            self.assertIn(f"name: openvmm-windows-arm64-{suffix}", arm_microvm)
+        arm_package = _workflow_job(workflow, "package-whp-arm64")
+        self.assertIn(arm_producer, arm_package)
+        self.assertIn("openvmm-artifact: openvmm-windows-arm64", arm_package)
 
         consumers = {
             "nvx-microvm-tests-kvm": (
@@ -7269,10 +7328,41 @@ python3() {
         ):
             self.assertIn("path: openvmm/target/release", consumer_workflow)
             self.assertIn("path: build", consumer_workflow)
-            self.assertEqual(
-                consumer_workflow.count("uses: actions/download-artifact@"),
-                download_count,
-            )
+            if consumer_workflow == package_workflow:
+                downloads = [
+                    step
+                    for step in yaml.safe_load(package_workflow)["jobs"]["package"][
+                        "steps"
+                    ]
+                    if str(step.get("uses", "")).startswith(
+                        "actions/download-artifact@"
+                    )
+                ]
+                self.assertEqual(
+                    sum(
+                        step.get("if") != "inputs.architecture == 'aarch64'"
+                        for step in downloads
+                    ),
+                    download_count,
+                )
+                arm_downloads = [
+                    step
+                    for step in downloads
+                    if step.get("if") != "inputs.architecture == 'x86_64'"
+                ]
+                self.assertEqual(
+                    {step["with"]["name"] for step in arm_downloads},
+                    {
+                        "guest-aarch64",
+                        "${{ inputs.openvmm-artifact }}-executable",
+                        "${{ inputs.openvmm-artifact }}-provenance",
+                    },
+                )
+            else:
+                self.assertEqual(
+                    consumer_workflow.count("uses: actions/download-artifact@"),
+                    download_count,
+                )
             self.assertIn(
                 "run: chmod +x openvmm/target/release/openvmm",
                 consumer_workflow,
@@ -7886,6 +7976,12 @@ python3() {
                     for component in step["with"]["components"].split():
                         builders[component] = job_name
         uploads = _guest_uploads()
+        arm_uploads = {
+            name: files
+            for name, files in uploads.items()
+            if files[0] == "artifacts-arm64"
+        }
+        self.assertEqual(set(arm_uploads), {"guest-aarch64"})
         self.assertEqual(
             set(guest_artifact_reuse.COMPONENT_ARTIFACTS),
             set(release.GUEST_ARTIFACT_COMPONENTS),
@@ -7903,7 +7999,10 @@ python3() {
                     sorted(files),
                     sorted(release.GUEST_ARTIFACT_COMPONENTS[component]),
                 )
-        self.assertEqual(set(uploads) - handed_over, {"guest-debug-kernel"})
+        self.assertTrue(set(arm_uploads).isdisjoint(handed_over))
+        self.assertEqual(
+            set(uploads) - set(arm_uploads) - handed_over, {"guest-debug-kernel"}
+        )
 
     def test_ci_runs_debug_kernel_on_mshv_for_prs_and_all_for_non_prs(self):
         workflow = (
@@ -8433,7 +8532,7 @@ python3() {
         self.assertEqual(check["env"]["GH_TOKEN"], "${{ github.token }}")
         self.assertEqual(
             check["run"],
-            'python3 scripts/nvx.py check-openvmm-ci --wait-minutes "${WAIT_MINUTES}" '
+            'python3 scripts/nvx.py check-openvmm-ci --include-arm64 --wait-minutes "${WAIT_MINUTES}" '
             '--summary "${GITHUB_STEP_SUMMARY}"',
         )
         # A pull request, whose pin promotion passes once OpenVMM's CI does,
@@ -8621,8 +8720,17 @@ python3() {
             sum(
                 configuration.count("uses: ./.github/actions/validate-nvx")
                 for configuration in configurations.values()
+            )
+            - _workflow_job(workflow, "nvx-cli-windows-arm64").count(
+                "uses: ./.github/actions/validate-nvx"
             ),
             len(ci.REQUIRED_CI_CLI_JOBS),
+        )
+        self.assertEqual(
+            _workflow_job(workflow, "nvx-cli-windows-arm64").count(
+                "uses: ./.github/actions/validate-nvx"
+            ),
+            1,
         )
         # A hypervisor job waits for the nvx build that it uses, if any,
         # but never for the CLI tests, so that it starts as soon as the build
@@ -9976,7 +10084,25 @@ Write-Output (Get-ExpectedRunnerLabels -BenchmarkRunner)
             / "action.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertEqual(package_action.count("archive-release"), 2)
+        package_steps = yaml.safe_load(package_action)["runs"]["steps"]
+        arm_condition = "runner.os == 'Windows' && inputs.architecture == 'aarch64'"
+        self.assertEqual(
+            sum(
+                step.get("run", "").count("archive-release")
+                for step in package_steps
+                if step.get("if") != arm_condition
+            ),
+            2,
+        )
+        arm_archive = [
+            step
+            for step in package_steps
+            if step.get("if") == arm_condition
+            and "archive-release" in step.get("run", "")
+        ]
+        self.assertEqual(len(arm_archive), 1)
+        self.assertEqual(arm_archive[0]["shell"], "python {0}")
+        self.assertIn('"--architecture", "aarch64"', arm_archive[0]["run"])
         self.assertIn(
             "python scripts\\nvx.py materialize-kernel-provenance-inputs",
             package_action,
@@ -13099,7 +13225,7 @@ class BuildTests(unittest.TestCase):
                 self.assertEqual(common.sha256_file(root / "sbin" / name), digest)
                 self.assertEqual(helpers[name]["binary_sha256"], digest)
             self.assertFalse((root / "sbin" / "nvx-mmio-write").exists())
-            self.assertFalse((root / "sbin" / "nvx-time-probe").exists())
+            self.assertTrue((root / "sbin" / "nvx-time-probe").exists())
 
     def test_arm_apk_manifest_refuses_foreign_packages_without_sealing(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -18412,10 +18538,12 @@ class SandboxSmokeProfileTests(unittest.TestCase):
             + body
         )
 
-        def run(*arguments: str) -> subprocess.CompletedProcess[str]:
+        def run(
+            *arguments: str, architecture: str = "x86_64"
+        ) -> subprocess.CompletedProcess[str]:
             return subprocess.run(
                 [self.shell, "-s", "--", *arguments],
-                input=script,
+                input=f"uname() {{ echo {architecture}; }}\n" + script,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -18433,7 +18561,7 @@ class SandboxSmokeProfileTests(unittest.TestCase):
                 "check_devices ",
                 "check_device_creation ",
                 "check_machine_id ",
-                "check_ports ",
+                "check_ports x86_64",
                 "check_cgroup ",
                 "check_image ",
                 "NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534",
@@ -18443,6 +18571,24 @@ class SandboxSmokeProfileTests(unittest.TestCase):
                 "check_share /tools ro",
                 "check_shares_isolated /workspace /tools",
                 "NVX-UBUNTU-SANDBOX-OK uid=65534 gid=65534",
+            ],
+        )
+        arm = run(
+            "entry",
+            "limits",
+            "33554432",
+            "8",
+            "/workspace",
+            "rw",
+            "/tools",
+            architecture="aarch64",
+        )
+        self.assertEqual(arm.returncode, 0, arm.stderr)
+        self.assertEqual(
+            arm.stdout.splitlines(),
+            [
+                line.replace("check_ports x86_64", "check_ports aarch64")
+                for line in result.stdout.splitlines()
             ],
         )
         result = run("/workspace")
@@ -18462,7 +18608,7 @@ class SandboxSmokeProfileTests(unittest.TestCase):
                 "check_devices ",
                 "check_device_creation ",
                 "check_machine_id ",
-                "check_ports ",
+                "check_ports x86_64",
                 "check_image ",
                 "NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534",
                 "check_entry ",
@@ -18474,6 +18620,114 @@ class SandboxSmokeProfileTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("limits requires MEMORY_MAX and PIDS_MAX", result.stderr)
         self.assertNotIn("NVX-UBUNTU-SANDBOX-OK", result.stdout)
+
+    def test_arm_raw_device_check_requires_private_devices_and_actual_refusal(self):
+        devices = {
+            f"/dev/{name}": self._fixture(f"raw-{name}", "")
+            for name in ("nvx-platform", "mem", "port")
+        }
+        for path in devices.values():
+            Path(path).unlink()
+        descriptors = self.root / "fds"
+        descriptors.mkdir()
+        (descriptors / "0").symlink_to("/dev/null")
+        (descriptors / "1").symlink_to("/dev/null")
+        (descriptors / "2").symlink_to("/dev/null")
+        replacements = {**devices, "/proc/$$/fd": descriptors.as_posix()}
+        read_control = (
+            'dd() { case "$*" in *"if=/dev/zero"*) return 0 ;; '
+            "*) return STATUS ;; esac; }\n"
+        )
+        for status, message in (
+            (1, None),
+            (0, "ended with status 0"),
+            (139, "ended with status 139"),
+        ):
+            with self.subTest(status=status):
+                result = self._run(
+                    ("check_ports",),
+                    read_control.replace("STATUS", str(status))
+                    + "check_ports aarch64\necho checked",
+                    replacements,
+                )
+                if message is None:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "checked\n")
+                else:
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn(message, result.stderr)
+        result = self._run(
+            ("check_ports",), "dd() { return 1; }\ncheck_ports aarch64", replacements
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("permitted private-device read did not work", result.stderr)
+        empty = self.root / "empty-fds"
+        empty.mkdir()
+        for directory, message in (
+            (self.root / "missing-fds", "descriptor view is unavailable"),
+            (empty, "cannot inspect the workload stdout descriptor"),
+        ):
+            result = self._run(
+                ("check_ports",),
+                read_control.replace("STATUS", "1") + "check_ports aarch64",
+                {**devices, "/proc/$$/fd": directory.as_posix()},
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(message, result.stderr)
+        result = self._run(
+            ("check_ports",),
+            read_control.replace("STATUS", "1")
+            + 'readlink() { echo "pipe:[owned-positive]"; }\ncheck_ports aarch64',
+            {**devices, "/proc/$$/fd": empty.as_posix()},
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("descriptor scan did not cover stdout", result.stderr)
+        for command, message in (
+            ("return 1", "cannot inspect the workload stdout descriptor"),
+            ("return 0", "stdout descriptor has no target"),
+        ):
+            result = self._run(
+                ("check_ports",),
+                read_control.replace("STATUS", "1")
+                + f"readlink() {{ {command}; }}\ncheck_ports aarch64",
+                replacements,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(message, result.stderr)
+        stable = descriptors / "3"
+        stable.symlink_to("/dev/null")
+        result = self._run(
+            ("check_ports",),
+            read_control.replace("STATUS", "1")
+            + f'readlink() {{ [ "$1" != "{stable.as_posix()}" ] || return 1; command readlink "$@"; }}\n'
+            + "check_ports aarch64",
+            replacements,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cannot inspect workload descriptor", result.stderr)
+        stable.unlink()
+        leak = descriptors / "3"
+        leak.symlink_to(devices["/dev/nvx-platform"])
+        result = self._run(
+            ("check_ports",),
+            read_control.replace("STATUS", "1") + "check_ports aarch64",
+            replacements,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("inherited raw-device descriptor", result.stderr)
+        leak.unlink()
+        exposed = Path(devices["/dev/nvx-platform"])
+        exposed.write_bytes(b"owned sentinel, not a real device")
+        result = self._run(
+            ("check_ports",),
+            read_control.replace("STATUS", "1") + "check_ports aarch64",
+            replacements,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"can see raw device {exposed.as_posix()}", result.stderr)
+        result = self._run(("check_ports",), "check_ports ppc64")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unsupported workload architecture ppc64", result.stderr)
 
 
 def _dynamic_entries(*entries: tuple[int, int]) -> bytes:

@@ -937,6 +937,7 @@ jobs:
             }}
         run: >-
           python3 scripts/nvx.py check-openvmm-ci
+          --include-arm64
           --wait-minutes "${WAIT_MINUTES}"
           --summary "${GITHUB_STEP_SUMMARY}"
 
@@ -1504,6 +1505,8 @@ jobs:
   release:
     name: Publish development release
     needs:
+      - required-status-check
+      - package-whp-arm64
       - debug-kernel
       - quality
       - nvx
@@ -1536,6 +1539,8 @@ jobs:
         github.event_name == 'push' &&
         github.ref == 'refs/heads/dev' &&
         !cancelled() &&
+        needs.required-status-check.result == 'success' &&
+        needs.package-whp-arm64.result == 'success' &&
         needs.debug-kernel.result == 'success' &&
         needs.quality.result == 'success' &&
         needs.nvx.result == 'success' &&
@@ -1595,7 +1600,8 @@ jobs:
         needs.package-whp.result == 'success'
       }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # Four packages' complete bounded retries plus the checkout/setup margin.
+    timeout-minutes: 110
     permissions:
       actions: read
       contents: write
@@ -1607,6 +1613,247 @@ jobs:
 
       - name: Publish development release
         uses: ./.github/actions/publish-development-release
+
+  # ARM products and jobs have their own identities. The x86 shards, cache
+  # keys, runner pools and required-status name above remain unchanged.
+  artifacts-arm64:
+    name: Build ARM64 guest artifacts
+    needs: [openvmm-changes]
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-guest-artifacts == 'true'
+        )
+      }}
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: rust:1.97.1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Build ARM guest artifacts
+        uses: ./.github/actions/build-arm64-guest-artifacts
+        with:
+          save-cache: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+
+      - name: Upload ARM guest artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: guest-aarch64
+          path: |
+            build/aarch64/Image
+            build/aarch64/Image.config
+            build/aarch64/Image.provenance.json
+            build/aarch64/Image-debug
+            build/aarch64/Image-debug.config
+            build/aarch64/Image-debug.provenance.json
+            build/aarch64/initramfs.cpio.gz
+            build/aarch64/initramfs.cpio.gz.packages.json
+            build/aarch64/initramfs.provenance.json
+            build/aarch64/initramfs-ubuntu.cpio.gz
+            build/aarch64/initramfs-ubuntu.cpio.gz.packages.json
+            build/aarch64/ubuntu-distro.erofs
+            build/aarch64/ubuntu-distro.erofs.manifest.json
+            build/aarch64/ubuntu-smoke-scratch.ext4
+          if-no-files-found: error
+          retention-days: 1
+
+  build-nvx-windows-arm64:
+    name: nvx binary / Windows ARM64 MSVC
+    if: >-
+      ${{
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
+    uses: ./.github/workflows/build-nvx-windows-arm64.yml
+
+  nvx-cli-windows-arm64:
+    name: NVX CLI / Windows ARM64
+    needs: [build-nvx-windows-arm64]
+    if: >-
+      ${{
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
+    runs-on: [self-hosted, windows, ARM64, whp, virtual-machine, general]
+    timeout-minutes: 30
+    env:
+      NVX: ${{ github.workspace }}\nvx\target\release\nvx.exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Checkout OpenVMM
+        uses: ./.github/actions/checkout-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Download ARM64 NVX executable
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nvx-windows-arm64-executable
+          path: nvx/target/release
+
+      - name: Download ARM64 NVX provenance
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nvx-windows-arm64-provenance
+          path: build
+
+      - name: Verify native ARM64 Python
+        if: runner.os == 'Windows'
+        shell: python {0}
+        env:
+          RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          import os
+          import sys
+          import sysconfig
+
+          if sys.platform != "win32" or sysconfig.get_platform() != "win-arm64" or os.environ["RUNNER_ARCH"] != "ARM64":
+              raise SystemExit("Native Windows ARM64 Python is required")
+
+      - name: Validate NVX CLI
+        uses: ./.github/actions/validate-nvx
+
+      - name: Compare OpenVMM contracts on ARM64
+        if: runner.os == 'Windows'
+        shell: python {0}
+        run: |
+          import subprocess
+
+          for target in ("openvmm_vectors", "openvmm_cpu_profiles"):
+              subprocess.run([
+                  "cargo", "test", "--locked", "--manifest-path", r"nvx\Cargo.toml",
+                  "--no-default-features", "--test", target, "--", "--ignored",
+              ], check=True)
+
+  build-openvmm-windows-arm64:
+    name: OpenVMM binary / Windows ARM64 MSVC
+    needs: [openvmm-changes, artifacts-arm64]
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts-arm64.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-openvmm-binaries == 'true'
+        )
+      }}
+    uses: ./.github/workflows/build-openvmm-binary.yml
+    with:
+      architecture: aarch64
+      display-name: Windows ARM64 MSVC
+      runner: '["self-hosted", "windows", "ARM64", "whp", "virtual-machine", "general"]'
+      backend: whp
+      artifact: openvmm-windows-arm64
+      binary: openvmm/target/release/openvmm.exe
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+  nvx-microvm-tests-whp-arm64:
+    name: NVX microVM tests / Windows ARM64 / WHP / ${{ matrix.guest }}
+    needs: [artifacts-arm64, build-openvmm-windows-arm64, build-nvx-windows-arm64, openvmm-changes]
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts-arm64.result == 'success' &&
+        needs.build-openvmm-windows-arm64.result == 'success' &&
+        needs.build-nvx-windows-arm64.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-microvm-tests == 'true'
+        )
+      }}
+    strategy:
+      fail-fast: false
+      matrix:
+        guest: [alpine, ubuntu]
+    uses: ./.github/workflows/run-arm64-whp.yml
+    with:
+      guest: ${{ matrix.guest }}
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+  nvx-microvm-debug-whp-arm64:
+    name: NVX microVM tests / Windows ARM64 / WHP / Debug
+    needs: [artifacts-arm64, build-openvmm-windows-arm64, build-nvx-windows-arm64, openvmm-changes]
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts-arm64.result == 'success' &&
+        needs.build-openvmm-windows-arm64.result == 'success' &&
+        needs.build-nvx-windows-arm64.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-microvm-tests == 'true'
+        )
+      }}
+    uses: ./.github/workflows/run-arm64-whp.yml
+    with:
+      debug-kernel: true
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+  package-whp-arm64:
+    name: Package / Windows ARM64 / WHP
+    needs: [artifacts-arm64, build-openvmm-windows-arm64, build-nvx-windows-arm64, openvmm-changes]
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts-arm64.result == 'success' &&
+        needs.build-openvmm-windows-arm64.result == 'success' &&
+        needs.build-nvx-windows-arm64.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-benchmarks == 'true'
+        )
+      }}
+    uses: ./.github/workflows/package-platform.yml
+    with:
+      architecture: aarch64
+      display-name: Windows ARM64 / WHP
+      runner: '["self-hosted", "windows", "ARM64", "whp", "virtual-machine", "general"]'
+      release-platform: windows-whp-aarch64
+      openvmm-artifact: openvmm-windows-arm64
+      nvx-artifact: nvx-windows-arm64
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
   performance-gate:
     name: Performance regression gate
@@ -1646,6 +1893,13 @@ jobs:
   required-status-check:
     name: Required status check
     needs:
+      - artifacts-arm64
+      - build-nvx-windows-arm64
+      - nvx-cli-windows-arm64
+      - build-openvmm-windows-arm64
+      - nvx-microvm-tests-whp-arm64
+      - nvx-microvm-debug-whp-arm64
+      - package-whp-arm64
       - quality
       - nvx
       - build-nvx-linux-musl
@@ -1740,6 +1994,43 @@ jobs:
           --run-openvmm-ci-check "${RUN_OPENVMM_CI_CHECK}"
           --run-microvm-tests "${RUN_MICROVM_TESTS}"
           --run-benchmarks "${RUN_BENCHMARKS}"
+
+      # The existing checker retains the x86 job inventory and its defaults.
+      # ARM jobs are additional obligations, selected explicitly from the same
+      # classifier; a skipped selected job is not a successful native run.
+      - name: Verify selected ARM64 jobs
+        if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+        shell: python3 {0}
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          SAME_REPOSITORY: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          import json
+          import os
+
+          needs = json.loads(os.environ["NEEDS"])
+          changes = needs["openvmm-changes"]
+          trusted = os.environ["SAME_REPOSITORY"] == "true"
+          def selected(output):
+              return changes["result"] != "success" or changes["outputs"].get(output) != "false"
+          expected = {
+              "artifacts-arm64": selected("run-guest-artifacts"),
+              "build-nvx-windows-arm64": trusted,
+              "nvx-cli-windows-arm64": trusted,
+              "build-openvmm-windows-arm64": trusted and selected("run-openvmm-binaries"),
+              "nvx-microvm-tests-whp-arm64": trusted and selected("run-microvm-tests"),
+              "nvx-microvm-debug-whp-arm64": trusted and selected("run-microvm-tests"),
+              "package-whp-arm64": trusted and selected("run-benchmarks"),
+          }
+          failures = []
+          for job, required in expected.items():
+              result = needs.get(job, {}).get("result", "missing")
+              wanted = "success" if required else "skipped"
+              if result != wanted:
+                  failures.append(f"{job}: {result}, expected {wanted}")
+          if failures:
+              raise SystemExit("\n".join(failures))
+          print("Selected ARM64 jobs passed; unselected jobs were skipped.")
 
   # A dev push records its performance results for a full run of dev to
   # persist, rather than committing them to dev: every push to dev outside the

@@ -20,6 +20,7 @@ from .benchmark import (
     InteractiveProcess,
     append_cleanup_failures,
     combined_failure,
+    prepare_arm_vm_evidence,
     raise_with_output,
     run_cleanup,
     terminate_after_failure,
@@ -90,6 +91,7 @@ class OpenvmmProcess:
         environment: Mapping[str, str] | None = None,
         output_read_delay: float = 0.0,
         time_abi_status: bool = True,
+        architecture: str = "x86_64",
     ) -> None:
         """Start OpenVMM and scan its console output for the time ABI.
 
@@ -101,9 +103,10 @@ class OpenvmmProcess:
         """
         if output_read_delay < 0:
             raise ValueError("OpenVMM output read delay cannot be negative")
+        command = prepare_arm_vm_evidence(command, log_path, architecture)
         # The monitor exists before OpenVMM does, so that nothing that it
         # raises leaves OpenVMM running outside the cleanup below (#720).
-        self._monitor = TimeAbiMonitor(command)
+        self._monitor = TimeAbiMonitor(command, architecture=architecture)
         self._query_status = time_abi_status and self._monitor.cold_boot
         process_environment = os.environ.copy()
         process_environment["OPENVMM_LOG"] = "off"

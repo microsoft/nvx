@@ -70,6 +70,7 @@ from nvx_tools.collect_ubuntu_sources import (
 )
 from nvx_tools.common import (
     ScriptError,
+    architecture_kwargs,
     artifact_path,
     positive_int,
 )
@@ -261,7 +262,11 @@ def command_build_scratch_template(args: argparse.Namespace) -> None:
 
 
 def command_verify_guest_determinism(args: argparse.Namespace) -> None:
-    verify_guest_determinism(args.work_dir, args.guest)
+    verify_guest_determinism(
+        args.work_dir,
+        args.guest,
+        **(architecture_kwargs(getattr(args, "architecture", "x86_64"))),
+    )
 
 
 def command_build_openvmm(args: argparse.Namespace) -> None:
@@ -277,8 +282,10 @@ def command_record_nvx_provenance(args: argparse.Namespace) -> None:
     print(f">> recorded the provenance of nvx in {path}")
 
 
-def command_materialize_kernel_provenance_inputs(_: argparse.Namespace) -> None:
-    materialize_kernel_provenance_inputs()
+def command_materialize_kernel_provenance_inputs(args: argparse.Namespace) -> None:
+    materialize_kernel_provenance_inputs(
+        **(architecture_kwargs(getattr(args, "architecture", "x86_64")))
+    )
 
 
 def command_setup_cross_os_cache(_: argparse.Namespace) -> None:
@@ -401,6 +408,7 @@ def command_package(args: argparse.Namespace) -> None:
         destination=args.destination,
         include_source=args.include_source,
         force=args.force,
+        **(architecture_kwargs(getattr(args, "architecture", "x86_64"))),
     )
 
 
@@ -614,6 +622,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     determinism.add_argument("--guest", choices=GUEST_NAMES, required=True)
     determinism.add_argument(
+        "--architecture", choices=("x86_64", "aarch64"), default="x86_64"
+    )
+    determinism.add_argument(
         "--work-dir",
         type=Path,
         default=(
@@ -648,6 +659,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     kernel_provenance = subparsers.add_parser(
         "materialize-kernel-provenance-inputs",
         help="write kernel provenance inputs from raw run-head blobs",
+    )
+    kernel_provenance.add_argument(
+        "--architecture", choices=("x86_64", "aarch64"), default="x86_64"
     )
     kernel_provenance.set_defaults(handler=command_materialize_kernel_provenance_inputs)
 
@@ -944,6 +958,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     package = subparsers.add_parser("package", help="stage a binary distribution")
     package.add_argument("--version")
+    package.add_argument(
+        "--architecture", choices=("x86_64", "aarch64"), default="x86_64"
+    )
     package.add_argument("--destination", type=Path)
     source_mode = package.add_mutually_exclusive_group(required=True)
     source_mode.add_argument("--include-source", action="store_true")

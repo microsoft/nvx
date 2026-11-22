@@ -19,6 +19,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::str::FromStr;
 use std::sync::mpsc;
 
+use super::commands::clear_phase_with as test_clear_phase_with;
 use super::cpu_mask::CpuMask;
 use super::daemon::{self, Promoter};
 use super::decoders::{
@@ -430,16 +431,6 @@ fn test_clear_phase(arguments: &[&[u8]]) -> Result<(), CommandError> {
     test_clear_phase_with(arguments, |adjustment| {
         sys::adjust_clock(adjustment).map(drop)
     })
-}
-
-/// Runs the clear-phase hook through `adjust`, separated so that its privileged operation is
-/// testable without changing the host's clock.
-fn test_clear_phase_with(
-    arguments: &[&[u8]],
-    adjust: impl FnOnce(ClockAdjustment) -> Result<(), Errno>,
-) -> Result<(), CommandError> {
-    exactly::<0>(arguments)?;
-    adjust(ClockAdjustment::ClearPhase).map_err(|_| CommandError::Operation)
 }
 
 /// Plans and prints one step or slew correction, with the `adjtimex` modes and status that the

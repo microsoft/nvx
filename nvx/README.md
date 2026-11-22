@@ -2079,12 +2079,18 @@ as `nvx-snapshot` does.
 | `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME` | Serves the managed control session and supervises sequential workloads |
 | `nvx-ingress [inherit\|start] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that the caller bound to one after the clone's process-free application; `start` binds such a socket and starts `inherit` on it in a session of its own, then exits once its program runs, or with status 1 if it does not start, for a guest agent that cannot hold the announcer; `test DIRECTORY` runs synthetic procfs snapshots |
 | `nvx-time [--report-only] COMMAND` | Enforces the cold-boot time ABI, publishes time state, and runs the discipline and violation-watcher daemon; x86-64 also supports capture/restore repair and `test NAME ...` decoder/process hooks |
-| `nvx-time-probe latency\|warp\|clock ...` | Diagnoses clock-read latency, cross-CPU TSC warp and offset, the clocks, CPUID, clock events, kernel messages, and optionally MSRs (x86_64) |
+| `nvx-time-probe latency\|warp\|clock ...` | Checks pairwise counter warp on x86-64/ARM64; x86-64 also diagnoses latency, clocks, CPUID, clock events, kernel messages and MSRs |
 | `nvx-init TIME_DAEMON [ANNOUNCER]` | Takes PID 1 over from a layered root's early boot, with its time daemon and optional announcer: gives itself and them an out-of-memory score adjustment of -1000 and a nice value of -10, collects every child's status, and, after `sync`, ends the VM with status 125 when a helper ends, 0 on `SIGTERM`, or the status of a failed x86-64 guest restore's class; elsewhere it exits with 2 |
 
 Each binary's command line, exit statuses, and byte output are compatibility
 contracts; the [`nvx::guest`](src/guest/mod.rs) documentation describes each
-program. After a restored platform capture, `nvx-init` keeps one guest restore
+program. On ARM64, `nvx-time-probe warp` admits the actual platform clock
+context and CNTFRQ before starting pinned workers. It preserves full Hz and
+refuses a rate override that differs from that context. The shared pairwise
+algorithm and its 1000 ns default bound are unchanged; x86 latency and
+CPUID/MSR diagnostics are not enabled on ARM.
+
+After a restored platform capture, `nvx-init` keeps one guest restore
 across control-session replacements, with its deadline anchored to the repair
 acknowledgement. It takes the restore's record from the activation record of
 its restore packet, before its control session, then applies the restore's

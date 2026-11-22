@@ -178,6 +178,67 @@ def describe_cpu_generations(
 OPENVMM_CPU_PROFILES = Path("vmm_core", "cpu_profile", "profiles")
 
 
+@dataclass(frozen=True)
+class ArmCpuProfile:
+    """The ISA-specific identity of a pinned ARM profile, not a CPUID generation."""
+
+    profile_id: str
+    vendor: str
+    sha256: str
+    physical_address_bits: int
+    registers: tuple[str, ...]
+
+
+def arm_cpu_profile(document: object) -> ArmCpuProfile | None:
+    """Read an ARM identity; leave CPUID documents to their existing reader."""
+    if not isinstance(document, dict) or "profile" not in document:
+        return None
+    document = cast(dict[str, object], document)
+    profile_value = document["profile"]
+    if not isinstance(profile_value, dict):
+        raise ValueError("its ARM profile is not a JSON object")
+    profile = cast(dict[str, object], profile_value)
+    if profile.get("schema") != "nvx.arm64.cpu.v1":
+        raise ValueError("its ARM profile schema is unsupported")
+    profile_id = profile.get("id")
+    vendor = document.get("vendor")
+    sha256 = document.get("sha256")
+    bits = _profile_int(profile.get("physical_address_bits"), "physical address bits")
+    fields = profile.get("fields")
+    if not isinstance(fields, list) or not fields:
+        raise ValueError("its ARM profile names no ID registers")
+    registers: list[str] = []
+    for entry in cast(list[object], fields):
+        if not isinstance(entry, dict):
+            raise ValueError("its ARM ID register is not a JSON object")
+        register = cast(dict[str, object], entry).get("register")
+        if (
+            not isinstance(register, str)
+            or re.fullmatch(r"ID_AA64[A-Z0-9]+_EL1", register) is None
+            or register in registers
+        ):
+            raise ValueError("its ARM ID register is malformed or repeated")
+        registers.append(register)
+    if (
+        not isinstance(profile_id, str)
+        or _PROFILE_ID.fullmatch(profile_id) is None
+        or not isinstance(vendor, str)
+        or not vendor
+        or not isinstance(sha256, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", sha256) is None
+        or bits not in (32, 36, 40, 42, 44, 48, 52)
+    ):
+        raise ValueError("its ARM profile identity is malformed")
+    return ArmCpuProfile(profile_id, vendor, sha256[7:], bits, tuple(registers))
+
+
+def counter_hz_is_valid(hz: int | float, *, architecture: str = "x86_64") -> bool:
+    """Apply the existing TSC or architected CNTFRQ contract."""
+    if architecture == "aarch64":
+        return 0 < hz <= 0xFFFFFFFF
+    return architecture == "x86_64" and MIN_TSC_HZ <= hz <= MAX_TSC_HZ
+
+
 def _profile_int(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"its {name} is not an integer")
@@ -585,16 +646,35 @@ def describe_exit_status(returncode: int | None) -> str | None:
     return f"guest powered off with time ABI status {returncode} ({STATUS_CLASSES[returncode]})"
 
 
-def _command_option(command: Sequence[str], option: str) -> str | None:
-    for index, argument in enumerate(command[:-1]):
+def _command_option(
+    command: Sequence[str], option: str, *, architecture: str = "x86_64"
+) -> str | None:
+    if architecture == "x86_64":
+        for index, argument in enumerate(command[:-1]):
+            if argument == option:
+                return command[index + 1]
+        return None
+    for index, argument in enumerate(command):
+        if argument.startswith(option + "="):
+            return argument[len(option) + 1 :]
         if argument == option:
-            return command[index + 1]
+            return command[index + 1] if index + 1 < len(command) else None
     return None
 
 
-def is_cold_boot_command(command: Sequence[str]) -> bool:
+def is_cold_boot_command(
+    command: Sequence[str], *, architecture: str = "x86_64"
+) -> bool:
     """Whether an OpenVMM command boots a kernel rather than restoring."""
-    return "--kernel" in command and "--restore-snapshot" not in command
+    if architecture == "x86_64":
+        return "--kernel" in command and "--restore-snapshot" not in command
+    cli_run = bool(command) and Path(command[0]).stem == "nvx" and "run" in command[1:]
+    return (
+        _command_option(command, "--kernel", architecture=architecture) is not None
+        or cli_run
+    ) and _command_option(
+        command, "--restore-snapshot", architecture=architecture
+    ) is None
 
 
 def _validate_marker(
@@ -604,6 +684,7 @@ def _validate_marker(
     backend: str | None,
     online_cpus: int | None,
     generation: int | None = None,
+    architecture: str = "x86_64",
 ) -> None:
     """Check a boot or restore line's fields against the backend's rates."""
     problems: list[str] = []
@@ -613,12 +694,21 @@ def _validate_marker(
         problems.append(f"it is not a passing {phase} check")
     try:
         tsc_hz = int(fields.get("tsc_hz", ""))
-        if not MIN_TSC_HZ <= tsc_hz <= MAX_TSC_HZ:
+        if architecture == "aarch64":
+            if not 0 < tsc_hz <= 0xFFFFFFFF:
+                problems.append(
+                    f"counter frequency={tsc_hz} is not a nonzero CNTFRQ value"
+                )
+        elif architecture != "x86_64":
+            problems.append(f"unsupported counter architecture {architecture!r}")
+        elif not MIN_TSC_HZ <= tsc_hz <= MAX_TSC_HZ:
             problems.append(f"tsc_hz={tsc_hz} is outside 500 MHz to 10 GHz")
     except ValueError:
         problems.append(f"tsc_hz={fields.get('tsc_hz')!r} is not an integer")
     lapic = fields.get("lapic_hz")
     expected_lapic = LAPIC_HZ.get(backend) if backend is not None else None
+    if architecture == "aarch64":
+        expected_lapic = 0
     if expected_lapic is not None and lapic != str(expected_lapic):
         problems.append(f"lapic_hz={lapic} is not the {backend} rate {expected_lapic}")
     actual = fields.get("generation", "")
@@ -641,9 +731,16 @@ def validate_boot_marker(
     *,
     backend: str | None,
     online_cpus: int | None = None,
+    architecture: str = "x86_64",
 ) -> None:
     """Check the boot marker's fields against the backend's declared rates."""
-    _validate_marker(fields, phase="boot", backend=backend, online_cpus=online_cpus)
+    _validate_marker(
+        fields,
+        phase="boot",
+        backend=backend,
+        online_cpus=online_cpus,
+        architecture=architecture,
+    )
 
 
 def validate_restore_marker(
@@ -678,10 +775,24 @@ class TimeAbiMonitor:
     guest a restore line. The query's runtime line is kept as ``runtime``.
     """
 
-    def __init__(self, command: Sequence[str] = ()) -> None:
-        self.backend = _command_option(command, "--hypervisor")
-        self.cold_boot = is_cold_boot_command(command)
-        self.restored = "--restore-snapshot" in command
+    def __init__(
+        self, command: Sequence[str] = (), *, architecture: str = "x86_64"
+    ) -> None:
+        if architecture not in ("x86_64", "aarch64"):
+            raise ValueError(f"unsupported counter architecture: {architecture}")
+        self.architecture = architecture
+        self.backend = _command_option(
+            command, "--hypervisor", architecture=architecture
+        )
+        self.cold_boot = is_cold_boot_command(command, architecture=architecture)
+        self.restored = (
+            "--restore-snapshot" in command
+            if architecture == "x86_64"
+            else _command_option(
+                command, "--restore-snapshot", architecture=architecture
+            )
+            is not None
+        )
         self.boot: dict[str, str] | None = None
         self.restores: list[dict[str, str]] = []
         self.runtime: dict[str, str] | None = None
@@ -836,6 +947,7 @@ class TimeAbiMonitor:
             self.boot,
             backend=self.backend,
             online_cpus=online_cpus,
+            architecture=self.architecture,
         )
         return self.boot
 
@@ -852,6 +964,8 @@ class TimeAbiMonitor:
         first, and each line keeps the values from when its check ran: only
         the restore line describes the CPUs that are online now.
         """
+        if self.architecture == "aarch64":
+            raise TimeAbiFailure("ARM snapshot restore is not qualified")
         if not self.restores:
             raise TimeAbiFailure(
                 f"guest did not report an NVX-TIME-ABI restore marker before "
