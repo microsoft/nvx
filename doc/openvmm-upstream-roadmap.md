@@ -9,8 +9,9 @@
 - Mapped fork tip: `1e492803287f04b40bb7c17e8648c4b96af52ecc`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR18 fixups at positions 302,
   333, 342, 345, 347, and 351, and the PR13 fixups at positions 340 and 349.
-- NVX's pinned OpenVMM revision: `de700ffc296303ebd76d79423c6ce1fd801d1dc5`, position 353, the head
-  of microsoft/openvmm#5219, whose commit follows position 352, `3aefff9ba`, the head of
+- NVX's pinned OpenVMM revision: `afa67d6a67d76a573439739bf98f8bc85158adcc`, position 354, the head
+  of microsoft/openvmm#5220, whose commit follows position 353, `de700ffc2`, the head of
+  microsoft/openvmm#5219, whose commit follows position 352, `3aefff9ba`, the head of
   microsoft/openvmm#5218, whose commit follows position 351, `8bea555db`, the head of
   microsoft/openvmm#5217, whose commit follows position 350, `189dc519f`, the head of
   microsoft/openvmm#5216, whose commit follows position 349, `2a483a06f`, the head of
@@ -30,8 +31,8 @@
   landed, so each later commit's position is one less than before, and it added five fixups at its
   tip, positions 335-339. Of the 334 replayed commits, 47 conflicted with upstream and 13 replayed
   with new context; see [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase). The pin is
-  227 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
-  341, 343, 344, 346, 348, 350, 352, and 353 are not yet assigned to PRs, positions 302, 333, 342,
+  228 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
+  341, 343, 344, 346, 348, 350, and 352-354 are not yet assigned to PRs, positions 302, 333, 342,
   345, 347, and 351 are PR18 fixups, positions 340 and 349 are PR13 fixups, and positions 316 and
   335-339 are rebase fixups; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
@@ -1641,7 +1642,8 @@ bf353460f
   -> PR18 fixup [351]
   -> virtio-fs links refused for nodes whose names are all gone [352]
   -> microVM file children attached through relative paths and symbolic links [353]
-  -> de700ffc2 (NVX pin)
+  -> virtio-fs aggregate root link counts that leave out file children [354]
+  -> afa67d6a6 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1701,7 +1703,7 @@ tests.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 227 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 228 later commits, positions
 302, 333, 342, 345, 347, and 351 are PR18 fixups, positions 340 and 349 are PR13 fixups, position
 316 is the fixup of the v7.1 rebase, positions 335-339 are the fixups of the v7.2 rebase, and the
 others are not yet classified or assigned to PRs.
@@ -1712,7 +1714,7 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
 v7.0 reorganization, position 316 is the v7.1 rebase's fixup, positions 317-334 followed the
-v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-353 followed the
+v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-354 followed the
 v7.2 rebase, so they combine none, apart from
 position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0
 reorganization folded into them. Each commit through position 316 has the position that it had in
@@ -1720,7 +1722,7 @@ v7.0 and v7.1, and each of positions 317-334 is its v7.1 position less one, sinc
 dropped v7.1 position 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each
 commit's v6.1 position is its v6.0 position less seven, the number of commits that the v6.1 rebase
 dropped before it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1
-position 149 on, and positions 297-353 have no earlier position; see
+position 149 on, and positions 297-354 have no earlier position; see
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
@@ -1960,6 +1962,7 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 351 | `8bea555db` | - | - | - | - | - | - | virtiofs: skip gone or hidden entries in microVM READDIRPLUS (microsoft/openvmm#5217); fold into 083, its policy test into 160 |
 | 352 | `3aefff9ba` | - | - | - | - | - | - | virtiofs: refuse to link a node whose last name is gone (microsoft/openvmm#5218) |
 | 353 | `de700ffc2` | - | - | - | - | - | - | virtiofs: resolve a microVM file child's path as its identity does (microsoft/openvmm#5219) |
+| 354 | `afa67d6a6` | - | - | - | - | - | - | virtiofs: count only child directories in the synthetic root's nlink (microsoft/openvmm#5220) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -1970,7 +1973,7 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`
 main on 2026-11-19, for positions 321-324, `78af54a51`, upstream main on 2026-11-20, for position
 325, `d83f87209`, upstream main later that day, for position 326, `265f0a73f`, upstream main
 later still, for positions 327 and 328, and `bf353460f`, upstream main on 2026-11-21 and the v7.2
-fork base, for positions 329-334 and 340-353.
+fork base, for positions 329-334 and 340-354.
 They name the positions that the commits have now, but neither the v7.2 rebase on `bf353460f`, the
 v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did
 the v6.1 rebase check the earlier ones on `7d90c4104`.
@@ -4763,6 +4766,25 @@ and positions 165, 194, 341, and 343 also change. It fixes a defect of position 
 maps, so it is not yet assigned to a PR either and follows position 165, as position 343 does.
 Upstream main lacks the defect, since it lacks the microVM profile and its file children.
 Replaying the commit there conflicts in both files, which upstream main lacks, so it cannot go
+upstream on its own.
+
+Position 354 has `VirtioFs::synthetic_root_nlink` count only the children of an aggregate's
+synthetic root that a read of the root lists as directories, so that `FUSE_GETATTR` and `FUSE_STATX`
+of the root report two plus its subdirectories, as for any directory (microsoft/nvx#1632).
+Upstream's aggregate support, microsoft/openvmm#3821, counted every child, when every child was a
+directory. Position 165 adds file children, which `write_child_entry` lists as `DT_REG`, but left
+them in the count, so an aggregate with file children reported more links than the subdirectories
+that its root holds: two file children and a directory child gave 5 rather than 3. The commit counts
+the children whose volume exposes no file, which is how `write_child_entry` tells a directory child
+from a file child; aggregates without file children, among them every aggregate outside a microVM,
+and the saved state are unchanged. It changes `synthetic_root_nlink` in `aggregate.rs`, which
+microsoft/openvmm#3821 adds and no chain commit changes; PR18's position 081 and positions 164, 165,
+332, 341, and 350 also change the file. It adds a test to the microVM's aggregate tests, which
+position 164 adds and positions 165, 194, 341, 343, and 353 also change. It fixes a defect of
+position 165, which no PR maps, so it is not yet assigned to a PR either and follows position 165,
+as positions 343 and 353 do. Upstream main lacks the defect, since it lacks the microVM profile and
+its file children. Its change to `aggregate.rs` applies to upstream main, but replaying the commit
+there conflicts in the microVM's `aggregate_fs_tests.rs`, which upstream main lacks, so it cannot go
 upstream on its own.
 
 ## PR summary
