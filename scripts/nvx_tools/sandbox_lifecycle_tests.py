@@ -117,6 +117,8 @@ def check_restage_bindings(before: bytes, after: bytes, image: str) -> None:
         bindings.append(binding)
     if bindings[0] == bindings[1]:
         raise RuntimeError("re-provision kept the stale distro binding")
+
+
 # A sandbox's VM starts without an OpenVMM lifecycle option, since nvx-init
 # owns its lifecycle, so OpenVMM reports its operation as a run.
 MANAGED_SUCCESS = {"operation": "run", "category": "success", "status_code": 0}
@@ -813,8 +815,12 @@ class LifecycleAcceptance:
 
         def source_metadata(value: os.stat_result) -> tuple[int, ...]:
             return (
-                value.st_dev, value.st_ino, value.st_mode, value.st_size,
-                value.st_mtime_ns, value.st_ctime_ns,
+                value.st_dev,
+                value.st_ino,
+                value.st_mode,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
             )
 
         def require_protected_source() -> None:
@@ -914,7 +920,8 @@ class LifecycleAcceptance:
                         "same_fixture_reprovision": True,
                     },
                     indent=2,
-                ) + "\n"
+                )
+                + "\n"
             ).encode(),
         )
 
