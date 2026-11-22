@@ -21,7 +21,6 @@ use super::{
 use crate::guest_restore::{GuestRestoreRecord, TransactionId};
 use crate::hex::hex;
 use crate::host::artifacts::compatibility::compatibility;
-use crate::host::cli::artifacts::locate;
 use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
 use crate::host::cli::download::Hold;
 use crate::host::cli::exec_lock::ExecLock;
@@ -30,7 +29,8 @@ use crate::host::cli::sandbox::state::{
     Config, RecordedDistro, RecordedScratch, Source, read_config, serialize_launch,
 };
 use crate::host::cli::sandbox::{
-    Artifacts, Options, error_with_cause, export_tokens, path_string, refuse_own_files,
+    Artifacts, Options, arm_effective_command_line, error_with_cause, export_tokens, path_string,
+    refuse_own_files,
 };
 use crate::host::cli::session::{ExecRequest, ExecResult, Session, closes};
 use crate::host::cli::shell::format_command;
@@ -43,7 +43,7 @@ use crate::host::process::KILL_TIMEOUT;
 use crate::host::report::Report;
 use crate::host::restore::{Attribution, RestoreError, RestoreEvidence};
 use crate::host::restore_driver::{self, Cancel, ControlRestoreError, Workload};
-use crate::host::runtime::{ArtifactIdentity, Runtime, RuntimeIdentity};
+use crate::host::runtime::{ArtifactIdentity, GuestArchitecture, Runtime, RuntimeIdentity};
 use crate::host::sandbox::distro::DISTRO_POLICY_REVISION;
 use crate::host::sandbox::scratch::{CLAIM_RELEASE_WAIT, CheckedScratch};
 use crate::host::session::{ExecEvent, SessionError};
@@ -83,6 +83,8 @@ fn start_locked(
     let config_path = state_dir.join(CONFIG_NAME);
     require_config(state_dir)?;
     let config = read_config(&config_path)?;
+    let selected_artifacts = artifacts.with_architecture(Config::recorded_architecture(&config)?);
+    let artifacts = &selected_artifacts;
     // The release of a checkout without artifacts is downloaded before the runtime identity of a
     // recorded launch is read from their install metadata, and no download replaces them until
     // the start ends, once OpenVMM has read them, so that the runtime identity that the start
@@ -112,7 +114,7 @@ fn start_locked(
         image.path(),
         scratch_image.as_deref(),
         config.export(),
-        Some(&locate(artifacts.root)?),
+        Some(&artifacts.locate()?),
     )?;
     // The view of each restore links the snapshot's files, which a share of the store would
     // give the guest to change.
@@ -139,7 +141,7 @@ fn start_locked(
         _ => None,
     };
     let vm_config = config.vm_config()?;
-    check_command_line(&config, &vm_config)?;
+    check_command_line(&config, &vm_config, config.architecture())?;
     artifacts.require()?;
     let runtime = runtime_for(artifacts, &config, artifacts.launch_identity()?)?;
     let restore = source.as_ref().map(|source| Restore {
@@ -627,7 +629,7 @@ pub(crate) fn run(
         // As `start` does, refuse the user's own nvx_* tokens, and the command line that the
         // launch would refuse, such as one that holds double quotes.
         let vm_config = config.vm_config()?;
-        check_command_line(&config, &vm_config)?;
+        check_command_line(&config, &vm_config, config.architecture())?;
         vm_config.check_command_line().map_err(error_with_cause)?;
         Session::exec_payload(request)?;
         Ok((config, vm_config))
@@ -646,7 +648,7 @@ pub(crate) fn run(
         config.distro().path(),
         config.scratch().as_deref(),
         config.export(),
-        Some(&locate(artifacts.root)?),
+        Some(&artifacts.locate()?),
     )?;
     if !options.dry_run
         && let Some(report) = &options.outcome_report
@@ -846,7 +848,7 @@ fn record(
 /// boot tokens of its root, as when the user's part adds a virtio-mmio device at the scratch
 /// disk's base beside a RAM upper; and one that hides from Linux the tokens that OpenVMM appends
 /// to it, with a `--` or an unclosed quote, as Linux reads them.
-fn check_command_line(config: &Config, vm: &VmConfig) -> Result {
+fn check_command_line(config: &Config, vm: &VmConfig, architecture: GuestArchitecture) -> Result {
     let refused = |message: &str| Exit::error(ErrorCode::Unsupported, message);
     let user = config.cmdline().as_bytes();
     if user.contains(&0) {
@@ -872,7 +874,18 @@ fn check_command_line(config: &Config, vm: &VmConfig) -> Result {
         .filesystem
         .as_ref()
         .map_or(0, |plan| export_tokens(plan).len());
-    if line.len() + shares + 1 > COMMAND_LINE_BUDGET {
+    if architecture == GuestArchitecture::Aarch64 {
+        let length = arm_effective_command_line(vm)
+            .map_err(error_with_cause)?
+            .len()
+            + 1;
+        if length > 2048 {
+            return Err(refused(&format!(
+                "sandbox AArch64 kernel command line needs {length} bytes including platform, \
+                 CPU/control, network/export tokens and the NUL; its limit is 2048 bytes"
+            )));
+        }
+    } else if line.len() + shares + 1 > COMMAND_LINE_BUDGET {
         return Err(refused(
             "sandbox kernel command line exceeds its 1024-byte x86 budget; use shorter arguments \
              and kernel parameters",

@@ -1,4 +1,5 @@
-//! The CLI's typed `config.json`, in format 10 only: one EROFS or GPT image by path,
+//! The CLI's typed `config.json`: legacy x86 format 10 and architecture-explicit format 11,
+//! with one EROFS or GPT image by path,
 //! a scratch upper by path or a RAM upper with its explicit cap, the image bindings,
 //! and the workload's view, network and export, with the export's pins.
 //!
@@ -45,6 +46,7 @@ use crate::host::config::{
 };
 use crate::host::filesystem::{ExportPlan, Pins, PlannedExport, ReservedTargets};
 use crate::host::paths;
+use crate::host::runtime::GuestArchitecture;
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding, DistroFormat};
 use crate::host::sandbox::layer::{LayerRole, SandboxLayer};
 use crate::host::sandbox::mount::{HostQueries, check_distinct_export_roots, os_error};
@@ -63,7 +65,7 @@ mod tests;
 /// The typed image and upper configuration that provision writes and start reads.
 const CONFIG_FORMAT: u64 = 10;
 /// Every configuration format that `start` reads.
-const CONFIG_FORMATS: [u64; 1] = [CONFIG_FORMAT];
+const CONFIG_FORMATS: [u64; 2] = [CONFIG_FORMAT, 11];
 /// What messages call a configuration.
 const DESCRIPTION: &str = "sandbox configuration";
 
@@ -398,8 +400,20 @@ pub(crate) fn serialize_launch(
     source: Option<&Source>,
 ) -> Result<String> {
     let (workload_uid, workload_gid) = config.workload_identity;
+    let architecture = config.architecture;
+    if source.is_some() && architecture == GuestArchitecture::Aarch64 {
+        return Err(Exit::error(
+            ErrorCode::Unsupported,
+            "AArch64 snapshot restore is unsupported",
+        ));
+    }
     let record = Config {
-        format: CONFIG_FORMAT,
+        format: if architecture == GuestArchitecture::X86_64 {
+            CONFIG_FORMAT
+        } else {
+            11
+        },
+        architecture: (architecture == GuestArchitecture::Aarch64).then_some(architecture),
         image: distro.image.clone(),
         upper: match scratch {
             Some(scratch) => Upper::Scratch {
@@ -441,23 +455,45 @@ pub(crate) fn serialize_launch(
 /// another format, such as an older one, also says to deprovision the sandbox and provision it
 /// again.
 pub(crate) fn read_config(path: &Path) -> Result<Object> {
-    read_object(path, DESCRIPTION, "format", &CONFIG_FORMATS).map_err(|error| {
-        match (error.code(), error.message()) {
-            (Some(ErrorCode::FormatUnsupported), Some(message)) => Exit::error(
-                ErrorCode::FormatUnsupported,
-                format!("{message}; deprovision the sandbox and provision it again"),
-            ),
-            _ => error,
-        }
-    })
+    let object =
+        read_object(path, DESCRIPTION, "format", &CONFIG_FORMATS).map_err(|error| {
+            match (error.code(), error.message()) {
+                (Some(ErrorCode::FormatUnsupported), Some(message)) => Exit::error(
+                    ErrorCode::FormatUnsupported,
+                    format!("{message}; deprovision the sandbox and provision it again"),
+                ),
+                _ => error,
+            }
+        })?;
+    if object.get("format").and_then(Value::as_u64) == Some(11) {
+        Config::recorded_architecture(&object).map_err(|error| {
+            if error.code() == Some(ErrorCode::FormatUnsupported) {
+                Exit::error(
+                    ErrorCode::FormatUnsupported,
+                    format!(
+                        "unsupported format in sandbox configuration {}: format 11 requires \
+                         an explicit supported architecture; deprovision the sandbox and \
+                         provision it again",
+                        path.display(),
+                    ),
+                )
+            } else {
+                error
+            }
+        })?;
+    }
+    Ok(object)
 }
 
-/// The sole configuration form, shared by provision's writer and start's reader.
+/// The configuration form, shared by provision's writer and start's reader.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
     /// The format, which [`read_config`] checked.
     format: u64,
+    /// Only the new record format carries ISA; format 10 retains its x86 meaning on every host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    architecture: Option<GuestArchitecture>,
     image: Image,
     upper: Upper,
     /// The workload's hostname.
@@ -495,6 +531,40 @@ pub(crate) struct Config {
 }
 
 impl Config {
+    pub(crate) fn architecture(&self) -> GuestArchitecture {
+        self.architecture.unwrap_or(GuestArchitecture::X86_64)
+    }
+
+    pub(crate) fn recorded_architecture(object: &Object) -> Result<GuestArchitecture> {
+        let invalid_explicit = || {
+            Exit::error(
+                ErrorCode::FormatUnsupported,
+                "sandbox configuration format 11 requires an explicit supported architecture",
+            )
+        };
+        match (
+            object.get("format").and_then(Value::as_u64),
+            object.get("architecture"),
+        ) {
+            (Some(CONFIG_FORMAT), None) => Ok(GuestArchitecture::X86_64),
+            (Some(11), Some(value)) => {
+                let architecture =
+                    serde_json::from_value(value.clone()).map_err(|_| invalid_explicit())?;
+                if architecture == GuestArchitecture::Aarch64
+                    && object.contains_key("source_snapshot")
+                {
+                    return Err(Exit::error(
+                        ErrorCode::Unsupported,
+                        "AArch64 snapshot restore is unsupported",
+                    ));
+                }
+                Ok(architecture)
+            }
+            (Some(11), None) => Err(invalid_explicit()),
+            _ => Err(malformed()),
+        }
+    }
+
     /// Returns the [`Source`] of a restored sandbox, or `None` for one that boots cold.
     ///
     /// A configuration that records only part of a source, a store that is not absolute, or an
@@ -562,6 +632,7 @@ impl Config {
             ));
         }
 
+        Self::recorded_architecture(&object)?;
         let config: Self =
             serde_json::from_value(Value::Object(object)).map_err(|_| malformed())?;
         // The network is checked as it is read, as the old plan's network was.

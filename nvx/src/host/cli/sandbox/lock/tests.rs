@@ -108,7 +108,7 @@ fn deprovision_removes_a_cold_sandbox_whose_state_directory_is_no_vm_directory()
     std::fs::create_dir(&state).unwrap();
     VmDir::open(&state).unwrap_err();
     std::fs::write(state.join(CONFIG_NAME), "{}").unwrap();
-    let artifacts = super::super::Artifacts { root: None };
+    let artifacts = super::super::Artifacts::new(None);
     super::super::lifecycle::deprovision(state.to_str().unwrap(), &artifacts, 5.0).unwrap();
     assert!(!state.exists());
 }

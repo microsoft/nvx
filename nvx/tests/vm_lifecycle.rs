@@ -16,6 +16,7 @@
 #![cfg(all(feature = "host", any(target_os = "linux", windows)))]
 
 use std::env;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -23,8 +24,8 @@ use nvx::host::config::{Boot, ConsoleAttachment, LayeredRoot, RootConfig, UpperC
 use nvx::host::process::{Opened, Process, ProcessRef};
 use nvx::host::report::Report;
 use nvx::host::runtime::{
-    ArtifactIdentity, CompatibilityIdentity, Hypervisor, LaunchOptions, Runtime, RuntimeIdentity,
-    probe_hypervisor,
+    ArtifactIdentity, CompatibilityIdentity, GuestArchitecture, Hypervisor, LaunchOptions, Runtime,
+    RuntimeIdentity, probe_hypervisor,
 };
 use nvx::host::vm::{self, Connection, SavedVm, VmDir, VmOutputs};
 use nvx::protocol::root::{Journal, OverlayMode, RootImage};
@@ -50,6 +51,10 @@ const STOPPED: u8 = 0x85;
 struct Inputs {
     /// The selected backend: `kvm`, `mshv`, or `whp`.
     backend: String,
+    /// Explicit guest ISA; absent legacy x86 input retains its original meaning.
+    architecture: Option<GuestArchitecture>,
+    /// The selected VMM CPU profile, or the VMM default for legacy x86 inputs.
+    cpu_profile: Option<String>,
     /// The OpenVMM executable.
     openvmm: PathBuf,
     /// The SHA-256 digest of the OpenVMM executable, its identity in the runtime's.
@@ -67,11 +72,13 @@ struct Inputs {
     /// The UUID of the layer's filesystem.
     image_uuid: String,
     /// A new copy of the sandbox scratch template, the upper's image.
-    scratch: PathBuf,
+    scratch: Option<PathBuf>,
     /// The VM's directory, which the test creates.
     vm_dir: PathBuf,
     /// The longest wait for each step, in seconds.
     timeout_seconds: f64,
+    /// Optional boot-console evidence; absent legacy input keeps the disconnected console.
+    console_log: Option<PathBuf>,
 }
 
 /// The VM that the test started, which it ends at once if the test fails before the VM exits.
@@ -155,7 +162,7 @@ fn a_cold_vm_is_attached_from_saved_values_and_stopped() {
     let timeout = Duration::from_secs_f64(inputs.timeout_seconds);
     let identity = |digest: &str| ArtifactIdentity::sha256(digest).expect("a SHA-256 digest");
     let runtime = Runtime {
-        architecture: nvx::host::runtime::GuestArchitecture::X86_64,
+        architecture: inputs.architecture.unwrap_or(GuestArchitecture::X86_64),
         openvmm: inputs.openvmm,
         kernel: inputs.kernel,
         initramfs: inputs.initramfs,
@@ -166,7 +173,7 @@ fn a_cold_vm_is_attached_from_saved_values_and_stopped() {
             CompatibilityIdentity::new("nvx-vm-lifecycle-test").expect("a compatibility identity"),
         ),
         hypervisor,
-        cpu_profile: None,
+        cpu_profile: inputs.cpu_profile,
         windows_breakaway: false,
         options: LaunchOptions::default(),
     };
@@ -178,9 +185,14 @@ fn a_cold_vm_is_attached_from_saved_values_and_stopped() {
             image: inputs.image,
             format: RootImage::erofs(Some(image_uuid)),
             gpt_first_partition_bound: None,
-            upper: UpperConfig::Scratch {
-                path: inputs.scratch,
-                journal: Journal::Allowed,
+            upper: match inputs.scratch {
+                Some(path) => UpperConfig::Scratch {
+                    path,
+                    journal: Journal::Allowed,
+                },
+                None => UpperConfig::Ram {
+                    max_memory_percent: 50,
+                },
             },
             overlay: OverlayMode::TrustedLowers,
         }),
@@ -190,7 +202,11 @@ fn a_cold_vm_is_attached_from_saved_values_and_stopped() {
         },
         network: None,
         filesystem: None,
-        console: ConsoleAttachment::Disconnected,
+        console: if inputs.console_log.is_some() {
+            ConsoleAttachment::Listener
+        } else {
+            ConsoleAttachment::Disconnected
+        },
         boot: Some(Boot {
             command_line: COMMAND_LINE.to_owned(),
             memory_capacity_mib: None,
@@ -202,6 +218,11 @@ fn a_cold_vm_is_attached_from_saved_values_and_stopped() {
     let dir = VmDir::open(&inputs.vm_dir).expect("the VM directory opens");
     let prepared =
         vm::create(&runtime, &config, None, &dir).expect("the public API creates the cold launch");
+    assert_eq!(
+        prepared.architecture(),
+        runtime.architecture,
+        "creation preserves the caller's explicit ISA in the prepared launch"
+    );
     // Creation makes the log, and starts nothing that writes the outcome report.
     assert!(prepared.outputs().log.is_file(), "creation makes the log");
     assert!(
@@ -209,23 +230,44 @@ fn a_cold_vm_is_attached_from_saved_values_and_stopped() {
         "no VM runs before the spawn"
     );
     let launched = vm::spawn(prepared).expect("the public API spawns the cold VM");
+    let started = Started {
+        process: launched.process.reference().clone(),
+        outputs: launched.outputs.clone(),
+        timeout,
+    };
+    let console = inputs.console_log.map(|path| {
+        let mut console = launched
+            .console(Instant::now() + timeout)
+            .expect("the console connects");
+        std::thread::spawn(move || {
+            let mut file = std::fs::File::create(path).unwrap();
+            let deadline = Instant::now() + timeout * 2;
+            let mut bytes = [0; 4096];
+            loop {
+                match console.read(&mut bytes, Some(deadline)) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        file.write_all(&bytes[..count]).unwrap();
+                        file.flush().unwrap();
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::TimedOut => break,
+                    Err(error) => panic!("the guest console failed: {error}"),
+                }
+            }
+        })
+    });
     let mut connection = launched
         .connect(Instant::now() + timeout)
         .expect("the launched VM accepts its control connection");
     acknowledged(&mut connection, PING, 1, READY, Instant::now() + timeout);
     drop(connection);
     let saved = SavedVm {
-        architecture: nvx::host::runtime::GuestArchitecture::X86_64,
+        architecture: runtime.architecture,
         vm_dir: dir,
         endpoint: launched.outputs.endpoint.clone(),
         capability: *launched.capability.as_bytes(),
         process: launched.process.reference().clone(),
         runtime: runtime.identity.clone(),
-    };
-    let started = Started {
-        process: saved.process.clone(),
-        outputs: launched.outputs.clone(),
-        timeout,
     };
     // The caller keeps only what it saved.
     drop(launched);
@@ -278,4 +320,9 @@ fn a_cold_vm_is_attached_from_saved_values_and_stopped() {
         Process::open(&saved.process),
         Ok(Opened::Exited(_))
     ));
+    if let Some(console) = console {
+        console
+            .join()
+            .expect("the boot console evidence reader ends");
+    }
 }

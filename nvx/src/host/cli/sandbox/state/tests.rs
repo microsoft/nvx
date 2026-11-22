@@ -5,6 +5,31 @@ use crate::host::sandbox::layer::LayerRole;
 use crate::host::sandbox::mount::{MountKind, MountOwner, MountPolicy, SandboxMount, plan_mounts};
 use crate::host::sandbox::{DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY};
 
+#[test]
+fn legacy_records_keep_x86_and_new_records_require_explicit_supported_architecture() {
+    let decode = |value: Value| Config::recorded_architecture(value.as_object().unwrap());
+    assert_eq!(
+        decode(json!({"format":10})).unwrap(),
+        GuestArchitecture::X86_64
+    );
+    assert_eq!(
+        decode(json!({"format":11,"architecture":"aarch64"})).unwrap(),
+        GuestArchitecture::Aarch64
+    );
+    for value in [
+        json!({"format":10,"architecture":"aarch64"}),
+        json!({"format":10,"architecture":null}),
+        json!({"format":11}),
+        json!({"format":11,"architecture":null}),
+        json!({"format":11,"architecture":"unknown"}),
+    ] {
+        assert!(decode(value).is_err());
+    }
+    let error =
+        decode(json!({"format":11,"architecture":"aarch64","source_snapshot":"s"})).unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::Unsupported));
+}
+
 /// A configuration records the export's description, its paths alone, under `export`, and its
 /// pins beside it under `export_pins`, and reads both back. Each start's check, which comes before
 /// the VM's configuration takes the description, refuses a pin that names another object now, as
@@ -37,7 +62,8 @@ fn records_keep_the_export_with_its_pins_and_starts_refuse_changed_pins() {
         "11111111-1111-1111-1111-111111111111",
     );
     let distro = RecordedDistro::new(&layer, DistroBinding::verify(&layer).unwrap()).unwrap();
-    let options = ProvisionConfig {
+    let mut options = ProvisionConfig {
+        architecture: GuestArchitecture::X86_64,
         hypervisor: "whp",
         memory_mib: 128,
         cmdline: "",
@@ -49,6 +75,24 @@ fn records_keep_the_export_with_its_pins_and_starts_refuse_changed_pins() {
     };
     let text = serialize_launch(&distro, None, &options, None).unwrap();
     let object: Object = serde_json::from_str(&text).unwrap();
+    assert_eq!(object["format"], 10);
+    assert!(!object.contains_key("architecture"));
+    options.architecture = GuestArchitecture::Aarch64;
+    let arm: Object =
+        serde_json::from_str(&serialize_launch(&distro, None, &options, None).unwrap()).unwrap();
+    assert_eq!(arm["format"], 11);
+    assert_eq!(arm["architecture"], "aarch64");
+    assert_eq!(
+        Config::new(arm.clone()).unwrap().architecture(),
+        GuestArchitecture::Aarch64
+    );
+    let mut missing = arm;
+    missing.remove("architecture");
+    assert!(Config::new(missing).is_err());
+    options.architecture = GuestArchitecture::X86_64;
+    let rewritten: Object =
+        serde_json::from_str(&serialize_launch(&distro, None, &options, None).unwrap()).unwrap();
+    assert_eq!(object, rewritten);
     assert_eq!(
         object["export"],
         serde_json::to_value(&export.description).unwrap()
@@ -107,6 +151,7 @@ fn restored_sandbox_records_round_trip_only_their_own_source() {
     let binding = DistroBinding::verify(&layer).unwrap();
     let distro = RecordedDistro::new(&layer, binding).unwrap();
     let options = ProvisionConfig {
+        architecture: GuestArchitecture::X86_64,
         hypervisor: "whp",
         memory_mib: 128,
         cmdline: "",

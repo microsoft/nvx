@@ -60,9 +60,9 @@ class InitramfsBuildConfig:
                 f"unsupported initramfs architecture: {self.architecture}"
             )
         if self.architecture == "aarch64":
-            if self.guest != "alpine":
+            if self.guest not in ("alpine", "ubuntu"):
                 raise ScriptError(
-                    "ARM initramfs production currently supports Alpine only"
+                    "ARM initramfs production supports Alpine or Ubuntu only"
                 )
             default_work = (
                 BuildConstants.BUILD_DIR
@@ -97,6 +97,32 @@ class DistroLayerBuildConfig:
     )
     output: Path = artifact_path(UbuntuBuildConstants.DISTRO_NAME)
     replace: bool = False
+    architecture: str = "x86_64"
+
+    def __post_init__(self) -> None:
+        if self.architecture not in ("x86_64", "aarch64"):
+            raise ScriptError(
+                f"unsupported distro-layer architecture: {self.architecture}"
+            )
+        if self.architecture == "aarch64":
+            default_work = (
+                BuildConstants.BUILD_DIR
+                / InitramfsBuildConstants.DISTRO_WORK_DIRECTORY_TEMPLATE.format(
+                    guest=UbuntuBuildConstants.GUEST_NAME
+                )
+            )
+            if self.work == default_work:
+                object.__setattr__(
+                    self,
+                    "work",
+                    BuildConstants.BUILD_DIR / "aarch64" / default_work.name,
+                )
+            if self.output == artifact_path(UbuntuBuildConstants.DISTRO_NAME):
+                object.__setattr__(
+                    self,
+                    "output",
+                    BuildConstants.BUILD_DIR / "aarch64" / self.output.name,
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,18 +300,23 @@ class BuildConfig:
     @staticmethod
     def distro_layer_config(
         guest: str = UbuntuBuildConstants.GUEST_NAME,
+        *,
+        architecture: str = "x86_64",
     ) -> DistroLayerBuildConfig:
         descriptor = guest_descriptor(guest)
+        directory = BuildConstants.BUILD_DIR
+        if architecture == "aarch64":
+            directory /= architecture
         return DistroLayerBuildConfig(
             guest=descriptor.name,
             work=(
-                BuildConstants.BUILD_DIR
+                directory
                 / InitramfsBuildConstants.DISTRO_WORK_DIRECTORY_TEMPLATE.format(
                     guest=descriptor.name
                 )
             ),
-            output=artifact_path(
-                BuildConstants.DISTRO_NAME_TEMPLATE.format(guest=descriptor.name)
-            ),
+            output=directory
+            / BuildConstants.DISTRO_NAME_TEMPLATE.format(guest=descriptor.name),
             replace=True,
+            architecture=architecture,
         )

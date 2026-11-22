@@ -171,6 +171,13 @@ impl PlatformDevice {
         self.write(Register::Shutdown, status)
     }
 
+    /// Ends the VM through this retained owner, even after switching to a root without the node.
+    pub(crate) fn power_off(self, status: u8) -> ! {
+        let requested = self.shutdown(status);
+        let closed = self.close();
+        finish_power_off(requested.and(closed))
+    }
+
     /// Explicitly releases access and reports a close error.
     pub(crate) fn close(self) -> Result<(), Errno> {
         self.descriptor.close()
@@ -219,6 +226,11 @@ pub(crate) fn power_off(status: u8) -> ! {
         let closed = device.close();
         requested.and(closed)
     });
+    finish_power_off(outcome)
+}
+
+/// Reports a failed shutdown request, then waits for the platform to end the VM.
+fn finish_power_off(outcome: Result<(), Errno>) -> ! {
     if let Err(error) = outcome {
         super::write_standard_error(
             format!("nvx: platform shutdown: {}\n", error.desc()).as_bytes(),

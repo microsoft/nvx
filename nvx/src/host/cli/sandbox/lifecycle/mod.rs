@@ -27,8 +27,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::ErrorCode;
-use crate::host::artifacts::{Guest, KERNEL_NAME};
-use crate::host::cli::artifacts::{Located, locate};
+use crate::host::artifacts::Guest;
+use crate::host::cli::artifacts::Located;
 use crate::host::cli::deadline::RETRY_INTERVAL;
 use crate::host::cli::sandbox::lock::LifecycleLock;
 use crate::host::cli::sandbox::state::{
@@ -41,7 +41,9 @@ use crate::host::cli::store::StateFile;
 use crate::host::cli::{Exit, Result};
 use crate::host::filesystem::PlannedExport;
 use crate::host::process::{Opened, Process};
-use crate::host::runtime::{IdentityPart, LaunchOptions, Runtime, RuntimeIdentity};
+use crate::host::runtime::{
+    GuestArchitecture, IdentityPart, LaunchOptions, Runtime, RuntimeIdentity,
+};
 use crate::host::sandbox::layer::SandboxLayer;
 use crate::host::sandbox::require_file;
 use crate::host::vm::SavedVm;
@@ -63,6 +65,8 @@ const OUTCOME_SCHEMA_VERSION: u64 = 1;
 
 /// The options of a launch, besides its images, that `provision` records.
 pub(crate) struct ProvisionConfig<'a> {
+    /// Explicit guest ISA selected by this launch's owner.
+    pub(crate) architecture: GuestArchitecture,
     /// `--hypervisor`, resolved.
     pub(crate) hypervisor: &'a str,
     /// `--memory-mib`.
@@ -141,7 +145,9 @@ fn find_vm(lock: &mut LifecycleLock, artifacts: &Artifacts<'_>) -> Result<Found>
             return Ok(Found::Exited);
         }
     };
-    let runtime = artifacts.runtime_identity()?;
+    let runtime = artifacts
+        .with_architecture(saved.architecture)
+        .runtime_identity()?;
     let differences = saved.runtime.differences(&runtime);
     Ok(if differences.is_empty() {
         Found::Live(saved, process)
@@ -196,11 +202,12 @@ fn running_vm(
 /// that no download replaces them meanwhile. A sandbox that records no launch needs neither the
 /// artifacts nor their root.
 fn found_vm(lock: &mut LifecycleLock, artifacts: &Artifacts<'_>) -> Result<Found> {
-    if lock.locked().runtime().map_err(error_with_cause)?.is_none() {
+    let Some(saved) = lock.locked().runtime().map_err(error_with_cause)? else {
         return Ok(Found::Nothing);
-    }
+    };
+    let artifacts = artifacts.with_architecture(saved.architecture);
     let _hold = artifacts.hold()?;
-    find_vm(lock, artifacts)
+    find_vm(lock, &artifacts)
 }
 
 /// Returns the running VM that `found` describes in the locked store of `state_dir`, as exec and
@@ -233,24 +240,33 @@ fn runtime_for(
     config: &Config,
     identity: RuntimeIdentity,
 ) -> Result<Runtime> {
-    let Located { dir, openvmm } = locate(artifacts.root)?;
+    let Located { dir, openvmm } = artifacts
+        .with_architecture(config.architecture())
+        .locate()?;
     Ok(Runtime {
-        architecture: crate::host::runtime::GuestArchitecture::X86_64,
+        architecture: dir.architecture(),
         openvmm,
-        kernel: dir.artifact(KERNEL_NAME),
+        kernel: dir.kernel(),
         initramfs: dir.initramfs(Guest::Alpine),
         identity,
         hypervisor: config.hypervisor().parse().map_err(error_with_cause)?,
-        cpu_profile: None,
+        cpu_profile: (dir.architecture() == GuestArchitecture::Aarch64).then(|| "auto".to_owned()),
         windows_breakaway: false,
         options: LaunchOptions::default(),
     })
 }
 
 fn connect(saved: &SavedVm, artifacts: &Artifacts<'_>, timeout: f64) -> Result<Session> {
+    let artifacts = artifacts.with_architecture(saved.architecture);
     let _hold = artifacts.hold()?;
     let config = Config::new(read_config(&saved.vm_dir.path().join(CONFIG_NAME))?)?;
-    let runtime = runtime_for(artifacts, &config, artifacts.runtime_identity()?)?;
+    if config.architecture() != saved.architecture {
+        return Err(Exit::error(
+            ErrorCode::RuntimeMismatch,
+            "sandbox configuration and saved VM name different guest architectures",
+        ));
+    }
+    let runtime = runtime_for(&artifacts, &config, artifacts.runtime_identity()?)?;
     Session::reattach(saved, &runtime, timeout)
 }
 

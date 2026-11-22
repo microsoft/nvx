@@ -164,6 +164,17 @@ of the root's Python minor version, which Debian's is not, so such a root
 builds natively; see
 [Ubuntu guest support](guests/ubuntu-guest.md#root-filesystem-builder).
 
+For an ARM managed cold root, pass `--architecture aarch64` to
+`build-distro-layer` and to the native Ubuntu or Alpine guest producer. Their
+outputs default to `build/aarch64/`; Ubuntu uses its separate pinned
+`ubuntu/packages-arm64.lock.json`, not the x86 package lock. The scratch
+template's canonical bytes are shared across ISAs: the producer normalizes
+e2fsprogs' signed-directory-hash superblock flag using the matching `debugfs`.
+Keep the kernel, initramfs, EROFS manifest, and Rust guest-binary source
+identities together; a retained OS used for unit tests is not a current managed
+root product. Invoke managed ARM CLI launches with `--architecture aarch64`;
+omitting it preserves the x86-64 contract on every host.
+
 The sandbox scratch template, `build/ubuntu-smoke-scratch.ext4`, is the empty
 ext4 file system of which the sandbox scenarios boot a copy as their scratch.
 [`build-scratch-template`](usage.md#build-scratch-template) formats it on

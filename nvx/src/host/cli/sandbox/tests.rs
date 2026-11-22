@@ -54,11 +54,11 @@ fn the_upper_is_scratch_or_ram() {
 #[test]
 fn image_options_are_only_valid_for_run_and_provision() {
     for operation in ["start", "exec", "stop", "deprovision"] {
-        for flag in ["--layer-format", "--ram-upper-percent"] {
-            let value = if flag == "--layer-format" {
-                "erofs"
-            } else {
-                "50"
+        for flag in ["--layer-format", "--ram-upper-percent", "--architecture"] {
+            let value = match flag {
+                "--layer-format" => "erofs",
+                "--architecture" => "aarch64",
+                _ => "50",
             };
             let (options, _) =
                 parse(&[operation.to_owned(), flag.to_owned(), value.to_owned()]).unwrap();

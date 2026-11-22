@@ -279,6 +279,12 @@ class UbuntuBuildConstants:
     BASE_SHA256: Final = (
         "a496a960472ce474a59590b8987d3a1135d3cbef1991f3b1abe8cacfea8bf85a"
     )
+    ARM_BASE_SHA256: Final = (
+        "5a1906794ced63a71a8119c3f211ef5f0bbe0a243001b4bbd41fdf80c5b219fd"
+    )
+    ARM_PACKAGE_LOCK: Final = (
+        BuildConstants.REPO_ROOT / "ubuntu" / "packages-arm64.lock.json"
+    )
     BASE_ARCHIVE_NAME: Final = f"ubuntu-base-{VERSION}-base-{ARCHITECTURE}.tar.gz"
     PACKAGE_LOCK_RELATIVE_PATH: Final = Path("ubuntu") / "packages.lock.json"
     PACKAGE_LOCK: Final = BuildConstants.REPO_ROOT / PACKAGE_LOCK_RELATIVE_PATH

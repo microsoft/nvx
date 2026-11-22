@@ -850,9 +850,13 @@ trait System {
 }
 
 /// The production operations.
+#[derive(Default)]
 struct RealSystem {
     /// The descriptor that reads [`SIGNALS`], once [`listen`](System::listen) opened it.
     signals: Option<SignalDescriptor>,
+    /// PID 1 retains shutdown authority without exposing the platform device in the workload root.
+    #[cfg(target_arch = "aarch64")]
+    platform: Option<sys::aarch64::PlatformDevice>,
 }
 
 impl System for RealSystem {
@@ -888,6 +892,10 @@ impl System for RealSystem {
 
     fn shut_down(&mut self, status: u8) {
         kernel::sync();
+        #[cfg(target_arch = "aarch64")]
+        if let Some(platform) = self.platform.take() {
+            platform.power_off(status);
+        }
         sys::power_off(status)
     }
 }
@@ -901,8 +909,15 @@ pub(crate) struct Runtime {
 
 impl Runtime {
     pub(crate) fn new(arguments: &[CString]) -> Result<Self, String> {
-        let mut system = RealSystem { signals: None };
+        let mut system = RealSystem::default();
         let helpers = prepare(&mut system, arguments)?;
+        #[cfg(target_arch = "aarch64")]
+        {
+            system.platform = Some(
+                sys::aarch64::PlatformDevice::open()
+                    .map_err(|error| format!("cannot retain platform shutdown device: {error}"))?,
+            );
+        }
         Ok(Self {
             system,
             helpers,
@@ -1003,7 +1018,7 @@ pub fn main() -> ExitCode {
             let result = serve_boot(&mut runtime);
             finish(&mut runtime.system, result);
         }
-        Err(failure) => finish(&mut RealSystem { signals: None }, Err(failure)),
+        Err(failure) => finish(&mut RealSystem::default(), Err(failure)),
     }
     ExitStatus::Failure.into()
 }

@@ -1636,7 +1636,7 @@ provision it again:
 
 | File | Contents |
 | --- | --- |
-| `config.json` | The provisioned sandbox, in format 10 only: `image` holds its format, path and identity; `upper` is tagged as scratch with its path or RAM with `max_memory_percent`. `distro_binding` binds the image, and `scratch_binding` binds scratch or is `null` for RAM. The export is typed, `null` when absent, and holds paths only; `export_pins`, `null` without an export, holds the identities of the export's denied and mapped objects that a workload could move, which each start checks before it launches the export, and a configuration without it is refused with the advice to deprovision the sandbox and provision it again. `network`, `null` without `--net`, holds `--net`, `--network-egress`, `--network-ingress`, `--host-loopback`, `--network-proxy`, each `null` when not given, and the `--host-loopback-forward` options, as given, with the egress rules in OpenVMM's form, from a policy file's compile if one was given. A sandbox that `snapshot restore` provisioned also records its snapshot's name under `source_snapshot`, the absolute path of the snapshot's store under `source_store`, and the program and arguments of the workload that each restore runs under `workload`; one that boots cold records none of them. An atomic pretty-JSON write uses mode 0600, and start reads the same strict typed fields without a legacy reader. |
+| `config.json` | The provisioned sandbox: x86 keeps the format 10 writer and reader unchanged; ARM uses format 11 with mandatory explicit `architecture`. `image` holds its format, path and identity; `upper` is tagged as scratch with its path or RAM with `max_memory_percent`. `distro_binding` binds the image, and `scratch_binding` binds scratch or is `null` for RAM. The export is typed, `null` when absent, and holds paths only; `export_pins`, `null` without an export, holds the identities of the export's denied and mapped objects that a workload could move, which each start checks before it launches the export, and a configuration without it is refused with the advice to deprovision the sandbox and provision it again. `network`, `null` without `--net`, holds `--net`, `--network-egress`, `--network-ingress`, `--host-loopback`, `--network-proxy`, each `null` when not given, and the `--host-loopback-forward` options, as given, with the egress rules in OpenVMM's form, from a policy file's compile if one was given. An x86 sandbox that `snapshot restore` provisioned also records its snapshot's name under `source_snapshot`, the absolute path of the snapshot's store under `source_store`, and the program and arguments of the workload that each restore runs under `workload`; one that boots cold records none of them. An atomic pretty-JSON write uses mode 0600, and start reads the same strict typed fields. |
 | `sandbox.lock` | The store's lock, which serializes the lifecycle transitions |
 | `exec.lock` | The exec lock, which an `exec` holds from before it finds the running VM until its workload ends, so that one `exec` at a time runs in the sandbox; it stays from the first `exec` until `deprovision` |
 | `launch.json` | The store's journal of a start in progress, or of one that was interrupted |
@@ -1648,6 +1648,19 @@ provision it again:
 | `openvmm/` | A restored sandbox's view of its snapshot, hard links to the files of the snapshot's `openvmm/`, which a start creates and `deprovision` removes, each under the snapshot's lock |
 | `restore-ready.sock` | On Linux, the endpoint of a restore's restore-ready event, which the next start of a restored sandbox, or its `deprovision`, removes under the snapshot's lock |
 | `activation-record.bin` | The activation record that the last start of a restored sandbox handed its guest in its restore packet, with mode 0600: the workload's identity and the guest-restore record of the start's own settings, which the next start replaces and `deprovision` removes |
+
+`sandbox run` and `provision` default to x86-64 on every host. Explicit
+`--architecture aarch64` selects local ARM products for managed cold boots;
+`start` and reattachment use recorded ISA values, never host inference. A
+format 11 record without valid explicit ISA is refused, and ARM snapshots and
+memory growth remain unsupported. This persistent configuration is distinct
+from the CLI's version 2 launch journal and unchanged snapshot/time formats.
+
+On ARM, the guest binds layered-root MMIO roles through enabled `virtio,mmio`
+DT nodes and their platform devices' verified `of_node` links. ARM PID1 keeps
+its private platform-device shutdown owner across the root switch; workloads
+neither receive that device node nor inherit its close-on-exec descriptor.
+The x86 block resolver and shutdown path are unchanged.
 
 `provision`, `start`, `stop`, and `deprovision` hold the store's lock for their
 whole transition, and `exec` only while it finds the running VM, so that a long

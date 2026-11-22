@@ -352,6 +352,7 @@ those of [`run`](#run) do, and their names cannot be abbreviated either.
 | Option | Default | Description |
 | --- | --- | --- |
 | `{run,provision,start,exec,stop,deprovision}` | `run` | Select a run, which keeps no state, or a managed lifecycle operation. |
+| `--architecture {x86_64,aarch64}` | `x86_64` on every host | Select the guest ISA of `run` or `provision`. ARM managed cold boots require explicit local ARM products and native Windows ARM64/WHP; later lifecycle commands use the provisioned and saved ISA, not the host. ARM restore and memory growth remain unsupported. |
 | `--layer ROLE,PATH,IMAGE_UUID` | required for `run` and `provision` | Attach exactly one `distro` image by path, of the format of `--layer-format`. The filesystem UUID or GPT disk GUID must be lowercase hexadecimal in canonical hyphenated form; braces, prefixes, uppercase, and unhyphenated forms are refused. |
 | `--layer-format {erofs,gpt}` | `erofs` | Select the image format of `run` or `provision` explicitly, without probing the file or inferring its format from its name. Other sandbox operations reject this option. |
 | `--scratch PATH` | required for `run` and `provision` with a scratch upper | Attach a preformatted ext4 scratch image as the overlay's writable upper. `--upper ram` refuses it. |
@@ -1163,22 +1164,25 @@ python3 scripts/nvx.py build-initramfs [--guest {alpine,ubuntu,azurelinux}] [--a
 Builds the selected initramfs. Alpine and Ubuntu build directly on Linux; Azure
 Linux uses Docker. Alpine is the default.
 `--architecture` defaults to `x86_64`. `aarch64` currently selects native Linux
-Alpine production only, with its separately pinned ARM archive, loader, packages,
-eight Rust programs, and work/output namespace under `build/aarch64/`. An ARM
-selection for another guest is refused before a Docker build starts.
+Alpine and Ubuntu production, with separately pinned ARM archives, packages,
+eight Rust programs, and work/output namespace under `build/aarch64/`. Ubuntu
+uses `ubuntu/packages-arm64.lock.json`; the x86 lock and default paths are
+unchanged. An ARM Azure Linux selection is refused before a Docker build starts.
 
 ### `build-distro-layer`
 
 ```text
 python3 scripts/nvx.py build-distro-layer
     --guest ubuntu
+    [--architecture {x86_64,aarch64}]
     [--output PATH]
     [--replace]
 ```
 
 Builds the immutable Ubuntu EROFS `distro` layer directly on Linux. The default
-output is `build/ubuntu-distro.erofs`. Existing output or manifest files are
-rejected unless `--replace` is present.
+output is `build/ubuntu-distro.erofs`, or
+`build/aarch64/ubuntu-distro.erofs` for explicit `--architecture aarch64`.
+Existing output or manifest files are rejected unless `--replace` is present.
 
 ### `build-scratch-template`
 
