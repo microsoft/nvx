@@ -18,33 +18,33 @@ const ACCESS: [&str; 2] = ["allow", "deny"];
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct NetworkOptions {
     /// `--net`.
-    pub(crate) net: Option<String>,
+    pub(super) net: Option<String>,
     /// `--network-profile`.
-    pub(crate) network_profile: Option<&'static str>,
+    pub(super) network_profile: Option<&'static str>,
     /// `--network-egress`.
-    pub(crate) network_egress: Option<&'static str>,
+    pub(super) network_egress: Option<&'static str>,
     /// `--network-ingress`.
-    pub(crate) network_ingress: Option<&'static str>,
+    pub(super) network_ingress: Option<&'static str>,
     /// The `--network-egress-allow` options.
-    pub(crate) network_egress_allow: Vec<String>,
+    pub(super) network_egress_allow: Vec<String>,
     /// The `--network-egress-deny` options.
-    pub(crate) network_egress_deny: Vec<String>,
+    pub(super) network_egress_deny: Vec<String>,
     /// `--network-egress-policy-file`, as given.
-    pub(crate) network_egress_policy_file: Option<String>,
+    pub(super) network_egress_policy_file: Option<String>,
     /// `--host-loopback`.
-    pub(crate) host_loopback: Option<&'static str>,
+    pub(super) host_loopback: Option<&'static str>,
     /// `--network-proxy`.
-    pub(crate) network_proxy: Option<String>,
+    pub(super) network_proxy: Option<String>,
     /// The `--host-loopback-forward` options.
-    pub(crate) host_loopback_forward: Vec<String>,
+    pub(super) host_loopback_forward: Vec<String>,
 }
 
 /// The rules of the egress policy of a launch, in OpenVMM's native form.
 pub(crate) struct NativeRules {
     /// The `--network-egress-allow` rules.
-    pub(crate) allow: Vec<String>,
+    pub(super) allow: Vec<String>,
     /// The `--network-egress-deny` rules.
-    pub(crate) deny: Vec<String>,
+    pub(super) deny: Vec<String>,
 }
 
 impl NetworkOptions {
@@ -54,7 +54,7 @@ impl NetworkOptions {
     /// # Panics
     ///
     /// If `name` is not a network option, which the parsers never pass.
-    pub(crate) fn take(&mut self, name: &str, value: &str) -> std::result::Result<(), String> {
+    pub(super) fn take(&mut self, name: &str, value: &str) -> std::result::Result<(), String> {
         let text = || value.to_owned();
         match name {
             "--net" => self.net = Some(text()),
@@ -73,7 +73,7 @@ impl NetworkOptions {
     }
 
     /// Returns whether any network option was given.
-    pub(crate) fn any(&self) -> bool {
+    pub(super) fn any(&self) -> bool {
         self.net.is_some()
             || self.network_profile.is_some()
             || self.network_egress.is_some()
@@ -89,7 +89,7 @@ impl NetworkOptions {
     /// Returns `_resolve_network_egress_rules(args)`: the explicit rules, or those that the
     /// `--network-egress-policy-file` compiles to, which neither rule option nor a missing
     /// `--network-egress` may accompany.
-    pub(crate) fn egress_rules(&self) -> Result<NativeRules> {
+    pub(super) fn egress_rules(&self) -> Result<NativeRules> {
         let Some(policy) = &self.network_egress_policy_file else {
             return Ok(NativeRules {
                 allow: self.network_egress_allow.clone(),
