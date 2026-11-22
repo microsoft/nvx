@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 /// The exclusive lock that serializes the lifecycle transitions of a state directory: the
 /// lifecycle lock of its sandbox's store, through which the transition changes the store's
 /// records. Dropping it releases the lock.
-pub(crate) struct LifecycleLock {
+pub(super) struct LifecycleLock {
     /// The state directory.
     state_dir: PathBuf,
     /// The sandbox's locked store.
@@ -28,7 +28,7 @@ impl LifecycleLock {
     /// The directory must be private to the current user, as the store requires of its
     /// directory. A provision whose directory deprovision removed meanwhile creates it again; any
     /// other transition then fails, as for a path that names no directory.
-    pub(crate) fn acquire(state_dir: &Path, timeout: f64, provision: bool) -> Result<Self> {
+    pub(super) fn acquire(state_dir: &Path, timeout: f64, provision: bool) -> Result<Self> {
         if !(timeout > 0.0 && timeout < f64::INFINITY) {
             return Err(Exit::error(
                 ErrorCode::Unsupported,
@@ -94,12 +94,12 @@ impl LifecycleLock {
     }
 
     /// Returns the sandbox's locked store.
-    pub(crate) fn locked(&mut self) -> &mut LockedState {
+    pub(super) fn locked(&mut self) -> &mut LockedState {
         &mut self.locked
     }
 
     /// Called only after exit proof, retaining the previous launch's log and outcome.
-    pub(crate) fn clear_runtime(&self) -> Result {
+    pub(super) fn clear_runtime(&self) -> Result {
         self.remove_files(&[
             StateFile::Capability,
             StateFile::Socket,
@@ -108,7 +108,7 @@ impl LifecycleLock {
         ])
     }
 
-    pub(crate) fn clear_outputs(&self) -> Result {
+    pub(super) fn clear_outputs(&self) -> Result {
         self.remove_files(&[
             StateFile::Socket,
             StateFile::Log,
@@ -139,7 +139,7 @@ impl LifecycleLock {
     /// Removes the sandbox and its state directory through the store, as deprovision does once no
     /// OpenVMM of the sandbox can run, waiting up to `timeout` seconds for open files, such as the
     /// lock files of other transitions, that keep the emptied directory, and releases the lock.
-    pub(crate) fn remove(self, timeout: f64) -> Result {
+    pub(super) fn remove(self, timeout: f64) -> Result {
         let directory = self.locked.directory()?;
         for name in [StateFile::Journal, StateFile::Runtime] {
             if directory
