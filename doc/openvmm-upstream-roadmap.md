@@ -9,17 +9,18 @@
 - Mapped fork tip: `1e492803287f04b40bb7c17e8648c4b96af52ecc`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR18 fixups at positions 302
   and 333, and the PR13 fixup at position 340.
-- NVX's pinned OpenVMM revision: `32888344a110ca39d261158618eca3d5478da004`, position 340, the head
-  of microsoft/openvmm#5206, whose commit follows position 339, `b51f9156c`, the head of
+- NVX's pinned OpenVMM revision: `ed2d7e3a15c9519fde09046ba6643f773c8285df`, position 341, the head
+  of microsoft/openvmm#5207, whose commit follows position 340, `32888344a`, the head of
+  microsoft/openvmm#5206, whose commit follows position 339, `b51f9156c`, the head of
   `feature/microvm/dev` and of the `feature/microvm/release/v7.2` branch of microsoft/openvmm. The
   v7.2 rebase moved the 335 commits of `feature/microvm/dev` at `30fe00786`, the pin before it,
   onto `bf353460f`. It dropped position 317, upstream's microsoft/openvmm#5160, which upstream had
   landed, so each later commit's position is one less than before, and it added five fixups at its
   tip, positions 335-339. Of the 334 replayed commits, 47 conflicted with upstream and 13 replayed
   with new context; see [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase). The pin is
-  214 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, and
-  334 are not yet assigned to PRs, positions 302 and 333 are PR18 fixups, position 340 is a PR13
-  fixup, and positions 316 and 335-339 are rebase fixups; see
+  215 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
+  and 341 are not yet assigned to PRs, positions 302 and 333 are PR18 fixups, position 340 is a
+  PR13 fixup, and positions 316 and 335-339 are rebase fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1615,7 +1616,8 @@ bf353460f
   -> virtio-fs lookup counts saturated rather than wrapped to zero [334]
   -> v7.2 rebase fixups [335-339]
   -> PR13 fixup [340]
-  -> 32888344a (NVX pin)
+  -> virtio-fs aggregate root reads bounded at 1 MiB [341]
+  -> ed2d7e3a1 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1650,7 +1652,7 @@ position 160 adds, and its test into position 166, which adds the exchange tests
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 214 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 215 later commits, positions
 302 and 333 are PR18 fixups, position 340 is a PR13 fixup, position 316 is the fixup of the v7.1
 rebase, positions 335-339 are the fixups of the v7.2 rebase, and the others are not yet classified
 or assigned to PRs.
@@ -1661,15 +1663,15 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
 v7.0 reorganization, position 316 is the v7.1 rebase's fixup, positions 317-334 followed the
-v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and position 340 followed the v7.2
-rebase, so they combine none, apart from
+v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340 and 341 followed
+the v7.2 rebase, so they combine none, apart from
 position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0
 reorganization folded into them. Each commit through position 316 has the position that it had in
 v7.0 and v7.1, and each of positions 317-334 is its v7.1 position less one, since the v7.2 rebase
 dropped v7.1 position 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each
 commit's v6.1 position is its v6.0 position less seven, the number of commits that the v6.1 rebase
 dropped before it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1
-position 149 on, and positions 297-340 have no earlier position; see
+position 149 on, and positions 297-341 have no earlier position; see
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
@@ -1896,6 +1898,7 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 338 | `942eeeda1` | - | - | - | - | - | - | openvmm_entry: keep the microVM sandbox blocks' fixed queue shape (v7.2 rebase fixup for microsoft/openvmm#5040); fold into 086, 087, 171, and 223 |
 | 339 | `b51f9156c` | - | - | - | - | - | - | openvmm_entry: build with_big_stack only where it runs (v7.2 rebase fixup for microsoft/openvmm#5082); fold into 254 |
 | 340 | `32888344a` | - | - | - | - | - | - | virtiofs: keep node names when renaming a name onto itself (microsoft/openvmm#5206); fold into 048, its test into 166 |
+| 341 | `ed2d7e3a1` | - | - | - | - | - | - | virtiofs: bound the buffer of an aggregate root's directory read (microsoft/openvmm#5207) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -1906,7 +1909,7 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`
 main on 2026-11-19, for positions 321-324, `78af54a51`, upstream main on 2026-11-20, for position
 325, `d83f87209`, upstream main later that day, for position 326, `265f0a73f`, upstream main
 later still, for positions 327 and 328, and `bf353460f`, upstream main on 2026-11-21 and the v7.2
-fork base, for positions 329-334 and 340.
+fork base, for positions 329-334, 340, and 341.
 They name the positions that the commits have now, but neither the v7.2 rebase on `bf353460f`, the
 v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did
 the v6.1 rebase check the earlier ones on `7d90c4104`.
@@ -4308,6 +4311,27 @@ checks that position 160 adds, and its test into position 166. Upstream main lac
 since it lacks the names that position 048 adds. Replaying the commit there conflicts in `lib.rs`,
 next to the names and checks of positions 048 and 160, and in the microVM's `exchange_tests.rs`,
 which upstream main lacks, so it follows PR13 upstream.
+
+Position 341 has `VirtioFs::read_synthetic_root_dir_with`, which answers `FUSE_READDIR` and
+`FUSE_READDIRPLUS` on an aggregate's synthetic root, fail a read that asks for more than
+`MAX_GUEST_BUFFER_SIZE`, 1 MiB, with `E2BIG` before it reserves its reply buffer, and reserve the
+buffer with `try_reserve_exact`, failing with `ENOMEM`, as the reads of every other directory do
+(microsoft/nvx#1598). It reserved whatever size the guest asked for with an infallible
+`Vec::with_capacity`, so a read of the root with a size of `u32::MAX` made the device reserve 4 GiB
+for one request, which aborts the VMM where the host cannot provide it. A read of 1 MiB, the most
+that the session's 256 pages per request let a Linux guest ask for, still lists the whole root. It
+changes upstream's code, which no earlier chain commit changes, though PR18's position 081 and
+positions 164, 165, and 332 change `aggregate.rs`, and it uses the `MAX_GUEST_BUFFER_SIZE` with
+which PR06's position 010 bounds `guest_buffer` and the reads of the other directories. It adds a
+test to the microVM's aggregate tests, which position 164 adds and positions 165 and 194 also
+change. It changes nothing that a mapped PR adds, and it fixes no defect of position 010, whose
+bound never covered the synthetic root, so it is not a PR06 fixup. NVX's Linux guest asks for at
+most 1 MiB, so the microVM behaves as it did. Upstream main has the defect, in the same
+`read_synthetic_root_dir_with`, which `a5f055dd7` (microsoft/openvmm#3821) adds, and in the reads
+that position 010 bounds. Replaying the commit on upstream main conflicts only in the microVM's
+`aggregate_fs_tests.rs`, which upstream main lacks; its change to `aggregate.rs` applies there, but
+uses the `MAX_GUEST_BUFFER_SIZE` of position 010, which upstream main lacks, so it cannot go
+upstream on its own as it is, and could go upstream with position 010, in microsoft/openvmm#4597.
 
 ## PR summary
 
