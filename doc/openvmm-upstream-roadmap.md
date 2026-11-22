@@ -9,8 +9,9 @@
 - Mapped fork tip: `1e492803287f04b40bb7c17e8648c4b96af52ecc`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR18 fixups at positions 302,
   333, and 342, and the PR13 fixup at position 340.
-- NVX's pinned OpenVMM revision: `afa0e9c20a7943d3ec556098d9272f4ee502bdd4`, position 343, the head
-  of microsoft/openvmm#5209, whose commit follows position 342, `5c82edac4`, the head of
+- NVX's pinned OpenVMM revision: `076889dbb04e3f2af3e3b3ea2adcad415b9c1de9`, position 344, the head
+  of microsoft/openvmm#5210, whose commit follows position 343, `afa0e9c20`, the head of
+  microsoft/openvmm#5209, whose commit follows position 342, `5c82edac4`, the head of
   microsoft/openvmm#5208, whose commit follows position 341, `ed2d7e3a1`, the head of
   `feature/microvm/dev`, where microsoft/openvmm#5207 landed position 341 on position 340,
   `32888344a`, where microsoft/openvmm#5206 landed position 340 on position 339, `b51f9156c`, the
@@ -20,9 +21,9 @@
   landed, so each later commit's position is one less than before, and it added five fixups at its
   tip, positions 335-339. Of the 334 replayed commits, 47 conflicted with upstream and 13 replayed
   with new context; see [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase). The pin is
-  217 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
-  341, and 343 are not yet assigned to PRs, positions 302, 333, and 342 are PR18 fixups, position
-  340 is a PR13 fixup, and positions 316 and 335-339 are rebase fixups; see
+  218 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
+  341, 343, and 344 are not yet assigned to PRs, positions 302, 333, and 342 are PR18 fixups,
+  position 340 is a PR13 fixup, and positions 316 and 335-339 are rebase fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1621,7 +1622,8 @@ bf353460f
   -> virtio-fs aggregate root reads bounded at 1 MiB [341]
   -> PR18 fixup [342]
   -> microVM file children whose names hold `\` or `:` refused [343]
-  -> afa0e9c20 (NVX pin)
+  -> microVM creates of existing names held to the write rule of opens [344]
+  -> 076889dbb (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1660,7 +1662,7 @@ the policy tests share the `request` helper that the tests call.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 217 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 218 later commits, positions
 302, 333, and 342 are PR18 fixups, position 340 is a PR13 fixup, position 316 is the fixup of the
 v7.1 rebase, positions 335-339 are the fixups of the v7.2 rebase, and the others are not yet
 classified or assigned to PRs.
@@ -1671,7 +1673,7 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
 v7.0 reorganization, position 316 is the v7.1 rebase's fixup, positions 317-334 followed the
-v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-343 followed the
+v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-344 followed the
 v7.2 rebase, so they combine none, apart from
 position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0
 reorganization folded into them. Each commit through position 316 has the position that it had in
@@ -1679,7 +1681,7 @@ v7.0 and v7.1, and each of positions 317-334 is its v7.1 position less one, sinc
 dropped v7.1 position 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each
 commit's v6.1 position is its v6.0 position less seven, the number of commits that the v6.1 rebase
 dropped before it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1
-position 149 on, and positions 297-343 have no earlier position; see
+position 149 on, and positions 297-344 have no earlier position; see
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
@@ -1909,6 +1911,7 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 341 | `ed2d7e3a1` | - | - | - | - | - | - | virtiofs: bound the buffer of an aggregate root's directory read (microsoft/openvmm#5207) |
 | 342 | `5c82edac4` | - | - | - | - | - | - | virtiofs: bound microVM directory snapshots in total when listing (microsoft/openvmm#5208); fold into 083, its budget in `new_microvm_aggregate` and its tests into 164 |
 | 343 | `afa0e9c20` | - | - | - | - | - | - | virtiofs: refuse a microVM file child that its volume cannot name (microsoft/openvmm#5209) |
+| 344 | `076889dbb` | - | - | - | - | - | - | virtiofs: apply open's write rule to a create of an existing name (microsoft/openvmm#5210) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -1919,7 +1922,7 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`
 main on 2026-11-19, for positions 321-324, `78af54a51`, upstream main on 2026-11-20, for position
 325, `d83f87209`, upstream main later that day, for position 326, `265f0a73f`, upstream main
 later still, for positions 327 and 328, and `bf353460f`, upstream main on 2026-11-21 and the v7.2
-fork base, for positions 329-334 and 340-343.
+fork base, for positions 329-334 and 340-344.
 They name the positions that the commits have now, but neither the v7.2 rebase on `bf353460f`, the
 v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did
 the v6.1 rebase check the earlier ones on `7d90c4104`.
@@ -4402,6 +4405,38 @@ position 165. Upstream main lacks the defect, since it lacks the microVM profile
 children. Replaying the commit there conflicts in all three files, which upstream main lacks: the
 microVM's `fs.rs` and `aggregate_fs_tests.rs` and the Guide's virtio-fs page, so it cannot go
 upstream on its own.
+
+Position 344 has a microVM `FUSE_CREATE` without `O_EXCL` of a name that already links to an
+object fail with `EROFS` when it would write or truncate the object and the node that the guest
+holds for the object is read-only, as `FUSE_OPEN` of that node fails (microsoft/nvx#1602). Position
+160's access policy lets the guest modify an object with several names only if every name that the
+guest has used for it is writable: it makes `VirtioFsInode::readonly` hold for a node with a name
+outside the writable paths, which upstream's `check_open_readonly` applies to an open. But it gave a
+create only the checks of a namespace mutation, of its directory and its entry, while the host open
+of a create without `O_EXCL` opens an existing object: a create of `out/twin`, a host hard link of
+a read-only `marker`, truncated `marker` with `O_TRUNC`, and the create's insert deduplicated the
+file onto the read-only node, which got a writable handle, so the restore of a snapshot taken then
+failed the check of writable handles that position 160 adds to the validation of PR18's position
+083. The commit has `preflight_create_inode`, the microVM create preflight that PR18's position 081
+adds, which already resolves the object that the name links to before the host opens anything,
+call a new `VirtioFs::check_create_existing`. That finds the node that the create's insert would
+reuse, with a new `InodeMap::reused` on the `InodeMap::reuses` of position 333, and refuses the
+create when its flags write or truncate, by a new `opens_for_writing` that `check_open_readonly`
+now shares, and that node is read-only; `preflight_microvm_insert` finds the reused node with
+`reused` too. It changes `create`, `check_open_readonly`, and `InodeMap` in `lib.rs`, upstream's
+code, next to the checks of position 160 and the `reuses` of position 333; PR06's position 010,
+PR13's position 048, PR18's positions 081 and 083, PR27's position 126, and positions 158, 164,
+322, 331, 332, 340, and 342 also change the file. It changes `preflight_create_inode` in the
+microVM's `fs.rs`, which position 081 adds; PR18's positions 083 and 085, PR22's position 102,
+PR27's position 126, and positions 158, 160, 164, 165, 194, 332, 342, and 343 also change the file.
+It changes `preflight_microvm_insert` in the microVM's `limits.rs`, which position 081 adds and
+position 333 changes; PR27's position 126 and position 160 also change the file. It adds a test to
+the microVM's policy tests, which position 160 adds and positions 164 and 194 also change. It fixes
+a defect of position 160, which no PR maps, so it is not yet assigned to a PR either and follows
+position 160. Upstream main lacks the defect, since it lacks the microVM access policy. Replaying
+the commit there conflicts in `lib.rs`, next to the code of PR06's position 010, PR18's position
+081, and positions 160 and 333, and in the microVM's `fs.rs`, `limits.rs`, and `policy_tests.rs`,
+which upstream main lacks, so it cannot go upstream on its own.
 
 ## PR summary
 
