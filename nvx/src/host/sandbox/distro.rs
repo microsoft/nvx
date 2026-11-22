@@ -521,12 +521,15 @@ fn read_sealed(
 /// lowercase hexadecimal SHA-256 digest of its content and the seal that it had while it was
 /// hashed, both through `access`.
 fn hash_sealed(path: &Path, access: Access<'_>, description: &str) -> Result<(String, FileSeal)> {
+    /// Bounds the hashing content buffer to 1 MiB regardless of the distro image's size.
+    const HASH_BUFFER_BYTES: usize = 1024 * 1024;
+
     let io_error = |error: io::Error| os_error(&error, Some(path));
     let mut file = (access.open)(path).map_err(io_error)?;
     let before = (access.seal)(&file).map_err(io_error)?;
     require_regular(&before, path, description)?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0; 1024 * 1024];
+    let mut buffer = vec![0; HASH_BUFFER_BYTES];
     loop {
         let read = match file.read(&mut buffer) {
             Ok(0) => break,
