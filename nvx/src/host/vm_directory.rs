@@ -76,7 +76,9 @@ impl VmDir {
     /// Returns the Linux socket `name` or a fresh Windows pipe with the prefix `pipe`.
     fn endpoint(&self, name: &str, pipe: &str) -> Result<String> {
         if cfg!(windows) {
-            let mut bytes = [0u8; 16];
+            /// A 128-bit random suffix makes collisions between fresh Windows pipe names unlikely.
+            const PIPE_NAME_RANDOM_BYTES: usize = 16;
+            let mut bytes = [0u8; PIPE_NAME_RANDOM_BYTES];
             getrandom::fill(&mut bytes)
                 .map_err(|error| Error::io("cannot draw the name of a pipe").with_source(error))?;
             let suffix = hex(&bytes);
