@@ -947,6 +947,92 @@ fn files_named_with_colons_or_backslashes_are_not_exported_alone() {
     }
 }
 
+/// OpenVMM looks up each name of a mapped path below the directory that its child exports, and
+/// refuses a colon or a backslash in it, so the planner refuses such a path, and a recorded plan
+/// that maps one fails its check, but not a directory with such a name, which OpenVMM opens by its
+/// host path.
+#[cfg(feature = "cli")]
+#[test]
+fn mapped_paths_named_with_colons_or_backslashes_below_their_directory_are_refused() {
+    let directory = root();
+    let base = directory.path();
+    let work = base.join("work");
+    let names: &[&str] = if cfg!(windows) {
+        // A Windows path with a colon in its last name names an alternate data stream.
+        &["config.json:stream"]
+    } else {
+        &["colon:here.txt", "back\\slash.txt", "colon:dir/notes.txt"]
+    };
+    let refused = |error: Error| {
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+        assert!(
+            error.message().contains("a colon or a backslash"),
+            "{error}"
+        );
+    };
+    for name in names {
+        let path = work.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"notes").unwrap();
+        let policy = FilesystemPolicy {
+            readonly_paths: vec![work.clone(), path],
+            ..FilesystemPolicy::default()
+        };
+        refused(plan(&policy).unwrap_err());
+    }
+    // A plan recorded before the planner refused such a path is refused when it is read back.
+    let recorded = |source: &str| ExportPlan {
+        children: vec![ExportChild {
+            root: canonical(&work),
+            file: false,
+            writable: false,
+            denied: Vec::new(),
+            allowed: Vec::new(),
+            write: Vec::new(),
+        }],
+        binds: vec![
+            Bind {
+                child: 0,
+                source: String::new(),
+                target: "/data".to_owned(),
+                read_only: true,
+            },
+            Bind {
+                child: 0,
+                source: source.to_owned(),
+                target: "/file".to_owned(),
+                read_only: true,
+            },
+        ],
+        owner: Owner::Vmm,
+    };
+    recorded("config.json")
+        .check(ReservedTargets::BLOCKLESS_ROOT)
+        .unwrap();
+    for name in names {
+        refused(
+            recorded(name)
+                .check(ReservedTargets::BLOCKLESS_ROOT)
+                .unwrap_err(),
+        );
+    }
+    if !cfg!(windows) {
+        let colon = base.join("colon:work");
+        fs::create_dir_all(colon.join("src")).unwrap();
+        let policy = FilesystemPolicy {
+            readonly_paths: vec![colon.clone(), colon.join("src")],
+            ..FilesystemPolicy::default()
+        };
+        let mapping = plan(&policy).unwrap().unwrap();
+        assert_eq!(mapping.children[0].root, canonical(&colon));
+        assert_eq!(
+            sources(&mapping),
+            [("0".to_owned(), true), ("0/src".to_owned(), true)]
+        );
+        mapping.check(ReservedTargets::BLOCKLESS_ROOT).unwrap();
+    }
+}
+
 #[cfg(feature = "cli")]
 #[test]
 fn openvmm_limits_are_checked_per_directory() {

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use super::guest_path::depth;
 use super::host_path::{display_path, relative_text};
-use super::limits::{file_name_problem, policy_limits};
+use super::limits::{file_name_problem, policy_limits, source_name_problem};
 #[cfg(feature = "cli")]
 use super::policy::Writable;
 use super::policy::{nearest_rule, policy_rule_problem};
@@ -32,16 +32,16 @@ impl ExportPlan {
     /// resolved, without a NUL character or a `..` component, and, on Windows, on a local drive,
     /// without the verbatim prefix, each file without a colon or a backslash in its name, whose
     /// policy paths lie inside it within OpenVMM's limits and keep its rules, and writable exactly
-    /// when a bind maps a path of it read-write; and at least
-    /// one and at most [`MAX_HOST_MAPPINGS`] binds, each of a known child, from a relative source
-    /// that holds the host's names joined with `/`, that a guest path can hold, and that the child
-    /// does not hide, unless it shows paths inside it again, to a free guest target, parents before
-    /// children, with a bind of every child's root. A target inside another's must show what the
-    /// other shows there. A child's write paths must be the outermost paths of its read-write
-    /// binds, unless one maps the whole child, when they may narrow its writes only to paths that
-    /// keep its other read-write binds writable. It reads nothing from the host: the caller keeps
-    /// the paths naming the objects that it means, as [`host::filesystem`](crate::host::filesystem)
-    /// describes.
+    /// when a bind maps a path of it read-write; and at least one and at most
+    /// [`MAX_HOST_MAPPINGS`] binds, each of a known child, from a relative source that holds the
+    /// host's names joined with `/`, without a colon or a backslash in them, that a guest path can
+    /// hold, and that the child does not hide, unless it shows paths inside it again, to a free
+    /// guest target, parents before children, with a bind of every child's root. A target inside
+    /// another's must show what the other shows there. A child's write paths must be the outermost
+    /// paths of its read-write binds, unless one maps the whole child, when they may narrow its
+    /// writes only to paths that keep its other read-write binds writable. It reads nothing from
+    /// the host: the caller keeps the paths naming the objects that it means, as
+    /// [`host::filesystem`](crate::host::filesystem) describes.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
     pub fn check(&self, reserved: ReservedTargets<'_>) -> Result<()> {
@@ -174,6 +174,13 @@ impl ExportPlan {
             if bind.source.contains('\0') {
                 return invalid(format!(
                     "it maps the path {:?} of child {}, which contains a NUL character",
+                    bind.source, bind.child
+                ));
+            }
+            if let Some(problem) = source_name_problem(&bind.source) {
+                return invalid(format!(
+                    "it maps the path {:?} of child {}, which {problem}, so OpenVMM cannot \
+                     export it",
                     bind.source, bind.child
                 ));
             }

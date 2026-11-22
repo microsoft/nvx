@@ -87,7 +87,7 @@ pub(crate) use self::host_path::{canonicalize, is_reparse_point};
 #[cfg(feature = "cli")]
 use self::host_path::{identity, relative_text};
 #[cfg(feature = "cli")]
-use self::limits::{check_policy_paths, check_root, file_name_problem};
+use self::limits::{check_policy_paths, check_root, file_name_problem, source_name_problem};
 #[cfg(feature = "cli")]
 use self::policy::{
     Writable, allowed_paths, canonicals, check_allowed_paths, check_read_only, check_write_paths,
@@ -361,7 +361,8 @@ pub(crate) struct ExportRequest<'a> {
 /// target inside another mapping's must show the very object that the other mapping shows there.
 /// A whole volume cannot be mapped, and a policy that would need more children than OpenVMM
 /// offers is refused. A file that a child exports alone must not have a colon or a backslash in
-/// its name, which OpenVMM refuses in every path of an export.
+/// its name, nor may a mapped path inside a directory that a child exports have one in a name
+/// below that directory, since OpenVMM refuses either in every path of an export.
 ///
 /// A read-only path must not lie inside a writable part, where the host could not keep it
 /// read-only: inside a read-write directory, unless write paths narrow that directory's writes
@@ -543,6 +544,12 @@ pub(crate) fn plan(request: &ExportRequest<'_>) -> Result<Option<PlannedExport>>
         let Some(source) = relative_text(&children[child].root, &entry.canonical) else {
             return unsupported(format!("{} is not valid UTF-8", entry.given.display()));
         };
+        if let Some(problem) = source_name_problem(&source) {
+            return unsupported(format!(
+                "OpenVMM cannot export {}, which {problem}",
+                entry.given.display()
+            ));
+        }
         if GUEST_EXPORT.len() + 1 + guest_source(child, &source).len() > MAX_GUEST_PATH
             || entry.target.len() > MAX_GUEST_PATH
         {

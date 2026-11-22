@@ -48,6 +48,16 @@ pub(super) fn file_name_problem(file: &Path) -> Option<&'static str> {
         .then_some("has a colon or a backslash in its name")
 }
 
+/// Explains why OpenVMM cannot reach `source`, the names of a mapped path below the directory that
+/// a child exports, joined with `/`, or returns `None` if it can. OpenVMM looks up each of those
+/// names, and refuses a colon or a backslash in them, as [`file_name_problem`] describes; it opens
+/// the directory itself by its host path, so the directory's own path may hold either.
+pub(super) fn source_name_problem(source: &str) -> Option<&'static str> {
+    source
+        .contains([':', '\\'])
+        .then_some("has a colon or a backslash in a name below its exported directory")
+}
+
 /// Applies OpenVMM's rules for the paths that it is to `action` in the exported directory `root`,
 /// so a policy that OpenVMM would refuse fails at provision rather than at every start: those of
 /// [`policy_limits`], and on the host, no link or reparse point below `root` and no other file
