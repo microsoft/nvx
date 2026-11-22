@@ -1,5 +1,6 @@
 //! Cold-run shares stay kernel tokens through the checked VM configuration; a restore takes the
-//! restore options of `snapshot restore` and the network of its snapshot's NIC.
+//! restore options of `snapshot restore` and the network of its snapshot's NIC; a cold run removes
+//! its VM directory with what its VM left in it.
 
 use proptest::prelude::*;
 
@@ -718,6 +719,28 @@ proptest! {
             let (options, _) = parse(&arguments).unwrap();
             let rules = options.network.egress_rules().unwrap();
             prop_assert!(cold_config(&options, &rules).is_err());
+        }
+    }
+}
+
+/// A cold run removes its VM directory with the staging file of an outcome report that OpenVMM
+/// did not finish writing, as one that the run forced down can leave, and keeps a directory that
+/// holds a file of another name.
+#[test]
+fn a_cold_run_removes_its_vm_directory_with_a_report_s_staging_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("vm");
+    for (staging, removed) in [(".tmpA1b2C3", true), ("other", false)] {
+        vm::create_private_dir(&path).unwrap();
+        for name in ["openvmm.log", "outcome.json", staging] {
+            fs::write(path.join(name), "").unwrap();
+        }
+        let result = remove_vm_directory(&VmDir::open(&path).unwrap());
+        assert_eq!(result.is_ok(), removed, "{staging}: {result:?}");
+        assert_eq!(path.exists(), !removed, "{staging}");
+        if !removed {
+            assert!(path.join(staging).exists(), "{staging}");
+            fs::remove_dir_all(&path).unwrap();
         }
     }
 }
