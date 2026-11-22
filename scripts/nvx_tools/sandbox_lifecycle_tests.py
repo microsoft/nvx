@@ -100,21 +100,26 @@ def check_restage_bindings(before: bytes, after: bytes, image: str) -> None:
             raise RuntimeError("the restaged configuration is malformed") from error
         if not isinstance(config, dict):
             raise RuntimeError("the restaged configuration is not an object")
+        config = cast(dict[str, object], config)
         recorded_image = config.get("image")
         binding = config.get("distro_binding")
-        policy = binding.get("policy") if isinstance(binding, dict) else None
+        policy = (
+            cast(dict[str, object], binding).get("policy")
+            if isinstance(binding, dict)
+            else None
+        )
         if (
             not isinstance(recorded_image, dict)
-            or recorded_image.get("path") != image
+            or cast(dict[str, object], recorded_image).get("path") != image
             or not isinstance(binding, dict)
             or policy != {"revision": 1, "result": "accepted"}
             or not isinstance(policy, dict)
-            or type(policy.get("revision")) is not int
+            or type(cast(dict[str, object], policy).get("revision")) is not int
         ):
             raise RuntimeError(
                 "restage did not bind the same owned image with an accepted policy"
             )
-        bindings.append(binding)
+        bindings.append(cast(dict[str, object], binding))
     if bindings[0] == bindings[1]:
         raise RuntimeError("re-provision kept the stale distro binding")
 
