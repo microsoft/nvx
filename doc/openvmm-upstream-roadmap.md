@@ -9,9 +9,12 @@
 - Mapped fork tip: `1e492803287f04b40bb7c17e8648c4b96af52ecc`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR18 fixups at positions 302,
   333, 342, 345, 347, 351, and 365, and the PR13 fixups at positions 340 and 349.
-- NVX's pinned OpenVMM revision: `09524b79c7e857c6c4c7a287ecf56d290ae79a8b`, position 370, the head
-  of microsoft/openvmm#5229, whose commit follows position 369, `6323fa7b9`, the head of
-  `feature/microvm/dev`, where microsoft/openvmm#5228 landed position 369 on position 368,
+- NVX's pinned OpenVMM revision: `c3089ff9089695ae5440c69fb77c80a482f321bd`, position 374, the
+  qualified fork head of microsoft/openvmm#5045. Its ARM cold-boot, admission, report-sharing,
+  and host-rate-hook commits at positions 371-374 follow the current `feature/microvm/dev`
+  head, `09524b79c7e857c6c4c7a287ecf56d290ae79a8b`, position 370, where
+  microsoft/openvmm#5229 landed. That commit follows position 369, `6323fa7b9`, where
+  microsoft/openvmm#5228 landed position 369 on position 368,
   `eff41b13f`, where microsoft/openvmm#5227 landed position 368 on position 367,
   `e3b20aef8`, where microsoft/openvmm#5226 landed positions 366 and 367 on position 365,
   `78ddb8044`, where microsoft/openvmm#5225 landed positions
@@ -40,11 +43,15 @@
   landed, so each later commit's position is one less than before, and it added five fixups at its
   tip, positions 335-339. Of the 334 replayed commits, 47 conflicted with upstream and 13 replayed
   with new context; see [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase). The pin is
-  244 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
-  341, 343, 344, 346, 348, 350, 352-364, and 366-370 are not yet assigned to PRs, positions 302,
+  248 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
+  341, 343, 344, 346, 348, 350, 352-364, and 366-374 are not yet assigned to numbered roadmap
+  PRs, positions 302,
   333, 342, 345, 347, 351, and 365 are PR18 fixups, positions 340 and 349 are PR13 fixups, and
   positions 316 and 335-339 are rebase fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
+  Positions 371-374 remain proposed by microsoft/openvmm#5045, not landed in
+  `feature/microvm/dev`; their source/product/native qualification is not a claim that
+  hosted OpenVMM CI has finished or that the fork was promoted upstream.
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -1663,7 +1670,12 @@ bf353460f
   -> virtio-fs nodes whose names are all gone reached only through their handles [368]
   -> microVM READDIRPLUS listings of btrfs placeholders and same-device mount points [369]
   -> microVM READDIRPLUS names of the listed node listed without a node [370]
-  -> 09524b79c (NVX pin)
+  -> 09524b79c (current feature/microvm/dev)
+  -> governed ARM64 cold boot on WHP [371]
+  -> explicit ARM CPU and time admission [372]
+  -> time ABI imports preserved through report sharing [373]
+  -> ARM cold host-rate test hook [374]
+  -> c3089ff90 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1725,10 +1737,12 @@ handle table whose first handle it keeps, and its test into position 364, whose 
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 244 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 248 later commits, positions
 302, 333, 342, 345, 347, 351, and 365 are PR18 fixups, positions 340 and 349 are PR13 fixups,
 position 316 is the fixup of the v7.1 rebase, positions 335-339 are the fixups of the v7.2 rebase,
-and the others are not yet classified or assigned to PRs.
+and the others are not yet classified or assigned to numbered roadmap PRs. Positions 371-374
+are the qualified ARM fork tail proposed by microsoft/openvmm#5045, based on the maintained
+v7.2 chain at position 370, not a rewrite of its upstream history.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 are the ABI restart
@@ -1736,7 +1750,7 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
 v7.0 reorganization, position 316 is the v7.1 rebase's fixup, positions 317-334 followed the
-v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-370 followed the
+v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-374 followed the
 v7.2 rebase, so they combine none, apart from
 position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0
 reorganization folded into them. Each commit through position 316 has the position that it had in
@@ -1744,7 +1758,7 @@ v7.0 and v7.1, and each of positions 317-334 is its v7.1 position less one, sinc
 dropped v7.1 position 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each
 commit's v6.1 position is its v6.0 position less seven, the number of commits that the v6.1 rebase
 dropped before it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1
-position 149 on, and positions 297-370 have no earlier position; see
+position 149 on, and positions 297-374 have no earlier position; see
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
@@ -2001,6 +2015,10 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 368 | `eff41b13f` | - | - | - | - | - | - | virtiofs: reach a node whose last name is gone only through its handles (microsoft/openvmm#5227) |
 | 369 | `6323fa7b9` | - | - | - | - | - | - | virtiofs: list btrfs placeholders and bind mounts in microVM READDIRPLUS (microsoft/openvmm#5228) |
 | 370 | `09524b79c` | - | - | - | - | - | - | virtiofs: stop microVM READDIRPLUS from aliasing the listed node (microsoft/openvmm#5229) |
+| 371 | `e9196b715` | - | - | - | - | - | - | microvm: enable governed ARM64 cold boot on WHP (microsoft/openvmm#5045) |
+| 372 | `6266d0115` | - | - | - | - | - | - | microvm: verify ARM64 CPU and time admission (microsoft/openvmm#5045) |
+| 373 | `c20d94dd2` | - | - | - | - | - | - | microvm: preserve time ABI imports across report sharing (microsoft/openvmm#5045) |
+| 374 | `c3089ff90` | - | - | - | - | - | - | time_abi: allow ARM cold host-rate test hook (microsoft/openvmm#5045) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -5223,6 +5241,27 @@ need positions 342 and 346, so it is not a PR18 fixup, and it follows position 3
 has the defect too, in `read_dir_with`, its own `READDIRPLUS`, which the commit leaves as it is.
 Replaying the commit there conflicts in the microVM's `file.rs` and `fs_tests.rs`, which upstream
 main lacks, so it cannot go upstream on its own.
+
+Positions 371-374 retain governed ARM/WHP cold boot, explicit CPU/time admission, the
+report-sharing import correction, and the opt-in cold host-rate test hook on the actual
+v7.2 chain. They are proposed together in microsoft/openvmm#5045, not folded into a numbered
+roadmap PR. Their same-source default ARM DEV product and normal/debug native controls were
+qualified before the fork head was published; ARM restore and memory growth remain refused.
+
+The following overlaps are derived from the actual new commits and earlier chain history,
+excluding lock-file-only overlap. Sharing a file is not itself a PR dependency or a reason to
+fold a commit into an earlier PR:
+
+| Position | Earlier positions sharing files |
+| --- | --- |
+| 371 | 3, 8, 11-13, 15, 21, 23, 26, 34-36, 49-53, 55-59, 62, 64, 66-74, 76-79, 82, 84-94, 100-103, 108, 110, 112-117, 119-120, 124, 126-127, 130, 132-149, 151, 153-156, 158-165, 168-171, 173-176, 178-179, 182-190, 192-193, 196-199, 201, 203, 205-206, 209-211, 213, 218-223, 228, 230, 235-236, 239-243, 246, 249, 257, 268-269, 277, 297, 299, 302-303, 305, 313, 335, 337-338 |
+| 372 | 8, 11-13, 15, 34-36, 49-52, 57-59, 62, 64, 67-68, 71-74, 76-79, 82, 84-94, 101, 103, 110, 112-117, 120, 124, 126-127, 130, 134, 136-137, 139-145, 147, 151, 153-155, 158-165, 168-169, 171, 173-176, 178-179, 182, 184-189, 192-193, 196-197, 199, 201, 203, 205-206, 209-211, 213, 218, 220-223, 228, 230, 236, 239-243, 246, 249, 257, 338, 371 |
+| 373 | 8, 11-13, 15, 34-36, 49-52, 57-58, 62, 67-68, 72-73, 86, 90-93, 127, 130, 134, 137, 139-145, 147, 151, 153-155, 178, 188, 196, 218, 236, 243, 246, 249, 257, 371-372 |
+| 374 | 59, 62, 64, 71, 74, 76-79, 82, 84-90, 92, 94, 101, 103, 110, 112-117, 119-120, 124, 126, 130, 134, 136, 140-145, 147, 155, 158-165, 168-169, 171, 173-176, 179, 182, 184-189, 192-193, 197, 199, 201, 203, 205-206, 209-211, 213, 220-223, 228, 230, 239, 338, 371-373 |
+
+The maintained helper's unapplied merge-tree against upstream main reports conflicts for this
+tail. These commits use the maintained microVM, CPU-policy and time/reporting infrastructure;
+no standalone-upstream type check or acceptance is claimed from the fork qualification.
 
 ## PR summary
 
