@@ -1568,12 +1568,16 @@ A service manager can grant the same set, such as systemd's
 operation succeeds only if its caller has OpenVMM's user and primary group and
 OpenVMM's user belongs to no other group; every other operation fails with
 `EPERM`. Hosts commonly grant access to `/dev/kvm` or `/dev/mshv` through such
-a group, so `caller` usually needs both capabilities. A managed sandbox's guest
-agent maps the shares before any workload runs, as guest root, which `caller`
-squashes to the owner of the host directory, so a managed sandbox whose
-OpenVMM cannot assume that identity fails to start. Grant OpenVMM no other
-capabilities: `CAP_SETUID` lets it assume any host identity, which `caller`
-mode confines to its export.
+a group, so `caller` usually needs both capabilities. In a user namespace that
+does not map every group, Linux reports each unmapped group as its overflow
+GID, 65534 by default, which is also the default workload's group, so there
+OpenVMM counts a group of its own that reads as the overflow GID as another
+group, even for a caller with that GID. A managed sandbox's guest agent maps
+the shares before any workload runs, as guest root, which `caller` squashes to
+the owner of the host directory, so a managed sandbox whose OpenVMM cannot
+assume that identity fails to start. Grant OpenVMM no other capabilities:
+`CAP_SETUID` lets it assume any host identity, which `caller` mode confines to
+its export.
 
 The guest kernel reports each caller's identity, and guest root may assume any
 identity inside the guest, so guest root and a compromised guest kernel can act
