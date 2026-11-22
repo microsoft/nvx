@@ -40,6 +40,7 @@ use super::transport::Transport;
 use super::vm::{Capability, Launched, VmOutputs};
 use crate::ErrorKind;
 use crate::guest_restore::GuestRestoreRecord;
+use crate::protocol::restore_ready::READY_EVENT;
 use crate::protocol::{self, HostMap};
 
 /// How long a restore may take, from the driver's start to the guest's Ready.
@@ -55,8 +56,6 @@ const POLL: Duration = Duration::from_millis(50);
 /// How long a VMM that closed its restore-ready endpoint without the event may take to exit, as
 /// OpenVMM does when it cannot start its VM worker.
 const CLOSED_EXIT_WAIT: Duration = Duration::from_secs(10);
-/// OpenVMM's restore-ready event.
-const READY_EVENT: &[u8] = b"OPENVMM_RESTORE_READY_V1\n";
 
 /// The caller's cancellation of a restore, which the restore observes within [`POLL`] once set.
 pub(crate) type Cancel = AtomicBool;
