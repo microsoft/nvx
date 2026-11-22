@@ -48,4 +48,3 @@ runs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python scripts\nvx.py doctor --help
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-

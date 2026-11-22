@@ -1323,9 +1323,8 @@ class _FakeSandboxCli:
                 "image": {"mtime_ns": image.stat().st_mtime_ns},
                 "policy": {"revision": 1, "result": "accepted"},
             }
-            if (
-                "restage-keeps-binding" in self.faults
-                and hasattr(self, "first_restage_binding")
+            if "restage-keeps-binding" in self.faults and hasattr(
+                self, "first_restage_binding"
             ):
                 binding = self.first_restage_binding
             elif not hasattr(self, "first_restage_binding"):
@@ -1348,7 +1347,10 @@ class _FakeSandboxCli:
         config = json.loads((state / "config.json").read_text(encoding="utf-8"))
         if "distro_binding" in config and "ignores-stale-layer" not in self.faults:
             image = Path(config["image"]["path"])
-            if image.stat().st_mtime_ns != config["distro_binding"]["image"]["mtime_ns"]:
+            if (
+                image.stat().st_mtime_ns
+                != config["distro_binding"]["image"]["mtime_ns"]
+            ):
                 return self._error(
                     "unavailable",
                     f"{image} changed after its distro binding was made: its modification time "
