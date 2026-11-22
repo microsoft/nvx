@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use super::{Result, check_interrupt};
 
 /// The longest that a wait sleeps between checks for Ctrl-C and for the condition it awaits.
-pub(crate) const RETRY_INTERVAL: Duration = Duration::from_millis(25);
+pub(super) const RETRY_INTERVAL: Duration = Duration::from_millis(25);
 
 /// A point in time `timeout` seconds after it was taken, or none when that is beyond what an
 /// [`Instant`] holds, which then never passes.
