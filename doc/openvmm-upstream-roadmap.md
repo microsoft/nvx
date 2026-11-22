@@ -9,19 +9,24 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c928e8dc1e1673a37c83c10fe145f6611a505cec`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126 and the PR18 fixup at position 302.
-- NVX's pinned OpenVMM revision: `85c3698f94e8c8308ac1b09e99b31b17ae50a037`, position 316, the head
-  of the `feature/microvm/release/v7.1` branch of microsoft/openvmm. The v7.1 rebase moved the 315
+- NVX's pinned OpenVMM revision: `0d24cec40be3abdf69835f1c1814e00e72d0fd5d`, position 319, the
+  locally qualified ARM cold-boot foundation after the v7.1 release base
+  `85c3698f94e8c8308ac1b09e99b31b17ae50a037` at position 316. This is not an upstream merge or
+  an advancement of `feature/microvm/dev`. The v7.1 rebase moved the 315
   commits of `feature/microvm/dev` at NVX's previous pin, `6e5303f94`, onto `9a875b563` without
   dropping any: the 296 of `feature/microvm/release/v7.0` and the 19 that microsoft/openvmm#5129,
   microsoft/openvmm#5131, microsoft/openvmm#5132, microsoft/openvmm#5134, microsoft/openvmm#5136,
   microsoft/openvmm#5140, and microsoft/openvmm#5141 landed after it. It added a fixup at its tip,
   position 316. Every commit keeps its position, and only positions 060 and 277, which conflicted
   with upstream, and position 007, whose context upstream changed, changed their patches; see
-  [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The pin is 190 commits past the
-  mapped tip on the same first-parent chain. Positions 127-301 and 303-316 are not yet assigned to
+  [Conflicts of the v7.1 rebase](#conflicts-of-the-v71-rebase). The pin is 193 commits past the
+  mapped tip on the same first-parent chain. Positions 127-301 and 303-319 are not yet assigned to
   PRs, and position 302 is a PR18 fixup; see [Commits after the mapped
-  tip](#commits-after-the-mapped-tip).
-- Upstream main: `715927303600a54911a836ed6f53dc338e15c05f` (2026-11-18), one commit past the
+  tip](#commits-after-the-mapped-tip). Positions 317-319 are the ARM foundation used by the
+  first two successor NVX layers. These are local/fork-only qualification pins, not a new
+  OpenVMM pull request or a claim of upstream CI acceptance.
+- Upstream main at the selected baseline: `715927303600a54911a836ed6f53dc338e15c05f`
+  (2026-11-18), one commit past the
   fork base; see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
 ## Upstream status
@@ -1461,7 +1466,9 @@ The physical branch is one first-parent chain:
   -> snapshot manifest's field map with upstream recorded in the Guide [314]
   -> malformed snapshot ID refused by its field before the rest of the manifest decodes [315]
   -> v7.1 rebase fixup [316]
-  -> 85c3698f9 (NVX pin)
+  -> local ARM cold-boot and CPU/time admission [317-318]
+  -> local ARM report-sharing import correction [319]
+  -> 0d24cec40 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1490,9 +1497,10 @@ position 069 and position 133.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 190 later commits, position
+The NVX pin extends the chain past position 126 without merges. Of its 193 later commits, position
 302 is a PR18 fixup, position 316 is the fixup of the v7.1 rebase, and the others are not yet
-classified or assigned to PRs.
+classified or assigned to PRs. Positions 317-319 are the local/fork-only ARM qualification tail
+and are not assigned to an upstream pull request.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 are the ABI restart
@@ -1504,7 +1512,7 @@ position 215, which combines v5.1 positions 222 and 223, and the commits that th
 reorganization folded into them. Each commit has the position that it had in v7.0, since the v7.1
 rebase dropped none. Each commit's v6.1 position is its v6.0 position less seven, the number of
 commits that the v6.1 rebase dropped before it, and its v6.0 position is its v5.1 position through
-147 and one less from v5.1 position 149 on, and positions 297-316 have no earlier position; see
+147 and one less from v5.1 position 149 on, and positions 297-319 have no earlier position; see
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
 [The v6.0 reorganization](#the-v60-reorganization). A v6.1 position counts in
@@ -1706,6 +1714,13 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 314 | `e61ccb214` | - | - | - | - | - | - | Guide: record the snapshot manifest's field map with upstream (microsoft/openvmm#5141) |
 | 315 | `848f60122` | - | - | - | - | - | - | openvmm_helpers: refuse a malformed snapshot ID by its field (microsoft/openvmm#5141) |
 | 316 | `85c3698f9` | - | - | - | - | - | - | cpu_profile, openvmm_helpers: name sha2 as upstream's lock file does (v7.1 rebase fixup for microsoft/openvmm#4941); fold into 069 and 133 |
+| 317 | `f275e345f` | - | - | - | - | - | - | microvm: enable governed ARM64 cold boot on WHP (local/fork-only; unassigned) |
+| 318 | `8db75252f` | - | - | - | - | - | - | microvm: verify ARM64 CPU and time admission (local/fork-only; unassigned) |
+| 319 | `0d24cec40` | - | - | - | - | - | - | microvm: preserve time ABI imports across report sharing (local/fork-only; unassigned) |
+
+Positions 317-319 add the ARM/WHP cold foundation and its explicit CPU/time admission, then
+correct imports in the new ARM dispatcher across report-sharing configurations.
+No existing OpenVMM pull request or upstream branch is changed by this mapping.
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
