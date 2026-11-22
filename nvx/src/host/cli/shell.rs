@@ -70,7 +70,7 @@ fn shell_command_line<S: AsRef<str>>(arguments: &[S]) -> String {
 
 /// Returns `arguments` as the CLI prints a command: [`windows_command_line`] on Windows, and
 /// [`shell_command_line`] on other hosts.
-pub(crate) fn format_command<S: AsRef<str>>(arguments: &[S]) -> String {
+pub(super) fn format_command<S: AsRef<str>>(arguments: &[S]) -> String {
     if cfg!(windows) {
         windows_command_line(arguments)
     } else {
