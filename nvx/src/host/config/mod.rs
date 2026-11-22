@@ -1256,8 +1256,11 @@ pub(crate) fn runtime_arguments(runtime: &Runtime) -> Result<Vec<OsString>> {
     };
     arguments.extend(["--guest-shutdown-action".into(), shutdown.into()]);
     if let Some(timeout) = runtime.options.control_auth_timeout {
+        /// Bounds the control authentication wait rendered as `--microvm-control-auth-timeout-ms`
+        /// to its accepted maximum of 60000 milliseconds.
+        const MAX_CONTROL_AUTH_TIMEOUT: Duration = Duration::from_secs(60);
         if timeout < Duration::from_millis(1)
-            || timeout > Duration::from_secs(60)
+            || timeout > MAX_CONTROL_AUTH_TIMEOUT
             || timeout.subsec_nanos() % 1_000_000 != 0
         {
             return Err(Error::unsupported(
