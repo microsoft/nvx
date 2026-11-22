@@ -85,10 +85,10 @@ pub(crate) fn open_regular(path: &Path) -> io::Result<File> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
 
-        /// `FILE_FLAG_OPEN_REPARSE_POINT`, which opens a link as itself.
-        const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(OPEN_REPARSE_POINT);
+        // Opens a link as itself.
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
     let file = options.open(path).map_err(refused_open)?;
     regular(file)
