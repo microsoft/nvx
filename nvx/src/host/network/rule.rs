@@ -143,15 +143,14 @@ impl EgressRule {
     pub(crate) fn parse_native(value: &str) -> Result<Self> {
         let refused = |reason: &str| Err(Error::unsupported(format!("{value}: {reason}")));
         let (destination, selector) = split_native_rule(value);
-        let (protocol, ports) =
-            match selector.map(|selector| selector.split(':').collect::<Vec<_>>()) {
-                None => (None, None),
-                Some(fields) => match fields[..] {
-                    [protocol] => (Some(protocol), None),
-                    [protocol, ports] => (Some(protocol), Some(ports)),
-                    _ => return refused("expected CIDR[:PROTOCOL[:PORT[-PORT]]]"),
-                },
-            };
+        let (protocol, ports) = match selector {
+            None => (None, None),
+            Some(selector) => match selector.split_once(':') {
+                None => (Some(selector), None),
+                Some((protocol, ports)) if !ports.contains(':') => (Some(protocol), Some(ports)),
+                Some(_) => return refused("expected CIDR[:PROTOCOL[:PORT[-PORT]]]"),
+            },
+        };
         let protocol = match protocol {
             None => None,
             Some("tcp") => Some(Protocol::Tcp),
