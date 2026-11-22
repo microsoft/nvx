@@ -470,10 +470,11 @@ pub(super) fn command_line(program: &OsStr, arguments: &[OsString]) -> io::Resul
     Ok(line)
 }
 
-/// Appends one argument using the Microsoft C runtime's backslash-and-quote rules.
+/// Appends one argument using the Microsoft C runtime's backslash-and-quote rules, traversing
+/// its borrowed UTF-16 units without an intermediate buffer.
 fn append_argument(line: &mut Vec<u16>, argument: &OsStr, always_quote: bool) -> io::Result<()> {
-    let units: Vec<u16> = argument.encode_wide().collect();
-    if units.contains(&0) {
+    let units = argument.encode_wide();
+    if units.clone().any(|unit| unit == 0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "command-line arguments cannot contain NUL characters",
@@ -481,10 +482,10 @@ fn append_argument(line: &mut Vec<u16>, argument: &OsStr, always_quote: bool) ->
     }
     let (quote, backslash) = (u16::from(b'"'), u16::from(b'\\'));
     let quoted = always_quote
-        || units.is_empty()
+        || argument.is_empty()
         || units
-            .iter()
-            .any(|&unit| unit == u16::from(b' ') || unit == u16::from(b'\t'));
+            .clone()
+            .any(|unit| unit == u16::from(b' ') || unit == u16::from(b'\t'));
     if quoted {
         line.push(quote);
     }
