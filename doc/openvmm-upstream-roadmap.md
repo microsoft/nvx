@@ -9,8 +9,9 @@
 - Mapped fork tip: `1e492803287f04b40bb7c17e8648c4b96af52ecc`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR18 fixups at positions 302,
   333, and 342, and the PR13 fixup at position 340.
-- NVX's pinned OpenVMM revision: `5c82edac42ca480d546459e019860759a27c2211`, position 342, the head
-  of microsoft/openvmm#5208, whose commit follows position 341, `ed2d7e3a1`, the head of
+- NVX's pinned OpenVMM revision: `afa0e9c20a7943d3ec556098d9272f4ee502bdd4`, position 343, the head
+  of microsoft/openvmm#5209, whose commit follows position 342, `5c82edac4`, the head of
+  microsoft/openvmm#5208, whose commit follows position 341, `ed2d7e3a1`, the head of
   `feature/microvm/dev`, where microsoft/openvmm#5207 landed position 341 on position 340,
   `32888344a`, where microsoft/openvmm#5206 landed position 340 on position 339, `b51f9156c`, the
   head of the `feature/microvm/release/v7.2` branch of microsoft/openvmm. The
@@ -19,9 +20,9 @@
   landed, so each later commit's position is one less than before, and it added five fixups at its
   tip, positions 335-339. Of the 334 replayed commits, 47 conflicted with upstream and 13 replayed
   with new context; see [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase). The pin is
-  216 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
-  and 341 are not yet assigned to PRs, positions 302, 333, and 342 are PR18 fixups, position 340
-  is a PR13 fixup, and positions 316 and 335-339 are rebase fixups; see
+  217 commits past the mapped tip on the same first-parent chain. Positions 127-301, 303-332, 334,
+  341, and 343 are not yet assigned to PRs, positions 302, 333, and 342 are PR18 fixups, position
+  340 is a PR13 fixup, and positions 316 and 335-339 are rebase fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1619,7 +1620,8 @@ bf353460f
   -> PR13 fixup [340]
   -> virtio-fs aggregate root reads bounded at 1 MiB [341]
   -> PR18 fixup [342]
-  -> 5c82edac4 (NVX pin)
+  -> microVM file children whose names hold `\` or `:` refused [343]
+  -> afa0e9c20 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1658,7 +1660,7 @@ the policy tests share the `request` helper that the tests call.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 216 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 217 later commits, positions
 302, 333, and 342 are PR18 fixups, position 340 is a PR13 fixup, position 316 is the fixup of the
 v7.1 rebase, positions 335-339 are the fixups of the v7.2 rebase, and the others are not yet
 classified or assigned to PRs.
@@ -1669,7 +1671,7 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-315 followed the
 v7.0 reorganization, position 316 is the v7.1 rebase's fixup, positions 317-334 followed the
-v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-342 followed the
+v7.1 rebase, positions 335-339 are the v7.2 rebase's fixups, and positions 340-343 followed the
 v7.2 rebase, so they combine none, apart from
 position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0
 reorganization folded into them. Each commit through position 316 has the position that it had in
@@ -1677,7 +1679,7 @@ v7.0 and v7.1, and each of positions 317-334 is its v7.1 position less one, sinc
 dropped v7.1 position 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each
 commit's v6.1 position is its v6.0 position less seven, the number of commits that the v6.1 rebase
 dropped before it, and its v6.0 position is its v5.1 position through 147 and one less from v5.1
-position 149 on, and positions 297-342 have no earlier position; see
+position 149 on, and positions 297-343 have no earlier position; see
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
 [Conflicts of the v6.1 rebase](#conflicts-of-the-v61-rebase), and
@@ -1906,6 +1908,7 @@ whose first 220 commits are those of `feature/microvm/release/v6.0`, and a v4.0 
 | 340 | `32888344a` | - | - | - | - | - | - | virtiofs: keep node names when renaming a name onto itself (microsoft/openvmm#5206); fold into 048, its test into 166 |
 | 341 | `ed2d7e3a1` | - | - | - | - | - | - | virtiofs: bound the buffer of an aggregate root's directory read (microsoft/openvmm#5207) |
 | 342 | `5c82edac4` | - | - | - | - | - | - | virtiofs: bound microVM directory snapshots in total when listing (microsoft/openvmm#5208); fold into 083, its budget in `new_microvm_aggregate` and its tests into 164 |
+| 343 | `afa0e9c20` | - | - | - | - | - | - | virtiofs: refuse a microVM file child that its volume cannot name (microsoft/openvmm#5209) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -1916,7 +1919,7 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-306, `c4419be15`
 main on 2026-11-19, for positions 321-324, `78af54a51`, upstream main on 2026-11-20, for position
 325, `d83f87209`, upstream main later that day, for position 326, `265f0a73f`, upstream main
 later still, for positions 327 and 328, and `bf353460f`, upstream main on 2026-11-21 and the v7.2
-fork base, for positions 329-334 and 340-342.
+fork base, for positions 329-334 and 340-343.
 They name the positions that the commits have now, but neither the v7.2 rebase on `bf353460f`, the
 v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did
 the v6.1 rebase check the earlier ones on `7d90c4104`.
@@ -4373,6 +4376,32 @@ budget in `new_microvm_aggregate` and its tests into position 164. Upstream main
 since it lacks the microVM persistence. Replaying the commit there conflicts in `file.rs` and
 `lib.rs`, next to the code of positions 081, 083, and 158, and in the microVM's `file.rs`, `fs.rs`,
 and `fs_tests.rs`, which upstream main lacks, so it follows PR18 upstream.
+
+Position 343 has `open_microvm_volume` refuse the file of an aggregate's file child whose name holds
+`\` or `:`, so that attaching the aggregate fails, at a cold boot or a restore, with an error that
+names the file (microsoft/nvx#1614). Position 165 opens the file's host directory as a strict
+volume whose root object is the file, at its name, and PR18's position 081 has a strict volume
+refuse every path with `\` or `:`, in `validate_relative_path`, which the preflight of an insert
+that position 081 adds, the confinement check that PR27's position 126 adds, and the save and
+restore of PR18's position 083 apply to every name of a node. Nothing checked the file's name
+when the child attached, since the profile's path rules cover only the policy paths that it
+parses, so a file child whose name had one, common on Linux, as in timestamps or digests, and on
+Windows the name of an alternate data stream of a file, attached, but every guest `LOOKUP` of it
+failed with `EINVAL`, and so did a `READDIRPLUS` of the aggregate's root from the child on, while
+a plain `READDIR` listed it as a regular file. The commit applies the same `validate_relative_path`
+to the file's name; a directory's own name is never a path of its volume, so directory shares and
+children are unchanged, and the saved state keeps its format. It changes the file branch of
+`open_microvm_volume` in the microVM's `fs.rs`, which position 164 adds and position 165 extends
+to files, and the rustdoc of `new_microvm_aggregate`, which position 164 adds and position 165
+changes; PR18's positions 081, 083, and 085, PR22's position 102, PR27's position 126, and
+positions 158, 160, 194, 332, and 342 also change the file. It adds tests to the microVM's
+aggregate tests, which position 164 adds and positions 165, 194, and 341 also change, and a bullet
+to the "Single files" part of the Guide's virtio-fs page, which position 165 adds. It fixes a
+defect of position 165, which no PR maps, so it is not yet assigned to a PR either and follows
+position 165. Upstream main lacks the defect, since it lacks the microVM profile and its file
+children. Replaying the commit there conflicts in all three files, which upstream main lacks: the
+microVM's `fs.rs` and `aggregate_fs_tests.rs` and the Guide's virtio-fs page, so it cannot go
+upstream on its own.
 
 ## PR summary
 
