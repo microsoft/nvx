@@ -179,6 +179,118 @@ class ArmCiTests(unittest.TestCase):
         )
         self.assertIn("--include-arm64", check["run"])
 
+    def test_arm_producers_checkout_the_pin_before_verifying_source(self) -> None:
+        guest = load(".github/actions/build-arm64-guest-artifacts/action.yml")
+        windows = load(".github/workflows/build-nvx-windows-arm64.yml")
+        for steps in (guest["runs"]["steps"], windows["jobs"]["build"]["steps"]):
+            with self.subTest(producer=steps):
+                checkout = next(
+                    index
+                    for index, item in enumerate(steps)
+                    if item.get("uses") == "./.github/actions/checkout-openvmm"
+                )
+                verify = next(
+                    index
+                    for index, item in enumerate(steps)
+                    if "verify" in item.get("run", "")
+                )
+                self.assertLess(checkout, verify)
+        prerequisites = step(guest, "Install native guest prerequisites")
+        self.assertLess(
+            guest["runs"]["steps"].index(prerequisites),
+            guest["runs"]["steps"].index(step(guest, "Checkout OpenVMM")),
+        )
+        helper = load(".github/actions/checkout-openvmm/action.yml")
+        checkout = step(helper, "Checkout OpenVMM")["with"]
+        self.assertEqual(checkout["repository"], "microsoft/openvmm")
+        self.assertEqual(checkout["path"], "openvmm")
+        self.assertFalse(checkout["persist-credentials"])
+        for name in (
+            "Resolve OpenVMM revision on Linux",
+            "Resolve OpenVMM revision on Windows",
+        ):
+            self.assertIn("git rev-parse :openvmm", step(helper, name)["run"])
+        self.assertIn("steps.revision-linux.outputs.sha", checkout["ref"])
+        self.assertIn("steps.revision-windows.outputs.sha", checkout["ref"])
+
+    def test_arm_guest_checkout_preserves_public_fork_authentication(self) -> None:
+        guest = load(".github/actions/build-arm64-guest-artifacts/action.yml")
+        helper = load(".github/actions/checkout-openvmm/action.yml")
+        for document in (guest, helper):
+            self.assertFalse(document["inputs"]["ssh-key"]["required"])
+            self.assertEqual(document["inputs"]["ssh-key"]["default"], "")
+        checkout = step(helper, "Checkout OpenVMM")["with"]
+        self.assertEqual(checkout["token"], "${{ github.token }}")
+        self.assertEqual(checkout["ssh-key"], "${{ inputs.ssh-key }}")
+        producer = self.ci["jobs"]["artifacts-arm64"]
+        self.assertNotIn(
+            "github.event.pull_request.head.repo.full_name == github.repository",
+            producer["if"],
+        )
+        key = step(self.ci, "Build ARM guest artifacts", job="artifacts-arm64")["with"][
+            "ssh-key"
+        ]
+        self.assertEqual(
+            key,
+            "${{ (github.event_name != 'pull_request' || "
+            "github.event.pull_request.head.repo.full_name == github.repository) "
+            "&& secrets.OPENVMM_DEPLOY_KEY || '' }}",
+        )
+
+    def test_arm_windows_checkout_receives_only_the_declared_deploy_key(self) -> None:
+        workflow = load(".github/workflows/build-nvx-windows-arm64.yml")
+        call = next(
+            value
+            for key, value in workflow.items()
+            if str(key).lower() in ("on", "true")
+        )["workflow_call"]
+        self.assertTrue(call["secrets"]["OPENVMM_DEPLOY_KEY"]["required"])
+        checkout = step(workflow, "Checkout OpenVMM", job="build")
+        self.assertEqual(
+            checkout["with"]["ssh-key"], "${{ secrets.OPENVMM_DEPLOY_KEY }}"
+        )
+        caller = self.ci["jobs"]["build-nvx-windows-arm64"]
+        self.assertEqual(
+            caller["secrets"],
+            {"OPENVMM_DEPLOY_KEY": "${{ secrets.OPENVMM_DEPLOY_KEY }}"},
+        )
+        self.assertIn(
+            "github.event.pull_request.head.repo.full_name == github.repository",
+            caller["if"],
+        )
+
+    def test_windows_runner_pools_do_not_accept_the_other_architecture(self) -> None:
+        arm = set(self.cold["jobs"]["test"]["runs-on"])
+        windows = load(".github/workflows/build-nvx-windows-arm64.yml")
+        self.assertEqual(set(windows["jobs"]["build"]["runs-on"]), arm)
+        arm_runner = arm | {"benchmark"}
+        x86_runner = (arm_runner - {"ARM64"}) | {"X64"}
+        selected: list[str] = []
+        for name, job in self.ci["jobs"].items():
+            value = job.get("with", {}).get("runner")
+            if not value:
+                continue
+            labels = set(json.loads(value))
+            if not {"self-hosted", "windows"}.issubset(labels):
+                continue
+            if "ARM64" in labels:
+                self.assertTrue(labels.issubset(arm_runner))
+                self.assertFalse(labels.issubset(x86_runner))
+            else:
+                selected.append(name)
+                self.assertTrue(labels.issubset(x86_runner))
+                self.assertFalse(labels.issubset(arm_runner), name)
+        self.assertCountEqual(
+            selected,
+            [
+                "build-openvmm-windows-msvc",
+                "nvx-microvm-tests-whp",
+                "nvx-microvm-guests-whp",
+                "nvx-microvm-debug-whp",
+                "platform-whp",
+            ],
+        )
+
     def test_x86_shards_and_default_cli_selection_remain_x86(self) -> None:
         for backend in ("kvm", "mshv", "whp"):
             job = self.ci["jobs"][f"nvx-microvm-tests-{backend}"]

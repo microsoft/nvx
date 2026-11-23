@@ -2,6 +2,10 @@ name: Build ARM64 guest artifacts
 description: Cache or build native AArch64 kernels, Alpine, and Ubuntu guests
 
 inputs:
+  ssh-key:
+    description: Optional OpenVMM deploy key for trusted caller contexts
+    required: false
+    default: ""
   save-cache:
     description: Save newly built artifacts only when the caller permits it
     required: false
@@ -31,6 +35,16 @@ runs:
           bc binutils bison build-essential ca-certificates cpio curl \
           e2fsprogs erofs-utils=1.5-1 flex git gzip libelf-dev libssl-dev \
           patch python3 rsync tar xz-utils zstd
+
+    - name: Checkout OpenVMM
+      uses: ./.github/actions/checkout-openvmm
+      with:
+        ssh-key: ${{ inputs.ssh-key }}
+
+    - name: Verify source and install Rust
+      shell: bash
+      run: |
+        set -euo pipefail
         python3 scripts/nvx.py verify
         toolchain=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
         test -n "${toolchain}"

@@ -883,7 +883,7 @@ jobs:
     uses: ./.github/workflows/build-openvmm-binary.yml
     with:
       display-name: Windows MSVC
-      runner: '["self-hosted", "windows", "whp", "virtual-machine", "general"]'
+      runner: '["self-hosted", "windows", "X64", "whp", "virtual-machine", "general"]'
       backend: whp
       artifact: openvmm-windows-msvc
       binary: openvmm/target/release/openvmm.exe
@@ -1057,7 +1057,7 @@ jobs:
     uses: ./.github/workflows/run-nvx-microvm-tests.yml
     with:
       display-name: Windows / WHP / Shard ${{ matrix.shard }} of ${{ strategy.job-total }}
-      runner: '["self-hosted", "windows", "whp", "virtual-machine", "general"]'
+      runner: '["self-hosted", "windows", "X64", "whp", "virtual-machine", "general"]'
       backend: whp
       openvmm-artifact: openvmm-windows-msvc
       nvx-artifact: nvx-windows-msvc
@@ -1168,7 +1168,7 @@ jobs:
     uses: ./.github/workflows/run-nvx-microvm-tests.yml
     with:
       display-name: Windows / WHP / Guests and sandboxes
-      runner: '["self-hosted", "windows", "whp", "virtual-machine", "general"]'
+      runner: '["self-hosted", "windows", "X64", "whp", "virtual-machine", "general"]'
       backend: whp
       openvmm-artifact: openvmm-windows-msvc
       nvx-artifact: nvx-windows-msvc
@@ -1265,7 +1265,7 @@ jobs:
     uses: ./.github/workflows/run-nvx-microvm-tests.yml
     with:
       display-name: Windows / WHP / Debug kernel
-      runner: '["self-hosted", "windows", "whp", "virtual-machine", "general"]'
+      runner: '["self-hosted", "windows", "X64", "whp", "virtual-machine", "general"]'
       backend: whp
       openvmm-artifact: openvmm-windows-msvc
       nvx-artifact: nvx-windows-msvc
@@ -1381,7 +1381,7 @@ jobs:
     uses: ./.github/workflows/run-platform.yml
     with:
       display-name: Windows / WHP / Virtual machine
-      runner: '["self-hosted", "windows", "whp", "virtual-machine", "benchmark"]'
+      runner: '["self-hosted", "windows", "X64", "whp", "virtual-machine", "benchmark"]'
       backend: whp
       benchmark-platform: windows-whp-virtual-machine
       openvmm-artifact: openvmm-windows-msvc
@@ -1614,8 +1614,8 @@ jobs:
       - name: Publish development release
         uses: ./.github/actions/publish-development-release
 
-  # ARM products and jobs have their own identities. The x86 shards, cache
-  # keys, runner pools and required-status name above remain unchanged.
+  # ARM products and jobs have their own identities. Architecture labels
+  # separate the runner pools; x86 shards, cache keys and status names stay put.
   artifacts-arm64:
     name: Build ARM64 guest artifacts
     needs: [openvmm-changes]
@@ -1641,6 +1641,7 @@ jobs:
       - name: Build ARM guest artifacts
         uses: ./.github/actions/build-arm64-guest-artifacts
         with:
+          ssh-key: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && secrets.OPENVMM_DEPLOY_KEY || '' }}
           save-cache: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
       - name: Upload ARM guest artifacts
@@ -1676,6 +1677,8 @@ jobs:
         )
       }}
     uses: ./.github/workflows/build-nvx-windows-arm64.yml
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
   nvx-cli-windows-arm64:
     name: NVX CLI / Windows ARM64
