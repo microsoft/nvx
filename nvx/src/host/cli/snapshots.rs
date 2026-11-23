@@ -268,7 +268,7 @@ pub(super) fn restore_source(
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String")]
-pub(crate) struct Name(String);
+pub(super) struct Name(String);
 
 impl TryFrom<String> for Name {
     type Error = Error;
@@ -327,7 +327,7 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn lock(&self, name: &Name, deadline: Deadline) -> Result<LockedSnapshot<'_>> {
+    pub(super) fn lock(&self, name: &Name, deadline: Deadline) -> Result<LockedSnapshot<'_>> {
         self.check()?;
         // Hex preserves case distinctions and avoids reserved host filenames.
         let directory = hex(name.0.as_bytes());
