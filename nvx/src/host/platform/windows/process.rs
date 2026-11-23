@@ -282,7 +282,7 @@ pub(crate) fn boot_id() -> io::Result<[u8; 16]> {
     let key = wide(BOOT_ID_KEY);
     let name = wide("BootId");
     let mut value = 0u32;
-    let mut size = mem::size_of::<u32>() as u32;
+    let mut size = mem::size_of_val(&value) as u32;
     // SAFETY: the names are NUL-terminated, the type flag admits only a REG_DWORD, and the
     // output buffer holds `size` bytes.
     let status = unsafe {
