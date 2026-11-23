@@ -440,7 +440,7 @@ def bounded_evidence(data: bytes, omitted: int = 0) -> bytes:
     return data
 
 
-def read_runtime(state: Path, *, architecture: str = "x86_64") -> dict[str, Any]:
+def read_runtime(state: Path, *, architecture: str | None = None) -> dict[str, Any]:
     path = state / RUNTIME
     try:
         value: object = json.loads(path.read_text(encoding="utf-8"))
@@ -449,26 +449,20 @@ def read_runtime(state: Path, *, architecture: str = "x86_64") -> dict[str, Any]
     if not isinstance(value, dict):
         raise RuntimeError(f"sandbox runtime record is not an object: {path}")
     runtime = cast(dict[str, Any], value)
-    fields = RUNTIME_FIELDS
-    if "version" in runtime or "architecture" in runtime or architecture != "x86_64":
-        fields |= {"version", "architecture"}
-        if (
-            type(runtime.get("version")) is not int
-            or runtime.get("version") != 2
-            or runtime.get("architecture") != architecture
-        ):
-            raise RuntimeError(
-                f"sandbox runtime record has an invalid ISA/version: {path}"
-            )
-    if frozenset(runtime) != fields:
+    if frozenset(runtime) != RUNTIME_FIELDS:
         raise RuntimeError(f"sandbox runtime record has unexpected fields: {path}")
     if type(runtime["version"]) is not int or runtime["version"] != 2:
         raise RuntimeError(f"sandbox runtime record has an invalid version: {path}")
-    architecture = runtime["architecture"]
-    if not isinstance(architecture, str) or architecture not in ("x86_64", "aarch64"):
+    recorded_architecture = runtime["architecture"]
+    if not isinstance(recorded_architecture, str) or recorded_architecture not in (
+        "x86_64",
+        "aarch64",
+    ):
         raise RuntimeError(
             f"sandbox runtime record has an invalid architecture: {path}"
         )
+    if architecture is not None and recorded_architecture != architecture:
+        raise RuntimeError(f"sandbox runtime record has an invalid ISA/version: {path}")
     vm_dir = runtime["vmDir"]
     capability = runtime["capability"]
     if not isinstance(capability, list):

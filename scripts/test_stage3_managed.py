@@ -294,10 +294,12 @@ class Stage3ManagedTests(unittest.TestCase):
         }
         path = state / lifecycle.RUNTIME
         path.write_text(json.dumps(record), encoding="utf-8")
-        self.assertEqual(lifecycle.read_runtime(state), record)
+        with self.assertRaisesRegex(RuntimeError, "unexpected fields"):
+            lifecycle.read_runtime(state)
         for architecture in ("x86_64", "aarch64"):
             current = {**record, "version": 2, "architecture": architecture}
             path.write_text(json.dumps(current), encoding="utf-8")
+            self.assertEqual(lifecycle.read_runtime(state), current)
             self.assertEqual(
                 lifecycle.read_runtime(state, architecture=architecture), current
             )
@@ -321,7 +323,7 @@ class Stage3ManagedTests(unittest.TestCase):
                     lifecycle.read_runtime(state, architecture="aarch64")
         path.write_text(json.dumps(current), encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "ISA/version"):
-            lifecycle.read_runtime(state)
+            lifecycle.read_runtime(state, architecture="x86_64")
 
     def test_arm_other_runtime_uses_namespaced_image_provenance_without_fallback(
         self,
