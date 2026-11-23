@@ -30,7 +30,7 @@ impl Guest {
 
     /// Returns the name of the guest's distribution, as messages show it: `Alpine Linux`,
     /// `Ubuntu Base`, or `Azure Linux`.
-    pub(crate) const fn distribution(self) -> &'static str {
+    pub(super) const fn distribution(self) -> &'static str {
         match self {
             Self::Alpine => "Alpine Linux",
             Self::Ubuntu => "Ubuntu Base",
