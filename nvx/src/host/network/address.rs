@@ -9,7 +9,7 @@
 //! IPv4-mapped IPv6 address such as `::ffff:192.0.2.0` with its IPv4 address in dotted form.
 
 use std::fmt;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// Address family of a [`Network`].
 ///
@@ -125,7 +125,7 @@ fn write_ipv6(formatter: &mut fmt::Formatter<'_>, address: u128) -> fmt::Result 
     if address >> 32 == 0xFFFF {
         return write!(formatter, "::ffff:{}", Ipv4Addr::from(address as u32));
     }
-    let groups: [u16; 8] = std::array::from_fn(|index| (address >> (112 - 16 * index)) as u16);
+    let groups = Ipv6Addr::from(address).segments();
     // The first of the longest runs of zero groups, if a run has at least two groups.
     let mut best: Option<(usize, usize)> = None;
     let mut index = 0;
