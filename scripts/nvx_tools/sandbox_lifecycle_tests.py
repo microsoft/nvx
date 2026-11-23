@@ -111,8 +111,10 @@ LOCK = "sandbox.lock"
 # The first exec of a provisioned sandbox creates its exec lock, even an exec
 # that finds no VM, and the lock stays until deprovision removes the sandbox.
 EXEC_LOCK = "exec.lock"
-# The fields of the store's runtime record.
-RUNTIME_FIELDS = frozenset({"capability", "endpoint", "process", "runtime", "vmDir"})
+# The fields of the store's newly written version-2 runtime record.
+RUNTIME_FIELDS = frozenset(
+    {"architecture", "capability", "endpoint", "process", "runtime", "version", "vmDir"}
+)
 PROVISIONED_ENTRIES = frozenset({CONFIG, LOCK})
 # Windows hosts serve the control endpoint as a named pipe outside the state.
 RUNNING_ENTRIES = frozenset(
@@ -375,6 +377,13 @@ def read_runtime(state: Path) -> dict[str, Any]:
     runtime = cast(dict[str, Any], value)
     if frozenset(runtime) != RUNTIME_FIELDS:
         raise RuntimeError(f"sandbox runtime record has unexpected fields: {path}")
+    if type(runtime["version"]) is not int or runtime["version"] != 2:
+        raise RuntimeError(f"sandbox runtime record has an invalid version: {path}")
+    architecture = runtime["architecture"]
+    if not isinstance(architecture, str) or architecture not in ("x86_64", "aarch64"):
+        raise RuntimeError(
+            f"sandbox runtime record has an invalid architecture: {path}"
+        )
     vm_dir = runtime["vmDir"]
     capability = runtime["capability"]
     if not isinstance(capability, list):

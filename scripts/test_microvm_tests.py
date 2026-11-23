@@ -1273,6 +1273,8 @@ class _FakeSandboxCli:
         (state / "runtime.json").write_text(
             json.dumps(
                 {
+                    "version": 2,
+                    "architecture": "x86_64",
                     "capability": list(capability),
                     "vmDir": str(state.resolve()),
                     "process": {"pid": pid, "startTime": pid * 7, "boot": "b" * 32},
@@ -1511,6 +1513,13 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
             path = state / "runtime.json"
             saved = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(sandbox_lifecycle_tests.read_runtime(state), saved)
+            for architecture in ("x86_64", "aarch64"):
+                with self.subTest(architecture=architecture):
+                    record = saved | {"architecture": architecture}
+                    path.write_text(json.dumps(record), encoding="utf-8")
+                    self.assertEqual(
+                        sandbox_lifecycle_tests.read_runtime(state), record
+                    )
             other = root / "other"
             other.mkdir()
             old = {
@@ -1522,6 +1531,27 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
             mismatched[0] ^= 1
             for record, message in (
                 (old, "unexpected fields"),
+                (saved | {"unknown": True}, "unexpected fields"),
+                (
+                    {name: value for name, value in saved.items() if name != "version"},
+                    "unexpected fields",
+                ),
+                (
+                    {
+                        name: value
+                        for name, value in saved.items()
+                        if name != "architecture"
+                    },
+                    "unexpected fields",
+                ),
+                (saved | {"version": 1}, "invalid version"),
+                (saved | {"version": True}, "invalid version"),
+                (saved | {"version": 2.0}, "invalid version"),
+                (saved | {"version": "2"}, "invalid version"),
+                (saved | {"version": None}, "invalid version"),
+                (saved | {"architecture": "x86"}, "invalid architecture"),
+                (saved | {"architecture": []}, "invalid architecture"),
+                (saved | {"architecture": None}, "invalid architecture"),
                 (saved | {"vmDir": str(other)}, "another VM directory"),
                 (saved | {"capability": [0] * 31}, "invalid capability"),
                 (saved | {"capability": mismatched}, "differs from its owned file"),

@@ -613,6 +613,10 @@ its gateway and no other destination, sandboxes whose overlay upper is a
 tmpfs in guest memory, with no scratch image, and sandboxes whose root is a
 GPT disk, over either upper, so that the three backends run the CLI's twelve
 cold cells (see the [case matrix](acceptance-case-matrix.md#cold-boots)). The
+managed lifecycle checks newly written runtime records against the exact
+version-2 schema, including the explicit `x86_64` or `aarch64` architecture,
+and rejects unknown fields, missing metadata, and invalid metadata values.
+It also verifies the VM directory and its owned control capability. The
 public `vm-lifecycle` scenario then creates, spawns, connects to, attaches to
 again, and stops a VM through the public API of `nvx`. The public
 `snapshot-core` and `snapshot-tiers` scenarios capture a named snapshot with
