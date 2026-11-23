@@ -2398,9 +2398,10 @@ the commit's files in the version alone.
 
 - Its `.cargo_vcs_info.json` records the run's commit, `nvx` as the path,
   and a dirty checkout exactly when the job rewrote the version.
-- Every file is the commit's byte for byte, which rules out CRLF line endings,
-  but for the rewritten version and the files that Cargo generates,
-  `Cargo.toml` and `.cargo_vcs_info.json`, which must hold no CR either.
+- The job compares each packaged file directly with the bytes of its committed
+  Git blob, accounting for the rewritten version. This catches changes such as
+  CRLF conversion. The two files Cargo generates, `Cargo.toml` and
+  `.cargo_vcs_info.json`, are checked separately and must hold no CR either.
 - It holds the license, the readme, and the snapshots of the public API, with
   which its users check the API that it promises. The `nvx` job, which
   `Required status check` requires, checked them against the API of the run's
