@@ -1,5 +1,6 @@
 """Fixture-only architecture wiring for the current public managed helpers."""
 
+import ctypes
 import hashlib
 import json
 import shutil
@@ -324,6 +325,59 @@ class Stage3ManagedTests(unittest.TestCase):
         path.write_text(json.dumps(current), encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "ISA/version"):
             lifecycle.read_runtime(state, architecture="x86_64")
+
+    @unittest.skipUnless(sys.platform == "win32", "requires Windows path aliases")
+    def test_windows_fixture_uses_the_same_long_owned_image_as_the_refusal(
+        self,
+    ) -> None:
+        if sys.platform != "win32":
+            raise unittest.SkipTest("requires Windows path aliases")
+        long_root = self.root.resolve()
+        get_short = ctypes.windll.kernel32.GetShortPathNameW
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = get_short(str(long_root), buffer, len(buffer))
+        self.assertGreater(length, 0)
+        self.assertLess(length, len(buffer))
+        short_root = Path(buffer.value)
+        if short_root == long_root:
+            self.skipTest("the fixture volume provides no short path alias")
+        acceptance = lifecycle.LifecycleAcceptance(
+            "whp",
+            timeout=1,
+            output_dir=long_root / "results",
+            artifacts=self.artifacts,
+            root=short_root,
+            architecture="aarch64",
+        )
+        self.assertEqual(acceptance.root, long_root)
+        image = acceptance.root / "owned.erofs"
+        image.write_bytes(b"owned fixture")
+        canonical = image.resolve()
+        error = (
+            f"error[unavailable]: {canonical} changed after its distro binding was made: "
+            "its modification time differs; deprovision the sandbox and provision it again\n"
+        ).encode()
+        lifecycle.check_changed_layer_start(
+            subprocess.CompletedProcess([], 1, b"", error), str(image)
+        )
+        with self.assertRaises(RuntimeError):
+            lifecycle.check_changed_layer_start(
+                subprocess.CompletedProcess([], 1, b"", error),
+                str(acceptance.root / "different.erofs"),
+            )
+
+    def test_linux_fixture_preserves_its_supplied_path(self) -> None:
+        supplied = self.root / "uncreated" / ".." / "fixture"
+        with patch.object(sys, "platform", "linux"):
+            acceptance = lifecycle.LifecycleAcceptance(
+                "kvm",
+                timeout=1,
+                output_dir=self.root / "results",
+                artifacts=self.artifacts,
+                root=supplied,
+            )
+        self.assertEqual(acceptance.root, supplied)
+        self.assertEqual(acceptance.state, supplied / "state")
 
     def test_arm_other_runtime_uses_namespaced_image_provenance_without_fallback(
         self,

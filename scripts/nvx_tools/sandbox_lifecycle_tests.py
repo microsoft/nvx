@@ -521,6 +521,8 @@ class LifecycleAcceptance:
             else start_stop_cycles
         )
         check_cycle_count(cycles, minimum=self.default_start_stop_cycles)
+        if sys.platform == "win32":
+            root = root.resolve()
         self.architecture = architecture
         self.start_stop_cycles = cycles
         self.backend = backend

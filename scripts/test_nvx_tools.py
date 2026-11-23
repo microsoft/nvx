@@ -8594,6 +8594,7 @@ python3() {
                             [
                                 "self-hosted",
                                 operating_system,
+                                *(["X64"] if operating_system == "windows" else []),
                                 backend,
                                 "virtual-machine",
                                 "benchmark",

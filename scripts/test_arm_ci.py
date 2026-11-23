@@ -9,8 +9,11 @@ import io
 import json
 import os
 import shlex
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -221,6 +224,122 @@ class ArmCiTests(unittest.TestCase):
             self.assertIn("git rev-parse :openvmm", step(helper, name)["run"])
         self.assertIn("steps.revision-linux.outputs.sha", checkout["ref"])
         self.assertIn("steps.revision-windows.outputs.sha", checkout["ref"])
+
+    def test_arm_initial_checkout_has_git_before_the_repository_exists(self) -> None:
+        steps = self.ci["jobs"]["artifacts-arm64"]["steps"]
+        bootstrap = next(
+            index
+            for index, item in enumerate(steps)
+            if item["name"] == "Install Git before NVX checkout"
+        )
+        checkout = next(
+            index
+            for index, item in enumerate(steps)
+            if item.get("uses", "").startswith("actions/checkout@")
+        )
+        self.assertLess(bootstrap, checkout)
+        self.assertNotIn("uses", steps[bootstrap])
+        self.assertEqual(steps[bootstrap]["shell"], "bash")
+        self.assertIn("set -euo pipefail", steps[bootstrap]["run"])
+        commands = [
+            shlex.split(line)
+            for line in steps[bootstrap]["run"].replace("\\\n", "").splitlines()
+        ]
+        install = next(item for item in commands if item[:2] == ["apt-get", "install"])
+        self.assertIn("--no-install-recommends", install)
+        self.assertIn("git", install)
+        self.assertIn("ca-certificates", install)
+
+    @unittest.skipUnless(shutil.which("bash"), "requires bash for the Linux step")
+    def test_linux_pin_resolution_fails_before_publishing_an_invalid_sha(self) -> None:
+        helper = load(".github/actions/checkout-openvmm/action.yml")
+        script = step(helper, "Resolve OpenVMM revision on Linux")["run"]
+        self.assertNotIn("if", step(helper, "Checkout OpenVMM"))
+        valid = "c3089ff9089695ae5440c69fb77c80a482f321bd"
+        for status, sha in (
+            (128, valid),
+            (0, ""),
+            (0, "not-a-sha"),
+            (0, valid + "\n" + valid),
+            (0, valid),
+        ):
+            with (
+                self.subTest(status=status, sha=sha),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                result = subprocess.run(
+                    [
+                        str(shutil.which("bash")),
+                        "-c",
+                        'git() { printf "%s\\n" "$TEST_SHA"; return "$TEST_RC"; }\n'
+                        + script,
+                    ],
+                    cwd=directory,
+                    env={
+                        **os.environ,
+                        "GITHUB_OUTPUT": "output.txt",
+                        "TEST_SHA": sha,
+                        "TEST_RC": str(status),
+                    },
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                output = Path(directory) / "output.txt"
+                if status == 0 and sha == valid:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(output.read_text(), f"sha={valid}\n")
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(output.exists())
+
+    @unittest.skipUnless(shutil.which("powershell.exe"), "requires Windows PowerShell")
+    def test_windows_pin_resolution_fails_before_publishing_an_invalid_sha(
+        self,
+    ) -> None:
+        helper = load(".github/actions/checkout-openvmm/action.yml")
+        script = step(helper, "Resolve OpenVMM revision on Windows")["run"]
+        valid = "c3089ff9089695ae5440c69fb77c80a482f321bd"
+        for status, sha in (
+            (128, valid),
+            (0, ""),
+            (0, "not-a-sha"),
+            (0, valid + "\n" + valid),
+            (0, valid),
+        ):
+            with (
+                self.subTest(status=status, sha=sha),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                result = subprocess.run(
+                    [
+                        str(shutil.which("powershell.exe")),
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "function git { $global:LASTEXITCODE = [int]$env:TEST_RC; Write-Output $env:TEST_SHA }\n"
+                        + script,
+                    ],
+                    cwd=directory,
+                    env={
+                        **os.environ,
+                        "GITHUB_OUTPUT": "output.txt",
+                        "TEST_SHA": sha,
+                        "TEST_RC": str(status),
+                    },
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                output = Path(directory) / "output.txt"
+                if status == 0 and sha == valid:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        output.read_text(encoding="utf-8-sig"), f"sha={valid}\n"
+                    )
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(output.exists())
 
     def test_arm_guest_checkout_preserves_public_fork_authentication(self) -> None:
         guest = load(".github/actions/build-arm64-guest-artifacts/action.yml")

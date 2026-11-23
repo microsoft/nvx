@@ -2044,7 +2044,8 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
             fixtures = list(root.glob("nvx-public-lifecycle-*"))
 
             self.assertEqual(len(fixtures), 1)
-            self.assertIn(str(fixtures[0]), str(raised.exception))
+            fixture = fixtures[0].resolve() if sys.platform == "win32" else fixtures[0]
+            self.assertIn(str(fixture), str(raised.exception))
             self.assertTrue((fixtures[0] / "state" / "config.json").is_file())
             self.assertFalse(any(fake.running.values()))
             self.assertTrue(
@@ -2081,7 +2082,12 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
                     (root / "results" / "sandbox-lifecycle-checks.json").is_file()
                 )
                 if preserved:
-                    self.assertIn(str(fixtures[0]), stderr.getvalue())
+                    fixture = (
+                        fixtures[0].resolve()
+                        if sys.platform == "win32"
+                        else fixtures[0]
+                    )
+                    self.assertIn(str(fixture), stderr.getvalue())
                     self.assertRegex(
                         stderr.getvalue(),
                         "^warning: cleanup after the interruption: .*"

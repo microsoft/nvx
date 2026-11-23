@@ -790,12 +790,21 @@ short-lived workflow artifacts alongside the OpenVMM handoff and benchmark
 results. Caches only accelerate reproducible build inputs and outputs; consumers
 do not depend on them as a handoff.
 Both ARM producers check out that pinned source before `nvx.py verify`.
+The slim ARM guest container installs Git before its initial NVX checkout,
+so checkout creates a Git working tree rather than a source archive. Pin
+resolution fails on a Git error or an invalid commit SHA before it emits
+an output or permits the OpenVMM checkout.
 The GitHub-hosted ARM guest producer also runs for fork pull requests: it
 uses the read-only job token for the public OpenVMM checkout, and receives
 the deploy key only in trusted repository contexts. The reusable native
 Windows ARM build declares that key and receives it from its guarded caller.
 Self-hosted Windows x86 selectors require `X64`, while ARM selectors require
 `ARM64`, so the build and WHP test pools do not overlap.
+The managed lifecycle fixture resolves Windows paths before constructing
+its owned state and image arguments. A correct stale-image refusal therefore
+names the same canonical image even when the service account's temporary
+directory originally uses an 8.3 alias; wrong images and missing refusal
+markers still fail.
 Pull requests and merge groups gate regressions against recent matching-platform
 history, and successful pushes to `dev` record their p50 values, which a full
 run of `dev` then appends under `data/` (see
