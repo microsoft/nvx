@@ -20,20 +20,20 @@ use crate::host::platform;
 const LINE_SEPARATOR: &str = if cfg!(windows) { "\r\n" } else { "\n" };
 
 /// Returns `text` and a line end, with each `\n` translated to [`LINE_SEPARATOR`].
-pub(crate) fn line(text: &str) -> String {
+pub(super) fn line(text: &str) -> String {
     let mut output = text.replace('\n', LINE_SEPARATOR);
     output.push_str(LINE_SEPARATOR);
     output
 }
 
 /// Prints `text` and a line end to standard output, and flushes it.
-pub(crate) fn print_stdout(text: &str) -> io::Result<()> {
+pub(super) fn print_stdout(text: &str) -> io::Result<()> {
     write_stdout(line(text).as_bytes())
 }
 
 /// Prints `text` and a line end to standard error, even after Ctrl-C. Like Python, which prints
 /// errors on a stream that it cannot write anyway, it ignores a failure.
-pub(crate) fn print_stderr(text: &str) {
+pub(super) fn print_stderr(text: &str) {
     let mut stderr = io::stderr().lock();
     let _ = stderr
         .write_all(line(text).as_bytes())
@@ -43,7 +43,7 @@ pub(crate) fn print_stderr(text: &str) {
 /// Ends the line that `written`, a workload's output that went to standard error last, left
 /// open, so that what [`print_stderr`] prints next starts a line of its own. It writes even after
 /// Ctrl-C, as [`print_stderr`] does, and ignores a failure.
-pub(crate) fn end_stderr_line(written: &[u8]) {
+pub(super) fn end_stderr_line(written: &[u8]) {
     let end = line_end_after(written);
     if !end.is_empty() {
         let mut stderr = io::stderr().lock();
@@ -63,12 +63,12 @@ fn line_end_after(written: &[u8]) -> &'static str {
 }
 
 /// Writes `data` to standard output as it is, and flushes it.
-pub(crate) fn write_stdout(data: &[u8]) -> io::Result<()> {
+pub(super) fn write_stdout(data: &[u8]) -> io::Result<()> {
     write_all(&mut io::stdout().lock(), data)
 }
 
 /// Writes `data` to standard error as it is, and flushes it.
-pub(crate) fn write_stderr(data: &[u8]) -> io::Result<()> {
+pub(super) fn write_stderr(data: &[u8]) -> io::Result<()> {
     write_all(&mut io::stderr().lock(), data)
 }
 
