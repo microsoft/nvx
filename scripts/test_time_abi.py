@@ -1671,7 +1671,8 @@ class RunnerWiringTests(unittest.TestCase):
                         pre_capture_script="true\n",
                         pre_capture_seconds=extra,
                     )
-                self.assertGreaterEqual(time.monotonic() - started, 0.25 + extra)
+                # Subtracting clock readings can round an elapsed interval below its limit.
+                self.assertGreaterEqual(time.monotonic(), started + (0.25 + extra))
                 self.assertEqual(
                     interaction.writes[1:],
                     [
