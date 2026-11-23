@@ -553,7 +553,12 @@ fn connection_failure(error: HostConnectionError, stage: Stage) -> SessionError 
 /// Returns the error category that the payload of an `APP_ERROR` response names, truncated to 64
 /// characters.
 fn error_category(payload: &[u8]) -> String {
-    String::from_utf8_lossy(payload).chars().take(64).collect()
+    /// Bounds guest-supplied category text in rejection events and diagnostics, not wire bytes.
+    const MAX_ERROR_CATEGORY_CHARS: usize = 64;
+    String::from_utf8_lossy(payload)
+        .chars()
+        .take(MAX_ERROR_CATEGORY_CHARS)
+        .collect()
 }
 
 /// Generates a random nonzero request identifier.
