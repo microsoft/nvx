@@ -81,7 +81,7 @@ impl fmt::Display for WireError {
 
 /// The value of a field, as its wire type holds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Value<'a> {
+enum Value<'a> {
     /// Wire type 0: a varint.
     Varint(u64),
     /// Wire type 1: eight little-endian bytes.
@@ -98,7 +98,7 @@ pub(super) struct Field<'a> {
     /// The field's number, from 1 to 2^29 - 1.
     pub(super) number: u32,
     /// The field's value.
-    pub(super) value: Value<'a>,
+    value: Value<'a>,
 }
 
 impl<'a> Field<'a> {
