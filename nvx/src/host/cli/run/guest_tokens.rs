@@ -1,7 +1,9 @@
 //! The blockless guest settings owned by the CLI, beside the library's root and view tokens.
 
 use crate::host::filesystem::ExportPlan;
-use crate::host::sandbox::{has_kernel_separator, parse_workload_identity};
+use crate::host::sandbox::{
+    has_kernel_separator, parse_named_workload_identity, parse_workload_id,
+};
 use crate::{Error, Result};
 
 /// Refusal of a workload identity that the caller's tokens name more than once.
@@ -43,14 +45,19 @@ pub(super) fn render(command_line: &str, export: Option<&ExportPlan>) -> Result<
         ));
     }
     let identity = match (uid, gid, identity) {
-        (None, None, identity) => identity.map(str::to_owned),
-        (Some(uid), Some(gid), None) => Some(format!("{uid}:{gid}")),
+        (None, None, None) => None,
+        (None, None, Some(identity)) => {
+            Some(parse_named_workload_identity("nvx_identity", identity)?)
+        }
+        (Some(uid), Some(gid), None) => Some((
+            parse_workload_id("nvx_workload_uid", uid)?,
+            parse_workload_id("nvx_workload_gid", gid)?,
+        )),
         (Some(_), Some(_), Some(_)) => return Err(Error::unsupported(REPEATED_IDENTITY)),
         _ => return Err(Error::unsupported("a workload needs both its UID and GID")),
     };
     tokens.push(format!("nvx_mode={mode}"));
-    if let Some(identity) = identity {
-        let (uid, gid) = parse_workload_identity(&identity)?;
+    if let Some((uid, gid)) = identity {
         tokens.push(format!("nvx_identity={uid}:{gid}"));
     }
     if let Some(export) = export {
