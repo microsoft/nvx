@@ -117,6 +117,24 @@ fn repeated_workload_identities_and_modes_are_refused() {
 }
 
 #[test]
+fn half_a_uid_and_gid_pair_is_incomplete_alone_and_repeats_nvx_identity() {
+    let incomplete = "a workload needs both its UID and GID";
+    let repeated = "a workload identity may be specified only once";
+    for (line, message) in [
+        ("nvx_workload_uid=1000", incomplete),
+        ("nvx_workload_gid=1000", incomplete),
+        ("nvx_workload_uid=1000 nvx_identity=1000:1000", repeated),
+        ("nvx_workload_gid=1000 nvx_identity=1000:1000", repeated),
+        ("nvx_identity=1000:1000 nvx_workload_uid=1000", repeated),
+        ("nvx_identity=1000:1000 nvx_workload_gid=1001", repeated),
+    ] {
+        let error = render(line, None).unwrap_err();
+        assert_eq!(error.kind(), crate::ErrorKind::Unsupported, "{line}");
+        assert_eq!(error.to_string(), message, "{line}");
+    }
+}
+
+#[test]
 fn planned_boot_shares_keep_table_sources_targets_access_and_file_kind() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("share");
