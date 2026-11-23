@@ -548,12 +548,21 @@ Connect: UnusableRoot, attributed to the request`.
 nvx/target/release/nvx download
     [--repository OWNER/REPOSITORY]
     [--hypervisor {auto,whp,kvm,mshv}]
+    [--architecture {x86_64,aarch64}]
 ```
 
 | Option | Default | Description |
 | --- | --- | --- |
 | `--repository OWNER/REPOSITORY` | `microsoft/nvx` | GitHub repository from which to download the release. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the release platform. `auto` chooses WHP on Windows and KVM on Linux. |
+| `--architecture {x86_64,aarch64}` | `x86_64` on every host | Select the package and guest ISA; ARM currently requires native Windows ARM64/WHP. |
+
+Explicit ARM downloads select `windows-whp-aarch64`, require its matching
+architecture/target manifest, and install guest artifacts and their provenance
+under `build/aarch64`, leaving x86 guest products untouched. Extracted ARM
+packages use `guest/Image` and require that same explicit manifest contract.
+The current all-or-none installation, download locks, checksums and
+partial-checkout protections apply to both ISAs.
 
 `download` installs a release into the repository checkout of the artifact
 root, which it refuses to be an extracted release. It first looks for the
@@ -968,10 +977,16 @@ run's results or stopped, after persisting the others.
 
 ```text
 python3 scripts/nvx.py check-openvmm-ci
+    [--include-arm64]
     [--revision SHA]
     [--wait-minutes MINUTES]
     [--summary PATH]
 ```
+
+`--include-arm64` additionally requires the native ARM64 Windows unit and
+VMM-test jobs. It retains the same exact-head, upstream head-repository trust
+filter and per-job aggregate evidence rules; a fork run or a skipped job
+cannot substitute for a required pass.
 
 Checks that OpenVMM's own CI passed the OpenVMM revision that the checkout's
 index pins, or the full commit SHA that `--revision` names, as
@@ -1046,11 +1061,14 @@ watches. Files that the build generates in its own target directory are exempt.
 It runs the static-ELF check and writes `manifest.json` with the source and
 executable SHA-256 digests.
 `--architecture x86_64`, the default, builds all ten programs for
-`x86_64-unknown-linux-musl`. `--architecture aarch64` builds eight for
+`x86_64-unknown-linux-musl`. `--architecture aarch64` builds nine for
 `aarch64-unknown-linux-musl`: `nvx-console-pending`, `nvx-reseed`, `nvx-exit`,
-`nvx-device-io`, `nvx-managed-agent`, `nvx-ingress`, `nvx-time`, and `nvx-init`.
-The x86-only raw-memory `nvx-mmio-write` and x86 time probe are not packaged as
-ARM stubs. ELF machine identity must match the selected target as well as being
+`nvx-device-io`, `nvx-managed-agent`, `nvx-ingress`, `nvx-time`,
+`nvx-time-probe`, and `nvx-init`. The ARM time probe runs the shared pairwise
+warp algorithm with an admitted full-Hz architectural counter binding; its
+x86 latency/CPUID/MSR commands remain unsupported. The x86-only raw-memory
+`nvx-mmio-write` is not packaged as an ARM stub.
+ELF machine identity must match the selected target as well as being
 static and non-executable-stack. Use separate output directories for each ISA;
 an existing manifest for another target is refused without replacing its files.
 It updates the output of an earlier build in place, adding `nvx-managed-agent`,
@@ -1075,11 +1093,14 @@ See [Setup](setup.md) for host prerequisites.
 
 ```console
 python3 scripts/nvx.py materialize-kernel-provenance-inputs
+    [--architecture {x86_64,aarch64}]
 ```
 
 Recreates the tracked kernel configuration and patch files from the current
 Git run head. It removes stale worktree patches that are absent from that
 revision and is used before packaging kernel provenance inputs.
+The default ISA is `x86_64`; `--architecture aarch64` selects the ARM input
+and derived configurations and the exact shared plus ARM patch inventory.
 
 ## Build commands
 
@@ -1165,7 +1186,7 @@ Builds the selected initramfs. Alpine and Ubuntu build directly on Linux; Azure
 Linux uses Docker. Alpine is the default.
 `--architecture` defaults to `x86_64`. `aarch64` currently selects native Linux
 Alpine and Ubuntu production, with separately pinned ARM archives, packages,
-eight Rust programs, and work/output namespace under `build/aarch64/`. Ubuntu
+nine Rust programs, and work/output namespace under `build/aarch64/`. Ubuntu
 uses `ubuntu/packages-arm64.lock.json`; the x86 lock and default paths are
 unchanged. An ARM Azure Linux selection is refused before a Docker build starts.
 
@@ -1219,6 +1240,7 @@ template.
 ```text
 python3 scripts/nvx.py verify-guest-determinism
     --guest ubuntu
+    [--architecture {x86_64,aarch64}]
     [--work-dir PATH]
 ```
 
@@ -1227,6 +1249,8 @@ EROFS layer, and sandbox scratch template twice from separate roots and
 compares every artifact SHA-256, and fails unless the template's is the one
 that `UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256` pins. A mismatch reports
 the first differing normalized rootfs entry when one exists.
+`--architecture` defaults to `x86_64` on every host and selects the ISA for
+both builds; ARM uses the same artifact comparisons and scratch-template pin.
 
 ### `build-openvmm`
 
@@ -1337,6 +1361,11 @@ OpenVMM's tests, and CI checks that it passed the pinned revision with
 ```text
 python3 scripts/nvx.py test-microvm
     --backend {kvm,mshv,whp}
+    [--architecture {x86_64,aarch64}]
+    [--cold-only]
+    [--vm-lifecycle-root {scratch,ram}]
+    [--start-stop-cycles N]
+    [--guest-test-elf PATH]
     [--guest {alpine,ubuntu,azurelinux}]
     [--scenario SCENARIO]...
     [--debug-kernel]
@@ -1347,11 +1376,62 @@ python3 scripts/nvx.py test-microvm
     [--output-dir PATH]
 ```
 
+The default architecture is `x86_64`, including on an ARM host. Explicit
+`--architecture aarch64` requires native Windows ARM64/WHP, namespaced ARM
+artifacts, and explicit scenario selection. ARM restore, snapshot and growth
+selections are refused. `--cold-only` selects the maintained cold projection
+of mixed filesystem, ingress, IPv6 and interrupt scenarios: their applicable
+cold and preboot-refusal assertions still run, while the duration report
+records the deferred restore tails. A cold projection is not a full mixed
+scenario pass.
+
+The read-only share check requests a mode change relative to the file's
+observed mode: accepting a no-op `chmod` is not proof of write access.
+The mutation must fail with a read-only-filesystem diagnostic and leave the
+mode unchanged.
+
+The managed guest smoke probe keeps the x86 port-fault and permission-refusal
+checks. On ARM it instead checks that the private device view hides the
+restricted NVX platform, raw-memory and port endpoints, and that actual reads
+are refused, alongside the unchanged capability and device-creation checks.
+
+Logged raw ARM launches also retain unique `*.launch.json` input/command
+records and request OpenVMM's actual `*.outcome.json` report beside the console
+log. A launch record is not an outcome or cleanup assertion. Scenarios that
+already own a report path retain their existing report handling; x86 commands
+and logging defaults are unchanged.
+
+The host-correction projection also retains its unhooked and hooked cold
+checks. ARM uses the complete architected counter frequency, not x86 Linux's
+TSC-kHz rounding; only the existing guest PLL clear-phase operation is shared.
+Its held and host correction state fields must match exactly: both convert
+the same scaled-ppm integer to rounded ppb, so ARM gets no x86 kHz allowance.
+The x86 exhaustive CPUID/MSR scenario remains x86-only.
+
+On ARM, guest-boot, SMP and the public VM lifecycle execute the selected
+processor counts; other helpers retain their own fixed-size contracts.
+Guest boot reports observed online CPUs and guest memory separately from
+requested arguments. `--vm-lifecycle-root` selects scratch or RAM for the
+public API acceptance. `--start-stop-cycles` controls successful cycles on
+one provision in the sandbox-lifecycle and sandbox-ram-upper scenarios;
+omitting it preserves their respective one/two-cycle contracts. RAM requires
+at least two cycles to keep its restart-isolation assertion.
+
 Runs NVX-owned Linux, SMP, virtio, sandbox, and snapshot correctness scenarios
 against the public OpenVMM CLI. Repeat `--scenario` to select a subset; without
-it, every scenario supported by the selected guest runs, except `smp-lapic`,
-which runs only when named: it repeats `smp` and also asserts that every CPU
-uses the one-shot counting LAPIC. `managed-exec-config`, `sandbox-lifecycle`,
+it, every scenario supported by the selected guest runs, except `smp-lapic`
+and `layered-boot`, which run only when named. `smp-lapic` repeats `smp` and
+also asserts that every CPU uses the one-shot counting LAPIC.
+`layered-boot` requires `--guest-test-elf` naming the matching standard
+guest-only Cargo libtest ELF; retain its compiler-artifact and source receipt
+with the run. It runs each of the two ignored production layered-boot tests
+in a separate VM for each scratch and RAM upper, at a fixed 1 VP/512 MiB.
+The early initramfs shell prepares only the normal devices, time service and
+test export; the existing Rust test performs the real root assembly, runtime
+mount, single switch and retained-handle mapping assertions. Ignore annotations
+and test oracles are unchanged. This fixture uses the admitted Ubuntu EROFS
+layer and canonical scratch template, not an old adapter or a fake guest.
+`managed-exec-config`, `sandbox-lifecycle`,
 `sandbox-proxy-only`, `sandbox-ram-upper`, and `sandbox-gpt-layer`, the public
 sandbox scenarios, drive the public `nvx sandbox` lifecycle commands (see
 [Run](run.md#managed-lifecycle)), `snapshot-core`, `snapshot-tiers`, and
@@ -1538,6 +1618,7 @@ changed shard.
 ```text
 python3 scripts/nvx.py doctor
     --backend {kvm,mshv,whp}
+    [--architecture {x86_64,aarch64}]
     [--checks ID ...]
     [--openvmm PATH]
     [--kernel PATH]
@@ -1560,6 +1641,7 @@ check and the subset that CI runs.
 | Option | Default | Description |
 | --- | --- | --- |
 | `--backend {kvm,mshv,whp}` | required | Select the backend to qualify. |
+| `--architecture {x86_64,aarch64}` | `x86_64` on every host | Select the explicit native counter/artifact ISA; ARM currently requires native Windows ARM64/WHP. |
 | `--checks ID ...` | `H1` to `H7` | Run only these checks, from `H1` to `H7`, in order. |
 | `--openvmm PATH` | `openvmm/target/release/openvmm[.exe]` | Select the OpenVMM binary for `H2`, `H3`, and `H6`. |
 | `--kernel PATH` | `build/vmlinux` | Select the guest kernel for `H3` and `H6`. |
@@ -1570,6 +1652,12 @@ check and the subset that CI runs.
 | `--probe-dir PATH` | `$RUNNER_TOOL_CACHE/nvx-host-time-probe`, or `build/host-time-probe` | Select the cache directory for the host probe, which the doctor builds with `rustc`. |
 | `--summary PATH` | none | Append a Markdown summary, for example to `$GITHUB_STEP_SUMMARY`. |
 | `--timeout SECONDS` | `120` | Set the seconds allowed for each probe or guest. `H4` gets its sampling window on top. |
+
+ARM qualification uses actual CNTVCT/CNTFRQ measurements and the pinned
+OpenVMM profile/admission report, not a CPUID fingerprint or a fixed counter
+frequency. It uses `build/aarch64/Image` and the ARM initramfs by default.
+Host clock-correction, UTC synchronization and warp bounds are unchanged;
+a passing ARM profile check does not imply H4 or H7 passed.
 
 ### `test-adversarial`
 
@@ -2091,6 +2179,7 @@ ISA's pinned source and ordered patch set.
 
 ```text
 python3 scripts/nvx.py package
+    [--architecture {x86_64,aarch64}]
     [--version VERSION]
     [--destination PATH]
     (--include-source | --binary-only)
@@ -2100,6 +2189,7 @@ python3 scripts/nvx.py package
 | Option | Description |
 | --- | --- |
 | `--version VERSION` | Override the packaged version. |
+| `--architecture {x86_64,aarch64}` | Select the guest/package ISA; the default remains `x86_64` on every host. |
 | `--destination PATH` | Override the staging destination. |
 | `--include-source` | Include the corresponding source artifacts in the package and omit the Azure Linux guest artifacts. |
 | `--binary-only` | Stage binaries only; publish corresponding source separately. |
@@ -2114,6 +2204,14 @@ for the release target of the host's operating system:
 [`record-nvx-provenance`](#record-nvx-provenance). See
 [Package and source delivery](distribution.md) for release procedures and
 source-publication requirements.
+
+Explicit ARM packaging currently targets Windows/WHP and requires actual
+ARM64 PE executables and NVX provenance for `aarch64-pc-windows-msvc`.
+It reads the kernel, Alpine and Ubuntu inputs from `build/aarch64`, packages
+`Image` instead of `vmlinux`, records their selected architecture, and omits
+unsupported Azure Linux artifacts. Existing source/config/executable and
+guest-manifest provenance checks still apply; a staged `release` path does
+not identify a build profile.
 
 ### `archive-release`
 

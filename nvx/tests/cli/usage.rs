@@ -777,10 +777,11 @@ const HELP: [Help; 6] = [
         name: "download",
         arguments: &["download", "-h"],
         usage: "usage: nvx download [-h] [--repository OWNER/REPOSITORY] [--hypervisor \
-                {auto,whp,kvm,mshv}]",
+                {auto,whp,kvm,mshv}] [--architecture {x86_64,aarch64}]",
         options: &[
             "--repository OWNER/REPOSITORY",
             "--hypervisor {auto,whp,kvm,mshv}",
+            "--architecture {x86_64,aarch64}",
         ],
     },
 ];

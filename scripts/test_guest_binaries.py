@@ -130,7 +130,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
                 set(result.binaries), set(GuestRustBuildConstants.ARM_BINARIES)
             )
             self.assertNotIn("nvx-mmio-write", result.binaries)
-            self.assertNotIn("nvx-time-probe", result.binaries)
+            self.assertIn("nvx-time-probe", result.binaries)
             manifest = json.loads((output / "manifest.json").read_text())
             self.assertEqual(manifest["target"], "aarch64-unknown-linux-musl")
             self.assertEqual(manifest["binaries"], result.binaries)

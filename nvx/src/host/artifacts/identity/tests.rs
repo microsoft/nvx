@@ -57,6 +57,41 @@ fn arm_namespace_never_falls_back_to_x86_or_relocates_native_vmm() {
     );
 }
 
+#[test]
+fn arm_release_admission_requires_matching_isa_target_and_supported_guests() {
+    let temporary = tempfile::tempdir().unwrap();
+    let valid = serde_json::json!({
+        "distribution": {"architecture": "aarch64"},
+        "nvx": {"target": "aarch64-pc-windows-msvc"},
+    });
+    for (field, value) in [
+        ("architecture", serde_json::json!("x86_64")),
+        ("architecture", serde_json::json!(null)),
+        ("target", serde_json::json!("x86_64-pc-windows-msvc")),
+        ("azurelinux", serde_json::json!({})),
+    ] {
+        let mut bad = valid.clone();
+        match field {
+            "architecture" => bad["distribution"][field] = value,
+            "target" => bad["nvx"][field] = value,
+            _ => bad[field] = value,
+        }
+        assert!(check_release_architecture(&bad, GuestArchitecture::Aarch64).is_err());
+    }
+    fs::write(
+        temporary.path().join("SOURCE-MANIFEST.json"),
+        valid.to_string(),
+    )
+    .unwrap();
+    let arm = ArtifactDir::release(temporary.path())
+        .unwrap()
+        .with_architecture(GuestArchitecture::Aarch64)
+        .unwrap();
+    assert_eq!(arm.kernel(), temporary.path().join("guest").join("Image"));
+    assert!(check_release_architecture(&valid, GuestArchitecture::X86_64).is_err());
+    assert!(check_release_architecture(&serde_json::json!({}), GuestArchitecture::X86_64).is_ok());
+}
+
 #[cfg(windows)]
 #[test]
 fn native_arm_vmm_admission_rejects_foreign_and_out_of_bounds_pe_headers() {

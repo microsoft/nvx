@@ -87,11 +87,7 @@ impl<'a> Artifacts<'a> {
     /// while it reads them and launches OpenVMM on them.
     pub(crate) fn ensure(&self, hypervisor: &str) -> Result<Hold> {
         let located = self.locate()?;
-        if located.dir.architecture() == GuestArchitecture::Aarch64 {
-            download::hold(&located)
-        } else {
-            download::ensure(&located, Some(Guest::Alpine), hypervisor)
-        }
+        download::ensure(&located, Some(Guest::Alpine), hypervisor)
     }
 
     /// Downloads the release of a checkout without artifacts for `hypervisor`, as
@@ -100,11 +96,7 @@ impl<'a> Artifacts<'a> {
     /// what the operation holds while it reads the artifacts and launches OpenVMM on them.
     pub(crate) fn ensure_under(&self, held: Hold, hypervisor: &str) -> Result<Hold> {
         let located = self.locate()?;
-        if located.dir.architecture() == GuestArchitecture::Aarch64 {
-            Ok(held)
-        } else {
-            download::ensure_under(held, &located, Some(Guest::Alpine), hypervisor)
-        }
+        download::ensure_under(held, &located, Some(Guest::Alpine), hypervisor)
     }
 
     /// Returns what an operation holds while it reads the runtime identity of the artifacts,

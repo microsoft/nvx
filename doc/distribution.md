@@ -130,7 +130,7 @@ such as another microVM ABI, time ABI, restore packet, or control contract,
 and names each field of its manifest that differs.
 
 CI follows the binary-only path. A package job for each of the `linux-kvm`,
-`linux-mshv`, and `windows-whp` platforms stages
+`linux-mshv`, `windows-whp`, and `windows-whp-aarch64` platforms stages
 `dist/nvx-<version>-<platform>` with `--binary-only`, with the `nvx` and
 provenance that the `nvx` build job of the platform's operating system built
 and its NVX CLI job tested, and archives it as `.tar.gz` on Linux and `.zip` on
@@ -141,6 +141,14 @@ The development release job checks that each package ships OpenVMM and
 `nvx` before it publishes them.
 [Continuous integration](ci.md) describes the jobs that gate and publish the
 resulting development release.
+
+The ARM Windows package uses explicit architecture selection, actual ARM64
+PE executables, an `aarch64-pc-windows-msvc` NVX provenance target, and the
+namespaced ARM guest producers. Its guest kernel is `Image`; Alpine and
+Ubuntu manifests identify their ARM artifacts, and Azure Linux is omitted.
+Architecture matching is additional to the existing hashes, source/config
+provenance and compatibility checks. It does not admit ARM snapshot restore
+or change the legacy x86 package/default contract.
 
 A documentation-only push, in which every changed path is under `doc/` or ends
 in `.md`, skips the platform and package jobs, as

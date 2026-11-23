@@ -91,6 +91,18 @@ pub(crate) fn counter_ticks() -> u64 {
     value
 }
 
+/// Orders a probe timestamp against the memory exchanges that it measures.
+pub(crate) fn counter_ticks_ordered() -> u64 {
+    let value: u64;
+    // SAFETY: the barriers and read-only EL0 counter access no address. Omitting `nomem`
+    // also keeps the compiler from moving the probe's shared-memory accesses across the read.
+    unsafe {
+        asm!("dsb ish", "isb", "mrs {value}, cntvct_el0", "isb",
+             value = out(reg) value, options(nostack, preserves_flags));
+    }
+    value
+}
+
 /// Owns only the kernel's restricted platform device, with no arbitrary physical-memory map.
 ///
 /// The driver enforces CAP_SYS_RAWIO, exact register widths and offsets. Closing the owner

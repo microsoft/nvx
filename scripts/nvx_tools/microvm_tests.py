@@ -8,6 +8,7 @@ import ipaddress
 import json
 import math
 import os
+import platform
 import queue
 import random
 import re
@@ -29,7 +30,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from stat import S_ISUID
-from typing import Any, NamedTuple, cast
+from typing import Any, NamedTuple, TypedDict, cast
 
 from . import nvx_cli
 from .adversarial_oracles import terminate_process_tree
@@ -56,18 +57,23 @@ from .benchmark import (
 from .benchmark import (
     run_guest_script as _run_guest_script,
 )
+from .build_config import KernelBuildConfig
 from .build_constants import (
     BuildConstants,
     KernelBuildConstants,
 )
 from .ci import OPENVMM_TEST_BACKENDS, validate_openvmm_test_backend
 from .common import (
+    ArchitectureKwargs,
     ScriptError,
+    architecture_kwargs,
     artifact_path,
     openvmm_binary_path,
     require_file,
     sha256_file,
 )
+from .elf import check_static_executables
+from .guest_binaries import guest_binary_architecture
 from .guests import GUEST_NAMES, GuestDescriptor, guest_descriptor
 from .managed_exec_tests import (
     WorkloadArtifacts,
@@ -75,6 +81,7 @@ from .managed_exec_tests import (
     format_errors,
     load_workload_artifacts,
     run_managed_exec_configuration,
+    workload_architecture_options,
     workload_artifact_paths,
 )
 from .microvm_durations import REPORT_NAME, DurationReport
@@ -242,7 +249,82 @@ DEBUG_KERNEL_SCENARIOS = (
 # hides TSC-deadline on every backend, so `smp` already runs on the one-shot
 # counting LAPIC; `smp-lapic` repeats it and asserts the counting-LAPIC facts,
 # for explicit local use (#286).
-MICROVM_EXPLICIT_SCENARIOS = ("smp-lapic",)
+MICROVM_EXPLICIT_SCENARIOS = ("smp-lapic", "layered-boot")
+COLD_EXPLICIT_SCENARIOS = frozenset(("layered-boot",))
+COLD_ONLY_SCENARIOS = frozenset(
+    (
+        "command-line-limit",
+        "directional-network-policy",
+        "denied-filesystem-paths",
+        "filesystem-comma-paths",
+        "filesystem-owner",
+        "filesystem-policy",
+        "filesystem-shares",
+        "guest-boot",
+        "guest-identity",
+        "host-loopback-policy",
+        "interrupt-map",
+        "ipv6-egress-policy",
+        "lifecycle",
+        "l3-l4-egress-policy",
+        "l3-l4-egress-port-ranges",
+        "l3-l4-egress-protocols",
+        "managed-lifecycle",
+        "managed-exec-config",
+        "private-network-ingress",
+        "sandbox-blocks",
+        "sandbox-gpt-layer",
+        "sandbox-lifecycle",
+        "sandbox-proxy-only",
+        "sandbox-ram-upper",
+        "smp",
+        "structured-outcome",
+        "time-host-correction",
+        "virtio-features",
+        "virtio-net",
+        "vm-lifecycle",
+        "workload-identity",
+    )
+)
+COLD_PROJECTION_SCENARIOS = frozenset(
+    (
+        "filesystem-policy",
+        "filesystem-shares",
+        "interrupt-map",
+        "ipv6-egress-policy",
+        "private-network-ingress",
+        "time-host-correction",
+    )
+)
+COLD_DEFERRED_SCENARIOS = {
+    **dict.fromkeys(
+        (
+            "console-snapshot",
+            "endpoint-policy-snapshot",
+            "filesystem-snapshot",
+            "network-snapshot",
+            "platform-aggregate-export",
+            "platform-filesystem",
+            "platform-network-policy",
+            "restore-downtime",
+            "restore-memory",
+            "restore-processors",
+            "scratch-snapshot",
+            "smp-snapshot",
+            "snapshot-core",
+            "snapshot-rollback",
+            "snapshot-tiers",
+            "untiered-network-policy",
+        ),
+        "requires unsupported ARM snapshot capture/restore; retained for x86",
+    ),
+    "console-exit": "every case captures then restores a console; there is no existing cold branch",
+    "platform-restore-processors": "ARM restore CPU activation/repair remains Phase 4C work",
+    "platform-zero-fill": "ARM restore and memory growth remain unsupported; Phase 5 is not enabled",
+    "cpu-profile-fallback": "x86 CPUID host-profile fallback; ARM uses pinned profile/capability admission",
+    "smp-lapic": "x86 counting-LAPIC oracle; ARM SMP checks its actual architected timers and IPIs",
+    "time-abi-conformance": "X1-X6 exhaustive CPUID/MSR checks are x86-only, not empty ARM passes",
+}
 SMP_LAPIC_COUNTING_MARKER = b"NVX-SMP-LAPIC-COUNTING-OK"
 MICROVM_PROCESSOR_COUNTS = (1, 2, 4, 8)
 MICROVM_TEST_SCRIPTS_DIR = Path(__file__).with_name("microvm_test_scripts")
@@ -849,6 +931,35 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--guest", choices=GUEST_NAMES, default="alpine")
     parser.add_argument(
+        "--architecture",
+        choices=("x86_64", "aarch64"),
+        default="x86_64",
+        help="declared guest ISA; the legacy x86 default is independent of host ISA",
+    )
+    parser.add_argument(
+        "--cold-only",
+        action="store_true",
+        help="explicit maintained cold scope, retaining cold and preboot assertions "
+        "while reporting mixed scenarios' snapshot tails as deferred",
+    )
+    parser.add_argument(
+        "--vm-lifecycle-root",
+        choices=("scratch", "ram"),
+        default="scratch",
+        help="root of the public vm-lifecycle acceptance (default: scratch)",
+    )
+    parser.add_argument(
+        "--start-stop-cycles",
+        type=positive_int,
+        help="cycles on one provision in sandbox-lifecycle and sandbox-ram-upper; "
+        "omitting it retains their respective one/two-cycle contracts",
+    )
+    parser.add_argument(
+        "--guest-test-elf",
+        type=Path,
+        help="matching standard guest-only libtest ELF for the explicit layered-boot fixture; retain its Cargo build/source receipt with the run",
+    )
+    parser.add_argument(
         "--scenario",
         action="append",
         choices=(*MICROVM_TEST_SCENARIOS, *MICROVM_EXPLICIT_SCENARIOS),
@@ -916,6 +1027,21 @@ def configure_shard_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
+class _GuestBootKwargs(ArchitectureKwargs, total=False):
+    processors: int
+
+
+class _VmLifecycleKwargs(_GuestBootKwargs, total=False):
+    memory_mib: int
+    ram_upper: bool
+
+
+class _DurationKwargs(TypedDict, total=False):
+    architecture: str
+    scope: str
+    deferred_restore_tails: Sequence[str]
+
+
 class GuestScriptResult(GuestCommandResult):
     """A guest script's run. ``text`` is the whole console transcript, and
     ``output`` what the console printed after the script's start line, which
@@ -936,6 +1062,7 @@ def run_guest_script(
     contain_process_tree: bool = False,
     boot_marker: bytes = BOOT_MARKER,
     on_stderr: Callable[[bytes], None] | None = None,
+    architecture: str = "x86_64",
 ) -> GuestScriptResult:
     """Run ``script`` in the shell of the guest that ``command`` boots, and
     require it to print the line ``completion_marker``.
@@ -972,6 +1099,7 @@ def run_guest_script(
         contain_process_tree=contain_process_tree,
         time_abi_status=True,
         on_stderr=on_stderr,
+        **(architecture_kwargs(architecture)),
     )
     output = _guest_script_output(result["text"])
     if not contains_output_line(output.encode("utf-8"), completion_marker):
@@ -1043,6 +1171,14 @@ def _read_script(name: str) -> str:
     script = (MICROVM_TEST_SCRIPTS_DIR / name).read_text(encoding="utf-8")
     if not script.endswith("\n"):
         raise ValueError(f"microVM test script must end with a newline: {name}")
+    if name in ("virtio-mmio.sh", "interrupt-map.sh.in"):
+        script = _read_script("virtio-mmio-resources.sh") + script
+    if name in (
+        "virtio-net.sh",
+        "filesystem-shares.sh",
+        "sandbox-blocks.sh",
+    ):
+        script = _read_script("virtio-mmio.sh") + script
     return script
 
 
@@ -1299,6 +1435,38 @@ def _restore_environment() -> dict[str, str]:
     return environment
 
 
+def _guest_resource_script() -> str:
+    return (
+        'echo "NVX-GUEST-RESOURCES online=$(getconf _NPROCESSORS_ONLN) '
+        "memtotal_kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo) "
+        "kernel_memory=$(dmesg | sed -n 's/.*Memory:.*\\/\\([0-9]*K\\).*/\\1/p' | head -n 1)\"\n"
+    )
+
+
+def _check_guest_resources(
+    output: bytes, *, processors: int, memory_mib: int
+) -> dict[str, str]:
+    observed = _single_marker_value(output, b"NVX-GUEST-RESOURCES ")
+    try:
+        resources = parse_fields(observed.decode("ascii"))
+        usable_kib = int(resources["memtotal_kib"])
+    except (UnicodeDecodeError, ValueError, KeyError) as error:
+        raise RuntimeError(
+            f"malformed guest resource observation: {observed!r}"
+        ) from error
+    if (
+        set(resources) != {"online", "memtotal_kib", "kernel_memory"}
+        or resources["online"] != str(processors)
+        or resources["kernel_memory"] != f"{memory_mib * 1024}K"
+        or not 0 < usable_kib <= memory_mib * 1024
+    ):
+        raise RuntimeError(
+            f"guest resource observation {resources!r} does not match "
+            f"{processors} online CPUs and {memory_mib} MiB RAM"
+        )
+    return resources
+
+
 def run_guest_boot(
     executable: Path,
     kernel: Path,
@@ -1309,7 +1477,14 @@ def run_guest_boot(
     memory_mib: int,
     timeout: float,
     log_path: Path,
+    architecture: str = "x86_64",
+    processors: int = 1,
 ) -> None:
+    boot_options: _GuestBootKwargs = {}
+    if processors != 1:
+        boot_options["processors"] = processors
+    if architecture != "x86_64":
+        boot_options["architecture"] = architecture
     command = workload_boot_command(
         executable,
         backend,
@@ -1317,20 +1492,29 @@ def run_guest_boot(
         initrd,
         memory_mib,
         "quiet loglevel=0",
+        **boot_options,
     )
-    run_guest_script(
+    result = run_guest_script(
         command,
         (
             "set -e\n"
             f"grep -Fqx 'ID={descriptor.os_release_id}' /etc/os-release\n"
             f"grep -Fq '{descriptor.release}' /etc/os-release\n"
-            "echo NVX-GUEST-BOOT-CHECK-OK\n"
+            + (_guest_resource_script() if architecture == "aarch64" else "")
+            + "echo NVX-GUEST-BOOT-CHECK-OK\n"
             "nvx-exit 0\n"
         ),
         GUEST_BOOT_COMPLETION_MARKER,
         timeout=timeout,
         log_path=log_path,
+        **(architecture_kwargs(architecture)),
     )
+    if architecture == "aarch64":
+        _check_guest_resources(
+            result["output"].encode("utf-8"),
+            processors=processors,
+            memory_mib=memory_mib,
+        )
 
 
 def run_guest_identity(
@@ -1343,6 +1527,7 @@ def run_guest_identity(
     memory_mib: int,
     timeout: float,
     log_path: Path,
+    architecture: str = "x86_64",
 ) -> None:
     command = workload_boot_command(
         executable,
@@ -1351,6 +1536,7 @@ def run_guest_identity(
         initrd,
         memory_mib,
         "quiet loglevel=0",
+        **(architecture_kwargs(architecture)),
     )
     run_guest_script(
         command,
@@ -1364,6 +1550,7 @@ def run_guest_identity(
         GUEST_IDENTITY_COMPLETION_MARKER,
         timeout=timeout,
         log_path=log_path,
+        **(architecture_kwargs(architecture)),
     )
 
 
@@ -1390,6 +1577,7 @@ def run_lifecycle(
     memory_mib: int,
     timeout: float,
     log_path: Path,
+    architecture: str = "x86_64",
 ) -> None:
     """Run lifecycle.sh in a quiet boot with the boot console.
 
@@ -1407,6 +1595,7 @@ def run_lifecycle(
         initrd,
         memory_mib,
         "quiet loglevel=0",
+        **(architecture_kwargs(architecture)),
     )
     stderr = bytearray()
     result = run_guest_script(
@@ -1416,6 +1605,7 @@ def run_lifecycle(
         timeout=timeout,
         log_path=log_path,
         on_stderr=stderr.extend,
+        **(architecture_kwargs(architecture)),
     )
     check_quiet_console(stderr.decode("utf-8", "replace"))
     check_quiet_console(result["text"])
@@ -1436,6 +1626,7 @@ def run_workload_identity(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
 ) -> None:
     def command(identity: str, cli_identity: str | None = None) -> list[str]:
         # The guest's init reads the identity from the CLI's token, and boots
@@ -1447,7 +1638,13 @@ def run_workload_identity(
             tokens += f" nvx_identity={cli_identity}"
         return [
             *workload_boot_command(
-                executable, backend, kernel, initrd, memory_mib, tokens
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                tokens,
+                **(architecture_kwargs(architecture)),
             ),
             "--microvm-workload-identity",
             identity,
@@ -1457,6 +1654,7 @@ def run_workload_identity(
     with OpenvmmProcess(
         accepted,
         output_dir / "workload-identity.log",
+        **(architecture_kwargs(architecture)),
     ) as process:
         result = process.wait(timeout)
     if result.returncode != 0 or WORKLOAD_IDENTITY_MARKER not in _output_lines(
@@ -1468,6 +1666,7 @@ def run_workload_identity(
     with OpenvmmProcess(
         unavailable,
         output_dir / "workload-identity-unavailable.log",
+        **(architecture_kwargs(architecture)),
     ) as process:
         result = process.wait(timeout)
     if (
@@ -1481,6 +1680,7 @@ def run_workload_identity(
     with OpenvmmProcess(
         root,
         output_dir / "workload-identity-root.log",
+        **(architecture_kwargs(architecture)),
     ) as process:
         result = process.wait(timeout)
     if result.returncode == 0 or BOOT_MARKER in result.output:
@@ -1500,6 +1700,7 @@ def run_workload_identity(
         with OpenvmmProcess(
             refused,
             output_dir / f"workload-identity-{name}.log",
+            **(architecture_kwargs(architecture)),
         ) as process:
             result = process.wait(timeout)
         if (
@@ -1570,6 +1771,7 @@ def run_managed_lifecycle(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
 ) -> None:
     """Run the managed lifecycle of a guest whose init hands the boot to the
     managed agent.
@@ -1608,6 +1810,7 @@ def run_managed_lifecycle(
             memory_mib,
             f"quiet loglevel=0 {MANAGED_LIFECYCLE_TOKENS}",
             boot_console=False,
+            **(architecture_kwargs(architecture)),
         )
         command.extend(
             (
@@ -1668,7 +1871,10 @@ def run_managed_lifecycle(
             guest_output = guest_log_path.read_bytes()
         except FileNotFoundError:
             guest_output = b""
-        monitor = TimeAbiMonitor(command)
+        monitor = TimeAbiMonitor(
+            command,
+            **(architecture_kwargs(architecture)),
+        )
         monitor.feed(guest_output)
         monitor.finish()
         if returncode != 0:
@@ -1702,6 +1908,7 @@ def run_managed_lifecycle(
         initrd,
         memory_mib,
         f"quiet loglevel=0 {MANAGED_LIFECYCLE_TOKENS}",
+        **(architecture_kwargs(architecture)),
     )
     invalid.extend(
         (
@@ -1714,6 +1921,7 @@ def run_managed_lifecycle(
     with OpenvmmProcess(
         invalid,
         output_dir / "managed-lifecycle-invalid-transition.log",
+        **(architecture_kwargs(architecture)),
     ) as rejected:
         result = rejected.wait(timeout)
     if result.returncode == 0 or BOOT_MARKER in result.output:
@@ -1751,6 +1959,10 @@ def run_vm_lifecycle(
     *,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
+    processors: int = 1,
+    memory_mib: int = 256,
+    ram_upper: bool = False,
 ) -> None:
     """Run a cold VM's lifecycle through the public API of `nvx`.
 
@@ -1767,7 +1979,7 @@ def run_vm_lifecycle(
             f"{VM_LIFECYCLE_TEST} with Cargo, which is not on PATH; "
             "install Rust (https://rustup.rs)"
         )
-    artifacts = load_workload_artifacts()
+    artifacts = load_workload_artifacts(**(architecture_kwargs(architecture)))
     # Cargo runs the test in the nvx directory, so every path is absolute.
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1775,8 +1987,9 @@ def run_vm_lifecycle(
     vm_dir = root / "vm"
     try:
         scratch = root / "scratch.ext4"
-        shutil.copyfile(artifacts.scratch_template, scratch)
-        inputs = {
+        if not ram_upper:
+            shutil.copyfile(artifacts.scratch_template, scratch)
+        inputs: dict[str, object] = {
             "backend": backend,
             "openvmm": os.fspath(executable.resolve()),
             "openvmm_sha256": sha256_file(executable),
@@ -1786,10 +1999,14 @@ def run_vm_lifecycle(
             "initramfs_sha256": sha256_file(initrd),
             "image": os.fspath(artifacts.distro.resolve()),
             "image_uuid": artifacts.layer_uuid,
-            "scratch": os.fspath(scratch),
+            "scratch": None if ram_upper else os.fspath(scratch),
             "vm_dir": os.fspath(vm_dir),
             "timeout_seconds": timeout,
         }
+        if architecture != "x86_64":
+            inputs.update(architecture=architecture, cpu_profile="auto")
+        if architecture != "x86_64" or processors != 1 or memory_mib != 256:
+            inputs.update(processors=processors, memory_mib=memory_mib)
         test_command = ignored_nvx_test_command(cargo, VM_LIFECYCLE_TEST)
         print(f">> {shlex.join(test_command)}", flush=True)
         process = subprocess.Popen(
@@ -1982,6 +2199,7 @@ def write_gpt_layer(
     backend: str,
     timeout: float,
     log_path: Path,
+    architecture: str = "x86_64",
 ) -> str:
     """Write a new GPT disk at ``disk`` whose layer partition holds an ext4
     copy of the tree of the EROFS layer ``distro``, and return its GUID.
@@ -2003,6 +2221,7 @@ def write_gpt_layer(
         initrd,
         GPT_LAYER_MEMORY_MIB,
         "quiet loglevel=0",
+        **(architecture_kwargs(architecture)),
     )
     command.extend(
         (
@@ -2018,6 +2237,7 @@ def write_gpt_layer(
         GPT_LAYER_READY_MARKER,
         timeout=timeout,
         log_path=log_path,
+        **(architecture_kwargs(architecture)),
     )
     return guid
 
@@ -2040,6 +2260,7 @@ class GptLayerAcceptance(LifecycleAcceptance):
         executable: Path,
         kernel: Path,
         initrd: Path,
+        architecture: str = "x86_64",
     ) -> None:
         super().__init__(
             backend,
@@ -2047,10 +2268,12 @@ class GptLayerAcceptance(LifecycleAcceptance):
             output_dir=output_dir,
             artifacts=artifacts,
             root=root,
+            **(architecture_kwargs(architecture)),
         )
         self.executable = executable
         self.kernel = kernel
         self.initrd = initrd
+        self.architecture = architecture
         self.disk = root / "distro.gpt"
         self.guid = ""
 
@@ -2076,6 +2299,7 @@ class GptLayerAcceptance(LifecycleAcceptance):
             backend=self.backend,
             timeout=self.timeout,
             log_path=self.output_dir / f"{self.evidence_prefix}disk.log",
+            **(architecture_kwargs(self.architecture)),
         )
 
     def options(self, upper: str, scratch_name: str) -> list[str]:
@@ -2083,6 +2307,7 @@ class GptLayerAcceptance(LifecycleAcceptance):
         `upper`, with a new copy of the scratch template at `scratch_name` in
         the fixture for a scratch upper."""
         options = [
+            *workload_architecture_options(self.architecture),
             "--hypervisor",
             self.backend,
             "--layer",
@@ -2236,11 +2461,12 @@ def run_sandbox_gpt_layer(
     *,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
 ) -> None:
     """Run the CLI's cold cells of a GPT disk, over a scratch upper and a RAM
     upper, whose disk a guest of `executable`, `kernel`, and `initrd` writes
     from the Ubuntu EROFS layer."""
-    artifacts = load_workload_artifacts()
+    artifacts = load_workload_artifacts(**(architecture_kwargs(architecture)))
     output_dir.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="nvx-public-gpt-layer-"))
     run_acceptance(
@@ -2253,6 +2479,7 @@ def run_sandbox_gpt_layer(
             executable=executable,
             kernel=kernel,
             initrd=initrd,
+            **(architecture_kwargs(architecture)),
         )
     )
 
@@ -3464,6 +3691,7 @@ def run_structured_outcome(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="nvx-structured-outcome-") as temporary:
         root = Path(temporary)
@@ -3477,6 +3705,7 @@ def run_structured_outcome(
             memory_mib,
             "quiet loglevel=0 nvx_report_secret=sensitive-command-value",
             network=DIRECTIONAL_NETWORK_CIDR,
+            **(architecture_kwargs(architecture)),
         )
         command.extend(
             (
@@ -3499,6 +3728,7 @@ def run_structured_outcome(
         with OpenvmmProcess(
             command,
             output_dir / "structured-outcome.log",
+            **(architecture_kwargs(architecture)),
         ) as process:
             process.wait_for(BOOT_MARKER, timeout)
             process.send_line("printf 'sensitive-output-value\\n'; /sbin/nvx-exit 37")
@@ -3549,6 +3779,7 @@ def run_structured_outcome(
             memory_mib,
             "quiet loglevel=0",
             network=DIRECTIONAL_NETWORK_CIDR,
+            **(architecture_kwargs(architecture)),
         )
         rejected.extend(
             (
@@ -3561,6 +3792,7 @@ def run_structured_outcome(
         with OpenvmmProcess(
             rejected,
             output_dir / "structured-outcome-rejected.log",
+            **(architecture_kwargs(architecture)),
         ) as process:
             rejected_result = process.wait(timeout)
         if rejected_result.returncode == 0 or BOOT_MARKER in rejected_result.output:
@@ -3700,6 +3932,7 @@ def run_smp(
     timeout: float,
     log_path: Path,
     counting_lapic: bool = False,
+    architecture: str = "x86_64",
 ) -> None:
     command = workload_boot_command(
         executable,
@@ -3709,9 +3942,14 @@ def run_smp(
         memory_mib,
         "quiet loglevel=0",
         processors=processors,
+        **(architecture_kwargs(architecture)),
     )
     script = (
-        smp_probe_script(processors, exit_guest=False)
+        smp_probe_script(
+            processors,
+            exit_guest=False,
+            **(architecture_kwargs(architecture)),
+        )
         + warp_probe_script()
         + "nvx-exit 0\n"
     )
@@ -3723,6 +3961,7 @@ def run_smp(
         WARP_PROBE_COMPLETION_MARKER,
         timeout=timeout,
         log_path=log_path,
+        **(architecture_kwargs(architecture)),
     )
     output = result["output"].encode("utf-8")
     if not contains_output_line(output, SMP_PROBE_COMPLETION_MARKER):
@@ -3739,7 +3978,10 @@ def run_smp(
         # The boot line must also report the backend's LAPIC rate for all
         # the CPUs; the status query alone doesn't check the CPU count. The
         # query ran before the script, so its lines are in the transcript.
-        monitor = TimeAbiMonitor(command)
+        monitor = TimeAbiMonitor(
+            command,
+            **(architecture_kwargs(architecture)),
+        )
         monitor.feed(result["text"].encode("utf-8"))
         monitor.finish()
         try:
@@ -3915,7 +4157,12 @@ def time_abi_evidence(output_dir: Path, backend: str | None = None) -> dict[str,
 
 
 def report_time_abi_evidence(
-    output_dir: Path, *, backend: str, guest: str, debug_kernel: bool
+    output_dir: Path,
+    *,
+    backend: str,
+    guest: str,
+    debug_kernel: bool,
+    architecture: str = "x86_64",
 ) -> str | None:
     """Print the run's evidence line and add it to the GitHub job summary."""
     evidence = time_abi_evidence(output_dir, backend)
@@ -3925,6 +4172,7 @@ def report_time_abi_evidence(
         "backend": backend,
         "guest": guest,
         "kernel": "debug" if debug_kernel else "default",
+        **({"architecture": architecture} if architecture != "x86_64" else {}),
         **evidence,
     }
     line = TIME_ABI_EVIDENCE_PREFIX + " ".join(f"{k}={v}" for k, v in fields.items())
@@ -3978,6 +4226,7 @@ def run_virtio_net(
     memory_mib: int,
     timeout: float,
     log_path: Path,
+    architecture: str = "x86_64",
 ) -> None:
     command = workload_boot_command(
         executable,
@@ -3987,6 +4236,7 @@ def run_virtio_net(
         memory_mib,
         "quiet loglevel=0",
         network="10.0.0.2/24",
+        **(architecture_kwargs(architecture)),
     )
     _append_endpoint_policy(command, ENDPOINT_POLICY)
     run_guest_script(
@@ -3995,6 +4245,7 @@ def run_virtio_net(
         VIRTIO_NET_COMPLETION_MARKER,
         timeout=timeout,
         log_path=log_path,
+        **(architecture_kwargs(architecture)),
     )
 
 
@@ -4005,6 +4256,8 @@ def command_line_limit_command(
     backend: str,
     memory_mib: int,
     padding: int,
+    *,
+    architecture: str = "x86_64",
 ) -> list[str]:
     """Return the command line limit scenario's OpenVMM command, whose caller
     tokens include a padding token with a value of ``padding`` bytes."""
@@ -4018,6 +4271,7 @@ def command_line_limit_command(
         memory_mib,
         f"quiet loglevel=0 {COMMAND_LINE_PADDING}{'x' * padding}",
         network=COMMAND_LINE_LIMIT_NETWORK,
+        **(architecture_kwargs(architecture)),
     )
 
 
@@ -4030,6 +4284,7 @@ def run_command_line_limit(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
 ) -> None:
     """Boot a kernel command line that fills the guest kernel's buffer.
 
@@ -4046,12 +4301,19 @@ def run_command_line_limit(
     def boot(padding: int, log_name: str) -> str:
         result = run_guest_script(
             command_line_limit_command(
-                executable, kernel, initrd, backend, memory_mib, padding
+                executable,
+                kernel,
+                initrd,
+                backend,
+                memory_mib,
+                padding,
+                **(architecture_kwargs(architecture)),
             ),
             _read_script("command-line-limit.sh"),
             COMMAND_LINE_LIMIT_COMPLETION_MARKER,
             timeout=timeout,
             log_path=output_dir / log_name,
+            **(architecture_kwargs(architecture)),
         )
         return _single_marker_value(
             result["output"].encode("utf-8"), COMMAND_LINE_PREFIX
@@ -4085,9 +4347,16 @@ def run_command_line_limit(
 
     with OpenvmmProcess(
         command_line_limit_command(
-            executable, kernel, initrd, backend, memory_mib, padding + 1
+            executable,
+            kernel,
+            initrd,
+            backend,
+            memory_mib,
+            padding + 1,
+            **(architecture_kwargs(architecture)),
         ),
         output_dir / "command-line-limit-over.log",
+        **(architecture_kwargs(architecture)),
     ) as process:
         result = process.wait(timeout)
     if (
@@ -4110,6 +4379,7 @@ def _directional_network_command(
     *,
     egress: str,
     ingress: str,
+    architecture: str = "x86_64",
 ) -> list[str]:
     if egress not in ("allow", "deny") or ingress not in ("allow", "deny"):
         raise ValueError("directional network actions must be 'allow' or 'deny'")
@@ -4121,6 +4391,7 @@ def _directional_network_command(
         memory_mib,
         "quiet loglevel=0",
         network=DIRECTIONAL_NETWORK_CIDR,
+        **(architecture_kwargs(architecture)),
     )
     command.extend(("--network-egress", egress, "--network-ingress", ingress))
     return command
@@ -4135,6 +4406,7 @@ def run_directional_network_policy(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
 ) -> None:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))
@@ -4178,10 +4450,12 @@ def run_directional_network_policy(
             memory_mib,
             egress="allow",
             ingress="deny",
+            **(architecture_kwargs(architecture)),
         )
         with OpenvmmProcess(
             allow_command,
             output_dir / "directional-network-allow.log",
+            **(architecture_kwargs(architecture)),
         ) as process:
             process.wait_for(BOOT_MARKER, timeout)
             _stage_script(
@@ -4232,6 +4506,7 @@ def run_directional_network_policy(
             memory_mib,
             egress="deny",
             ingress="deny",
+            **(architecture_kwargs(architecture)),
         )
         run_guest_script(
             deny_command,
@@ -4247,6 +4522,7 @@ def run_directional_network_policy(
             DIRECTIONAL_NETWORK_DENY_MARKER,
             timeout=timeout,
             log_path=output_dir / "directional-network-deny.log",
+            **(architecture_kwargs(architecture)),
         )
         listener.settimeout(NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS)
         try:
@@ -4361,6 +4637,7 @@ def run_l3_l4_egress_policy(
     timeout: float,
     output_dir: Path,
     guest: str = "alpine",
+    architecture: str = "x86_64",
 ) -> None:
     tcp, udp = _bind_egress_ports()
     for endpoint in (*tcp, *udp):
@@ -4419,7 +4696,16 @@ def run_l3_l4_egress_policy(
             policy_file=policy_path,
         )
         command = [
-            *nvx_cli.command_line(("run",)),
+            *nvx_cli.command_line(
+                (
+                    "run",
+                    *(
+                        ("--architecture", "aarch64", "--cpu-profile", "auto")
+                        if architecture == "aarch64"
+                        else ()
+                    ),
+                )
+            ),
             "--guest",
             guest,
             "--hypervisor",
@@ -4460,6 +4746,7 @@ def run_l3_l4_egress_policy(
             timeout=timeout,
             log_path=output_dir / "l3-l4-egress-policy.log",
             contain_process_tree=True,
+            **(architecture_kwargs(architecture)),
         )
         server.join(timeout)
         if server.is_alive():
@@ -4528,11 +4815,13 @@ def run_l3_l4_egress_policy(
                 memory_mib,
                 "quiet loglevel=0",
                 network=DIRECTIONAL_NETWORK_CIDR,
+                **(architecture_kwargs(architecture)),
             )
             invalid.extend(extra)
             with OpenvmmProcess(
                 invalid,
                 output_dir / f"l3-l4-egress-{name}.log",
+                **(architecture_kwargs(architecture)),
             ) as process:
                 result = process.wait(timeout)
             if (
@@ -4759,6 +5048,7 @@ def run_l3_l4_egress_protocols(
     timeout: float,
     output_dir: Path,
     guest: str = "alpine",
+    architecture: str = "x86_64",
 ) -> None:
     tcp, udp = _bind_dual_protocol_ports(2)
     try:
@@ -4786,7 +5076,16 @@ def run_l3_l4_egress_protocols(
                 encoding="utf-8",
             )
             command = [
-                *nvx_cli.command_line(("run",)),
+                *nvx_cli.command_line(
+                    (
+                        "run",
+                        *(
+                            ("--architecture", "aarch64", "--cpu-profile", "auto")
+                            if architecture == "aarch64"
+                            else ()
+                        ),
+                    )
+                ),
                 "--guest",
                 guest,
                 "--hypervisor",
@@ -4814,6 +5113,7 @@ def run_l3_l4_egress_protocols(
                     timeout=timeout,
                     log_path=output_dir / f"l3-l4-egress-{case.name}.log",
                     contain_process_tree=True,
+                    **(architecture_kwargs(architecture)),
                 )
                 host_reached = server.finish()
             guest_reports = _egress_probe_reports(result["output"])
@@ -4846,11 +5146,13 @@ def run_l3_l4_egress_protocols(
                 memory_mib,
                 "quiet loglevel=0",
                 network=DIRECTIONAL_NETWORK_CIDR,
+                **(architecture_kwargs(architecture)),
             )
             invalid.extend(("--network-egress", "deny", "--network-egress-allow", rule))
             with OpenvmmProcess(
                 invalid,
                 output_dir / f"l3-l4-egress-{name}.log",
+                **(architecture_kwargs(architecture)),
             ) as process:
                 rejected = process.wait(timeout)
             if (
@@ -4937,6 +5239,7 @@ def run_l3_l4_egress_port_ranges(
     timeout: float,
     output_dir: Path,
     guest: str = "alpine",
+    architecture: str = "x86_64",
 ) -> None:
     tcp, udp = _bind_dual_protocol_ports(len(L3_L4_EGRESS_RANGE_POSITIONS))
     try:
@@ -4964,7 +5267,16 @@ def run_l3_l4_egress_port_ranges(
             ABOVE_PORT=str(ports["above"]),
         )
         public_run = [
-            *nvx_cli.command_line(("run",)),
+            *nvx_cli.command_line(
+                (
+                    "run",
+                    *(
+                        ("--architecture", "aarch64", "--cpu-profile", "auto")
+                        if architecture == "aarch64"
+                        else ()
+                    ),
+                )
+            ),
             "--guest",
             guest,
             "--hypervisor",
@@ -5015,6 +5327,7 @@ def run_l3_l4_egress_port_ranges(
                     timeout=timeout,
                     log_path=output_dir / f"l3-l4-egress-range-{case.name}.log",
                     contain_process_tree=True,
+                    **(architecture_kwargs(architecture)),
                 )
                 host_reached = server.finish()
             guest_reports = _egress_probe_reports(result["output"])
@@ -5061,11 +5374,13 @@ def run_l3_l4_egress_port_ranges(
                 memory_mib,
                 "quiet loglevel=0",
                 network=DIRECTIONAL_NETWORK_CIDR,
+                **(architecture_kwargs(architecture)),
             )
             invalid.extend(("--network-egress", "deny", "--network-egress-allow", rule))
             with OpenvmmProcess(
                 invalid,
                 output_dir / f"l3-l4-egress-range-{name}.log",
+                **(architecture_kwargs(architecture)),
             ) as process:
                 rejected = process.wait(timeout)
             if (
@@ -5401,6 +5716,8 @@ def run_ipv6_egress_policy(
     timeout: float,
     output_dir: Path,
     guest: str = "alpine",
+    architecture: str = "x86_64",
+    cold_only: bool = False,
 ) -> None:
     endpoints = _bind_ipv6_egress_ports()
     try:
@@ -5427,7 +5744,16 @@ def run_ipv6_egress_policy(
             )
             native = compile_egress_policy(policy_path)
             command = [
-                *nvx_cli.command_line(("run",)),
+                *nvx_cli.command_line(
+                    (
+                        "run",
+                        *(
+                            ("--architecture", "aarch64", "--cpu-profile", "auto")
+                            if architecture == "aarch64"
+                            else ()
+                        ),
+                    )
+                ),
                 "--guest",
                 guest,
                 "--hypervisor",
@@ -5455,6 +5781,7 @@ def run_ipv6_egress_policy(
                     timeout=timeout,
                     log_path=output_dir / f"ipv6-egress-{case.name}.log",
                     contain_process_tree=True,
+                    **(architecture_kwargs(architecture)),
                 )
                 host_reached = server.finish()
             guest_reports = _egress_probe_reports(result["output"])
@@ -5483,17 +5810,18 @@ def run_ipv6_egress_policy(
                 }
             )
 
-        _run_ipv6_egress_snapshot(
-            executable,
-            kernel,
-            initrd,
-            backend,
-            memory_mib=memory_mib,
-            timeout=timeout,
-            output_dir=output_dir,
-            endpoint=endpoints["tcp6-named"],
-            named_port=named_port,
-        )
+        if not cold_only:
+            _run_ipv6_egress_snapshot(
+                executable,
+                kernel,
+                initrd,
+                backend,
+                memory_mib=memory_mib,
+                timeout=timeout,
+                output_dir=output_dir,
+                endpoint=endpoints["tcp6-named"],
+                named_port=named_port,
+            )
 
         invalid = workload_boot_command(
             executable,
@@ -5503,6 +5831,7 @@ def run_ipv6_egress_policy(
             memory_mib,
             "quiet loglevel=0",
             network=DIRECTIONAL_NETWORK_CIDR,
+            **(architecture_kwargs(architecture)),
         )
         invalid.extend(
             _ipv6_egress_rule_arguments(f"{DIRECTIONAL_NETWORK_GATEWAY_IPV6}/129")
@@ -5510,6 +5839,7 @@ def run_ipv6_egress_policy(
         with OpenvmmProcess(
             invalid,
             output_dir / "ipv6-egress-invalid-prefix.log",
+            **(architecture_kwargs(architecture)),
         ) as process:
             rejected = process.wait(timeout)
         if (
@@ -5703,6 +6033,7 @@ def run_host_loopback_policy(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
 ) -> None:
     with ExitStack() as listeners:
         denied_general, denied_general_udp = _bind_tcp_udp_listener_pair(
@@ -5741,6 +6072,7 @@ def run_host_loopback_policy(
             memory_mib,
             "quiet loglevel=0",
             network=DIRECTIONAL_NETWORK_CIDR,
+            **(architecture_kwargs(architecture)),
         )
         control_command.extend(
             ("--network-egress", "allow", "--network-ingress", "deny")
@@ -5764,6 +6096,7 @@ def run_host_loopback_policy(
             HOST_LOOPBACK_UDP_CONTROL_MARKER,
             timeout=timeout,
             log_path=output_dir / "host-loopback-udp-control.log",
+            **(architecture_kwargs(architecture)),
         )
         for listener in denied_udp:
             try:
@@ -5802,6 +6135,7 @@ def run_host_loopback_policy(
             HOST_LOOPBACK_DENY_MARKER,
             timeout=timeout,
             log_path=output_dir / "host-loopback-deny.log",
+            **(architecture_kwargs(architecture)),
         )
         proxy_server.join(timeout)
         if proxy_server.is_alive():
@@ -5906,6 +6240,7 @@ def run_host_loopback_policy(
             memory_mib,
             "quiet loglevel=0",
             network=DIRECTIONAL_NETWORK_CIDR,
+            **(architecture_kwargs(architecture)),
         )
         # Egress admits only the guest's own connection to the general host
         # service and its datagrams to the UDP services, so the guest's
@@ -5932,6 +6267,7 @@ def run_host_loopback_policy(
         with OpenvmmProcess(
             allow_command,
             output_dir / "host-loopback-allow.log",
+            **(architecture_kwargs(architecture)),
         ) as process:
             process.wait_for(BOOT_MARKER, timeout)
             _stage_script(
@@ -5995,6 +6331,7 @@ def run_host_loopback_policy(
         memory_mib=memory_mib,
         timeout=timeout,
         output_dir=output_dir,
+        **(architecture_kwargs(architecture)),
     )
 
 
@@ -6162,6 +6499,7 @@ def run_host_loopback_rejections(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
 ) -> None:
     for name, network, extra, expected in (
         (
@@ -6207,6 +6545,7 @@ def run_host_loopback_rejections(
             memory_mib,
             "quiet loglevel=0",
             network=network,
+            **(architecture_kwargs(architecture)),
         )
         invalid.extend(extra)
         with tempfile.TemporaryDirectory(prefix="nvx-loopback-rejection-") as temporary:
@@ -6222,6 +6561,7 @@ def run_host_loopback_rejections(
             with OpenvmmProcess(
                 invalid,
                 output_dir / f"host-loopback-{name}.log",
+                **(architecture_kwargs(architecture)),
             ) as process:
                 result = process.wait(timeout)
             if pidfile.parent.exists():
@@ -6371,6 +6711,7 @@ def _private_ingress_command(
     backend: str,
     memory_mib: int,
     *policy: str,
+    architecture: str = "x86_64",
 ) -> list[str]:
     command = workload_boot_command(
         executable,
@@ -6380,6 +6721,7 @@ def _private_ingress_command(
         memory_mib,
         "quiet loglevel=0",
         network=DIRECTIONAL_NETWORK_CIDR,
+        **(architecture_kwargs(architecture)),
     )
     command.extend(policy)
     return command
@@ -6396,10 +6738,15 @@ def _run_private_ingress_guest(
     timeout: float,
     log_path: Path,
     probe: Callable[[], None],
+    architecture: str = "x86_64",
 ) -> None:
     """Boot a guest that serves TCP and UDP on ``port``, run ``probe`` from the
     host while it listens, and require the guest to observe ``expect``."""
-    with OpenvmmProcess(command, log_path) as process:
+    with OpenvmmProcess(
+        command,
+        log_path,
+        **(architecture_kwargs(architecture)),
+    ) as process:
         process.wait_for(BOOT_MARKER, timeout)
         _stage_script(
             process,
@@ -6436,6 +6783,8 @@ def run_private_network_ingress(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
+    cold_only: bool = False,
 ) -> None:
     """Verify that ``--network-ingress allow`` publishes the guest's listeners.
 
@@ -6510,6 +6859,7 @@ def run_private_network_ingress(
                 "allow",
                 "--host-loopback",
                 "allow",
+                **(architecture_kwargs(architecture)),
             ),
             ingress="allow",
             expect="reached",
@@ -6519,6 +6869,7 @@ def run_private_network_ingress(
             timeout=timeout,
             log_path=output_dir / "private-network-ingress-host-allowed.log",
             probe=exchange,
+            **(architecture_kwargs(architecture)),
         )
         outbound.settimeout(NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS)
         try:
@@ -6571,6 +6922,7 @@ def run_private_network_ingress(
             "allow",
             "--host-loopback",
             "deny",
+            **(architecture_kwargs(architecture)),
         ),
         ingress="allow",
         expect="unreached",
@@ -6580,6 +6932,7 @@ def run_private_network_ingress(
         timeout=timeout,
         log_path=output_dir / "private-network-ingress-host-denied.log",
         probe=refused,
+        **(architecture_kwargs(architecture)),
     )
 
     port = _private_ingress_port()
@@ -6607,6 +6960,7 @@ def run_private_network_ingress(
             "allow",
             "--network-ingress",
             "deny",
+            **(architecture_kwargs(architecture)),
         ),
         ingress="deny",
         expect="unreached",
@@ -6616,7 +6970,11 @@ def run_private_network_ingress(
         timeout=timeout,
         log_path=output_dir / "private-network-ingress-denied.log",
         probe=unpublished,
+        **(architecture_kwargs(architecture)),
     )
+
+    if cold_only:
+        return
 
     with tempfile.TemporaryDirectory(prefix="nvx-ingress-snapshot-") as temporary:
         invalid = _private_ingress_command(
@@ -6629,10 +6987,12 @@ def run_private_network_ingress(
             "allow",
             "--snapshot-destination",
             str(Path(temporary) / "snapshot"),
+            **(architecture_kwargs(architecture)),
         )
         with OpenvmmProcess(
             invalid,
             output_dir / "private-network-ingress-snapshot.log",
+            **(architecture_kwargs(architecture)),
         ) as process:
             result = process.wait(timeout)
     if (
@@ -6778,6 +7138,7 @@ def run_denied_filesystem_paths(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="nvx-denied-paths-") as temporary:
         root = Path(temporary) / "share"
@@ -6812,6 +7173,7 @@ def run_denied_filesystem_paths(
             memory_mib,
             "quiet loglevel=0",
             mount=f"/mnt/share,{root},rw",
+            **(architecture_kwargs(architecture)),
         )
         command.extend(("--mount-deny", str(secrets)))
         run_guest_script(
@@ -6820,6 +7182,7 @@ def run_denied_filesystem_paths(
             FILESYSTEM_DENIED_MARKER,
             timeout=timeout,
             log_path=output_dir / "denied-filesystem-paths.log",
+            **(architecture_kwargs(architecture)),
         )
         if (allowed / "from-guest").read_bytes() != b"NVX-GUEST-WRITE\n":
             raise RuntimeError("allowed filesystem path did not remain writable")
@@ -6849,12 +7212,14 @@ def run_denied_filesystem_paths(
                 memory_mib,
                 "quiet loglevel=0",
                 mount=f"/mnt/share,{root},rw",
+                **(architecture_kwargs(architecture)),
             )
             for path in denied_paths:
                 invalid.extend(("--mount-deny", str(path)))
             with OpenvmmProcess(
                 invalid,
                 output_dir / f"denied-filesystem-{name}.log",
+                **(architecture_kwargs(architecture)),
             ) as process:
                 result = process.wait(timeout)
             if (
@@ -6947,6 +7312,7 @@ def run_filesystem_owner(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
 ) -> None:
     def boot_command(mount: str) -> list[str]:
         command = workload_boot_command(
@@ -6957,13 +7323,16 @@ def run_filesystem_owner(
             memory_mib,
             "quiet loglevel=0",
             mount=mount,
+            **(architecture_kwargs(architecture)),
         )
         command.extend(("--mount-owner", "caller"))
         return command
 
     def assert_rejected(name: str, mount: str, expected: bytes) -> None:
         with OpenvmmProcess(
-            boot_command(mount), output_dir / f"filesystem-owner-{name}.log"
+            boot_command(mount),
+            output_dir / f"filesystem-owner-{name}.log",
+            **(architecture_kwargs(architecture)),
         ) as process:
             result = process.wait(timeout)
         if (
@@ -7049,6 +7418,7 @@ def run_filesystem_owner(
             FILESYSTEM_OWNER_MARKER,
             timeout=timeout,
             log_path=output_dir / "filesystem-owner.log",
+            **(architecture_kwargs(architecture)),
         )
 
         for path in (root, *root.rglob("*")):
@@ -7086,6 +7456,175 @@ def run_filesystem_owner(
             )
 
 
+def run_layered_boot(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    test_elf: Path,
+    timeout: float,
+    output_dir: Path,
+    architecture: str = "x86_64",
+) -> None:
+    """Run each real root-switching libtest in its own scratch and RAM VM."""
+    test_elf = require_file(test_elf, "standard guest libtest ELF")
+    recipe = guest_binary_architecture(architecture)
+    check_static_executables([test_elf], expected_machine=recipe.machine)
+    artifacts = load_workload_artifacts(**architecture_kwargs(architecture))
+    tests = (
+        (
+            "maps",
+            "layered_cold_boot_maps_through_handles_opened_before_its_only_switch",
+        ),
+        (
+            "runtime-share",
+            "layered_cold_boot_mounts_runtime_before_a_live_share_beneath_run",
+        ),
+    )
+    expected_elf = sha256_file(test_elf)
+    expected_distro = sha256_file(artifacts.distro)
+    for upper in ("scratch", "ram"):
+        for label, name in tests:
+            with tempfile.TemporaryDirectory(prefix="nvx-layered-boot-") as temporary:
+                root = Path(temporary)
+                export = root / "export"
+                export.mkdir()
+                (export / "data").write_bytes(b"sl75b-real-export\n")
+                runner = export / "guest-libtest"
+                shutil.copyfile(test_elf, runner)
+                runner.chmod(0o755)
+                test_name = f"guest::init::boot::tests::{name}"
+                stem = f"layered-boot-{label}-{upper}"
+                report_path = output_dir / f"{stem}.outcome.json"
+                command_line = [
+                    "quiet",
+                    "loglevel=0",
+                    "rdinit=/bin/sh",
+                    f"nvx_layer=distro,0xd0003000,erofs:{artifacts.layer_uuid}",
+                    SCRATCH_UPPER_TOKEN if upper == "scratch" else RAM_UPPER_TOKEN,
+                    "nvx_hostname=6c6179657265642d74657374",
+                    "nvx_machine_id=generated",
+                    "nvx_identity=42420:42421",
+                    "nvx_workload_account=create",
+                ]
+                if label == "maps":
+                    command_line.append("nvx_maps=2")
+                command = workload_boot_command(
+                    executable,
+                    backend,
+                    kernel,
+                    initrd,
+                    512,
+                    " ".join(command_line),
+                    processors=1,
+                    **architecture_kwargs(architecture),
+                )
+                command.extend(
+                    (
+                        "--microvm-control-console",
+                        "none",
+                        "--microvm-report",
+                        str(report_path),
+                        "--microvm-sandbox-block",
+                        f"distro:file:{artifacts.distro},ro",
+                    )
+                )
+                if upper == "scratch":
+                    scratch = root / "scratch.ext4"
+                    shutil.copyfile(artifacts.scratch_template, scratch)
+                    command.extend(
+                        ("--microvm-sandbox-block", f"scratch:file:{scratch}")
+                    )
+                if label == "maps":
+                    command.extend(
+                        (
+                            "--mount-aggregate",
+                            "/run/nvx/hostfs/root",
+                            "--mount-child",
+                            f"0,{export},ro",
+                        )
+                    )
+                    guest_runner = "/mnt/nvx-layered-test/0/guest-libtest"
+                else:
+                    command.extend(("--mount", f"/run/task-state,{export},ro"))
+                    guest_runner = "/mnt/nvx-layered-test/guest-libtest"
+                inputs = {
+                    "architecture": architecture,
+                    "fixed_processors": 1,
+                    "fixed_memory_mib": 512,
+                    "upper": upper,
+                    "exact_ignored_test": test_name,
+                    "standard_test_elf": {
+                        "path": str(test_elf),
+                        "sha256": expected_elf,
+                        "compiler_provenance": "Retain the matching normal Cargo test-artifact/source receipt with this explicit input.",
+                    },
+                    "distro_sha256": expected_distro,
+                    "distro_uuid": artifacts.layer_uuid,
+                    "command": command,
+                }
+                (output_dir / f"{stem}.inputs.json").write_text(
+                    json.dumps(inputs, indent=2) + "\n", encoding="utf-8"
+                )
+                script = _render_script(
+                    "layered-boot.sh.in",
+                    TEST_ELF=guest_runner,
+                    TEST_NAME=test_name,
+                    RESOURCE_SCRIPT=_guest_resource_script(),
+                )
+                with OpenvmmProcess(
+                    command,
+                    output_dir / f"{stem}.log",
+                    time_abi_status=False,
+                    **architecture_kwargs(architecture),
+                ) as process:
+                    process.wait_for(b"# ", timeout)
+                    _stage_script(
+                        process,
+                        "/tmp/nvx-layered-boot",
+                        "NVX_LAYERED_BOOT_SCRIPT",
+                        script,
+                    )
+                    result = process.wait(timeout)
+                output = result.output.replace(b"\r", b"")
+                named = f"test {test_name} ... ok".encode()
+                summary = rb"(?m)^test result: ok\. 1 passed; 0 failed; 0 ignored;"
+                if (
+                    result.returncode != 0
+                    or not contains_output_line(output, named)
+                    or re.search(summary, output) is None
+                ):
+                    raise RuntimeError(
+                        f"{stem}: dedicated layered boot test did not execute and pass: "
+                        f"status {result.returncode}, output={bounded_text(result.output)}"
+                    )
+                _read_outcome_report(report_path)
+                check_run_report(report_path, backend)
+                resources = _check_guest_resources(output, processors=1, memory_mib=512)
+                (output_dir / f"{stem}.observed.json").write_text(
+                    json.dumps(
+                        {
+                            "actual_exact_test": test_name,
+                            "passed": 1,
+                            "ignored": 0,
+                            "resources": resources,
+                            "actual_report_sha256": sha256_file(report_path),
+                        },
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                if (
+                    sha256_file(test_elf) != expected_elf
+                    or sha256_file(runner) != expected_elf
+                    or (export / "data").read_bytes() != b"sl75b-real-export\n"
+                    or sha256_file(artifacts.distro) != expected_distro
+                ):
+                    raise RuntimeError(f"{stem}: a read-only fixture input changed")
+
+
 def run_sandbox_blocks(
     executable: Path,
     kernel: Path,
@@ -7095,6 +7634,7 @@ def run_sandbox_blocks(
     memory_mib: int,
     timeout: float,
     log_path: Path,
+    architecture: str = "x86_64",
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="nvx-sandbox-blocks-") as temporary:
         root = Path(temporary)
@@ -7105,6 +7645,7 @@ def run_sandbox_blocks(
             initrd,
             memory_mib,
             "quiet loglevel=0",
+            **(architecture_kwargs(architecture)),
         )
         for role in ("distro", "scratch"):
             path = root / f"{role}.img"
@@ -7120,6 +7661,7 @@ def run_sandbox_blocks(
             SANDBOX_BLOCKS_COMPLETION_MARKER,
             timeout=timeout,
             log_path=log_path,
+            **(architecture_kwargs(architecture)),
         )
 
 
@@ -7198,6 +7740,7 @@ def run_virtio_features(
     memory_mib: int,
     timeout: float,
     log_path: Path,
+    architecture: str = "x86_64",
 ) -> None:
     """Boot a microVM with every fixed virtio device, the NIC, the dormant
     host filesystem slot, both consoles, and both sandbox blocks, and check
@@ -7212,6 +7755,7 @@ def run_virtio_features(
             memory_mib,
             "quiet loglevel=0",
             network=VIRTIO_FEATURES_NETWORK,
+            **(architecture_kwargs(architecture)),
         )
         command.extend(("--microvm-control-console", "none"))
         for role in ("distro", "scratch"):
@@ -7228,6 +7772,7 @@ def run_virtio_features(
             VIRTIO_FEATURES_COMPLETION_MARKER,
             timeout=timeout,
             log_path=log_path,
+            **(architecture_kwargs(architecture)),
         )
     check_virtio_features(result["output"])
 
@@ -7257,10 +7802,13 @@ class InterruptMapEntry(NamedTuple):
     actions: str
     fired: int
     unhandled: int
+    dt_interrupts: str | None = None
 
 
 def parse_interrupt_map(
     output: str,
+    *,
+    architecture: str = "x86_64",
 ) -> tuple[dict[str, dict[int, InterruptMapEntry]], dict[str, int]]:
     """Return the interrupt-map scenario's reports in ``output``, by step and
     by the base of each device's window, and the guest's ERR, MIS, and SPU
@@ -7281,7 +7829,12 @@ def parse_interrupt_map(
             fields = dict(field.split("=", 1) for field in line[len(prefix) :].split())
             if prefix == INTERRUPT_MAP_ERRORS_PREFIX:
                 errors = {
-                    name: int(fields[name]) for name in INTERRUPT_MAP_ERROR_COUNTS
+                    name: int(fields[name])
+                    for name in (
+                        ("err",)
+                        if architecture == "aarch64"
+                        else INTERRUPT_MAP_ERROR_COUNTS
+                    )
                 }
                 continue
             step = fields["step"]
@@ -7295,6 +7848,7 @@ def parse_interrupt_map(
                 fields["actions"],
                 int(fields["count"]),
                 int(fields["unhandled"]),
+                fields.get("dt_interrupts"),
             )
         except (KeyError, ValueError) as error:
             raise RuntimeError(
@@ -7316,6 +7870,7 @@ def check_interrupt_map(
     *,
     before: str,
     after: str = "traffic",
+    architecture: str = "x86_64",
 ) -> None:
     """Check the interrupt-map scenario's reports against the map of the
     architecture guide (2.4.2 and Table 2.7): after the steps ``before`` and
@@ -7327,6 +7882,9 @@ def check_interrupt_map(
     interrupt (MIS), and no spurious APIC interrupt (SPU).
 
     Raises RuntimeError naming each departure."""
+    if architecture not in ("x86_64", "aarch64"):
+        raise ValueError(f"unsupported interrupt architecture: {architecture}")
+    arm = architecture == "aarch64"
     problems: list[str] = []
     for step in (before, after):
         entries = steps.get(step)
@@ -7346,12 +7904,31 @@ def check_interrupt_map(
                     f"no {expected.name} is reported at {base:#x} after step {step}"
                 )
                 continue
-            if entry.irq != expected.irq:
+            if not arm and entry.irq != expected.irq:
                 problems.append(
                     f"{expected.name} at {base:#x} interrupts on IRQ {entry.irq}, "
                     f"not {expected.irq}"
                 )
-            if entry.chip != "IO-APIC" or entry.hwirq != entry.irq:
+            if arm:
+                slot = (base - 0xD000_0000) // 0x1000
+                if entry.chip != "GICv3" or entry.hwirq != 32 + slot:
+                    problems.append(
+                        f"{expected.name}'s Linux IRQ {entry.irq} is INTID "
+                        f"{entry.hwirq} of {entry.chip}, not GICv3 INTID {32 + slot}"
+                    )
+                if entry.dt_interrupts != f"00000000{slot:08x}00000001":
+                    problems.append(
+                        f"{expected.name}'s DT interrupt cells are "
+                        f"{entry.dt_interrupts!r}, not [GIC_SPI=0, {slot}, EDGE_RISING=1]"
+                    )
+                if (
+                    entry.irq < 0
+                    or sum(other.irq == entry.irq for other in entries.values()) != 1
+                ):
+                    problems.append(
+                        f"{expected.name}'s Linux IRQ {entry.irq} is invalid or shared"
+                    )
+            elif entry.chip != "IO-APIC" or entry.hwirq != entry.irq:
                 problems.append(
                     f"{expected.name}'s IRQ {entry.irq} is input {entry.hwirq} of "
                     f"{entry.chip}, not the IOAPIC input of its number"
@@ -7369,14 +7946,23 @@ def check_interrupt_map(
         for base in sorted(bases):
             expected = MICROVM_VIRTIO_DEVICES[base]
             first, last = steps[before][base], steps[after][base]
+            if arm and first.irq != last.irq:
+                problems.append(
+                    f"{expected.name}'s Linux IRQ changed from {first.irq} "
+                    f"to {last.irq} with traffic"
+                )
             if last.fired <= first.fired:
                 problems.append(
                     f"{expected.name}'s IRQ {first.irq} fired {first.fired} times "
                     f"after step {before} and {last.fired} after step {after}"
                 )
-    if not errors:
+    if arm and not errors:
+        problems.append("the guest reported no GIC Err count")
+    elif arm and errors["err"]:
+        problems.append(f"/proc/interrupts counts {errors['err']} GIC errors (Err)")
+    elif not arm and not errors:
         problems.append("the guest reported no ERR, MIS, and SPU counts")
-    elif any(errors.values()):
+    elif not arm and any(errors.values()):
         problems.append(
             f"/proc/interrupts counts {errors['err']} APIC errors or spurious PIC "
             f"interrupts (ERR), {errors['mis']} misrouted IOAPIC interrupts "
@@ -7389,7 +7975,9 @@ def check_interrupt_map(
         )
 
 
-def _interrupt_map_script(devices: int, *, capture: str) -> str:
+def _interrupt_map_script(
+    devices: int, *, capture: str, architecture: str = "x86_64"
+) -> str:
     """Return the interrupt-map scenario's guest script for a guest with
     ``devices`` virtio devices, which runs ``capture`` between its boot report
     and its traffic.
@@ -7400,6 +7988,7 @@ def _interrupt_map_script(devices: int, *, capture: str) -> str:
         "interrupt-map.sh.in",
         DEVICES=str(devices),
         CAPTURE=capture,
+        ARCHITECTURE=architecture,
         GUEST_ATTACH="".join(f"\\{byte:03o}" for byte in INTERRUPT_MAP_GUEST_ATTACH),
     )
 
@@ -7413,6 +8002,8 @@ def run_interrupt_map(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
+    cold_only: bool = False,
 ) -> None:
     """Check the interrupt map of the architecture guide (2.4.2 and Table
     2.7) end to end.
@@ -7441,6 +8032,7 @@ def run_interrupt_map(
             "quiet loglevel=0",
             network=INTERRUPT_MAP_NETWORK,
             mount=mount,
+            **(architecture_kwargs(architecture)),
         )
         command.extend(("--microvm-control-console", "none"))
         for role in ("distro", "scratch"):
@@ -7453,13 +8045,30 @@ def run_interrupt_map(
             )
         result = run_guest_script(
             command,
-            _interrupt_map_script(len(MICROVM_VIRTIO_DEVICES), capture=""),
+            _interrupt_map_script(
+                len(MICROVM_VIRTIO_DEVICES),
+                capture="",
+                **(architecture_kwargs(architecture)),
+            ),
             INTERRUPT_MAP_COMPLETION_MARKER,
             timeout=timeout,
             log_path=output_dir / "interrupt-map.log",
+            **(architecture_kwargs(architecture)),
         )
-        steps, errors = parse_interrupt_map(result["output"])
-        check_interrupt_map(steps, errors, MICROVM_VIRTIO_DEVICES, before="boot")
+        steps, errors = parse_interrupt_map(
+            result["output"],
+            **(architecture_kwargs(architecture)),
+        )
+        check_interrupt_map(
+            steps,
+            errors,
+            MICROVM_VIRTIO_DEVICES,
+            before="boot",
+            **(architecture_kwargs(architecture)),
+        )
+
+        if cold_only:
+            return
 
         snapshot_path = root / "snapshot"
         capture_command = [
@@ -7472,6 +8081,7 @@ def run_interrupt_map(
                 "quiet loglevel=0",
                 network=INTERRUPT_MAP_NETWORK,
                 mount=mount,
+                **(architecture_kwargs(architecture)),
             ),
             "--snapshot-destination",
             str(snapshot_path),
@@ -7480,6 +8090,7 @@ def run_interrupt_map(
         with OpenvmmProcess(
             capture_command,
             output_dir / "interrupt-map-capture.log",
+            **(architecture_kwargs(architecture)),
         ) as process:
             process.wait_for(BOOT_MARKER, timeout)
             _stage_script(
@@ -7516,6 +8127,7 @@ def run_interrupt_map(
         with OpenvmmProcess(
             restore_command,
             output_dir / "interrupt-map-restore.log",
+            **(architecture_kwargs(architecture)),
         ) as process:
             process.wait_for(INTERRUPT_MAP_COMPLETION_MARKER, timeout)
             restored = process.wait(timeout)
@@ -8090,16 +8702,26 @@ def time_host_correction_composed_ppm(host_ppm: float, hook_ppm: int) -> float:
     return host_ppm + hook_ppm + host_ppm * hook_ppm / 1_000_000
 
 
-def time_host_correction_guest_ppm(correction_ppm: float, tsc_hz: int) -> float:
+def time_host_correction_guest_ppm(
+    correction_ppm: float, tsc_hz: int, *, architecture: str = "x86_64"
+) -> float:
     """Return the correction that Linux must hold after it rounds
     ``tsc_hz`` down to the kHz."""
     if tsc_hz <= 0:
         raise RuntimeError(f"the declared TSC rate is invalid: {tsc_hz} Hz")
+    if architecture == "aarch64":
+        if tsc_hz > 0xFFFFFFFF:
+            raise RuntimeError(f"the declared ARM counter rate is invalid: {tsc_hz} Hz")
+        return correction_ppm
+    if architecture != "x86_64":
+        raise ValueError(f"unsupported correction architecture: {architecture}")
     kernel_hz = tsc_hz // 1000 * 1000
     return (1_000_000 + correction_ppm) * kernel_hz / tsc_hz - 1_000_000
 
 
-def time_host_correction_hooks(host_ppm: float, tsc_hz: int) -> tuple[int, int, int]:
+def time_host_correction_hooks(
+    host_ppm: float, tsc_hz: int, *, architecture: str = "x86_64"
+) -> tuple[int, int, int]:
     """Return the ``host-rate-offset-ppm`` hooks, in ppm, of the
     time-host-correction scenario's cold boot, restore, and limit restore on a
     host whose own clock correction is ``host_ppm``.
@@ -8127,7 +8749,11 @@ def time_host_correction_hooks(host_ppm: float, tsc_hz: int) -> tuple[int, int, 
             min(OPENVMM_HOST_RATE_OFFSET_LIMIT_PPM, hook),
         )
         published = time_host_correction_composed_ppm(host_ppm, hook)
-        guest = time_host_correction_guest_ppm(published, tsc_hz)
+        guest = time_host_correction_guest_ppm(
+            published,
+            tsc_hz,
+            **(architecture_kwargs(architecture)),
+        )
         if abs(guest) >= LINUX_FREQUENCY_LIMIT_PPB / 1000:
             raise RuntimeError(
                 f"the host's own correction of {host_ppm:+.3f} ppm cannot be "
@@ -8146,7 +8772,7 @@ def time_host_correction_hooks(host_ppm: float, tsc_hz: int) -> tuple[int, int, 
 
 
 def time_host_correction_frequency_allowance_ppb(
-    tsc_hz: int, correction_ppb: int
+    tsc_hz: int, correction_ppb: int, *, architecture: str = "x86_64"
 ) -> int:
     """Return the rounding allowance between the host and kernel corrections.
 
@@ -8155,15 +8781,26 @@ def time_host_correction_frequency_allowance_ppb(
     more ppb for the correction's integer rounding. The time ABI admits rates
     as low as 500 MHz, where this is nearly 2,000 ppb rather than the 1,001 ppb
     sufficient at 1 GHz.
+
+    ARM admits equal declared and kernel rates, so requested_frequency keeps
+    the host's scaled-ppm integer exactly. Both reported ppb fields use the
+    same frequency_to_ppb conversion of that integer, including its rounding;
+    no difference between these state fields is allowed.
     """
     if tsc_hz <= 0:
         raise ValueError(f"invalid TSC rate {tsc_hz}")
+    if architecture == "aarch64":
+        if tsc_hz > 0xFFFFFFFF:
+            raise ValueError(f"invalid ARM counter rate {tsc_hz}")
+        return 0
+    if architecture != "x86_64":
+        raise ValueError(f"unsupported correction architecture: {architecture}")
     numerator = 999 * (1_000_000_000 + abs(correction_ppb))
     return (numerator + tsc_hz - 1) // tsc_hz + 1
 
 
 def check_time_host_correction(
-    output: str, *, context: str, limit: bool = False
+    output: str, *, context: str, limit: bool = False, architecture: str = "x86_64"
 ) -> str:
     """Check the guest's report of the time-host-correction scenario in its
     console ``output``, and return a summary of it.
@@ -8216,7 +8853,11 @@ def check_time_host_correction(
                     "step or restore repair kept a stale correction"
                 )
         tsc_hz = int(state["tsc_hz"])
-        required_ppm = time_host_correction_guest_ppm(correction_ppb / 1000, tsc_hz)
+        required_ppm = time_host_correction_guest_ppm(
+            correction_ppb / 1000,
+            tsc_hz,
+            **(architecture_kwargs(architecture)),
+        )
         beyond = abs(required_ppm) > LINUX_FREQUENCY_LIMIT_PPB / 1000
         if limit:
             if not beyond:
@@ -8251,7 +8892,9 @@ def check_time_host_correction(
             )
         first, second = samples
         allowance_ppb = time_host_correction_frequency_allowance_ppb(
-            tsc_hz, correction_ppb
+            tsc_hz,
+            correction_ppb,
+            **(architecture_kwargs(architecture)),
         )
         if abs(frequency_ppb - correction_ppb) > allowance_ppb:
             raise RuntimeError(
@@ -8315,6 +8958,8 @@ def run_time_host_correction(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
+    cold_only: bool = False,
 ) -> None:
     """Check that the guest applies the host's clock correction that OpenVMM
     publishes with each time sample, through the ``host-rate-offset-ppm`` test
@@ -8328,6 +8973,10 @@ def run_time_host_correction(
     repair on, and pass the warp probe and its restore checks; restored with a
     rate beyond Linux's 500 ppm limit, in the direction of the host's own
     correction, it must hold the limit and report it."""
+    if architecture == "aarch64" and not cold_only:
+        raise ScriptError(
+            "ARM host-correction testing requires an explicit cold projection"
+        )
     boot_command = workload_boot_command(
         executable,
         backend,
@@ -8336,6 +8985,7 @@ def run_time_host_correction(
         memory_mib,
         "quiet loglevel=0",
         processors=1,
+        **(architecture_kwargs(architecture)),
     )
     completion = f"echo {TIME_HOST_CORRECTION_COMPLETION_MARKER.decode()}\nnvx-exit 0\n"
     context = "host clock correction probe"
@@ -8345,9 +8995,14 @@ def run_time_host_correction(
         TIME_HOST_CORRECTION_COMPLETION_MARKER,
         timeout=timeout,
         log_path=output_dir / "time-host-correction-probe.log",
+        **(architecture_kwargs(architecture)),
     )
     host_ppm, tsc_hz = time_host_correction_host(probe["output"], context=context)
-    boot_ppm, restore_ppm, limit_ppm = time_host_correction_hooks(host_ppm, tsc_hz)
+    boot_ppm, restore_ppm, limit_ppm = time_host_correction_hooks(
+        host_ppm,
+        tsc_hz,
+        **(architecture_kwargs(architecture)),
+    )
     print(f"{context}: the host's own correction is {host_ppm:+.3f} ppm", flush=True)
     context = f"host clock correction cold boot (hook {boot_ppm:+d} ppm)"
     result = run_guest_script(
@@ -8356,8 +9011,18 @@ def run_time_host_correction(
         TIME_HOST_CORRECTION_COMPLETION_MARKER,
         timeout=timeout,
         log_path=output_dir / "time-host-correction-boot.log",
+        **(architecture_kwargs(architecture)),
     )
-    print(check_time_host_correction(result["output"], context=context), flush=True)
+    print(
+        check_time_host_correction(
+            result["output"],
+            context=context,
+            **(architecture_kwargs(architecture)),
+        ),
+        flush=True,
+    )
+    if cold_only:
+        return
     with tempfile.TemporaryDirectory(prefix="nvx-time-host-correction-") as temporary:
         snapshot_path = Path(temporary) / "snapshot"
         capture_snapshot(
@@ -11469,8 +12134,14 @@ def _expect_process_failure(
     timeout: float,
     expected: bytes | None = None,
     forbidden_markers: tuple[bytes, ...] = (),
+    *,
+    architecture: str = "x86_64",
 ) -> None:
-    with OpenvmmProcess(command, log_path) as process:
+    with OpenvmmProcess(
+        command,
+        log_path,
+        **(architecture_kwargs(architecture)),
+    ) as process:
         result = process.wait(timeout)
     if result.returncode == 0:
         raise RuntimeError(f"OpenVMM unexpectedly accepted invalid restore: {command}")
@@ -11833,6 +12504,8 @@ def _shares_command(
     toolcache: Path,
     data: Path,
     files: Path,
+    *,
+    architecture: str = "x86_64",
 ) -> list[str]:
     command = workload_boot_command(
         executable,
@@ -11841,6 +12514,7 @@ def _shares_command(
         initrd,
         memory_mib,
         f"quiet loglevel=0 {_SHARE_TOKENS}",
+        **(architecture_kwargs(architecture)),
     )
     command.extend(_aggregate_arguments(workspace, toolcache, data, files))
     return command
@@ -11887,6 +12561,8 @@ def run_filesystem_shares(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
+    cold_only: bool = False,
 ) -> None:
     """Attach a read-write workspace, a read-only tool cache, a data directory
     with a hidden root, and a read-only and a read-write file, each without
@@ -11908,6 +12584,7 @@ def run_filesystem_shares(
             toolcache,
             data,
             files,
+            **(architecture_kwargs(architecture)),
         )
         command.extend(
             (
@@ -11924,6 +12601,7 @@ def run_filesystem_shares(
             FILESYSTEM_SHARES_MARKER,
             timeout=timeout,
             log_path=output_dir / "filesystem-shares.log",
+            **(architecture_kwargs(architecture)),
         )
         if (workspace / "from-guest").read_bytes() != b"NVX-GUEST-WRITE\n":
             raise RuntimeError("read-write share did not accept a guest write")
@@ -12019,11 +12697,21 @@ def run_filesystem_shares(
             ),
         ):
             invalid = workload_boot_command(
-                executable, backend, kernel, initrd, memory_mib, "quiet loglevel=0"
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                "quiet loglevel=0",
+                **(architecture_kwargs(architecture)),
             )
             invalid.extend(arguments)
             _expect_boot_failure(
-                invalid, output_dir / f"filesystem-shares-{name}.log", timeout, expected
+                invalid,
+                output_dir / f"filesystem-shares-{name}.log",
+                timeout,
+                expected,
+                **(architecture_kwargs(architecture)),
             )
         for name, arguments, expected in (
             (
@@ -12045,13 +12733,21 @@ def run_filesystem_shares(
                 toolcache,
                 data,
                 files,
+                **(architecture_kwargs(architecture)),
             )
             invalid.extend(arguments)
             _expect_boot_failure(
-                invalid, output_dir / f"filesystem-shares-{name}.log", timeout, expected
+                invalid,
+                output_dir / f"filesystem-shares-{name}.log",
+                timeout,
+                expected,
+                **(architecture_kwargs(architecture)),
             )
 
         # Every child belongs to the snapshot contract, in order.
+        if cold_only:
+            return
+
         snapshot = root / "snapshot"
         with OpenvmmProcess(
             [
@@ -12065,11 +12761,13 @@ def run_filesystem_shares(
                     toolcache,
                     data,
                     files,
+                    **(architecture_kwargs(architecture)),
                 ),
                 "--snapshot-destination",
                 str(snapshot),
             ],
             output_dir / "filesystem-shares-capture.log",
+            **(architecture_kwargs(architecture)),
         ) as process:
             process.wait_for(BOOT_MARKER, timeout)
             _stage_script(
@@ -12129,11 +12827,14 @@ def run_filesystem_shares(
                 timeout,
                 expected,
                 (FILESYSTEM_SHARES_AFTER_MARKER,),
+                **(architecture_kwargs(architecture)),
             )
         restore = snapshot_restore_command(executable, backend, snapshot)
         restore.extend(aggregate)
         with OpenvmmProcess(
-            restore, output_dir / "filesystem-shares-restore.log"
+            restore,
+            output_dir / "filesystem-shares-restore.log",
+            **(architecture_kwargs(architecture)),
         ) as process:
             process.wait_for(FILESYSTEM_SHARES_AFTER_MARKER, timeout)
             restored = process.wait(timeout)
@@ -12165,6 +12866,7 @@ def run_filesystem_shares(
             timeout,
             b"root identity does not match",
             (FILESYSTEM_SHARES_AFTER_MARKER,),
+            **(architecture_kwargs(architecture)),
         )
 
 
@@ -12211,6 +12913,8 @@ def run_filesystem_policy(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    architecture: str = "x86_64",
+    cold_only: bool = False,
 ) -> None:
     """Narrow a read-write share's writes and expose a path in a hidden subtree.
 
@@ -12244,6 +12948,7 @@ def run_filesystem_policy(
                 memory_mib,
                 "quiet loglevel=0",
                 mount=f"/workspace,{share},{mode}",
+                **(architecture_kwargs(architecture)),
             )
 
         run_guest_script(
@@ -12252,6 +12957,7 @@ def run_filesystem_policy(
             FILESYSTEM_POLICY_MARKER,
             timeout=timeout,
             log_path=output_dir / "filesystem-policy.log",
+            **(architecture_kwargs(architecture)),
         )
         if (share / "out" / "from-guest").read_bytes() != b"NVX-GUEST-WRITE\n":
             raise RuntimeError("writable path did not accept a guest write")
@@ -12311,10 +13017,14 @@ def run_filesystem_policy(
                 output_dir / f"filesystem-policy-{name}.log",
                 timeout,
                 expected,
+                **(architecture_kwargs(architecture)),
             )
 
         # The policy belongs to the snapshot contract, and the restored guest
         # keeps both its writable handle and the policy.
+        if cold_only:
+            return
+
         snapshot = root / "snapshot"
         with OpenvmmProcess(
             [
@@ -12324,6 +13034,7 @@ def run_filesystem_policy(
                 str(snapshot),
             ],
             output_dir / "filesystem-policy-capture.log",
+            **(architecture_kwargs(architecture)),
         ) as process:
             process.wait_for(BOOT_MARKER, timeout)
             _stage_script(
@@ -12364,11 +13075,14 @@ def run_filesystem_policy(
                 timeout,
                 b"does not match the snapshot contract",
                 (FILESYSTEM_POLICY_AFTER_MARKER,),
+                **(architecture_kwargs(architecture)),
             )
         restore = snapshot_restore_command(executable, backend, snapshot)
         restore.extend(("--mount", mount, *_policy_arguments(share)))
         with OpenvmmProcess(
-            restore, output_dir / "filesystem-policy-restore.log"
+            restore,
+            output_dir / "filesystem-policy-restore.log",
+            **(architecture_kwargs(architecture)),
         ) as process:
             process.wait_for(FILESYSTEM_POLICY_AFTER_MARKER, timeout)
             restored = process.wait(timeout)
@@ -12395,6 +13109,7 @@ def run_filesystem_comma_paths(
     timeout: float,
     output_dir: Path,
     guest: str = "alpine",
+    architecture: str = "x86_64",
 ) -> None:
     """Share host directories whose paths contain commas through `nvx run`:
     a read-write `alpha,beta` and a read-only `2026, final`, each with a
@@ -12425,7 +13140,16 @@ def run_filesystem_comma_paths(
             ("aggregate", (alpha, reports)),
         ):
             command = [
-                *nvx_cli.command_line(("run",)),
+                *nvx_cli.command_line(
+                    (
+                        "run",
+                        *(
+                            ("--architecture", "aarch64", "--cpu-profile", "auto")
+                            if architecture == "aarch64"
+                            else ()
+                        ),
+                    )
+                ),
                 "--guest",
                 guest,
                 "--hypervisor",
@@ -12455,6 +13179,7 @@ def run_filesystem_comma_paths(
                 timeout=timeout,
                 log_path=output_dir / f"filesystem-comma-paths-{name}.log",
                 contain_process_tree=True,
+                **(architecture_kwargs(architecture)),
             )
             expected = dict(contents)
             if alpha in attached:
@@ -12468,9 +13193,18 @@ def run_filesystem_comma_paths(
 
 
 def _expect_boot_failure(
-    command: list[str], log_path: Path, timeout: float, expected: bytes
+    command: list[str],
+    log_path: Path,
+    timeout: float,
+    expected: bytes,
+    *,
+    architecture: str = "x86_64",
 ) -> None:
-    with OpenvmmProcess(command, log_path) as process:
+    with OpenvmmProcess(
+        command,
+        log_path,
+        **(architecture_kwargs(architecture)),
+    ) as process:
         result = process.wait(timeout)
     if (
         result.returncode == 0
@@ -12780,6 +13514,34 @@ def require_debug_kernel(config: Path) -> None:
 def run(args: argparse.Namespace) -> int:
     validate_openvmm_test_backend(args.backend)
     descriptor = guest_descriptor(args.guest)
+    architecture = getattr(args, "architecture", "x86_64")
+    cold_only = getattr(args, "cold_only", False)
+    if cold_only and args.scenario is None:
+        raise ScriptError("--cold-only requires explicit --scenario selection")
+    if architecture == "aarch64":
+        if (
+            args.backend != "whp"
+            or sys.platform != "win32"
+            or platform.machine().lower() not in ("arm64", "aarch64")
+        ):
+            raise ScriptError("ARM correctness requires native Windows ARM64/WHP")
+        if descriptor.name == "azurelinux":
+            raise ScriptError("ARM correctness has no Azure Linux artifact contract")
+        if args.scenario is None:
+            raise ScriptError("ARM correctness requires explicit --scenario selection")
+        if getattr(args, "shard", None) is not None:
+            raise ScriptError("ARM correctness uses explicit scenarios, not x86 shards")
+    if cold_only or architecture == "aarch64":
+        outside = (
+            set(args.scenario or ()) - COLD_ONLY_SCENARIOS - COLD_EXPLICIT_SCENARIOS
+        )
+        mixed = set(args.scenario or ()) & COLD_PROJECTION_SCENARIOS
+        if outside or (architecture == "aarch64" and mixed and not cold_only):
+            raise ScriptError(
+                "unsupported cold/ARM correctness scope: "
+                + ", ".join(sorted(outside or mixed))
+                + "; select maintained cold scenarios and --cold-only for mixed projections"
+            )
     debug_kernel = getattr(args, "debug_kernel", False)
     shard: tuple[int, int] | None = getattr(args, "shard", None)
     if shard is not None and (
@@ -12793,7 +13555,18 @@ def run(args: argparse.Namespace) -> int:
     if args.memory_mib is None:
         args.memory_mib = descriptor.default_memory_mib
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
-    if debug_kernel:
+    if architecture == "aarch64":
+        selected_kernel = KernelBuildConfig.for_architecture(
+            architecture, debug=debug_kernel
+        )
+        if debug_kernel:
+            require_debug_kernel(
+                selected_kernel.output.with_name(
+                    selected_kernel.output.name + ".config"
+                )
+            )
+        kernel = require_file(selected_kernel.output, "microVM Linux direct kernel")
+    elif debug_kernel:
         require_debug_kernel(artifact_path(KernelBuildConstants.DEBUG_CONFIG_NAME))
         kernel = require_file(
             artifact_path(KernelBuildConstants.DEBUG_BINARY_NAME),
@@ -12805,7 +13578,7 @@ def run(args: argparse.Namespace) -> int:
             "microVM Linux direct kernel",
         )
     initrd = require_file(
-        artifact_path(descriptor.initramfs_name),
+        artifact_path(descriptor.initramfs_name, **architecture_kwargs(architecture)),
         f"microVM {descriptor.distribution} initramfs",
     )
     output_dir: Path = args.output_dir
@@ -12837,6 +13610,17 @@ def run(args: argparse.Namespace) -> int:
                 f"{guest_label} guest does not support correctness scenario(s): "
                 + ", ".join(sorted(unsupported))
             )
+    if "layered-boot" in scenarios and getattr(args, "guest_test_elf", None) is None:
+        raise ScriptError(
+            "layered-boot requires --guest-test-elf from a matching standard guest test build"
+        )
+    if (
+        "layered-boot" not in scenarios
+        and getattr(args, "guest_test_elf", None) is not None
+    ):
+        raise ScriptError(
+            "--guest-test-elf requires the explicit layered-boot scenario"
+        )
     # A default run runs the public sandbox scenarios too, so their Ubuntu
     # artifacts must be there before any scenario runs.
     public = [
@@ -12844,7 +13628,9 @@ def run(args: argparse.Namespace) -> int:
     ]
     if public:
         try:
-            for path, description in workload_artifact_paths():
+            for path, description in workload_artifact_paths(
+                **(architecture_kwargs(architecture))
+            ):
                 require_file(path, description)
         except ScriptError as error:
             raise ScriptError(
@@ -12856,6 +13642,14 @@ def run(args: argparse.Namespace) -> int:
                 "on Linux, or name other scenarios with --scenario"
             ) from error
 
+    deferred = sorted(set(scenarios) & COLD_PROJECTION_SCENARIOS) if cold_only else []
+    duration_options: _DurationKwargs = {}
+    if deferred:
+        duration_options["deferred_restore_tails"] = deferred
+    if architecture != "x86_64" or cold_only:
+        duration_options.update(
+            architecture=architecture, scope="cold" if cold_only else "full"
+        )
     with DurationReport(
         output_dir / REPORT_NAME,
         backend=args.backend,
@@ -12863,7 +13657,13 @@ def run(args: argparse.Namespace) -> int:
         kernel="debug" if debug_kernel else "default",
         processors=args.processors,
         scenarios=scenarios,
+        **duration_options,
     ) as report:
+        if deferred:
+            print(
+                "Cold projection only; snapshot tails NOT RUN: " + ", ".join(deferred),
+                flush=True,
+            )
         _run_scenarios(
             report,
             args,
@@ -12880,6 +13680,7 @@ def run(args: argparse.Namespace) -> int:
             backend=args.backend,
             guest=descriptor.name,
             debug_kernel=debug_kernel,
+            **(architecture_kwargs(architecture)),
         )
         print(f"Wrote microVM correctness logs to {output_dir}")
     return 0
@@ -12898,22 +13699,32 @@ def _run_scenarios(
 ) -> None:
     """Run the selected scenarios in their fixed order, and time each
     execution in `report`."""
+    architecture = getattr(args, "architecture", "x86_64")
     if "guest-boot" in scenarios:
-        report.start(
-            "guest-boot",
-            f"Running {descriptor.distribution} initramfs boot correctness "
-            f"on OpenVMM/{args.backend}",
-        )
-        run_guest_boot(
-            executable,
-            kernel,
-            initrd,
-            args.backend,
-            descriptor,
-            memory_mib=args.memory_mib,
-            timeout=args.timeout,
-            log_path=output_dir / f"{descriptor.name}-guest-boot.log",
-        )
+        for processors in dict.fromkeys(
+            args.processors if architecture == "aarch64" else (1,)
+        ):
+            report.start(
+                "guest-boot",
+                f"Running {descriptor.distribution} initramfs boot correctness "
+                f"on OpenVMM/{args.backend}",
+                **({"processors": [processors]} if architecture == "aarch64" else {}),
+            )
+            suffix = f"-{processors}vp" if architecture == "aarch64" else ""
+            boot_options: _GuestBootKwargs = {}
+            if architecture != "x86_64":
+                boot_options.update(architecture=architecture, processors=processors)
+            run_guest_boot(
+                executable,
+                kernel,
+                initrd,
+                args.backend,
+                descriptor,
+                memory_mib=args.memory_mib,
+                timeout=args.timeout,
+                log_path=output_dir / f"{descriptor.name}-guest-boot{suffix}.log",
+                **boot_options,
+            )
     if "guest-identity" in scenarios:
         report.start(
             "guest-identity",
@@ -12929,6 +13740,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             log_path=output_dir / f"{descriptor.name}-guest-identity.log",
+            **(architecture_kwargs(architecture)),
         )
     if "console-exit" in scenarios:
         for processors in dict.fromkeys(args.processors):
@@ -13006,6 +13818,8 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
+            **({"cold_only": True} if getattr(args, "cold_only", False) else {}),
         )
     if "filesystem-policy" in scenarios:
         report.start(
@@ -13021,6 +13835,8 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
+            **({"cold_only": True} if getattr(args, "cold_only", False) else {}),
         )
     if "filesystem-comma-paths" in scenarios:
         report.start(
@@ -13034,6 +13850,7 @@ def _run_scenarios(
             timeout=args.timeout,
             output_dir=output_dir,
             guest=descriptor.name,
+            **(architecture_kwargs(architecture)),
         )
     if "filesystem-snapshot" in scenarios:
         report.start(
@@ -13062,6 +13879,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             log_path=output_dir / "lifecycle.log",
+            **(architecture_kwargs(architecture)),
         )
     if "workload-identity" in scenarios:
         report.start(
@@ -13076,6 +13894,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
         )
     if "managed-exec-config" in scenarios:
         report.start(
@@ -13083,28 +13902,69 @@ def _run_scenarios(
             f"Running public managed execution configuration on OpenVMM/{args.backend}",
         )
         run_managed_exec_configuration(
-            args.backend, timeout=args.timeout, output_dir=output_dir
+            args.backend,
+            timeout=args.timeout,
+            output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
         )
     if "sandbox-lifecycle" in scenarios:
         report.start(
             "sandbox-lifecycle",
             f"Running public managed sandbox lifecycle on OpenVMM/{args.backend}",
         )
-        run_sandbox_lifecycle(args.backend, timeout=args.timeout, output_dir=output_dir)
+        run_sandbox_lifecycle(
+            args.backend,
+            timeout=args.timeout,
+            output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
+            **(
+                {"start_stop_cycles": args.start_stop_cycles}
+                if getattr(args, "start_stop_cycles", None) is not None
+                else {}
+            ),
+        )
+    if "layered-boot" in scenarios:
+        report.start(
+            "layered-boot",
+            f"Running dedicated layered boot tests (1 VP/512 MiB) on OpenVMM/{args.backend}",
+        )
+        run_layered_boot(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            test_elf=args.guest_test_elf,
+            timeout=args.timeout,
+            output_dir=output_dir,
+            **architecture_kwargs(architecture),
+        )
     if "sandbox-proxy-only" in scenarios:
         report.start(
             "sandbox-proxy-only",
             f"Running public proxy-only sandbox networking on OpenVMM/{args.backend}",
         )
         run_sandbox_proxy_only(
-            args.backend, timeout=args.timeout, output_dir=output_dir
+            args.backend,
+            timeout=args.timeout,
+            output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
         )
     if "sandbox-ram-upper" in scenarios:
         report.start(
             "sandbox-ram-upper",
             f"Running public RAM-upper sandboxes on OpenVMM/{args.backend}",
         )
-        run_sandbox_ram_upper(args.backend, timeout=args.timeout, output_dir=output_dir)
+        run_sandbox_ram_upper(
+            args.backend,
+            timeout=args.timeout,
+            output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
+            **(
+                {"start_stop_cycles": args.start_stop_cycles}
+                if getattr(args, "start_stop_cycles", None) is not None
+                else {}
+            ),
+        )
     if "sandbox-gpt-layer" in scenarios:
         report.start(
             "sandbox-gpt-layer",
@@ -13117,20 +13977,42 @@ def _run_scenarios(
             args.backend,
             timeout=args.timeout,
             output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
         )
     if "vm-lifecycle" in scenarios:
-        report.start(
-            "vm-lifecycle",
-            f"Running the public API's cold VM lifecycle on OpenVMM/{args.backend}",
-        )
-        run_vm_lifecycle(
-            executable,
-            kernel,
-            initrd,
-            args.backend,
-            timeout=args.timeout,
-            output_dir=output_dir,
-        )
+        ram_upper = getattr(args, "vm_lifecycle_root", "scratch") == "ram"
+        for processors in dict.fromkeys(
+            args.processors if architecture == "aarch64" else (1,)
+        ):
+            report.start(
+                "vm-lifecycle",
+                f"Running the public API's cold VM lifecycle on OpenVMM/{args.backend}",
+                **({"processors": [processors]} if architecture == "aarch64" else {}),
+            )
+            root_mode = "ram" if ram_upper else "scratch"
+            evidence = (
+                output_dir / f"vm-lifecycle-{processors}vp-{root_mode}"
+                if architecture == "aarch64"
+                else output_dir
+            )
+            vm_options: _VmLifecycleKwargs = {}
+            if architecture != "x86_64":
+                vm_options.update(
+                    architecture=architecture,
+                    processors=processors,
+                    memory_mib=args.memory_mib,
+                )
+            if ram_upper:
+                vm_options["ram_upper"] = True
+            run_vm_lifecycle(
+                executable,
+                kernel,
+                initrd,
+                args.backend,
+                timeout=args.timeout,
+                output_dir=evidence,
+                **vm_options,
+            )
     if "managed-lifecycle" in scenarios:
         report.start(
             "managed-lifecycle",
@@ -13144,6 +14026,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
         )
     if "structured-outcome" in scenarios:
         report.start(
@@ -13158,6 +14041,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
         )
     if "l3-l4-egress-policy" in scenarios:
         report.start(
@@ -13174,6 +14058,7 @@ def _run_scenarios(
             timeout=args.timeout,
             output_dir=output_dir,
             guest=descriptor.name,
+            **(architecture_kwargs(architecture)),
         )
     if "l3-l4-egress-protocols" in scenarios:
         report.start(
@@ -13190,6 +14075,7 @@ def _run_scenarios(
             timeout=args.timeout,
             output_dir=output_dir,
             guest=descriptor.name,
+            **(architecture_kwargs(architecture)),
         )
     if "l3-l4-egress-port-ranges" in scenarios:
         report.start(
@@ -13206,6 +14092,7 @@ def _run_scenarios(
             timeout=args.timeout,
             output_dir=output_dir,
             guest=descriptor.name,
+            **(architecture_kwargs(architecture)),
         )
     if "ipv6-egress-policy" in scenarios:
         report.start(
@@ -13222,6 +14109,8 @@ def _run_scenarios(
             timeout=args.timeout,
             output_dir=output_dir,
             guest=descriptor.name,
+            **(architecture_kwargs(architecture)),
+            **({"cold_only": True} if getattr(args, "cold_only", False) else {}),
         )
     if "host-loopback-policy" in scenarios:
         report.start(
@@ -13236,6 +14125,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
         )
     if "private-network-ingress" in scenarios:
         report.start(
@@ -13250,6 +14140,8 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
+            **({"cold_only": True} if getattr(args, "cold_only", False) else {}),
         )
     if "denied-filesystem-paths" in scenarios:
         report.start(
@@ -13264,6 +14156,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
         )
     if "filesystem-owner" in scenarios:
         report.start(
@@ -13278,6 +14171,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
         )
     if "network-snapshot" in scenarios:
         report.start(
@@ -13313,6 +14207,7 @@ def _run_scenarios(
                 timeout=args.timeout,
                 log_path=output_dir / f"{scenario}-{processors}.log",
                 counting_lapic=counting_lapic,
+                **(architecture_kwargs(architecture)),
             )
     if "sandbox-blocks" in scenarios:
         report.start(
@@ -13327,6 +14222,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             log_path=output_dir / "sandbox-blocks.log",
+            **(architecture_kwargs(architecture)),
         )
     if "scratch-snapshot" in scenarios:
         report.start(
@@ -13539,6 +14435,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
         )
     if "time-abi-conformance" in scenarios:
         processors = max(args.processors)
@@ -13571,6 +14468,8 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
+            **({"cold_only": True} if getattr(args, "cold_only", False) else {}),
         )
     if "virtio-net" in scenarios:
         report.start(
@@ -13585,6 +14484,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             log_path=output_dir / "virtio-net.log",
+            **(architecture_kwargs(architecture)),
         )
     if "virtio-features" in scenarios:
         report.start(
@@ -13600,6 +14500,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             log_path=output_dir / "virtio-features.log",
+            **(architecture_kwargs(architecture)),
         )
     if "interrupt-map" in scenarios:
         report.start(
@@ -13614,6 +14515,8 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
+            **({"cold_only": True} if getattr(args, "cold_only", False) else {}),
         )
     if "command-line-limit" in scenarios:
         report.start(
@@ -13629,4 +14532,5 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            **(architecture_kwargs(architecture)),
         )

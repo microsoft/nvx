@@ -1,0 +1,27 @@
+set -eu
+fail() {
+    echo "NVX-LAYERED-BOOT-BOOTSTRAP-FAIL $*" >&2
+    /sbin/nvx-exit 1
+    exit 1
+}
+mount -t proc none /proc || fail proc
+mount -t sysfs none /sys || fail sysfs
+mount -t devtmpfs none /dev 2>/dev/null ||
+    [ "$(stat -f -c %T /dev)" = devtmpfs ] || fail devtmpfs
+mount -t tmpfs -o mode=755,nosuid,nodev tmpfs /run || fail run
+mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /tmp || fail tmp
+if [ -e /proc/sys/kernel/modules_disabled ]; then
+    echo 1 >/proc/sys/kernel/modules_disabled || fail modules
+fi
+/sbin/nvx-time boot || fail time-boot
+/sbin/nvx-time status || fail time-status
+@RESOURCE_SCRIPT@
+mkdir -p /mnt/nvx-layered-test || fail runner-directory
+mount -t virtiofs -o ro microvm /mnt/nvx-layered-test || fail runner-export
+status=0
+NVX_LAYERED_BOOT_TEST=1 @TEST_ELF@ --ignored --exact @TEST_NAME@ --nocapture \
+    >/tmp/nvx-layered-test-result 2>&1 || status=$?
+cat /tmp/nvx-layered-test-result || fail test-output
+echo "NVX-LAYERED-BOOT-TEST-DONE status=$status"
+/sbin/nvx-exit "$status"
+exit "$status"

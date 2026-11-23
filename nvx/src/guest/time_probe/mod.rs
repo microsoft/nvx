@@ -7,8 +7,11 @@
 //! programs read their arguments. It reads the kernel's numbers, such as `/proc/cpuinfo`'s
 //! rates, only in the form in which the kernel writes them.
 
+#[cfg(target_arch = "x86_64")]
 mod clock;
+mod counter;
 mod format;
+#[cfg(target_arch = "x86_64")]
 mod latency;
 mod support;
 mod warp;
@@ -26,6 +29,7 @@ pub(super) const VERSION: &str = "1.1";
 pub(super) const MAX_CPUS: usize = 1024;
 
 /// Byte-exact command help and exit-status contract.
+#[cfg(target_arch = "x86_64")]
 const USAGE: &[u8] = br#"usage: nvx-time-probe COMMAND [OPTIONS]
 
 Commands:
@@ -48,6 +52,20 @@ Commands:
 
 The TSC rate comes from --tsc-hz, sysfs tsc_freq_khz, the kernel log, or
 /proc/cpuinfo, in that order, and is measured as a last resort.
+Exit status: 0 success, 1 warp FAIL, 2 usage error, 3 runtime error.
+"#;
+
+#[cfg(target_arch = "aarch64")]
+const USAGE: &[u8] = br#"usage: nvx-time-probe COMMAND [OPTIONS]
+
+Commands:
+  warp [--duration-ms N] [--cpus LIST] [--bound-ns N] [--tsc-hz HZ]
+      Pairwise cross-CPU architectural virtual-counter checks.
+      The default bound is 1000 ns. The complete NVX ARM binding and
+      CNTFRQ_EL0 supply the full-Hz rate; an override must match it exactly.
+  version
+
+The x86 latency, CPUID and MSR clock probes are unsupported on ARM.
 Exit status: 0 success, 1 warp FAIL, 2 usage error, 3 runtime error.
 "#;
 
@@ -77,8 +95,10 @@ fn run(
         return Err(CommandError::Usage);
     };
     match command {
+        #[cfg(target_arch = "x86_64")]
         b"latency" => latency::run(rest, out, err),
         b"warp" => warp::run(rest, out, err),
+        #[cfg(target_arch = "x86_64")]
         b"clock" => clock::run(rest, out, err),
         b"version" | b"--version" => {
             let _ = writeln!(out, "nvx-time-probe {VERSION}");

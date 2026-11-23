@@ -18,8 +18,8 @@ expect_read_only() {
 
 # One virtio-fs slot carries every share as a child of one aggregate, which
 # the guest mounts where only root can enter and binds at each target.
-grep -q 'virtio_mmio.device=0x1000@0xd0001000:17' /proc/cmdline || fail 40
-if grep -q '0xd0008000' /proc/cmdline; then
+fixed_virtio_present d0001000 17 || fail 40
+if ! fixed_virtio_absent d0008000; then
     fail 41
 fi
 grep -q 'virtfs_dir=/run/nvx/shares virtfs_tag=microvm virtfs_mode=rw virtfs_aggregate=1' /proc/cmdline || fail 42
@@ -93,10 +93,14 @@ if error=$(rm -f /run/nvx/shares/1/seed 2>&1); then
     fail 75
 fi
 expect_read_only "$error" 76
-if error=$(chmod 0777 /run/nvx/shares/1/seed 2>&1); then
+readonly_mode=$(stat -c %a /run/nvx/shares/1/seed) || fail 77
+# Some chmod implementations accept a no-op without sending a mutation.
+readonly_update=$(printf '%o' "$((0$readonly_mode ^ 0200))")
+if error=$(chmod "$readonly_update" /run/nvx/shares/1/seed 2>&1); then
     fail 77
 fi
 expect_read_only "$error" 78
+[ "$(stat -c %a /run/nvx/shares/1/seed)" = "$readonly_mode" ] || fail 107
 [ ! -e /run/nvx/shares/0/secrets ] || fail 79
 [ ! -e /run/nvx/shares/2/private.txt ] || fail 80
 # Hard links cannot join children: like Linux's linkat, OpenVMM refuses a link

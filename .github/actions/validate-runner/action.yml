@@ -2,6 +2,10 @@ name: Validate runner
 description: Verify the toolchain and virtualization backend required by an NVX job
 
 inputs:
+  architecture:
+    description: Expected guest and native runner architecture
+    required: false
+    default: x86_64
   backend:
     description: Virtualization backend expected on the runner
     required: true
@@ -23,6 +27,53 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Validate Windows architecture selection
+      if: runner.os == 'Windows'
+      shell: python {0}
+      env:
+        ARCHITECTURE: ${{ inputs.architecture }}
+      run: |
+        import os
+
+        if os.environ["ARCHITECTURE"] not in ("x86_64", "aarch64"):
+            raise SystemExit("Unsupported native runner architecture")
+
+    - name: Verify native Windows ARM64 runner
+      if: inputs.architecture == 'aarch64' && runner.os == 'Windows'
+      shell: python {0}
+      env:
+        RUNNER_ARCH: ${{ runner.arch }}
+        BACKEND: ${{ inputs.backend }}
+      run: |
+        import os
+        import platform
+        import subprocess
+        import sys
+        import sysconfig
+
+        if (
+            sys.platform != "win32"
+            or platform.machine().lower() not in ("arm64", "aarch64")
+            or sysconfig.get_platform() != "win-arm64"
+            or os.environ["RUNNER_ARCH"] != "ARM64"
+            or os.environ["BACKEND"] != "whp"
+        ):
+            raise SystemExit("ARM qualification requires native Windows ARM64 and WHP")
+        result = subprocess.run(["rustc", "-vV"], capture_output=True, text=True, check=True)
+        if "host: aarch64-pc-windows-msvc" not in result.stdout.splitlines():
+            raise SystemExit("ARM qualification requires native ARM64 rustc")
+
+    - name: Validate Linux architecture selection
+      if: runner.os != 'Windows'
+      shell: python3 {0}
+      env:
+        ARCHITECTURE: ${{ inputs.architecture }}
+      run: |
+        import os
+
+        if os.environ["ARCHITECTURE"] != "x86_64":
+            raise SystemExit("Native ARM runtime qualification is Windows WHP only")
+
     - name: Validate Linux toolchain
       if: runner.os != 'Windows'
       shell: bash
@@ -152,6 +203,7 @@ runs:
         if ($jobSid -ne "S-1-5-20") {
           throw "Actions job uses SID $jobSid, expected Network Service"
         }
+        if ("${{ inputs.architecture }}" -eq "x86_64") {
         $system32 = Join-Path $env:SystemRoot "System32"
         $pcatFirmware = @(
           (Join-Path $system32 "vmfirmwarepcat.dll"),
@@ -165,6 +217,7 @@ runs:
         $svgaFirmware = Join-Path $system32 "VmEmulatedDevices.dll"
         if (-not (Test-Path -LiteralPath $svgaFirmware -PathType Leaf)) {
           throw "Hyper-V SVGA firmware was not found: $svgaFirmware"
+        }
         }
 
     # A cancelled job's harness can start OpenVMM after the runner's orphan
@@ -278,7 +331,7 @@ runs:
         --summary "${GITHUB_STEP_SUMMARY}"
 
     - name: Qualify host time on Windows
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && inputs.architecture == 'x86_64'
       shell: powershell
       run: >-
         python scripts\nvx.py doctor
@@ -288,6 +341,44 @@ runs:
         ${{ inputs.verify-openvmm == 'true' && 'H3 --cpu-fingerprint "$env:RUNNER_TEMP\nvx-cpu-fingerprint.json"' || '--no-openvmm' }}
         --ci-schedule
         --summary "$env:GITHUB_STEP_SUMMARY"
+
+    - name: Qualify ARM counter time on Windows
+      if: runner.os == 'Windows' && inputs.architecture == 'aarch64'
+      shell: python {0}
+      env:
+        VERIFY_OPENVMM: ${{ inputs.verify-openvmm }}
+        WARP_PROBE: ${{ inputs.warp-probe }}
+      run: |
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        verify_openvmm = os.environ["VERIFY_OPENVMM"] == "true"
+        warp_probe = os.environ["WARP_PROBE"] == "true"
+        if warp_probe and not verify_openvmm:
+            raise SystemExit("ARM guest warp qualification requires verify-openvmm=true")
+        checks = ["H1", "H2", "H3", "H4"] if verify_openvmm else ["H1", "H4"]
+        if warp_probe:
+            checks.append("H6")
+        command = [
+            sys.executable, r"scripts\nvx.py", "doctor",
+            "--architecture", "aarch64", "--backend", "whp",
+            "--checks", *checks,
+        ]
+        if not verify_openvmm:
+            command.append("--no-openvmm")
+            deferred = (
+                "ARM H2/H3 built-product/profile admission: DEFERRED. "
+                "This pre-build H1/H4 host-check receipt is not profile admission. "
+                "Required ARM runtime jobs must admit the built OpenVMM and guest "
+                "artifacts with H2/H3 before running their scenarios."
+            )
+            print("::notice::" + deferred, flush=True)
+            with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+                summary.write("### ARM pre-build qualification scope\n" + deferred + "\n\n")
+        command.extend(("--ci-schedule", "--summary", os.environ["GITHUB_STEP_SUMMARY"]))
+        subprocess.run(command, check=True)
 
     # A failed CPU profile check keeps OpenVMM's fingerprint, which names the
     # host's whole CPU surface for a new generation or profile revision.

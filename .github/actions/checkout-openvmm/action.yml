@@ -3,8 +3,9 @@ description: Checkout the OpenVMM revision pinned by the NVX repository
 
 inputs:
   ssh-key:
-    description: SSH deploy key used to checkout OpenVMM
-    required: true
+    description: Optional deploy key; public checkouts otherwise use the job token
+    required: false
+    default: ""
 
 outputs:
   sha:
@@ -49,4 +50,5 @@ runs:
         ref: ${{ steps.revision-linux.outputs.sha || steps.revision-windows.outputs.sha }}
         path: openvmm
         persist-credentials: false
+        token: ${{ github.token }}
         ssh-key: ${{ inputs.ssh-key }}

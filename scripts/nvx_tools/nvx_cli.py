@@ -83,6 +83,7 @@ RELEASE_TARGETS = {
     "linux": OpenVMMBuildConstants.MUSL_RUST_TARGET,
     "windows": OpenVMMBuildConstants.WINDOWS_RUST_TARGET,
 }
+ARM_WINDOWS_RELEASE_TARGET = "aarch64-pc-windows-msvc"
 # The domain and format of the inventory that source_sha256() hashes.
 SOURCE_DIGEST_DOMAIN = "nvx-cli-sources"
 SOURCE_DIGEST_FORMAT = 1
@@ -99,9 +100,17 @@ def binary_path() -> Path:
     return DIRECTORY / "target" / "release" / name
 
 
-def release_target() -> str:
+def release_target(*, architecture: str = "x86_64") -> str:
     """Return the Rust target of the nvx that releases for this host's
     operating system ship."""
+    if architecture == "aarch64":
+        if os.name != "nt":
+            raise ScriptError(
+                "ARM release packaging currently supports only Windows/WHP"
+            )
+        return ARM_WINDOWS_RELEASE_TARGET
+    if architecture != "x86_64":
+        raise ScriptError(f"unsupported release architecture: {architecture}")
     return RELEASE_TARGETS["windows" if os.name == "nt" else "linux"]
 
 
@@ -181,6 +190,26 @@ def check_target(executable: Path, target: str) -> None:
     """Fail unless `executable` is what a build for `target` gives, where the
     target makes that checkable: for the Linux release target, a static
     executable, which a build for the host's own target is not."""
+    if target == ARM_WINDOWS_RELEASE_TARGET:
+        try:
+            with executable.open("rb") as stream:
+                dos = stream.read(64)
+                if len(dos) != 64 or dos[:2] != b"MZ":
+                    raise ScriptError(f"invalid ARM64 PE executable: {executable}")
+                offset = int.from_bytes(dos[60:64], "little")
+                if offset < len(dos):
+                    raise ScriptError(
+                        f"ARM64 PE header overlaps the DOS header: {executable}"
+                    )
+                stream.seek(offset)
+                pe = stream.read(6)
+        except OSError as error:
+            raise ScriptError(
+                f"cannot inspect ARM64 PE executable {executable}: {error}"
+            ) from error
+        if pe[:4] != b"PE\0\0" or int.from_bytes(pe[4:6], "little") != 0xAA64:
+            raise ScriptError(f"executable is not ARM64 PE: {executable}")
+        return
     if target != RELEASE_TARGETS["linux"]:
         return
     try:

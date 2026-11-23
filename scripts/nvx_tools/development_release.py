@@ -708,18 +708,22 @@ def publish_development_release(
     version: str,
     packages: Sequence[Path],
     *,
+    include_arm64: bool = False,
     upload_attempts: int = DEVELOPMENT_RELEASE_UPLOAD_ATTEMPTS,
     upload_timeout_seconds: float = DEVELOPMENT_RELEASE_UPLOAD_TIMEOUT_SECONDS,
     retry_backoff_seconds: float = DEVELOPMENT_RELEASE_RETRY_BACKOFF_SECONDS,
 ) -> None:
+    """Publish three legacy packages, or four with explicit ARM64 selection."""
     if _REPOSITORY_PATTERN.fullmatch(repository) is None:
         raise ScriptError("GitHub repository must be OWNER/REPOSITORY")
     if _TARGET_SHA_PATTERN.fullmatch(target_sha) is None:
         raise ScriptError("development release target must be a full commit SHA")
     if not version:
         raise ScriptError("development release version must not be empty")
-    if len(packages) != 3:
-        raise ScriptError("development releases require exactly three packages")
+    expected_packages = 4 if include_arm64 else 3
+    if len(packages) != expected_packages:
+        count = "four" if include_arm64 else "three"
+        raise ScriptError(f"development releases require exactly {count} packages")
     if upload_attempts < 1:
         raise ScriptError("upload attempts must be positive")
     if upload_timeout_seconds <= 0:

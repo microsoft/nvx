@@ -38,6 +38,7 @@ from .build_constants import (
 )
 from .common import (
     ScriptError,
+    architecture_kwargs,
     artifact_path,
     download_verified,
     format_size,
@@ -274,8 +275,14 @@ def _kernel_patch_files(architecture: str = "x86_64") -> tuple[Path, ...]:
     return patches
 
 
-def materialize_kernel_provenance_inputs() -> None:
+def materialize_kernel_provenance_inputs(*, architecture: str = "x86_64") -> None:
     """Write kernel provenance inputs from immutable run-head blobs."""
+    config = KernelBuildConfig.for_architecture(architecture)
+    config_paths = (
+        (config.input_config.as_posix(), config.derived_config.as_posix())
+        if architecture == "aarch64"
+        else (KernelBuildConstants.INPUT_CONFIG.as_posix(),)
+    )
     tracked = run_capture(
         [
             "git",
@@ -285,7 +292,7 @@ def materialize_kernel_provenance_inputs() -> None:
             "--name-only",
             "HEAD",
             "--",
-            KernelBuildConstants.INPUT_CONFIG.as_posix(),
+            *config_paths,
             KernelBuildConstants.PATCH_DIRECTORY.as_posix(),
         ],
         cwd=BuildConstants.REPO_ROOT,
@@ -294,14 +301,28 @@ def materialize_kernel_provenance_inputs() -> None:
     tree_paths = tuple(
         path for path in tracked.stdout.decode("utf-8").split("\0") if path
     )
-    config_path = KernelBuildConstants.INPUT_CONFIG.as_posix()
     patch_paths = tuple(
         path
         for path in tree_paths
         if path.startswith(f"{KernelBuildConstants.PATCH_DIRECTORY.as_posix()}/")
         and path.endswith(".patch")
     )
-    if config_path not in tree_paths:
+    if architecture == "aarch64":
+        arm_patches = {path.as_posix() for path in KernelBuildConstants.ARM_PATCHES}
+        missing_arm = arm_patches - set(tree_paths)
+        if missing_arm:
+            raise ScriptError(
+                "ARM kernel patches are missing from the run head: "
+                + ", ".join(sorted(missing_arm))
+            )
+        patch_paths = tuple(
+            path
+            for path in patch_paths
+            if Path(path).parent.as_posix()
+            == KernelBuildConstants.PATCH_DIRECTORY.as_posix()
+            or path in arm_patches
+        )
+    if not all(path in tree_paths for path in config_paths):
         raise ScriptError("kernel config is missing from the run head")
     if not patch_paths:
         raise ScriptError("kernel patches are missing from the run head")
@@ -313,11 +334,22 @@ def materialize_kernel_provenance_inputs() -> None:
             BuildConstants.REPO_ROOT / KernelBuildConstants.PATCH_DIRECTORY
         ).glob("*.patch")
     }
+    if architecture == "aarch64":
+        worktree_patch_paths.update(
+            {
+                path.relative_to(BuildConstants.REPO_ROOT).as_posix(): path
+                for path in (
+                    BuildConstants.REPO_ROOT
+                    / KernelBuildConstants.PATCH_DIRECTORY
+                    / "arm64"
+                ).glob("*.patch")
+            }
+        )
     for relative in sorted(worktree_patch_paths.keys() - head_patch_paths):
         worktree_patch_paths[relative].unlink()
         print(f">> removed stale {relative} absent from the run head")
 
-    for relative in (config_path, *patch_paths):
+    for relative in (*config_paths, *patch_paths):
         blob = run_capture(
             ["git", "cat-file", "blob", f"HEAD:{relative}"],
             cwd=BuildConstants.REPO_ROOT,
@@ -1293,7 +1325,9 @@ def build_scratch_template(config: ScratchTemplateBuildConfig) -> None:
     print(f">> built {output} ({format_size(output.stat().st_size)})")
 
 
-def verify_guest_determinism(work: Path, guest: str) -> None:
+def verify_guest_determinism(
+    work: Path, guest: str, *, architecture: str = "x86_64"
+) -> None:
     _require_linux("verify-guest-determinism")
     descriptor = guest_descriptor(guest)
     if descriptor.name != "ubuntu":
@@ -1322,6 +1356,7 @@ def verify_guest_determinism(work: Path, guest: str) -> None:
                     / InitramfsBuildConstants.DETERMINISM_INITRAMFS_WORK_DIRECTORY_NAME
                 ),
                 output=attempt_root / descriptor.initramfs_name,
+                **(architecture_kwargs(architecture)),
             )
         )
         build_distro_layer(
@@ -1332,6 +1367,7 @@ def verify_guest_determinism(work: Path, guest: str) -> None:
                     / InitramfsBuildConstants.DETERMINISM_DISTRO_WORK_DIRECTORY_NAME
                 ),
                 output=attempt_root / UbuntuBuildConstants.DISTRO_NAME,
+                **(architecture_kwargs(architecture)),
             )
         )
         build_scratch_template(
@@ -1407,11 +1443,7 @@ def build_kernel(config: KernelBuildConfig) -> None:
         source_fingerprint,
         input_config_sha256,
         fragment_sha256,
-        **(
-            {"architecture": config.architecture}
-            if config.architecture != "x86_64"
-            else {}
-        ),
+        **(architecture_kwargs(config.architecture)),
     )
     build_inputs: dict[str, str] = {
         "source": source_fingerprint,
@@ -1568,11 +1600,7 @@ def generate_kernel_config(config: KernelBuildConfig, *, check: bool = False) ->
             else generated.record.render(architecture=config.architecture)
         ),
         check=check,
-        **(
-            {"architecture": config.architecture}
-            if config.architecture != "x86_64"
-            else {}
-        ),
+        **(architecture_kwargs(config.architecture)),
     )
 
 

@@ -1,5 +1,7 @@
 """Unit tests for the harness-side NVX time ABI checks and host qualification."""
 
+# pyright: reportPrivateUsage=false
+
 from __future__ import annotations
 
 import ast
@@ -19,14 +21,14 @@ import threading
 import time
 import types
 import unittest
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from nvx_tools import benchmark, doctor, openvmm_process, time_abi  # noqa: E402
+from nvx_tools import benchmark, common, doctor, openvmm_process, time_abi  # noqa: E402
 from nvx_tools.time_abi import TimeAbiFailure, TimeAbiMonitor  # noqa: E402
 
 BOOT_LINE = (
@@ -795,6 +797,24 @@ class FieldParsingTests(unittest.TestCase):
 
 
 class MonitorTests(unittest.TestCase):
+    def test_arm_command_recognition_does_not_change_legacy_x86_dispatch(self):
+        cli = ["nvx", "run", "--hypervisor=whp"]
+        legacy = TimeAbiMonitor(cli)
+        self.assertFalse(legacy.cold_boot)
+        self.assertIsNone(legacy.backend)
+        arm = TimeAbiMonitor(cli, architecture="aarch64")
+        self.assertTrue(arm.cold_boot)
+        self.assertEqual(arm.backend, "whp")
+        incomplete = TimeAbiMonitor(["openvmm", "--kernel", "--restore-snapshot"])
+        self.assertTrue(incomplete.restored)
+        self.assertFalse(incomplete.cold_boot)
+        self.assertFalse(TimeAbiMonitor(["openvmm", "--kernel=Image"]).cold_boot)
+        self.assertTrue(
+            TimeAbiMonitor(
+                ["openvmm", "--kernel=Image"], architecture="aarch64"
+            ).cold_boot
+        )
+
     def test_classifies_commands(self):
         monitor = TimeAbiMonitor(KVM_BOOT)
         self.assertEqual(monitor.backend, "kvm")
@@ -1001,6 +1021,45 @@ class MonitorTests(unittest.TestCase):
         )
         assert mshv is not None
         time_abi.validate_boot_marker(mshv, backend="mshv")
+
+    def test_arm_counter_rates_require_explicit_guest_isa(self):
+        command = ["nvx", "run", "--hypervisor=whp", "--architecture", "aarch64"]
+        for rate in (19_200_000, 1_000_000_001, 0xFFFFFFFF):
+            line = BOOT_LINE.replace("tsc_hz=2194804000", f"tsc_hz={rate}").replace(
+                "lapic_hz=1000000000", "lapic_hz=0"
+            )
+            with self.subTest(rate=rate):
+                monitor = TimeAbiMonitor(command, architecture="aarch64")
+                monitor.feed((line + STATUS_OK).encode())
+                self.assertEqual(
+                    monitor.require_boot("ARM cold run")["tsc_hz"], str(rate)
+                )
+                with self.assertRaises(TimeAbiFailure):
+                    TimeAbiMonitor(
+                        ["openvmm", "--kernel", "vmlinux", "--hypervisor", "whp"]
+                    ).feed((line + STATUS_OK).encode())
+
+    def test_arm_counter_validation_rejects_bad_rates_and_nonzero_lapic(self):
+        for rate, lapic in ((0, 0), (0x1_0000_0000, 0), (19_200_000, 200_000_000)):
+            line = BOOT_LINE.replace("tsc_hz=2194804000", f"tsc_hz={rate}").replace(
+                "lapic_hz=1000000000", f"lapic_hz={lapic}"
+            )
+            with self.subTest(rate=rate, lapic=lapic):
+                monitor = TimeAbiMonitor(
+                    ["nvx", "run", "--hypervisor", "whp"], architecture="aarch64"
+                )
+                with self.assertRaises(TimeAbiFailure):
+                    monitor.feed((line + STATUS_OK).encode())
+
+    def test_arm_restore_is_not_admitted_by_a_valid_cold_counter(self):
+        monitor = TimeAbiMonitor(
+            ["openvmm", "--restore-snapshot", "snapshot"], architecture="aarch64"
+        )
+        monitor.feed(RESTORE_LINE.encode())
+        with self.assertRaisesRegex(
+            TimeAbiFailure, "ARM snapshot restore is not qualified"
+        ):
+            monitor.require_restore("unsupported ARM restore")
 
     def test_validates_restore_marker_fields_against_the_backend(self):
         restore = time_abi.parse_marker(RESTORE_LINE)
@@ -2039,6 +2098,119 @@ class DoctorTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def test_arm_preflight_binds_the_pinned_profile_and_full_host_counter(self):
+        context = doctor_context(self.root)
+        context.backend = "whp"
+        context.architecture = "aarch64"
+        frequency = 19_200_001
+        context.facts["host_counter_hz"] = str(frequency)
+        profile = time_abi.ArmCpuProfile(
+            "arm.fixture.v1", "fixture", "a" * 64, 36, ("ID_AA64PFR0_EL1",)
+        )
+        catalog_patch = patch.object(
+            doctor, "_arm_profile_catalog", return_value={profile.profile_id: profile}
+        )
+        catalog_patch.start()
+        self.addCleanup(catalog_patch.stop)
+        bits = profile.physical_address_bits
+        fields = {
+            "v": "1",
+            "architecture": "aarch64",
+            "backend": "whp",
+            "feature_bank_count": "2",
+            "feature_bank0": "0",
+            "feature_bank1": "0",
+            "backend_readback": "verified",
+            "effective_cpu": "verified",
+            "guest_started": "false",
+            "counter_hz": str(frequency),
+            "cpu_profile": profile.profile_id,
+            "cpu_profile_sha256": profile.sha256,
+            "backend_usable_gpa_bits": str(bits),
+            "configured_gpa_bits": str(bits),
+            "architectural_pa_bits": str(bits),
+            "effective_parange": str((32, 36, 40, 42, 44, 48, 52).index(bits)),
+            "cpu_id_registers_verified": str(len(profile.registers)),
+        }
+        self.assertTrue(doctor._check_arm_preflight(context, fields).passed)
+        for field, value in (
+            ("counter_hz", str(frequency + 1)),
+            ("cpu_profile_sha256", "0" * 64),
+            ("configured_gpa_bits", str(bits + 1)),
+            ("cpu_id_registers_verified", "0"),
+            ("tsc_hz", str(frequency)),
+        ):
+            with self.subTest(field=field):
+                self.assertFalse(
+                    doctor._check_arm_preflight(
+                        context, {**fields, field: value}
+                    ).passed
+                )
+
+    def test_arm_catalog_reads_only_immutable_pinned_blobs_without_lazy_fetch(self):
+        context = doctor_context(self.root)
+        revision = "a" * 40
+        prefix = time_abi.OPENVMM_CPU_PROFILES.as_posix()
+        arm_path = f"{prefix}/arm.fixture.v1.json"
+        x86_path = f"{prefix}/x86.fixture.v1.json"
+        document = {
+            "vendor": "fixture",
+            "sha256": "sha256:" + "b" * 64,
+            "profile": {
+                "schema": "nvx.arm64.cpu.v1",
+                "id": "arm.fixture.v1",
+                "physical_address_bits": 36,
+                "fields": [{"register": "ID_AA64PFR0_EL1"}],
+            },
+        }
+        queries: list[tuple[str, ...]] = []
+
+        def capture(
+            command: Sequence[str | Path], *, env: Mapping[str, str]
+        ) -> common.CommandResult:
+            self.assertEqual(env["GIT_NO_LAZY_FETCH"], "1")
+            arguments = tuple(str(argument) for argument in command)
+            queries.append(arguments)
+            if "ls-tree" in command:
+                self.assertIn(revision, command)
+                data = f"{arm_path}\n{x86_path}\n".encode()
+            else:
+                self.assertIn("cat-file", command)
+                self.assertTrue(arguments[-1].startswith(revision + ":"))
+                data = json.dumps(
+                    document if arguments[-1].endswith(arm_path) else {"generation": {}}
+                ).encode()
+            return common.CommandResult(arguments, 0, data, b"")
+
+        with (
+            patch.object(doctor, "openvmm_git_state", return_value=(revision, True)),
+            patch.object(doctor, "run_capture", side_effect=capture),
+        ):
+            profiles = doctor._arm_profile_catalog(context)
+        self.assertEqual(set(profiles), {"arm.fixture.v1"})
+        self.assertEqual(context.facts["profile_source_revision"], revision)
+        self.assertEqual(len(queries), 3)
+
+    def test_arm_guest_warp_threads_explicit_isa_into_command_and_monitor(self):
+        context = doctor_context(self.root)
+        context.backend = "whp"
+        context.architecture = "aarch64"
+        text = (
+            BOOT_LINE.replace("tsc_hz=2194804000", "tsc_hz=19200001").replace(
+                "lapic_hz=1000000000", "lapic_hz=0"
+            )
+            + STATUS_OK
+            + warp_output().replace("tsc_hz=2194804000", "tsc_hz=19200001")
+        )
+        with patch.object(
+            doctor, "run_guest_script", return_value={"text": text}
+        ) as run:
+            boot, _ = doctor._warp_guest(context, 4, ())
+        self.assertEqual(boot["tsc_hz"], "19200001")
+        self.assertEqual(run.call_args.kwargs["architecture"], "aarch64")
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--cpu-profile") + 1], "auto")
 
     def test_check_lines_escape_details_for_field_parsers(self):
         line = doctor.CheckResult("H5", False, 'say "x" \\ y').line()

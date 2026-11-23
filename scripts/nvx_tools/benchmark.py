@@ -29,6 +29,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Callable, Generator, Sequence
 from pathlib import Path
 from string import Template
@@ -2514,6 +2515,7 @@ def workload_boot_command(
     virtio_blk: Path | None = None,
     microvm_sandbox_block: Path | None = None,
     boot_console: bool = True,
+    architecture: str = "x86_64",
 ) -> list[str]:
     """Return the OpenVMM command that cold-boots a workload guest.
 
@@ -2522,6 +2524,10 @@ def workload_boot_command(
     shell, and the byte channel, ``hvc0``, writes to OpenVMM's stderr.
     Without it, the byte channel is the guest's console.
     """
+    if architecture not in ("x86_64", "aarch64"):
+        raise ValueError(f"unsupported guest architecture: {architecture}")
+    if architecture == "aarch64" and backend != "whp":
+        raise ValueError("ARM correctness requires native Windows/WHP")
     command = [
         *command_prefix,
         str(executable),
@@ -2556,6 +2562,8 @@ def workload_boot_command(
         )
     if boot_console:
         command.extend(BOOT_CONSOLE_ARGUMENTS)
+    if architecture == "aarch64":
+        command.extend(("--cpu-profile", "auto"))
     return command
 
 
@@ -2820,6 +2828,50 @@ def _raise_guest_script_failure(
         raise error
 
 
+def prepare_arm_vm_evidence(
+    command: Sequence[str], log_path: Path | None, architecture: str
+) -> Sequence[str]:
+    """Keep the raw ARM run's report and launch inputs beside its console log."""
+    if (
+        architecture != "aarch64"
+        or log_path is None
+        or not command
+        or Path(command[0]).name.lower() not in ("openvmm", "openvmm.exe")
+        or any(
+            argument == "--microvm-report" or argument.startswith("--microvm-report=")
+            for argument in command
+        )
+    ):
+        return command
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    stem = log_path.with_name(f"{log_path.name}.{uuid.uuid4().hex}")
+    report = stem.with_name(f"{stem.name}.outcome.json")
+    recorded_command = [*command, "--microvm-report", str(report)]
+    inputs = {"executable": Path(command[0])}
+    for index, argument in enumerate(command):
+        for option in ("--kernel", "--initrd"):
+            if argument == option and index + 1 < len(command):
+                inputs[option[2:]] = Path(command[index + 1])
+            elif argument.startswith(f"{option}="):
+                inputs[option[2:]] = Path(argument[len(option) + 1 :])
+    record = {
+        "kind": "raw-openvmm-launch-inputs-before-spawn-not-a-runtime-outcome",
+        "architecture": architecture,
+        "command": recorded_command,
+        "report_path": str(report),
+        "inputs": {
+            role: {"path": str(path.resolve()), "sha256": sha256_file(path)}
+            for role, path in inputs.items()
+        },
+    }
+    with stem.with_name(f"{stem.name}.launch.json").open(
+        "x", encoding="utf-8", newline="\n"
+    ) as stream:
+        json.dump(record, stream, indent=2)
+        stream.write("\n")
+    return recorded_command
+
+
 def run_guest_script(
     command: Sequence[str],
     script: str,
@@ -2834,6 +2886,7 @@ def run_guest_script(
     time_abi_status: bool = False,
     host_state_on_timeout: Callable[[subprocess.Popen[bytes]], str] | None = None,
     on_stderr: Callable[[bytes], None] | None = None,
+    architecture: str = "x86_64",
 ) -> GuestCommandResult:
     """Run ``script`` once the guest boots and wait for ``completion_marker``.
 
@@ -2854,6 +2907,8 @@ def run_guest_script(
     then holds alone, and the log and the error reports interleave the two
     streams by whole lines. ``SeparatedOutput`` keeps the last MiB of each.
     """
+    command = prepare_arm_vm_evidence(command, log_path, architecture)
+    monitor = TimeAbiMonitor(command, architecture=architecture)
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off"
     started_ns = time.perf_counter_ns()
@@ -2864,7 +2919,6 @@ def run_guest_script(
         separate_stderr=on_stderr is not None,
     )
     process = interaction.process
-    monitor = TimeAbiMonitor(command)
     query_status = time_abi_status and monitor.cold_boot
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)
@@ -4076,12 +4130,22 @@ def smp_probe_script(
     exit_guest: bool = True,
     network_gateway: str | None = None,
     ioapic_irq: int | None = None,
+    architecture: str = "x86_64",
 ) -> str:
+    if architecture not in ("x86_64", "aarch64"):
+        raise ValueError(f"unsupported SMP probe architecture: {architecture}")
     if processors not in (1, 2, 4, 8):
         raise ValueError("microVM SMP probe supports 1, 2, 4, or 8 vCPUs")
     if (network_gateway is None) != (ioapic_irq is None):
         raise ValueError("network gateway and IOAPIC IRQ must be specified together")
-    apic_ids = ",".join(str(cpu) for cpu in range(processors))
+    if architecture == "aarch64" and network_gateway is not None:
+        raise ValueError(
+            "the ARM cold SMP probe does not use x86 snapshot IOAPIC inputs"
+        )
+    apic_ids = ",".join(
+        f"0x{cpu:016x}" if architecture == "aarch64" else str(cpu)
+        for cpu in range(processors)
+    )
     network_probe = ""
     if network_gateway is not None and ioapic_irq is not None:
         network_probe = _render_benchmark_script(
@@ -4092,6 +4156,8 @@ def smp_probe_script(
     rendered = _render_benchmark_script(
         "smp-probe.sh.in",
         PROCESSORS=str(processors),
+        ARCHITECTURE=architecture,
+        IDENTITY_LIST_NAME="dt_mpidrs" if architecture == "aarch64" else "apic_ids",
         APIC_IDS=apic_ids,
         NETWORK_PROBE=network_probe,
         COMPLETION_MARKER=SMP_PROBE_COMPLETION_MARKER.decode(),

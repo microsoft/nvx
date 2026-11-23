@@ -18,7 +18,7 @@ from typing import cast
 from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nvx_tools import common, nvx_cli, release, ubuntu  # noqa: E402
+from nvx_tools import archive, build, common, nvx_cli, release, ubuntu  # noqa: E402
 from nvx_tools.build_constants import (  # noqa: E402
     AlpineBuildConstants,
     AzureLinuxBuildConstants,
@@ -1437,6 +1437,238 @@ class ReleaseTests(unittest.TestCase):
                 "prior",
             )
             self.assertFalse(staging.exists())
+
+    def test_arm_source_metadata_binds_arm_inputs_without_replacing_x86_metadata(self):
+        manifest = json.loads(
+            (BuildConstants.REPO_ROOT / "SOURCE-MANIFEST.json").read_bytes()
+        )
+        inputs = build.kernel_provenance_inputs("aarch64")
+        paths = release._validate_source_manifest_metadata(
+            manifest, inputs, architecture="aarch64"
+        )
+        self.assertTrue(any("/arm64/" in path for path in paths))
+        manifest["linux"]["architectures"]["aarch64"]["input_config"] = (
+            "kernel/config-microvm"
+        )
+        with self.assertRaisesRegex(common.ScriptError, "ARM Linux inputs"):
+            release._validate_source_manifest_metadata(
+                manifest, inputs, architecture="aarch64"
+            )
+
+    def test_arm_guest_admission_refuses_azurelinux_before_reading_any_file(self):
+        with patch.object(release, "require_file") as require_file:
+            with self.assertRaisesRegex(
+                common.ScriptError, "unknown guest artifact component: azurelinux"
+            ):
+                release.validate_guest_artifacts(
+                    Path("owned-empty"), ("azurelinux",), architecture="aarch64"
+                )
+        require_file.assert_not_called()
+
+    def test_project_source_archive_keeps_selected_config_and_manifest_namespace(self):
+        for architecture in ("x86_64", "aarch64"):
+            with (
+                self.subTest(architecture=architecture),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                build_dir = root / "build"
+                (build_dir / "aarch64").mkdir(parents=True)
+                (root / "SOURCE-MANIFEST.json").write_bytes(b"source metadata\n")
+                (build_dir / "vmlinux.config").write_bytes(b"legacy x86 config\n")
+                (build_dir / "aarch64" / "Image.config").write_bytes(
+                    b"selected ARM config\n"
+                )
+                selected = (
+                    build_dir / "aarch64" if architecture == "aarch64" else build_dir
+                )
+                manifest = selected / "initramfs.cpio.gz.packages.json"
+                manifest.write_bytes(b"selected guest manifest\n")
+                output = root / "project.tar.gz"
+
+                def artifact_path(
+                    name: str,
+                    *,
+                    architecture: str = "x86_64",
+                    directory: Path = build_dir,
+                ) -> Path:
+                    return (
+                        directory / architecture / name
+                        if architecture == "aarch64"
+                        else directory / name
+                    )
+
+                with (
+                    patch.object(BuildConstants, "REPO_ROOT", root),
+                    patch.object(
+                        ReleaseBuildConstants,
+                        "PROJECT_SOURCE_PATHS",
+                        ("SOURCE-MANIFEST.json",),
+                    ),
+                    patch.object(release, "artifact_path", side_effect=artifact_path),
+                ):
+                    release._project_source_archive(
+                        output,
+                        "fixture",
+                        [manifest],
+                        **common.architecture_kwargs(architecture),
+                    )
+                config_name = (
+                    "Image.config" if architecture == "aarch64" else "vmlinux.config"
+                )
+                prefix = (
+                    "nvx-project-source-fixture/"
+                    + selected.relative_to(root).as_posix()
+                )
+                with tarfile.open(output, "r:gz") as source:
+                    self.assertEqual(
+                        set(source.getnames()),
+                        {
+                            "nvx-project-source-fixture/SOURCE-MANIFEST.json",
+                            f"{prefix}/{config_name}",
+                            f"{prefix}/{manifest.name}",
+                        },
+                    )
+                    stream = source.extractfile(f"{prefix}/{config_name}")
+                    assert stream is not None
+                    self.assertEqual(
+                        stream.read(), (selected / config_name).read_bytes()
+                    )
+
+    def test_source_package_validates_only_its_selected_linux_archive(self):
+        class SourceValidated(Exception):
+            pass
+
+        for architecture in ("x86_64", "aarch64"):
+            with (
+                self.subTest(architecture=architecture),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                build_dir = root / "build"
+                source_dir = build_dir / "sources"
+                (build_dir / "aarch64").mkdir(parents=True)
+                (build_dir / "vmlinux.config").write_bytes(b"x86 final configuration\n")
+                (build_dir / "aarch64" / "Image.config").write_bytes(
+                    b"ARM final configuration\n"
+                )
+                metadata: dict[str, object] = {
+                    "linux": {
+                        "patches": [],
+                        "architectures": {"aarch64": {"patches": []}},
+                    }
+                }
+                (root / "SOURCE-MANIFEST.json").write_text(json.dumps(metadata))
+                for relative in (
+                    KernelBuildConstants.ARM_INPUT_CONFIG,
+                    KernelBuildConstants.ARM_DERIVED_CONFIG,
+                ):
+                    path = root / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(relative.as_posix().encode())
+                archives: dict[str, Path] = {}
+                for isa in ("x86_64", "aarch64"):
+                    arm = isa == "aarch64"
+                    config = (
+                        build_dir / "aarch64" / "Image.config"
+                        if arm
+                        else build_dir / "vmlinux.config"
+                    )
+                    inputs = [
+                        (config, f"source/{config.name}"),
+                        (root / "SOURCE-MANIFEST.json", "source/SOURCE-MANIFEST.json"),
+                    ]
+                    if arm:
+                        inputs.extend(
+                            (root / relative, f"source/{relative.as_posix()}")
+                            for relative in (
+                                KernelBuildConstants.ARM_INPUT_CONFIG,
+                                KernelBuildConstants.ARM_DERIVED_CONFIG,
+                            )
+                        )
+                    driver = "hvc_nvx_mmio.c" if arm else "hvc_xe9.c"
+                    driver_path = root / isa / driver
+                    driver_path.parent.mkdir()
+                    driver_path.write_bytes(b"owned source fixture\n")
+                    inputs.append(
+                        (
+                            driver_path,
+                            f"source/{KernelBuildConstants.SOURCE_NAME}/drivers/tty/hvc/{driver}",
+                        )
+                    )
+                    directory = source_dir / KernelBuildConstants.SOURCE_DIRECTORY_NAME
+                    name = KernelBuildConstants.SOURCE_ARCHIVE_NAME
+                    if arm:
+                        directory /= isa
+                        name = (
+                            f"{KernelBuildConstants.SOURCE_ARCHIVE_ROOT}-{isa}.tar.gz"
+                        )
+                    directory.mkdir(parents=True, exist_ok=True)
+                    archives[isa] = directory / name
+                    archive.create_reproducible_tar_gz(archives[isa], inputs)
+                binary = root / "openvmm.fixture"
+                binary.write_bytes(
+                    b"packaging reaches nvx admission only after source validation"
+                )
+
+                def artifact_path(
+                    name: str,
+                    *,
+                    architecture: str = "x86_64",
+                    directory: Path = build_dir,
+                ) -> Path:
+                    return (
+                        directory / architecture / name
+                        if architecture == "aarch64"
+                        else directory / name
+                    )
+
+                with (
+                    patch.object(BuildConstants, "REPO_ROOT", root),
+                    patch.object(BuildConstants, "SOURCE_DIR", source_dir),
+                    patch.object(release, "artifact_path", side_effect=artifact_path),
+                    patch.object(
+                        release, "_guest_release_inputs", return_value=([], [], [], [])
+                    ),
+                    patch.object(
+                        release, "_validate_alpine_sources", return_value=frozenset()
+                    ),
+                    patch.object(release, "_validate_ubuntu_sources"),
+                    patch.object(release, "openvmm_binary_path", return_value=binary),
+                    patch.object(
+                        release, "_require_release_nvx", side_effect=SourceValidated
+                    ),
+                    patch.object(
+                        release,
+                        "_validate_linux_source_archive",
+                        wraps=release._validate_linux_source_archive,
+                    ) as validate,
+                ):
+                    with self.assertRaises(SourceValidated):
+                        release.package_release(
+                            version="fixture",
+                            destination=root / "package",
+                            include_source=True,
+                            force=False,
+                            **common.architecture_kwargs(architecture),
+                        )
+                    validate.assert_called_once_with(
+                        archives[architecture],
+                        **common.architecture_kwargs(architecture),
+                    )
+                    archives[architecture].write_bytes(
+                        archives[
+                            "aarch64" if architecture == "x86_64" else "x86_64"
+                        ].read_bytes()
+                    )
+                    with self.assertRaisesRegex(common.ScriptError, "HVC driver"):
+                        release.package_release(
+                            version="fixture",
+                            destination=root / "package",
+                            include_source=True,
+                            force=False,
+                            **common.architecture_kwargs(architecture),
+                        )
 
 
 if __name__ == "__main__":

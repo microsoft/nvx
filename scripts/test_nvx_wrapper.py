@@ -716,6 +716,33 @@ class NvxTests(unittest.TestCase):
                     dashed, nvx_cli.EgressRules(allow=("192.0.2.0/24",), deny=())
                 )
 
+    def test_arm_release_target_requires_actual_arm_pe_headers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = Path(temporary) / "nvx.exe"
+            for machine in (0xAA64, 0x8664, 0x14C):
+                header = bytearray(70)
+                header[:2] = b"MZ"
+                header[60:64] = (64).to_bytes(4, "little")
+                header[64:68] = b"PE\0\0"
+                header[68:70] = machine.to_bytes(2, "little")
+                executable.write_bytes(header)
+                if machine == 0xAA64:
+                    nvx_cli.check_target(executable, nvx_cli.ARM_WINDOWS_RELEASE_TARGET)
+                else:
+                    with self.assertRaisesRegex(common.ScriptError, "not ARM64 PE"):
+                        nvx_cli.check_target(
+                            executable, nvx_cli.ARM_WINDOWS_RELEASE_TARGET
+                        )
+            for offset in (2, 0xFFFFFFFF):
+                header = bytearray(70)
+                header[:2] = b"MZ"
+                header[60:64] = offset.to_bytes(4, "little")
+                if offset == 2:
+                    header[2:8] = b"PE\0\0" + (0xAA64).to_bytes(2, "little")
+                executable.write_bytes(header)
+                with self.assertRaises(common.ScriptError):
+                    nvx_cli.check_target(executable, nvx_cli.ARM_WINDOWS_RELEASE_TARGET)
+
 
 if __name__ == "__main__":
     unittest.main()

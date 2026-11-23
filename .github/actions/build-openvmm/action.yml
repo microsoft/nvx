@@ -2,6 +2,10 @@ name: Build OpenVMM
 description: Checkout and cache or build one reusable OpenVMM binary
 
 inputs:
+  architecture:
+    description: Expected ISA of the native OpenVMM executable
+    required: false
+    default: x86_64
   ssh-key:
     description: SSH deploy key used to checkout OpenVMM
     required: true
@@ -164,6 +168,23 @@ runs:
         if (-not (Test-Path -LiteralPath "build/openvmm.provenance.json" -PathType Leaf)) {
           throw "OpenVMM provenance was not produced"
         }
+
+    - name: Verify ARM64 OpenVMM executable ISA
+      if: runner.os == 'Windows' && inputs.architecture == 'aarch64'
+      shell: python {0}
+      env:
+        BINARY: ${{ inputs.binary-path }}
+      run: |
+        import os
+        import struct
+        from pathlib import Path
+
+        data = Path(os.environ["BINARY"]).read_bytes()
+        if data[:2] != b"MZ" or len(data) < 64:
+            raise SystemExit("OpenVMM must be a Windows ARM64 PE executable")
+        offset = struct.unpack_from("<I", data, 0x3c)[0]
+        if data[offset:offset + 4] != b"PE\0\0" or struct.unpack_from("<H", data, offset + 4)[0] != 0xaa64:
+            raise SystemExit("OpenVMM is not a native ARM64 executable")
 
     - name: Save OpenVMM binary on Linux
       if: >-
