@@ -13,7 +13,8 @@ const REPEATED_IDENTITY: &str = "a workload identity may be specified only once"
 ///
 /// The caller's tokens give each of the CLI's settings at most once: the blockless mode, with
 /// `nvx_mode=` or `nvx_lifecycle=`, and the workload identity, with `nvx_identity=` or both of
-/// `nvx_workload_uid=` and `nvx_workload_gid=`. A repeated one is refused, never resolved.
+/// `nvx_workload_uid=` and `nvx_workload_gid=`. A repeated one is refused, never resolved, and
+/// `nvx_identity=` beside either of the others repeats the identity.
 pub(super) fn render(command_line: &str, export: Option<&ExportPlan>) -> Result<String> {
     let (mut mode, mut uid, mut gid, mut identity) = (None, None, None, None);
     let mut caller = String::new();
@@ -53,8 +54,10 @@ pub(super) fn render(command_line: &str, export: Option<&ExportPlan>) -> Result<
             parse_workload_id("nvx_workload_uid", uid)?,
             parse_workload_id("nvx_workload_gid", gid)?,
         )),
-        (Some(_), Some(_), Some(_)) => return Err(Error::unsupported(REPEATED_IDENTITY)),
-        _ => return Err(Error::unsupported("a workload needs both its UID and GID")),
+        (_, _, Some(_)) => return Err(Error::unsupported(REPEATED_IDENTITY)),
+        (Some(_), None, None) | (None, Some(_), None) => {
+            return Err(Error::unsupported("a workload needs both its UID and GID"));
+        }
     };
     tokens.push(format!("nvx_mode={mode}"));
     if let Some((uid, gid)) = identity {
