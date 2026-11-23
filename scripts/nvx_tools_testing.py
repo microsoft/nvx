@@ -331,3 +331,18 @@ def write_release_fixture(
         "nvx": nvx_binary,
     }
     return paths, kernel_inputs, revision
+
+
+def posix_shell() -> str | None:
+    shell = shutil.which("sh")
+    if shell is None:
+        git = shutil.which("git")
+        git_shell = Path(git).parent.parent / "bin" / "sh.exe" if git else None
+        if git_shell is not None and git_shell.is_file():
+            shell = str(git_shell)
+    return shell
+
+
+def shell_function(source: str, name: str) -> str:
+    start = source.index(f"\n{name}() {{\n") + 1
+    return source[start : source.index("\n}\n", start) + 3]
