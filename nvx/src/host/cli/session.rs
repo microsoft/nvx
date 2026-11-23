@@ -59,7 +59,7 @@ use crate::{ErrorCode, ErrorKind};
 /// The exit categories that `exec` accepts, `MANAGED_EXIT_CATEGORIES`, but the output limit,
 /// which version 2 of NVXC does not have. A cancellation, whose end this session never waits
 /// for, is not among them.
-pub(crate) const EXIT_CATEGORIES: [&str; 4] = ["exit", "timeout", "signal", "failed"];
+pub(super) const EXIT_CATEGORIES: [&str; 4] = ["exit", "timeout", "signal", "failed"];
 /// The longest that one wait of a transport blocks before it checks for Ctrl-C.
 const POLL_SLICE: Duration = Duration::from_millis(250);
 
