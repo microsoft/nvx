@@ -196,7 +196,7 @@ impl ErrorCode {
     }
 
     /// Returns the kind of the errors that have this code.
-    pub(crate) const fn kind(self) -> ErrorKind {
+    const fn kind(self) -> ErrorKind {
         match self {
             Self::Unavailable | Self::ArtifactMissing => ErrorKind::Unavailable,
             Self::Unsupported
