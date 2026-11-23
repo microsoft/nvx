@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use super::guest_path::depth;
 use super::host_path::{display_path, relative_text};
-use super::limits::{file_name_problem, policy_limits, source_name_problem};
+use super::limits::{file_name_problem, policy_limits, root_limits, source_name_problem};
 #[cfg(feature = "cli")]
 use super::policy::Writable;
 use super::policy::{nearest_rule, policy_rule_problem};
@@ -28,19 +28,19 @@ use crate::protocol::{HostMap, MAPS_TOKEN, MAX_HOST_MAPPINGS};
 impl ExportPlan {
     /// Checks that a plan, such as one read from a record, is one that a planner could make for a
     /// root that reserves `reserved`: at least one and at most [`MAX_CHILDREN`] children, none
-    /// inside another, each an absolute host path below a volume's root, with its host paths
-    /// resolved, without a NUL character or a `..` component, and, on Windows, on a local drive,
-    /// without the verbatim prefix, each file without a colon or a backslash in its name, whose
-    /// policy paths lie inside it within OpenVMM's limits and keep its rules, and writable exactly
-    /// when a bind maps a path of it read-write; and at least one and at most
-    /// [`MAX_HOST_MAPPINGS`] binds, each of a known child, from a relative source that holds the
-    /// host's names joined with `/`, without a colon or a backslash in them, that a guest path can
-    /// hold, and that the child does not hide, unless it shows paths inside it again, to a free
-    /// guest target, parents before children, with a bind of every child's root. A target inside
-    /// another's must show what the other shows there. A child's write paths must be the outermost
-    /// paths of its read-write binds, unless one maps the whole child, when they may narrow its
-    /// writes only to paths that keep its other read-write binds writable. It reads nothing from
-    /// the host: the caller keeps the paths naming the objects that it means, as
+    /// inside another, whose host paths OpenVMM accepts together, each an absolute host path below
+    /// a volume's root, with its host paths resolved, without a NUL character or a `..` component,
+    /// and, on Windows, on a local drive, without the verbatim prefix, each file without a colon
+    /// or a backslash in its name, whose policy paths lie inside it within OpenVMM's limits and
+    /// keep its rules, and writable exactly when a bind maps a path of it read-write; and at least
+    /// one and at most [`MAX_HOST_MAPPINGS`] binds, each of a known child, from a relative source
+    /// that holds the host's names joined with `/`, without a colon or a backslash in them, that a
+    /// guest path can hold, and that the child does not hide, unless it shows paths inside it
+    /// again, to a free guest target, parents before children, with a bind of every child's root.
+    /// A target inside another's must show what the other shows there. A child's write paths must
+    /// be the outermost paths of its read-write binds, unless one maps the whole child, when they
+    /// may narrow its writes only to paths that keep its other read-write binds writable. It reads
+    /// nothing from the host: the caller keeps the paths naming the objects that it means, as
     /// [`host::filesystem`](crate::host::filesystem) describes.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
@@ -149,6 +149,9 @@ impl ExportPlan {
                 "the paths that OpenVMM is to hide, show again, or make writable exceed its \
                  {MAX_AGGREGATE_POLICY_BYTES}-byte limit"
             ));
+        }
+        if let Err(problem) = root_limits(self.children.iter().map(|child| child.root.as_path())) {
+            return invalid(problem);
         }
         let mut previous: Option<&Bind> = None;
         for (index, bind) in self.binds.iter().enumerate() {
