@@ -115,35 +115,11 @@ impl AttachmentCancellation {
     }
 
     /// Ends pending I/O; repeated calls also cover cancellation racing with an I/O submission.
-    #[allow(unsafe_code)]
     pub(super) fn cancel(&self) -> io::Result<()> {
         self.cancelled.store(true, Ordering::SeqCst);
         #[cfg(any(target_os = "linux", windows))]
         if let Some(handle) = &*self.transport.lock().expect("attachment lock poisoned") {
-            #[cfg(target_os = "linux")]
-            {
-                use nix::sys::socket::{Shutdown, shutdown};
-                use std::os::fd::AsRawFd;
-
-                match shutdown(handle.as_raw_fd(), Shutdown::Both) {
-                    Ok(()) | Err(nix::errno::Errno::ENOTCONN) => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::io::AsRawHandle;
-                use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
-                use windows_sys::Win32::System::IO::CancelIoEx;
-
-                // SAFETY: the retained handle belongs only to this attachment's connection.
-                if unsafe { CancelIoEx(handle.as_raw_handle().cast(), std::ptr::null()) } == 0 {
-                    let error = io::Error::last_os_error();
-                    if error.raw_os_error() != Some(ERROR_NOT_FOUND as i32) {
-                        return Err(error);
-                    }
-                }
-            }
+            platform::interrupt_transfers(handle)?;
         }
         Ok(())
     }
