@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import struct
 import sys
 import unittest
@@ -196,6 +197,14 @@ class ArmCiTests(unittest.TestCase):
                 )
                 self.assertLess(checkout, verify)
         prerequisites = step(guest, "Install native guest prerequisites")
+        install = next(
+            command
+            for line in prerequisites["run"].replace("\\\n", "").splitlines()
+            if (command := shlex.split(line))[:2] == ["apt-get", "install"]
+        )
+        self.assertIn("--no-install-recommends", install)
+        for package in ("git", "openssh-client"):
+            self.assertIn(package, install)
         self.assertLess(
             guest["runs"]["steps"].index(prerequisites),
             guest["runs"]["steps"].index(step(guest, "Checkout OpenVMM")),

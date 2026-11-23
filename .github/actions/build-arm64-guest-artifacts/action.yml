@@ -33,7 +33,7 @@ runs:
         apt-get update
         apt-get install -y --no-install-recommends \
           bc binutils bison build-essential ca-certificates cpio curl \
-          e2fsprogs erofs-utils=1.5-1 flex git gzip libelf-dev libssl-dev \
+          e2fsprogs erofs-utils=1.5-1 flex git gzip libelf-dev libssl-dev openssh-client \
           patch python3 rsync tar xz-utils zstd
 
     - name: Checkout OpenVMM
