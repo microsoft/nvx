@@ -303,9 +303,7 @@ pub(crate) fn boot_id() -> io::Result<[u8; 16]> {
             format!("cannot read the registry value HKLM\\{BOOT_ID_KEY}\\BootId: {error}"),
         ));
     }
-    let mut id = [0; 16];
-    id[..4].copy_from_slice(&value.to_le_bytes());
-    Ok(id)
+    Ok(u128::from(value).to_le_bytes())
 }
 
 /// The registry key of the boot counter, under `HKEY_LOCAL_MACHINE`.
