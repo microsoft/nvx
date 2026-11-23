@@ -53,6 +53,7 @@ use super::artifacts::{Located, locate};
 use super::sandbox::HYPERVISORS;
 use super::{Exit, Result, check_interrupt, io_error, output};
 use crate::ErrorCode;
+use crate::hex::hex;
 use crate::host::artifacts::{ArtifactDir, Guest, Layout, MANIFEST_NAME, REPO_BUILD_DIR};
 
 /// The usage and help of the parser.
@@ -512,7 +513,7 @@ impl Staging {
         getrandom::fill(&mut bytes).map_err(|error| {
             Exit::error(ErrorCode::Io, format!("cannot read random bytes: {error}"))
         })?;
-        let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let token = hex(&bytes);
         let path = parent.join(format!(".nvx-download-{token}"));
         #[cfg(unix)]
         let builder = {
