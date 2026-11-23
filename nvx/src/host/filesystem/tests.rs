@@ -500,6 +500,40 @@ fn policies_beyond_the_children_of_an_aggregate_are_refused() {
 
 #[cfg(feature = "cli")]
 #[test]
+fn exports_whose_host_paths_exceed_what_one_aggregate_accepts_are_refused() {
+    let directory = root();
+    // 256 files with 250-byte names, each a child of its own, have host paths of more than 65536
+    // bytes together, which OpenVMM refuses.
+    let readonly_paths: Vec<PathBuf> = (0..256)
+        .map(|index| {
+            let path = directory
+                .path()
+                .join("tools")
+                .join(format!("{index:03}-{}", "x".repeat(246)));
+            fs::write(&path, b"x").unwrap();
+            path
+        })
+        .collect();
+    let error = plan(&FilesystemPolicy {
+        readonly_paths,
+        ..FilesystemPolicy::default()
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+    assert!(
+        error.message().contains("exceed its 65536-byte limit"),
+        "{error}"
+    );
+    assert!(
+        error
+            .message()
+            .contains("map fewer paths, or the directories that contain them, instead"),
+        "{error}"
+    );
+}
+
+#[cfg(feature = "cli")]
+#[test]
 fn nested_mappings_merge_into_the_outermost_directory() {
     let directory = root();
     let base = directory.path();
@@ -2028,6 +2062,50 @@ fn recorded_plans_hold_no_more_policy_than_one_aggregate_accepts() {
     assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
     assert!(
         error.message().contains("exceed its 131072-byte limit"),
+        "{error}"
+    );
+}
+
+#[test]
+fn recorded_plans_hold_no_longer_host_paths_than_one_aggregate_accepts() {
+    // OpenVMM counts each root as it canonicalizes it, with the prefix `\\?\` on Windows, so 16
+    // roots that it counts as 4096 bytes each reach its 65536-byte limit, and one byte more
+    // exceeds it. The check reads nothing from the host, so the roots need not exist.
+    let volume = if cfg!(windows) { r"C:\" } else { "/" };
+    let counted = volume.len() + if cfg!(windows) { r"\\?\".len() } else { 0 };
+    let recorded = |extra: usize| ExportPlan {
+        children: (0..16)
+            .map(|index| {
+                let length = 4096 - counted - 2 + if index == 0 { extra } else { 0 };
+                ExportChild {
+                    root: Path::new(volume).join(format!("{index:02}{}", "x".repeat(length))),
+                    file: false,
+                    writable: false,
+                    denied: Vec::new(),
+                    allowed: Vec::new(),
+                    write: Vec::new(),
+                }
+            })
+            .collect(),
+        binds: (0..16)
+            .map(|index| Bind {
+                child: index,
+                source: String::new(),
+                target: format!("/c{index:02}"),
+                read_only: true,
+            })
+            .collect(),
+        owner: Owner::Vmm,
+    };
+    recorded(0).check(ReservedTargets::CONTAINER_ROOT).unwrap();
+    let error = recorded(1)
+        .check(ReservedTargets::CONTAINER_ROOT)
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+    assert!(
+        error
+            .message()
+            .contains("hold 65537 bytes, which exceed its 65536-byte limit"),
         "{error}"
     );
 }

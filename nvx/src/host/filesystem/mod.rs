@@ -87,7 +87,9 @@ pub(crate) use self::host_path::{canonicalize, is_reparse_point};
 #[cfg(feature = "cli")]
 use self::host_path::{identity, relative_text};
 #[cfg(feature = "cli")]
-use self::limits::{check_policy_paths, check_root, file_name_problem, source_name_problem};
+use self::limits::{
+    check_policy_paths, check_root, file_name_problem, root_limits, source_name_problem,
+};
 #[cfg(feature = "cli")]
 use self::policy::{
     Writable, allowed_paths, canonicals, check_allowed_paths, check_read_only, check_write_paths,
@@ -101,6 +103,9 @@ pub const GUEST_EXPORT: &str = EXPORT_DIRECTORY;
 
 /// Largest number of host directories and files that OpenVMM exports through one aggregate.
 pub const MAX_CHILDREN: usize = 256;
+/// Largest combined UTF-8 byte length of the host paths of one aggregate's children, each as
+/// OpenVMM canonicalizes it, which on Windows adds the verbatim prefix `\\?\`.
+const MAX_AGGREGATE_ROOT_BYTES: usize = 64 * 1024;
 /// Largest number of hidden, allowed, or writable paths that OpenVMM accepts in one exported
 /// directory.
 const MAX_POLICY_PATHS: usize = 128;
@@ -360,9 +365,10 @@ pub(crate) struct ExportRequest<'a> {
 /// target is mapped once, read-only if either mapping is. Two objects never share a target, and a
 /// target inside another mapping's must show the very object that the other mapping shows there.
 /// A whole volume cannot be mapped, and a policy that would need more children than OpenVMM
-/// offers is refused. A file that a child exports alone must not have a colon or a backslash in
-/// its name, nor may a mapped path inside a directory that a child exports have one in a name
-/// below that directory, since OpenVMM refuses either in every path of an export.
+/// offers, or children whose host paths are longer together than OpenVMM accepts, is refused. A
+/// file that a child exports alone must not have a colon or a backslash in its name, nor may a
+/// mapped path inside a directory that a child exports have one in a name below that directory,
+/// since OpenVMM refuses either in every path of an export.
 ///
 /// A read-only path must not lie inside a writable part, where the host could not keep it
 /// read-only: inside a read-write directory, unless write paths narrow that directory's writes
@@ -425,6 +431,11 @@ pub(crate) fn plan(request: &ExportRequest<'_>) -> Result<Option<PlannedExport>>
             "the mapped paths need {} exported directories and files, but OpenVMM exports at \
              most {MAX_CHILDREN}; map directories that contain the files instead",
             roots.len()
+        ));
+    }
+    if let Err(problem) = root_limits(roots.iter().map(PathBuf::as_path)) {
+        return unsupported(format!(
+            "{problem}; map fewer paths, or the directories that contain them, instead"
         ));
     }
     let allowed = allowed_paths(request.allowed, &roots)?;

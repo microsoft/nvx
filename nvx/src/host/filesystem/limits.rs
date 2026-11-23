@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 
 #[cfg(feature = "cli")]
 use super::host_path::is_reparse_point;
-use super::host_path::relative_text;
+use super::host_path::{display_path, relative_text};
 #[cfg(feature = "cli")]
 use super::unsupported_inspection;
-use super::{MAX_POLICY_BYTES, MAX_POLICY_PATH_BYTES, MAX_POLICY_PATHS};
+use super::{MAX_AGGREGATE_ROOT_BYTES, MAX_POLICY_BYTES, MAX_POLICY_PATH_BYTES, MAX_POLICY_PATHS};
 #[cfg(feature = "cli")]
 use crate::error::{Error, Result};
 #[cfg(all(unix, feature = "cli"))]
@@ -56,6 +56,27 @@ pub(super) fn source_name_problem(source: &str) -> Option<&'static str> {
     source
         .contains([':', '\\'])
         .then_some("has a colon or a backslash in a name below its exported directory")
+}
+
+/// Applies OpenVMM's limit on the host paths of an aggregate's children, `roots`: at most
+/// [`MAX_AGGREGATE_ROOT_BYTES`] bytes together, as OpenVMM counts them, or why OpenVMM would refuse
+/// them.
+pub(super) fn root_limits<'a>(
+    roots: impl IntoIterator<Item = &'a Path>,
+) -> std::result::Result<(), String> {
+    // OpenVMM counts each root as it canonicalizes it, which on Windows adds the verbatim prefix.
+    let prefix = if cfg!(windows) { r"\\?\".len() } else { 0 };
+    let total: usize = roots
+        .into_iter()
+        .map(|root| prefix + display_path(root).len())
+        .sum();
+    if total > MAX_AGGREGATE_ROOT_BYTES {
+        return Err(format!(
+            "the host paths that OpenVMM is to export hold {total} bytes, which exceed its \
+             {MAX_AGGREGATE_ROOT_BYTES}-byte limit"
+        ));
+    }
+    Ok(())
 }
 
 /// Applies OpenVMM's rules for the paths that it is to `action` in the exported directory `root`,
