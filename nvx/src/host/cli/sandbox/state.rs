@@ -297,7 +297,7 @@ enum Upper {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Source {
     /// The snapshot's name.
-    pub(crate) snapshot: SnapshotName,
+    pub(in crate::host::cli) snapshot: SnapshotName,
     /// The absolute path of the snapshot's store.
     pub(crate) store: PathBuf,
     /// The program, an absolute guest path, and the arguments of the workload.
