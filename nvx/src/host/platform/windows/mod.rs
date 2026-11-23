@@ -100,7 +100,7 @@ fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
 
 /// Returns the system directory, such as `C:\Windows\System32`, as `GetSystemDirectoryW` names
 /// it: a directory of every Windows host that only administrators may change.
-pub(crate) fn system_directory() -> io::Result<PathBuf> {
+pub(in crate::host) fn system_directory() -> io::Result<PathBuf> {
     // The legacy path budget is an initial capacity, not a limit on the returned directory.
     let mut buffer = vec![0u16; MAX_PATH as usize];
     loop {
