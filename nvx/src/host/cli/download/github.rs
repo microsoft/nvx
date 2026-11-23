@@ -651,6 +651,8 @@ pub(super) fn repository_parts(repository: &str) -> Option<(&str, &str)> {
 /// read it: the `message` of a JSON document, or else at most 200 characters of a body that is
 /// not JSON, with its whitespace collapsed.
 fn error_message(body: &[u8]) -> String {
+    /// Bounds the non-JSON diagnostic to 200 characters after whitespace is collapsed.
+    const MAX_ERROR_BODY_CHARS: usize = 200;
     let text = String::from_utf8_lossy(body);
     let payload = text.trim();
     if payload.is_empty() {
@@ -667,7 +669,7 @@ fn error_message(body: &[u8]) -> String {
             .collect::<Vec<_>>()
             .join(" ")
             .chars()
-            .take(200)
+            .take(MAX_ERROR_BODY_CHARS)
             .collect(),
     }
 }
