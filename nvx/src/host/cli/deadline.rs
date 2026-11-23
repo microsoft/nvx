@@ -60,7 +60,7 @@ impl Deadline {
 }
 
 /// Sleeps for `duration`, as `time.sleep` does, failing if Ctrl-C arrives meanwhile.
-pub(crate) fn sleep(duration: Duration) -> Result {
+pub(super) fn sleep(duration: Duration) -> Result {
     let end = Instant::now().checked_add(duration);
     loop {
         check_interrupt()?;
