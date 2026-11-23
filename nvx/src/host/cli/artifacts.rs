@@ -52,15 +52,15 @@ pub(super) fn run(root: Option<&str>) -> Result {
 
 /// The artifacts that a command runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Located {
+pub(super) struct Located {
     /// The artifact directory.
-    pub(crate) dir: ArtifactDir,
+    pub(super) dir: ArtifactDir,
     /// The OpenVMM executable: [`OPENVMM_VARIABLE`] if set, or the directory's.
-    pub(crate) openvmm: PathBuf,
+    pub(super) openvmm: PathBuf,
 }
 
 /// Returns the artifacts of `--root`, or of the directory that holds the executable.
-pub(crate) fn locate(root: Option<&str>) -> Result<Located> {
+pub(super) fn locate(root: Option<&str>) -> Result<Located> {
     let dir = match root {
         Some(root) => ArtifactDir::from_dir(root)?,
         None => {
