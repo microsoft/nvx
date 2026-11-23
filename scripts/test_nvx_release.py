@@ -18,7 +18,7 @@ from typing import cast
 from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nvx_tools import common, nvx_cli, release, ubuntu  # noqa: E402
+from nvx_tools import archive, build, common, nvx_cli, release, ubuntu  # noqa: E402
 from nvx_tools.build_constants import (  # noqa: E402
     AlpineBuildConstants,
     AzureLinuxBuildConstants,
