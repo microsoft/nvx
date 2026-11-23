@@ -9,8 +9,9 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126.
-- NVX's pinned OpenVMM revision: `09966aa637e0d488f71c7d7536264357d39db32f`, position 361, the head
-  of microsoft/openvmm#5253, whose commit follows position 360, `3f7112dea`, the head of
+- NVX's pinned OpenVMM revision: `5e0e72d72d60bce5e2c5735a08ffebd57ae24216`, position 364, the head
+  of microsoft/openvmm#5254, whose commits follow position 361, `09966aa63`, the head of
+  microsoft/openvmm#5253, whose commit follows position 360, `3f7112dea`, the head of
   microsoft/openvmm#5252, whose commits follow position 358, `7e94a090a`, the head of
   microsoft/openvmm#5251, whose commit follows position 357, `e8324ea31`, the head of
   `feature/microvm/dev` since microsoft/openvmm#5248 and microsoft/openvmm#5249 landed positions
@@ -22,8 +23,8 @@
   commits that they fix, so each later commit's position is its v7.2 position less the number of
   those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
   `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
-  tests. The pin is 235 commits past the mapped tip on the same first-parent chain, and positions
-  127-361 are not yet assigned to PRs; see
+  tests. The pin is 238 commits past the mapped tip on the same first-parent chain, and positions
+  127-364 are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1766,7 +1767,8 @@ bf353460f
   -> virtio-fs inodes documented to deduplicate only within a volume [358]
   -> offsets found in test and fuzzing chipset regions that end at the top [359-360]
   -> virtio-fs nodes of LINK replies kept until the guest forgets them [361]
-  -> 09966aa63 (NVX pin)
+  -> microVM saves refused while the guest holds a replaced virtio-fs object [362-364]
+  -> 5e0e72d72 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1789,7 +1791,7 @@ reorganization folded the fixups of PR13 and PR18 and of the v7.1 and v7.2 rebas
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges, and its 235 later commits are not
+The NVX pin extends the chain past position 126 without merges, and its 238 later commits are not
 yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
@@ -1798,17 +1800,17 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356-361 followed the v8.0 reorganization, so they combine none, apart
+v7.2 rebase, and positions 356-364 followed the v8.0 reorganization, so they combine none, apart
 from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
 v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which through
 position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
-335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-361 lack.
+335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-364 lack.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-361 have no position before v7.0; see
+positions 297-364 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2058,6 +2060,9 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 359 | `06e69049e` | - | - | - | - | - | - | - | chipset_arc_mutex_device: find offsets in a region that ends at the top (microsoft/openvmm#5252) |
 | 360 | `3f7112dea` | - | - | - | - | - | - | - | chipset_device_fuzz: find offsets in an I/O region that ends at the top (microsoft/openvmm#5252) |
 | 361 | `09966aa63` | - | - | - | - | - | - | - | virtiofs: keep the node that a LINK returns until the guest forgets it (microsoft/openvmm#5253) |
+| 362 | `b5914cf2d` | - | - | - | - | - | - | - | virtiofs: fail a microVM save while the guest holds a replaced object (microsoft/openvmm#5254) |
+| 363 | `b2ac1073d` | - | - | - | - | - | - | - | virtiofs: fail a microVM save of nodes or handles that a restore rejects (microsoft/openvmm#5254) |
+| 364 | `5e0e72d72` | - | - | - | - | - | - | - | virtiofs: say which nodes a microVM save keeps apart (microsoft/openvmm#5254) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2069,7 +2074,7 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-305, `c4419be15`
 `d83f87209`, upstream main later that day, for position 324, `265f0a73f`, upstream main later still,
 for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork base of v7.2 and
 v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356, and
-`5d6ab1cfa`, upstream main later that day, for positions 357-361. They name the positions that the
+`5d6ab1cfa`, upstream main later that day, for positions 357-364. They name the positions that the
 commits have now, but neither the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`,
 the v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked them again, nor
 did the v6.1 rebase check the earlier ones on `7d90c4104`.
@@ -5125,6 +5130,54 @@ race, in the same `link`, since microsoft/openvmm#2661. Replaying the commit the
 whose checks of PR13's position 048, PR18's position 081, and positions 160 and 164 it keeps, and
 where it adds `reference_inode` and `InodeMap::forget`, next to position 335's `get_file` and
 position 334's `reused`, which upstream main lacks, so it cannot go upstream on its own.
+
+Positions 362-364 have the microVM save, `VirtioFs::save_microvm_state`, fail rather than save a
+snapshot that cannot restore while the guest holds an object that the host has replaced
+(microsoft/nvx#1901). The save of PR18's position 083 took the identity that it records for a node
+from the object that the node's first name reached at the save, and checked only that the node's
+other names reached the same one. Once host software had renamed a new file over a file that the
+guest held open, it thus recorded the held node with the new file's identity under the held file's
+guest inode number, and the restore failed with "saved guest inode ID does not match the
+attachment", or, once the guest had looked the name up again, which gives the new file a node of its
+own, with "saved aliases are duplicated or ambiguous", since both nodes recorded the name. Position
+362 has the save record each node's own identity, the device, inode number, and file type of the
+object that the node got, through a new `VirtioFsInode::object_identity`, and check every name of
+the node against it with position 083's `validate_identity`, as the restore does, and removes
+position 083's `validate_saved_identity`, which only compared the names with each other. Position
+363 also fails the save when two nodes of one volume share a name or a dedup key, as when the host
+gives the inode number of an object that the guest holds to an object of another type and then to
+one of the held object's type, each of which PR18's position 081 gives a node of its own, or when a
+handle reaches another object than its node, as when the guest opened the node while the host had
+replaced its object; the restore rejects both. Each error names the node or handle and says what the
+guest must release. Position 364 corrects two comments of position 363's checks, which said that no
+two nodes may share a name or an object, and that two nodes of one object arise when the host gives
+a held object's inode number to another object of its type: the checks keep apart only the nodes of
+one volume, as the restore does, and such a host gives the guest the held node again, since a lookup
+reuses it. The saved state keeps its format, and the restore is unchanged. In the microVM's `fs.rs`,
+they change the node and handle loops of `save_microvm_state`, in lines that position 083 adds and
+no later position changes, and position 363 adds `nodes_of_one_object` after the
+`open_microvm_volume` of position 164; PR18's positions 081 and 085, PR22's position 102, PR27's
+position 126, and positions 158, 160, 164, 165, 194, 330, 333, 334, and 339 also change the file. In
+the microVM's `inode.rs`, which PR18's position 081, PR22's position 102, PR27's position 126, and
+positions 160, 165, 330, 343, 346-349, and 353 also change, position 362 adds `object_identity`
+after position 083's `from_saved`, and in its `state.rs`, which PR18's positions 081 and 085, PR22's
+position 102, PR27's position 126, and positions 158, 160, 164, 165, and 194 also change, it removes
+`validate_saved_identity`; none of those positions change the lines that the commits change.
+Positions 362 and 363 add three tests to the microVM's persistence tests, after position 083's
+`hard_link_aliases_restore_and_reject_missing_or_replaced_names`, which PR18's position 081, PR22's
+position 102, and positions 164, 329-331, 335, 350, 354, and 355 also change; the tests call the
+policy tests' `lookup`, `open`, `release`, and `read_node`, which position 160 adds and position 164
+exports to the other tests, and position 083's `microvm_with_a_tracked_file` and
+`directory_with_the_inode_number_of`. Position 362 also adds a paragraph to the "Snapshot
+attachments" section of the Guide's virtio-fs page, after the sentence about writable handles that
+position 160 adds; PR18's position 085 adds the page, and PR22's position 103, PR25's position 119,
+PR27's position 126, and positions 158-160, 164-166, 168, 175, 184, 186, 197, 330, 333, 336, 341,
+343, 345, and 346 change it. They fix defects of position 083's save, but position 362 compares by
+the device that position 329 records, through position 330's `device_nr`, and their tests need
+position 164's export of the policy tests' helpers, so they are not PR18 fixups, and they follow
+position 330. Upstream main lacks the defect, since it lacks the microVM's snapshots. Replaying the
+commits there conflicts in the microVM's `fs.rs`, `fs_tests.rs`, `inode.rs`, and `state.rs` and in
+the Guide's virtio-fs page, which upstream main lacks, so they cannot go upstream on their own.
 
 ## PR summary
 
