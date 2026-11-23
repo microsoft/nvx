@@ -11,9 +11,11 @@ pub use cidr::Cidr;
 
 /// Returns whether `hostname` is a lowercase RFC 1123 label of up to 63 characters.
 pub fn is_valid_hostname(hostname: &str) -> bool {
+    /// RFC 1035 section 2.3.4 limits a DNS label to 63 octets.
+    const MAX_LABEL_BYTES: usize = 63;
     let bytes = hostname.as_bytes();
     !bytes.is_empty()
-        && bytes.len() <= 63
+        && bytes.len() <= MAX_LABEL_BYTES
         && bytes
             .iter()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
