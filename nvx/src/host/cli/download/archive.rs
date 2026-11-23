@@ -125,8 +125,9 @@ fn members(listing: &str) -> Result<(String, BTreeSet<String>)> {
         .iter()
         .filter_map(|member| member.split('/').next())
         .collect();
-    let root = match roots.into_iter().collect::<Vec<_>>()[..] {
-        [root] => root.to_owned(),
+    let mut roots = roots.iter();
+    let root = match (roots.next(), roots.next()) {
+        (Some(&root), None) => root.to_owned(),
         _ => {
             return Err(invalid(
                 "release archive must contain exactly one package root".to_owned(),
