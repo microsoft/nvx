@@ -234,7 +234,7 @@ fn delete_opened(file: &OwnedHandle) -> io::Result<()> {
             raw(file),
             FileDispositionInfoEx,
             (&raw const posix).cast(),
-            mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+            mem::size_of_val(&posix) as u32,
         )
     };
     if set != 0 {
@@ -255,7 +255,7 @@ fn delete_opened(file: &OwnedHandle) -> io::Result<()> {
             raw(file),
             FileDispositionInfo,
             (&raw const disposition).cast(),
-            mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+            mem::size_of_val(&disposition) as u32,
         )
     };
     if set == 0 {
