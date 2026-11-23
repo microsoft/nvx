@@ -3921,6 +3921,8 @@ class _FakeSnapshotCli:
         (state / "runtime.json").write_text(
             json.dumps(
                 {
+                    "version": 2,
+                    "architecture": "x86_64",
                     "capability": list(capability),
                     "vmDir": str(state.resolve()),
                     "process": {"pid": pid, "startTime": pid * 7, "boot": "b" * 32},
