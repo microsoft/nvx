@@ -9,8 +9,9 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126.
-- NVX's pinned OpenVMM revision: `e8324ea31864e90e3486ec89d11f28d15e2c7b67`, position 357, the head
-  of microsoft/openvmm#5249, whose commit follows position 356, `b73db6676`, the head of
+- NVX's pinned OpenVMM revision: `7e94a090a80de4f5ac08a1ab74d1726da4dcf08b`, position 358, the head
+  of microsoft/openvmm#5251, whose commit follows position 357, `e8324ea31`, the head of
+  microsoft/openvmm#5249, whose commit follows position 356, `b73db6676`, the head of
   microsoft/openvmm#5248, whose commit follows position 355, `899dcd63f`, the head of
   `feature/microvm/dev` and of the `feature/microvm/release/v8.0` branch of microsoft/openvmm. The
   v8.0 reorganization replayed the 370 commits of `feature/microvm/dev` at `09524b79c`, the pin
@@ -19,8 +20,8 @@
   commits that they fix, so each later commit's position is its v7.2 position less the number of
   those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
   `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
-  tests. The pin is 231 commits past the mapped tip on the same first-parent chain, and positions
-  127-357 are not yet assigned to PRs; see
+  tests. The pin is 232 commits past the mapped tip on the same first-parent chain, and positions
+  127-358 are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1760,7 +1761,8 @@ bf353460f
   -> microVM READDIRPLUS names of the listed node listed without a node [355]
   -> FUSE_INIT negotiations adopted only once their reply is sent [356]
   -> PCI slots of chipset devices claimed only once their state unit spawns [357]
-  -> e8324ea31 (NVX pin)
+  -> virtio-fs inodes documented to deduplicate only within a volume [358]
+  -> 7e94a090a (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1783,7 +1785,7 @@ reorganization folded the fixups of PR13 and PR18 and of the v7.1 and v7.2 rebas
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges, and its 231 later commits are not
+The NVX pin extends the chain past position 126 without merges, and its 232 later commits are not
 yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
@@ -1792,17 +1794,17 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356 and 357 followed the v8.0 reorganization, so they combine none,
-apart from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0
-and v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which
-through position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316,
-333, 335-340, 342, 345, 347, 349, 351, and 365, and which positions 356 and 357 lack.
+v7.2 rebase, and positions 356-358 followed the v8.0 reorganization, so they combine none, apart
+from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
+v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which through
+position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
+335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-358 lack.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-357 have no position before v7.0; see
+positions 297-358 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2048,6 +2050,7 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 355 | `899dcd63f` | 370 | - | - | - | - | - | - | virtiofs: stop microVM READDIRPLUS from aliasing the listed node (microsoft/openvmm#5229) |
 | 356 | `b73db6676` | - | - | - | - | - | - | - | fuse: adopt a FUSE_INIT negotiation only once its reply is sent (microsoft/openvmm#5248) |
 | 357 | `e8324ea31` | - | - | - | - | - | - | - | vmotherboard: claim a device's PCI slot only once its unit spawns (microsoft/openvmm#5249) |
+| 358 | `7e94a090a` | - | - | - | - | - | - | - | virtiofs: say that inodes deduplicate only within a volume (microsoft/openvmm#5251) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2059,10 +2062,10 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-305, `c4419be15`
 `d83f87209`, upstream main later that day, for position 324, `265f0a73f`, upstream main later still,
 for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork base of v7.2 and
 v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356, and
-`5d6ab1cfa`, upstream main later that day, for position 357. They name the positions that the
-commits have now, but neither the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`,
-the v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked them again, nor
-did the v6.1 rebase check the earlier ones on `7d90c4104`.
+`5d6ab1cfa`, upstream main later that day, for positions 357 and 358. They name the positions that
+the commits have now, but neither the v8.0 reorganization and the v7.2 rebase, both on
+`bf353460f`, the v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked
+them again, nor did the v6.1 rebase check the earlier ones on `7d90c4104`.
 
 Some of these commits change mapped work rather than add to it. Position 142 removes the legacy
 microVM clock paths, changing files that PR10 and PR17 also change, and makes manifest version 6 the
@@ -5043,6 +5046,27 @@ loader among them, returns its error, and the microVM has no PCI or PCIe device,
 it did. Upstream main has the defect: its add registers the places before `finalize` the same way.
 Replaying the commit there conflicts in `services.rs`, whose `finalize` and `tests` module of
 position 316 it changes, so it cannot go upstream on its own, and it follows position 316.
+
+Position 358 has two comments in the `lib.rs` of `virtiofs` say that inodes deduplicate only within
+a volume (microsoft/nvx#1905). The comment of `VirtioFs::insert_inode` said that, on a file system
+with stable inode numbers, an inode that already existed with the inserted inode's device and inode
+number was returned instead, which reads as a key over the whole file system and leaves out the
+file type that a match needs and the volumes without stable file IDs, and the summary of `InodeMap`
+said that the map tracked in-use inodes by their actual inode number. The map indexes the inodes
+that insertions may reuse by `DedupKey`, which holds the volume ID with the host device and inode
+numbers on a volume with stable file IDs and with the path on any other, so a host object that two
+children of an aggregate reach gets a node in each, and it reuses only a candidate of the inserted
+inode's file type. The comment of `insert_inode` now says so, and the summary of `InodeMap` that the
+map indexes by `DedupKey` the inodes that insertions may reuse, as section 3.6.4 of the host
+filesystem design has said since microsoft/nvx#1875; the commit changes no code. It changes the
+comment of `insert_inode`, to which position 329 adds the device, and upstream's summary of
+`InodeMap`; PR06's position 010, PR13's position 048, PR18's positions 081 and 083, PR27's
+position 126, and positions 158, 160, 164, 320, 330, 334, 335, 342, 343, 350, and 352 also change
+`lib.rs`, none of the lines that the commit changes. It changes nothing that a mapped PR adds, so
+it is no fixup, and it follows position 329. Upstream main keys a stable-ID volume's inodes by
+volume ID and inode number, also reuses only a candidate of the same file type, and has both
+comments, but for the device in that of `insert_inode`. Replaying the commit there conflicts in
+that comment, so it cannot go upstream on its own.
 
 ## PR summary
 
