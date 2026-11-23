@@ -9,20 +9,21 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126.
-- NVX's pinned OpenVMM revision: `3f7112dea23464c07647eccb9290f335d38d3926`, position 360, the head
-  of microsoft/openvmm#5252, whose commits follow position 358, `7e94a090a`, the head of
+- NVX's pinned OpenVMM revision: `09966aa637e0d488f71c7d7536264357d39db32f`, position 361, the head
+  of microsoft/openvmm#5253, whose commit follows position 360, `3f7112dea`, the head of
+  microsoft/openvmm#5252, whose commits follow position 358, `7e94a090a`, the head of
   microsoft/openvmm#5251, whose commit follows position 357, `e8324ea31`, the head of
-  microsoft/openvmm#5249, whose commit follows position 356, `b73db6676`, the head of
-  microsoft/openvmm#5248, whose commit follows position 355, `899dcd63f`, the head of
-  `feature/microvm/dev` and of the `feature/microvm/release/v8.0` branch of microsoft/openvmm. The
+  `feature/microvm/dev` since microsoft/openvmm#5248 and microsoft/openvmm#5249 landed positions
+  356, `b73db6676`, and 357 on position 355, `899dcd63f`, the head of the
+  `feature/microvm/release/v8.0` branch of microsoft/openvmm. The
   v8.0 reorganization replayed the 370 commits of `feature/microvm/dev` at `09524b79c`, the pin
   before it, on their own fork base and folded the 15 fixups that the roadmap assigned to earlier
   commits, v7.2 positions 302, 316, 333, 335-340, 342, 345, 347, 349, 351, and 365, into the
   commits that they fix, so each later commit's position is its v7.2 position less the number of
   those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
   `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
-  tests. The pin is 234 commits past the mapped tip on the same first-parent chain, and positions
-  127-360 are not yet assigned to PRs; see
+  tests. The pin is 235 commits past the mapped tip on the same first-parent chain, and positions
+  127-361 are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1764,7 +1765,8 @@ bf353460f
   -> PCI slots of chipset devices claimed only once their state unit spawns [357]
   -> virtio-fs inodes documented to deduplicate only within a volume [358]
   -> offsets found in test and fuzzing chipset regions that end at the top [359-360]
-  -> 3f7112dea (NVX pin)
+  -> virtio-fs nodes of LINK replies kept until the guest forgets them [361]
+  -> 09966aa63 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1787,7 +1789,7 @@ reorganization folded the fixups of PR13 and PR18 and of the v7.1 and v7.2 rebas
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges, and its 234 later commits are not
+The NVX pin extends the chain past position 126 without merges, and its 235 later commits are not
 yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
@@ -1796,17 +1798,17 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356-360 followed the v8.0 reorganization, so they combine none, apart
+v7.2 rebase, and positions 356-361 followed the v8.0 reorganization, so they combine none, apart
 from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
 v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which through
 position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
-335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-360 lack.
+335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-361 lack.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-360 have no position before v7.0; see
+positions 297-361 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2055,6 +2057,7 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 358 | `7e94a090a` | - | - | - | - | - | - | - | virtiofs: say that inodes deduplicate only within a volume (microsoft/openvmm#5251) |
 | 359 | `06e69049e` | - | - | - | - | - | - | - | chipset_arc_mutex_device: find offsets in a region that ends at the top (microsoft/openvmm#5252) |
 | 360 | `3f7112dea` | - | - | - | - | - | - | - | chipset_device_fuzz: find offsets in an I/O region that ends at the top (microsoft/openvmm#5252) |
+| 361 | `09966aa63` | - | - | - | - | - | - | - | virtiofs: keep the node that a LINK returns until the guest forgets it (microsoft/openvmm#5253) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2066,7 +2069,7 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-305, `c4419be15`
 `d83f87209`, upstream main later that day, for position 324, `265f0a73f`, upstream main later still,
 for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork base of v7.2 and
 v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356, and
-`5d6ab1cfa`, upstream main later that day, for positions 357-360. They name the positions that the
+`5d6ab1cfa`, upstream main later that day, for positions 357-361. They name the positions that the
 commits have now, but neither the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`,
 the v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked them again, nor
 did the v6.1 rebase check the earlier ones on `7d90c4104`.
@@ -5087,6 +5090,41 @@ among them, change neither crate's entry, to which each adds one line. They chan
 mapped PR adds. No device of the microVM runs on either chipset, so the microVM behaves as it did.
 Replaying them on upstream main applies without conflicts, and both packages type-check there with
 their tests, which pass, so they can go upstream on their own.
+
+Position 361 has `FUSE_LINK` take the lookup reference that its reply hands the guest when it
+resolves its target node, under the inode map's lock, so that a `FORGET` cannot remove the node
+before the reply returns it (microsoft/nvx#1897). Upstream's `VirtioFs::link` counted the reference
+with `VirtioFsInode::inc_lookup` only after its host link, and outside the lock under which
+`Fuse::forget` removes a node whose count reaches zero. The guest sends `FORGET` on the
+high-priority queue, whose worker runs independently of the request queue's, so a `FORGET` of the
+guest's other references to the target while the `LINK` ran removed the node: the `LINK` then
+replied with an ID that every later request failed with `EINVAL`, and recorded the new name, as an
+alias of PR13's position 048, on an inode that nothing tracked. A new `VirtioFs::reference_inode`
+increments the node's count under the map's read lock, which keeps out the write lock that
+`FORGET` takes, and checks the node's confinement as `get_inode` does since PR27's position 126.
+The `LookupReference` that it returns releases the reference, through a new `InodeMap::forget` that
+`forget` now uses too, unless the `LINK` keeps it for its reply, so a `LINK` that fails before or at
+its host link keeps no reference, and the release removes the node if a `FORGET` meanwhile left it
+none. `inc_lookup`, which position 331 saturates at `u64::MAX`, now reports whether it changed the
+count, so that releasing a reference that a saturated count did not record changes nothing. The
+saved state keeps its format. In `lib.rs`, it changes upstream's `link` and `forget`, and in `link`
+the argument of the alias preflight that PR18's position 081 adds, and it adds `reference_inode`,
+whose comment cites that of `insert_inode`, which position 358 rewrites, after upstream's
+`reserve_inode`, `LookupReference` after upstream's `InodeReservation`, and `InodeMap::forget` after
+position 334's `reused`; PR06's position 010, PR13's position 048, PR18's position 083, PR27's
+position 126, and positions 158, 160, 164, 320, 329, 330, 335, 342, 343, 350, and 352 also change
+the file, none of the lines that the commit changes. In `inode.rs`, it changes `inc_lookup`, which
+upstream's microsoft/openvmm#2661 adds and position 331 changes; PR06's position 010, PR13's
+position 048, PR18's positions 081 and 083, PR22's position 102, PR27's position 126, and positions
+160, 165, 320, 329, 330, 338, 346, and 353 also change the file, none of those lines. It adds three
+tests to the tests of `lib.rs`, which use the microVM profile of PR18's position 081 and the alias
+lock of PR13's position 048. It changes nothing that a mapped PR adds but that argument, and it
+fixes no defect of a mapped PR: the race is upstream's, so it is no fixup. Upstream main has the
+race, in the same `link`, since microsoft/openvmm#2661. Replaying the commit there conflicts in
+`inode.rs`, in `inc_lookup`, which upstream main does not saturate, and in `lib.rs`: in `link`,
+whose checks of PR13's position 048, PR18's position 081, and positions 160 and 164 it keeps, and
+where it adds `reference_inode` and `InodeMap::forget`, next to position 335's `get_file` and
+position 334's `reused`, which upstream main lacks, so it cannot go upstream on its own.
 
 ## PR summary
 
