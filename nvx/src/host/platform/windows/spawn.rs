@@ -432,15 +432,10 @@ fn spawn_listed(
 /// by the last four characters of the program's full path name: `.bat` or `.cmd` in any case, so
 /// a file named only `.cmd` is one too.
 fn refuse_batch_file(program: &Path) -> io::Result<()> {
-    let full: Vec<u16> = std::path::absolute(program)?
-        .as_os_str()
-        .encode_wide()
-        .collect();
-    let suffix: Vec<u8> = full[full.len().saturating_sub(4)..]
-        .iter()
-        .map(|unit| u8::try_from(*unit).map_or(0, |byte| byte.to_ascii_lowercase()))
-        .collect();
-    if suffix == b".bat" || suffix == b".cmd" {
+    let full = std::path::absolute(program)?;
+    let bytes = full.as_os_str().as_encoded_bytes();
+    let suffix = &bytes[bytes.len().saturating_sub(4)..];
+    if suffix.eq_ignore_ascii_case(b".bat") || suffix.eq_ignore_ascii_case(b".cmd") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
