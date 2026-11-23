@@ -144,7 +144,7 @@ pub(super) fn with_owner_only_attributes<T>(
         - mem::size_of::<u32>()
         + sid_len;
     let mut acl = vec![0u32; acl_len.div_ceil(mem::size_of::<u32>())];
-    let acl_len = (acl.len() * mem::size_of::<u32>()) as u32;
+    let acl_len = mem::size_of_val(acl.as_slice()) as u32;
     let acl_ptr = acl.as_mut_ptr().cast::<ACL>();
     let mut descriptor = SECURITY_DESCRIPTOR::default();
     let descriptor_ptr: PSECURITY_DESCRIPTOR = (&raw mut descriptor).cast();
