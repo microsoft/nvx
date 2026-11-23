@@ -19,7 +19,7 @@ use super::checks::{self, Checks};
 #[cfg(target_arch = "x86_64")]
 use super::cpu_mask::CpuMask;
 #[cfg(target_arch = "x86_64")]
-use super::decoders::{self, GENERATION_ID_SIZE};
+use super::decoders::GENERATION_ID_SIZE;
 use super::events::CheckId;
 use super::system::{self, PORTB_TIME_WINDOW, Runtime};
 #[cfg(target_arch = "x86_64")]
