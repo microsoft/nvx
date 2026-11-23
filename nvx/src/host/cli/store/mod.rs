@@ -75,7 +75,7 @@ impl StateDir {
     /// Creates the directory `dir`, whose parent must exist, private to the current user, or
     /// opens it if it exists already, which then must be private, as [`open`](Self::open)
     /// requires.
-    pub(crate) fn create(dir: &Path) -> Result<Self> {
+    pub(super) fn create(dir: &Path) -> Result<Self> {
         let problem = platform::create_store_dir(dir).map_err(failed(format!(
             "cannot create the sandbox store {}",
             dir.display()
@@ -85,7 +85,7 @@ impl StateDir {
 
     /// Opens the existing directory `dir`, which must be private to the current user, as
     /// [`create`](Self::create) makes it. Fails with [`ErrorCode::NotFound`] if it does not exist.
-    pub(crate) fn open(dir: &Path) -> Result<Self> {
+    pub(super) fn open(dir: &Path) -> Result<Self> {
         let problem = platform::check_store_dir(dir).map_err(failed(format!(
             "cannot open the sandbox store {}",
             dir.display()
