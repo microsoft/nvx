@@ -9,16 +9,18 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126.
-- NVX's pinned OpenVMM revision: `899dcd63f81e9fd40d1585cb50c60f22afed7a46`, position 355, the head
-  of the `feature/microvm/release/v8.0` branch of microsoft/openvmm. The v8.0 reorganization
-  replayed the 370 commits of `feature/microvm/dev` at `09524b79c`, the pin before it, on their
-  own fork base and folded the 15 fixups that the roadmap assigned to earlier commits, v7.2
-  positions 302, 316, 333, 335-340, 342, 345, 347, 349, 351, and 365, into the commits that they
-  fix, so each later commit's position is its v7.2 position less the number of those fixups
-  before it; see [The v8.0 reorganization](#the-v80-reorganization). The pin's tree differs from
-  the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm` tests. The pin is 229
-  commits past the mapped tip on the same first-parent chain, and positions 127-355 are not yet
-  assigned to PRs; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
+- NVX's pinned OpenVMM revision: `b73db66767b9f57621c87a69b80f0a9e4e0fd9fa`, position 356, the head
+  of microsoft/openvmm#5248, whose commit follows position 355, `899dcd63f`, the head of
+  `feature/microvm/dev` and of the `feature/microvm/release/v8.0` branch of microsoft/openvmm. The
+  v8.0 reorganization replayed the 370 commits of `feature/microvm/dev` at `09524b79c`, the pin
+  before it, on their own fork base and folded the 15 fixups that the roadmap assigned to earlier
+  commits, v7.2 positions 302, 316, 333, 335-340, 342, 345, 347, 349, 351, and 365, into the
+  commits that they fix, so each later commit's position is its v7.2 position less the number of
+  those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
+  `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
+  tests. The pin is 230 commits past the mapped tip on the same first-parent chain, and positions
+  127-356 are not yet assigned to PRs; see
+  [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -30,8 +32,8 @@ had not passed, so it dropped no commit and nothing conflicted with upstream. It
 fixups of the v7.2 line into the commits that they fix, re-expressed for the code that those
 commits have: the PR13 and PR18 fixups at v7.2 positions 302, 333, 340, 342, 345, 347, 349, 351,
 and 365, which pull requests added after v7.0, the v7.1 rebase's fixup at v7.2 position 316, and
-the v7.2 rebase's fixups at v7.2 positions 335-339. The pin's tree differs from the tree of
-`09524b79c` only in rustfmt's layout of two `virt_kvm` tests; see
+the v7.2 rebase's fixups at v7.2 positions 335-339. The tree of its head, `899dcd63f`, differs
+from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm` tests; see
 [The v8.0 reorganization](#the-v80-reorganization).
 
 The `feature/microvm/release/v7.2` rebase moved the 335-commit chain of `feature/microvm/dev`,
@@ -1755,7 +1757,8 @@ bf353460f
   -> virtio-fs nodes whose names are all gone reached only through their handles [353]
   -> microVM READDIRPLUS listings of btrfs placeholders and same-device mount points [354]
   -> microVM READDIRPLUS names of the listed node listed without a node [355]
-  -> 899dcd63f (NVX pin)
+  -> FUSE_INIT negotiations adopted only once their reply is sent [356]
+  -> b73db6676 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1778,7 +1781,7 @@ reorganization folded the fixups of PR13 and PR18 and of the v7.1 and v7.2 rebas
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges, and its 229 later commits are not
+The NVX pin extends the chain past position 126 without merges, and its 230 later commits are not
 yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
@@ -1786,17 +1789,18 @@ commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 a
 of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 followed the v5.0
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
-v7.0 reorganization, positions 315-331 followed the v7.1 rebase, and positions 332-355 followed
-the v7.2 rebase, so they combine none, apart from position 215, which combines v5.1 positions 222
-and 223, and the commits that the v7.0 and v8.0 reorganizations folded into them. The table gives
-each commit's v7.2 position, which through position 301 is its own, since the v8.0
-reorganization folded v7.2 positions 302, 316, 333, 335-340, 342, 345, 347, 349, 351, and 365.
+v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
+v7.2 rebase, and position 356 followed the v8.0 reorganization, so they combine none, apart from
+position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and v8.0
+reorganizations folded into them. The table gives each commit's v7.2 position, which through
+position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
+335-340, 342, 345, 347, 349, 351, and 365, and which position 356 lacks.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-355 have no position before v7.0; see
+positions 297-356 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2040,6 +2044,7 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 353 | `766a74a9d` | 368 | - | - | - | - | - | - | virtiofs: reach a node whose last name is gone only through its handles (microsoft/openvmm#5227) |
 | 354 | `c0efd6c92` | 369 | - | - | - | - | - | - | virtiofs: list btrfs placeholders and bind mounts in microVM READDIRPLUS (microsoft/openvmm#5228) |
 | 355 | `899dcd63f` | 370 | - | - | - | - | - | - | virtiofs: stop microVM READDIRPLUS from aliasing the listed node (microsoft/openvmm#5229) |
+| 356 | `b73db6676` | - | - | - | - | - | - | - | fuse: adopt a FUSE_INIT negotiation only once its reply is sent (microsoft/openvmm#5248) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2049,11 +2054,11 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-305, `c4419be15`
 `715927303`, upstream main on 2026-11-18, for positions 315-318, `5cf28492b`, upstream main on
 2026-11-19, for positions 319-322, `78af54a51`, upstream main on 2026-11-20, for position 323,
 `d83f87209`, upstream main later that day, for position 324, `265f0a73f`, upstream main later still,
-for positions 325 and 326, and `bf353460f`, upstream main on 2026-11-21 and the fork base of v7.2
-and v8.0, for positions 327-355. They name the positions that the commits have now, but neither the
-v8.0 reorganization and the v7.2 rebase, both on `bf353460f`, the v7.1 rebase on `9a875b563`, nor
-the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the earlier
-ones on `7d90c4104`.
+for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork base of v7.2 and
+v8.0, for positions 327-355, and `b50d0c979`, upstream main later on 2026-11-23, for position 356.
+They name the positions that the commits have now, but neither the v8.0 reorganization and the
+v7.2 rebase, both on `bf353460f`, the v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on
+`e6b458cc0` checked them again, nor did the v6.1 rebase check the earlier ones on `7d90c4104`.
 
 Some of these commits change mapped work rather than add to it. Position 142 removes the legacy
 microVM clock paths, changing files that PR10 and PR17 also change, and makes manifest version 6 the
@@ -4980,6 +4985,36 @@ a PR18 fixup, and it follows position 354. Upstream main has the defect too, in 
 own `READDIRPLUS`, which the commit leaves as it is. Replaying the commit there conflicts in the
 microVM's `file.rs` and `fs_tests.rs`, which upstream main lacks, so it cannot go upstream on its
 own.
+
+Position 356 has `Session::dispatch_init` adopt a `FUSE_INIT` negotiation, and mark the session
+initialized, only once it has sent the negotiation's reply (microsoft/nvx#1898). It negotiated in
+the session's own `SessionInfo`, under the write guard that it holds for the whole request, so a
+reply that could not be sent, as when a guest's reply buffers cannot hold it, left the values of a
+negotiation that the guest never received in an uninitialized session: `Session::save_state` saved
+them in a state that the `SessionState::validate` of PR13's position 047 refuses, which a dormant
+microVM slot refused to save, and the next `FUSE_INIT`, which sets only some fields before
+`Fuse::init`, inherited the failed attempt's `max_background` and `congestion_threshold`. It now
+negotiates in a `SessionInfo` of the request's own, from the defaults and the guest's offer alone,
+and stores it in the session only once it has sent the negotiation's reply, so a reply that fails
+leaves the session uninitialized without a negotiation. Position 328's refusal of unoffered flags,
+which replies with an error instead, already left it so, but no longer resets the session's
+`SessionInfo`, which it no longer touches. A `FUSE_INIT` whose negotiation's reply is sent
+negotiates as before. When the reply fails, `Fuse::init` has already run, and nothing pairs it with
+`Fuse::destroy`, which microsoft/nvx#1900 tracks; `VirtioFs::init` records its negotiation there, so
+a microVM save after such a reply still finds that record and the session's state disagree, as
+before. The saved state keeps its format. In `session.rs`, it changes `dispatch_init`, in lines that
+PR13's position 047, which caps the guest's minor version, and position 328, which keeps the version
+and the guest's capabilities across `init` and adds the refusal, also change, and in `lib.rs` it
+documents the adoption on `Fuse::init` after position 328's paragraph; PR13's position 047 and
+positions 321, 323, 326, and 327 also change both files, and position 324 changes `session.rs`. It
+adds two tests to position 328's tests of `FUSE_INIT`, which use the session's test harness of
+positions 321 and 325 and the session state of PR13's position 047. It is not a PR13 fixup, although
+the failed attempt's values reached position 047's saved state: the negotiation in place is
+upstream's, and the commit changes lines that position 328 adds, so it follows position 328.
+Upstream main negotiates in the session's `SessionInfo` too, so its next `FUSE_INIT` after a reply
+that fails inherits the same two fields, but it saves no session state. Replaying the commit there
+conflicts in `lib.rs` and `session.rs`, whose lines of positions 047 and 328 it changes, and in
+position 328's `init.rs`, which upstream main lacks, so it cannot go upstream on its own.
 
 ## PR summary
 
