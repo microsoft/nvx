@@ -407,14 +407,12 @@ fn check_protective_mbr<S: ReadAt + ?Sized>(source: &S) -> Result<(), GptError> 
     if mbr[MBR_SIGNATURE_OFFSET..] != MBR_SIGNATURE {
         return Err(GptError::MbrSignature);
     }
-    let records: Vec<&[u8]> = mbr[MBR_RECORDS_OFFSET..MBR_SIGNATURE_OFFSET]
-        .chunks_exact(MBR_RECORD_SIZE)
-        .collect();
+    let (records, _) = mbr[MBR_RECORDS_OFFSET..MBR_SIGNATURE_OFFSET].as_chunks::<MBR_RECORD_SIZE>();
     let protective = records
         .iter()
         .position(|record| record[MBR_RECORD_TYPE_OFFSET] == PROTECTIVE_TYPE)
         .ok_or(GptError::NoProtectiveRecord)?;
-    let start = u32_at(records[protective], MBR_RECORD_START_OFFSET);
+    let start = u32_at(&records[protective], MBR_RECORD_START_OFFSET);
     if u64::from(start) != PRIMARY_HEADER_LBA {
         return Err(GptError::ProtectiveRecordStart(start));
     }
