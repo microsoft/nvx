@@ -77,7 +77,6 @@ impl MemoryMapping {
     ///
     /// Returns `false` without writing unless every byte lies inside the mapping. The mapping is
     /// writable by construction.
-    #[cfg(target_arch = "x86_64")]
     pub(crate) fn write_bytes(&mut self, offset: usize, bytes: &[u8]) -> bool {
         if offset
             .checked_add(bytes.len())

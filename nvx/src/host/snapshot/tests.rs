@@ -1548,6 +1548,7 @@ impl RestoreFixture {
             boot: None,
         };
         let runtime = Runtime {
+            architecture: crate::host::runtime::GuestArchitecture::X86_64,
             openvmm: snapshot.root.path().join("unread-openvmm"),
             kernel: snapshot.root.path().join("unread-kernel"),
             initramfs: snapshot.root.path().join("unread-initramfs"),

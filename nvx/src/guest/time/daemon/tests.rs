@@ -31,7 +31,7 @@ fn polled(disruption: u32) -> BestSample {
 
 #[test]
 fn a_poll_records_its_sample_and_reports_a_disruption() {
-    let mut state = TimeState::default();
+    let mut state = StateReport::default();
     let accepted = |disruption, step_realtime_ns| PollOutcome::Accepted {
         sample: polled(disruption),
         step_realtime_ns,

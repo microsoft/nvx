@@ -128,6 +128,7 @@ fn runtime_identities_name_the_parts_that_differ() {
 /// options.
 fn shared() -> Runtime {
     Runtime {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         openvmm: PathBuf::from("openvmm"),
         kernel: PathBuf::from("vmlinux"),
         initramfs: PathBuf::from("initramfs.cpio.gz"),

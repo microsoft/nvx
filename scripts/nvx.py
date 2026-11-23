@@ -71,6 +71,7 @@ from nvx_tools.collect_ubuntu_sources import (
 from nvx_tools.common import (
     ScriptError,
     artifact_path,
+    positive_int,
 )
 from nvx_tools.create_linux_source_archive import (
     configure_parser as configure_linux_source_archive_parser,
@@ -93,6 +94,7 @@ from nvx_tools.guest_binaries import (
 from nvx_tools.guests import GUEST_NAMES, guest_descriptor
 from nvx_tools.kernel_config import configuration_problems
 from nvx_tools.kernel_config import summary as kernel_config_summary
+from nvx_tools.kernel_features import features_for_architecture
 from nvx_tools.merge_queue import configure_parser as configure_merge_queue_parser
 from nvx_tools.microvm_tests import configure_parser as configure_microvm_test_parser
 from nvx_tools.microvm_tests import (
@@ -140,6 +142,8 @@ def _build_config(args: argparse.Namespace) -> BuildConfig:
         guest=getattr(args, "guest", InitramfsBuildConstants.DEFAULT_GUEST),
         native_guest=getattr(args, "native", False),
         debug_kernel=getattr(args, "debug_kernel", False),
+        kernel=KernelBuildConfig(jobs=getattr(args, "jobs", None)),
+        docker=DockerBuildConfig(kernel_jobs=getattr(args, "jobs", None)),
         openvmm=_openvmm_build_config(args),
     )
 
@@ -149,11 +153,15 @@ def command_build_guest(args: argparse.Namespace) -> None:
 
 
 def command_check_guest_binaries(args: argparse.Namespace) -> None:
-    check_guest_binaries(args.toolchain)
+    check_guest_binaries(
+        args.toolchain, architecture=getattr(args, "architecture", "x86_64")
+    )
 
 
 def command_build_guest_binaries(args: argparse.Namespace) -> None:
-    result = build_guest_binaries(args.output)
+    result = build_guest_binaries(
+        args.output, architecture=getattr(args, "architecture", "x86_64")
+    )
     print(
         json.dumps(
             {
@@ -167,60 +175,81 @@ def command_build_guest_binaries(args: argparse.Namespace) -> None:
 
 
 def command_test_guest_binaries(args: argparse.Namespace) -> None:
-    test_guest_binaries(args.binaries)
+    test_guest_binaries(
+        args.binaries, architecture=getattr(args, "architecture", "x86_64")
+    )
 
 
 def command_build_kernel(args: argparse.Namespace) -> None:
     build_kernel(
-        KernelBuildConfig.debug_variant()
-        if getattr(args, "debug", False)
-        else KernelBuildConfig()
+        KernelBuildConfig.for_architecture(
+            getattr(args, "architecture", "x86_64"),
+            debug=getattr(args, "debug", False),
+            jobs=getattr(args, "jobs", None),
+        )
     )
 
 
 def command_kernel_config(args: argparse.Namespace) -> None:
+    config = KernelBuildConfig.for_architecture(getattr(args, "architecture", "x86_64"))
     if args.native:
-        generate_kernel_config(KernelBuildConfig(), check=args.check)
+        generate_kernel_config(config, check=args.check)
     else:
+        if config.architecture != "x86_64":
+            raise ScriptError(
+                "ARM kernel-config requires --native on an AArch64 Linux toolchain"
+            )
         generate_docker_kernel_config(DockerBuildConfig(), check=args.check)
 
 
-def command_check_kernel_config(_: argparse.Namespace) -> None:
+def command_check_kernel_config(args: argparse.Namespace) -> None:
     root = BuildConstants.REPO_ROOT
-    config_text = (root / KernelBuildConstants.INPUT_CONFIG).read_text(encoding="utf-8")
-    derived_text = (root / KernelBuildConstants.DERIVED_CONFIG).read_text(
-        encoding="utf-8"
+    config = KernelBuildConfig.for_architecture(getattr(args, "architecture", "x86_64"))
+    config_text = (root / config.input_config).read_text(encoding="utf-8")
+    derived_text = (root / config.derived_config).read_text(encoding="utf-8")
+    features = features_for_architecture(config.architecture)
+    problems = (
+        configuration_problems(config_text, derived_text)
+        if config.architecture == "x86_64"
+        else configuration_problems(
+            config_text,
+            derived_text,
+            features,
+            config_name=config.input_config.as_posix(),
+            derived_name=config.derived_config.as_posix(),
+        )
     )
-    problems = configuration_problems(config_text, derived_text)
     if problems:
         raise ScriptError(
             "the kernel configuration does not match its feature inventory:\n  "
             + "\n  ".join(problems)
         )
     print(
-        f">> kernel configuration: {kernel_config_summary(config_text, derived_text)}"
+        f">> kernel configuration: {kernel_config_summary(config_text, derived_text, features)}"
     )
 
 
 def command_build_initramfs(args: argparse.Namespace) -> None:
+    config = BuildConfig.initramfs_config(
+        args.guest, architecture=getattr(args, "architecture", "x86_64")
+    )
     if not guest_descriptor(args.guest).native_build_supported:
         build_docker_initramfs(DockerBuildConfig(), args.guest)
         return
-    build_initramfs(BuildConfig.initramfs_config(args.guest))
+    build_initramfs(config)
 
 
 def command_build_distro_layer(args: argparse.Namespace) -> None:
+    selected = BuildConfig.distro_layer_config(
+        args.guest, architecture=args.architecture
+    )
     build_distro_layer(
         DistroLayerBuildConfig(
             guest=args.guest,
-            work=(
-                BuildConstants.BUILD_DIR
-                / InitramfsBuildConstants.DISTRO_WORK_DIRECTORY_TEMPLATE.format(
-                    guest=args.guest
-                )
-            ),
-            output=args.output,
+            work=selected.work,
+            output=args.output if args.output is not None else selected.output,
             replace=args.replace,
+            architecture=args.architecture,
         )
     )
 
@@ -390,6 +419,9 @@ def _add_guest_options(
 ) -> None:
     choices = (*GUEST_NAMES, "all") if allow_all else GUEST_NAMES
     parser.add_argument(
+        "--jobs", type=positive_int, help="maximum parallel kernel build jobs"
+    )
+    parser.add_argument(
         "--guest",
         choices=choices,
         default=InitramfsBuildConstants.DEFAULT_GUEST,
@@ -444,6 +476,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--toolchain",
         help="Rust toolchain to use (default: the rust-toolchain.toml pin)",
     )
+    guest_binary_checks.add_argument(
+        "--architecture", choices=("x86_64", "aarch64"), default="x86_64"
+    )
     guest_binary_checks.set_defaults(handler=command_check_guest_binaries)
 
     guest_binaries = subparsers.add_parser(
@@ -451,6 +486,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="build the pinned Rust executables for Linux guests",
     )
     guest_binaries.add_argument("--output", type=Path, required=True)
+    guest_binaries.add_argument(
+        "--architecture", choices=("x86_64", "aarch64"), default="x86_64"
+    )
     guest_binaries.set_defaults(handler=command_build_guest_binaries)
 
     guest_binary_tests = subparsers.add_parser(
@@ -458,11 +496,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="test prebuilt Rust guest executables",
     )
     guest_binary_tests.add_argument("--binaries", type=Path, required=True)
+    guest_binary_tests.add_argument(
+        "--architecture", choices=("x86_64", "aarch64"), default="x86_64"
+    )
     guest_binary_tests.set_defaults(handler=command_test_guest_binaries)
 
     kernel = subparsers.add_parser(
         "build-kernel",
         help="fetch, patch, and build the pinned kernel natively on Linux",
+    )
+    kernel.add_argument(
+        "--jobs", type=positive_int, help="maximum parallel kernel build jobs"
+    )
+    kernel.add_argument(
+        "--architecture", choices=("x86_64", "aarch64"), default="x86_64"
     )
     kernel.add_argument(
         "--debug",
@@ -480,6 +527,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "generate kernel/config-microvm and its derived record from the "
             "kernel feature inventory"
         ),
+    )
+    kernel_config.add_argument(
+        "--architecture", choices=("x86_64", "aarch64"), default="x86_64"
     )
     kernel_config.add_argument(
         "--native",
@@ -503,6 +553,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "kernel feature inventory, without a kernel source"
         ),
     )
+    check_kernel_config.add_argument(
+        "--architecture", choices=("x86_64", "aarch64"), default="x86_64"
+    )
     check_kernel_config.set_defaults(handler=command_check_kernel_config)
 
     initramfs = subparsers.add_parser(
@@ -521,6 +574,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             f"(default: {InitramfsBuildConstants.DEFAULT_GUEST})"
         ),
     )
+    initramfs.add_argument(
+        "--architecture", choices=("x86_64", "aarch64"), default="x86_64"
+    )
     initramfs.set_defaults(handler=command_build_initramfs)
 
     distro_layer = subparsers.add_parser(
@@ -529,9 +585,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     distro_layer.add_argument("--guest", choices=GUEST_NAMES, required=True)
     distro_layer.add_argument(
+        "--architecture", choices=("x86_64", "aarch64"), default="x86_64"
+    )
+    distro_layer.add_argument(
         "--output",
         type=Path,
-        default=artifact_path(UbuntuBuildConstants.DISTRO_NAME),
     )
     distro_layer.add_argument("--replace", action="store_true")
     distro_layer.set_defaults(handler=command_build_distro_layer)

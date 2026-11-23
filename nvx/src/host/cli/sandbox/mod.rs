@@ -22,15 +22,16 @@ mod state;
 
 use std::path::{Path, PathBuf};
 
-use super::artifacts::{Located, OPENVMM_VARIABLE, locate};
+use super::artifacts::{Located, OPENVMM_VARIABLE};
 use super::download::{self, Hold};
 use super::session::ExecRequest;
 use super::{Exit, Result, io_error, output};
 use crate::ErrorCode;
-use crate::host::artifacts::{Guest, KERNEL_NAME, require_artifact};
+use crate::host::artifacts::{Guest, require_artifact};
+use crate::host::config::VmConfig;
 use crate::host::filesystem::{ExportPlan, PlannedExport, ReservedTargets};
 use crate::host::paths;
-use crate::host::runtime::RuntimeIdentity;
+use crate::host::runtime::{GuestArchitecture, RuntimeIdentity};
 use crate::host::sandbox::DEFAULT_ENTRYPOINT;
 use crate::host::sandbox::distro::{DistroBinding, DistroFormat};
 use crate::host::sandbox::layer::SandboxLayer;
@@ -49,18 +50,48 @@ pub(crate) use self::options::{Options, path_string};
 pub(crate) use self::state::Source;
 use self::state::{NetworkRecord, RecordedDistro, check_images, check_workload};
 
+fn locate_for(root: Option<&str>, architecture: GuestArchitecture) -> Result<Located> {
+    let mut located = super::artifacts::locate(root)?;
+    located.dir = located.dir.with_architecture(architecture)?;
+    Ok(located)
+}
+
 /// The artifacts of a sandbox, found when an operation first needs them.
 pub(crate) struct Artifacts<'a> {
     /// `--root`, if given.
     pub(super) root: Option<&'a str>,
+    architecture: GuestArchitecture,
 }
 
-impl Artifacts<'_> {
+impl<'a> Artifacts<'a> {
+    pub(crate) fn new(root: Option<&'a str>) -> Self {
+        Self {
+            root,
+            architecture: GuestArchitecture::X86_64,
+        }
+    }
+
+    pub(crate) fn with_architecture(&self, architecture: GuestArchitecture) -> Self {
+        Self {
+            root: self.root,
+            architecture,
+        }
+    }
+
+    fn locate(&self) -> Result<Located> {
+        locate_for(self.root, self.architecture)
+    }
+
     /// Downloads the release of a checkout without artifacts for `hypervisor` before an
     /// operation runs them, as [`download::ensure`] decides, and returns what the operation holds
     /// while it reads them and launches OpenVMM on them.
     pub(crate) fn ensure(&self, hypervisor: &str) -> Result<Hold> {
-        download::ensure(&locate(self.root)?, Some(Guest::Alpine), hypervisor)
+        let located = self.locate()?;
+        if located.dir.architecture() == GuestArchitecture::Aarch64 {
+            download::hold(&located)
+        } else {
+            download::ensure(&located, Some(Guest::Alpine), hypervisor)
+        }
     }
 
     /// Downloads the release of a checkout without artifacts for `hypervisor`, as
@@ -68,24 +99,36 @@ impl Artifacts<'_> {
     /// [`hold`](Self::hold) returned before the operation read anything of the root, and returns
     /// what the operation holds while it reads the artifacts and launches OpenVMM on them.
     pub(crate) fn ensure_under(&self, held: Hold, hypervisor: &str) -> Result<Hold> {
-        download::ensure_under(held, &locate(self.root)?, Some(Guest::Alpine), hypervisor)
+        let located = self.locate()?;
+        if located.dir.architecture() == GuestArchitecture::Aarch64 {
+            Ok(held)
+        } else {
+            download::ensure_under(held, &located, Some(Guest::Alpine), hypervisor)
+        }
     }
 
     /// Returns what an operation holds while it reads the runtime identity of the artifacts,
     /// which runs none of them, as [`download::hold`] says: it downloads nothing.
     pub(crate) fn hold(&self) -> Result<Hold> {
-        download::hold(&locate(self.root)?)
+        download::hold(&self.locate()?)
     }
 
     /// Returns the OpenVMM executable, kernel, and Alpine initramfs, checked in that order as
     /// `nvx.py sandbox run` and `start` checked them.
     pub(crate) fn require(&self) -> Result<[String; 3]> {
-        let Located { dir, openvmm } = locate(self.root)?;
+        let Located { dir, openvmm } = self.locate()?;
         require_artifact(&openvmm, "OpenVMM release binary")?;
-        let kernel = dir.artifact(KERNEL_NAME);
-        require_artifact(&kernel, "Linux direct kernel")?;
+        #[cfg(windows)]
+        if dir.architecture() == GuestArchitecture::Aarch64 {
+            crate::host::artifacts::check_arm64_pe(&openvmm)?;
+        }
+        let kernel = dir.require_kernel()?;
         let initrd = dir.initramfs(Guest::Alpine);
-        require_artifact(&initrd, "initramfs")?;
+        if dir.architecture() == GuestArchitecture::Aarch64 {
+            dir.require_initramfs(Guest::Alpine)?;
+        } else {
+            require_artifact(&initrd, "initramfs")?;
+        }
         Ok([
             path_string(&openvmm)?,
             path_string(&kernel)?,
@@ -97,7 +140,7 @@ impl Artifacts<'_> {
     /// names, as [`ArtifactDir::runtime_identity`](crate::host::artifacts::ArtifactDir::runtime_identity)
     /// reads it.
     pub(crate) fn runtime_identity(&self) -> Result<RuntimeIdentity> {
-        locate(self.root)?
+        self.locate()?
             .dir
             .runtime_identity()
             .map_err(error_with_cause)
@@ -108,7 +151,7 @@ impl Artifacts<'_> {
     /// own OpenVMM alone, so the start refuses another one that `NVX_OPENVMM` names, which the
     /// runtime record would otherwise misname.
     pub(crate) fn launch_identity(&self) -> Result<RuntimeIdentity> {
-        let Located { dir, openvmm } = locate(self.root)?;
+        let Located { dir, openvmm } = self.locate()?;
         if openvmm != dir.openvmm() {
             return Err(Exit::error(
                 ErrorCode::Unsupported,
@@ -120,6 +163,51 @@ impl Artifacts<'_> {
         }
         dir.runtime_identity().map_err(error_with_cause)
     }
+}
+
+/// Projects the selected VMM's DT boot additions; no x86 device-discovery tokens are appended.
+pub(super) fn arm_effective_command_line(config: &VmConfig) -> crate::Result<String> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use crate::host::network::{self, Access, HostLoopback};
+
+    let mut line = format!(
+        "earlycon=nvx-mmio,0xd1000000 console=hvc1 reboot=t panic=-1 {} \
+         nr_cpus={} nvx_control_tty=hvc2",
+        config.kernel_command_line()?,
+        config.processors,
+    );
+    if let Some(network) = &config.network {
+        let guest = network.cold_nic()?.guest_network;
+        let mask = u32::MAX << (32 - u32::from(guest.prefix_len()));
+        let gateway = Ipv4Addr::from((u32::from(guest.address()) & mask) + 1);
+        let embed = |address: Ipv4Addr| {
+            Ipv6Addr::from((0xfd00_u128 << 112) | u128::from(u32::from(address)))
+        };
+        line.push_str(&format!(
+            " virtnet_ip={} virtnet_mask={} virtnet_gw={gateway}",
+            guest.address(),
+            Ipv4Addr::from(mask),
+        ));
+        if let Some(server) = network::dns_server(&network.policy, gateway, Some(embed(gateway)))? {
+            line.push_str(&format!(" virtnet_dns={server}"));
+        }
+        line.push_str(&format!(
+            " virtnet_ip6={}/{} virtnet_gw6={}",
+            embed(guest.address()),
+            96 + guest.prefix_len(),
+            embed(gateway),
+        ));
+        if network.policy.ingress == Access::Allow {
+            line.push_str(" virtnet_ingress=allow");
+        } else if network.policy.host_loopback == HostLoopback::Allow {
+            line.push_str(" virtnet_ingress=host-loopback");
+        }
+    }
+    if let Some(export) = &config.filesystem {
+        line.push_str(&export_tokens(export));
+    }
+    Ok(line)
 }
 
 /// Returns the error that prints the message of `error`, followed by the I/O error or other
@@ -160,7 +248,7 @@ pub(super) fn restore(root: Option<&str>, options: Options, source: Source) -> R
         state_dir
             .as_deref()
             .expect("provision required --state-dir"),
-        &Artifacts { root },
+        &Artifacts::new(root),
         timeout,
         false,
     )
@@ -181,7 +269,7 @@ pub(super) fn restore_once(root: Option<&str>, options: Options, source: Source)
         options.timeout,
     );
     run_from(root, options, Some(&source))?;
-    let artifacts = Artifacts { root };
+    let artifacts = Artifacts::new(root);
     let restored = lifecycle::start(&state_dir, &artifacts, timeout, true)
         .and_then(|()| lifecycle::stop(&state_dir, &artifacts, timeout));
     let removed = lifecycle::deprovision(&state_dir, &artifacts, timeout).map_err(|error| {
@@ -243,7 +331,19 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
         upper: options.upper,
     };
     let environment = checks.check()?;
-    let artifacts = Artifacts { root };
+    let selected_architecture = options.architecture.unwrap_or(GuestArchitecture::X86_64);
+    if options.architecture.is_some()
+        && !matches!(
+            operation,
+            SandboxOperation::Run | SandboxOperation::Provision
+        )
+    {
+        return Err(Exit::error(
+            ErrorCode::Unsupported,
+            "--architecture is only valid for sandbox run or provision; later transitions use the recorded ISA",
+        ));
+    }
+    let artifacts = Artifacts::new(root).with_architecture(selected_architecture);
     // A run holds the lock of the downloads into a checkout from before it reads the distro
     // layer, which may be a release's, until its VM is ready, so that no download replaces the
     // layer or the artifacts meanwhile. It reports a failure to take it where it decides to
@@ -347,7 +447,7 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
             let state_dir = state_dir("provision")?;
             // A provision runs no artifact, so it needs no artifact root; without one, `start`
             // checks the shares against the artifacts that it runs.
-            let located = locate(root).ok();
+            let located = artifacts.locate().ok();
             refuse_own_files(
                 Some(("state directory", Path::new(state_dir))),
                 layer.path(),
@@ -360,7 +460,16 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
                 &layer,
                 scratch.as_deref(),
                 &distro,
-                &recorded(&options, export.as_ref(), network.as_ref()),
+                &recorded(
+                    &options,
+                    export.as_ref(),
+                    network.as_ref(),
+                    if source.is_some() {
+                        GuestArchitecture::X86_64
+                    } else {
+                        selected_architecture
+                    },
+                ),
                 source,
                 options.timeout,
             )
@@ -408,7 +517,12 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
             let Some(result) = lifecycle::run(
                 &distro,
                 scratch.as_deref(),
-                &recorded(&options, export.as_ref(), network.as_ref()),
+                &recorded(
+                    &options,
+                    export.as_ref(),
+                    network.as_ref(),
+                    selected_architecture,
+                ),
                 &artifacts,
                 &options,
                 &request,
@@ -432,8 +546,10 @@ fn recorded<'a>(
     options: &'a Options,
     export: Option<&'a PlannedExport>,
     network: Option<&'a NetworkRecord>,
+    architecture: GuestArchitecture,
 ) -> ProvisionConfig<'a> {
     ProvisionConfig {
+        architecture,
         hypervisor: hypervisor(options.hypervisor),
         memory_mib: options.memory_mib,
         cmdline: &options.cmdline,

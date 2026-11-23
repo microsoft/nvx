@@ -153,9 +153,10 @@ released first-parent ancestor.
 
 [`nvx/`](../nvx/README.md) is also published on crates.io as the `nvx`
 crate, a preview whose versions are pre-releases, which Cargo selects only for
-a requirement that names a pre-release: `0.2.0-alpha.N` since the breaking
-release that the [changelog](../CHANGELOG.md) records, and `0.1.0-alpha.N`
-before it. The nightly CI run publishes a new version from `dev` whenever the
+a requirement that names a pre-release. The unreleased explicit-guest-ISA API
+starts the `0.3.0-alpha.N` series; `0.2.0-alpha.N` and `0.1.0-alpha.N`
+remain the earlier breaking series that the [changelog](../CHANGELOG.md)
+records. The nightly CI run publishes a new version from `dev` whenever the
 crate changed, with the next number, as
 [crates.io releases](ci.md#cratesio-releases) describes, so a change reaches
 crates.io within a day of its merge. The crate holds the files that Git tracks

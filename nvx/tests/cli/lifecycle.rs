@@ -185,9 +185,19 @@ fn assert_runtime_record(root: &Root, state: &str, record: &Value) -> (String, P
     names.sort();
     assert_eq!(
         names,
-        ["capability", "endpoint", "process", "runtime", "vmDir"],
+        [
+            "architecture",
+            "capability",
+            "endpoint",
+            "process",
+            "runtime",
+            "version",
+            "vmDir",
+        ],
         "{record}"
     );
+    assert_eq!(record["version"], 2, "{record}");
+    assert_eq!(record["architecture"], "x86_64", "{record}");
     assert_eq!(
         Path::new(record["vmDir"].as_str().unwrap()),
         root.below(state)

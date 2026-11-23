@@ -352,6 +352,8 @@ class FieldParsingTests(unittest.TestCase):
             assert content is not None
             (profiles / Path(path).name).write_text(content, encoding="utf-8")
             document = json.loads(content)
+            if time_abi.is_arm_cpu_profile(document):
+                continue
             generation = document["generation"]
             # Keyed by profile ID, so that a revision that the copy lacks fails
             # the comparison instead of replacing another.
@@ -406,6 +408,27 @@ class FieldParsingTests(unittest.TestCase):
         generations = time_abi.openvmm_cpu_generations(checkout)
         self.assertEqual(set(generations), {icelake, alderlake, sapphire_rapids})
         self.assertEqual(len(generations), 3)
+        arm = checkout / time_abi.OPENVMM_CPU_PROFILES / "qualcomm.oryon-x1.v1.json"
+        arm.write_text(
+            json.dumps(
+                {
+                    "vendor": "qualcomm",
+                    "profile": {
+                        "id": "qualcomm.oryon-x1.v1",
+                        "schema": "nvx.arm64.cpu.v1",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(time_abi.openvmm_cpu_generations(checkout), generations)
+        arm.write_text(
+            json.dumps({"profile": {"schema": "nvx.arm64.cpu.v2"}}),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "names no vendor or generation"):
+            time_abi.openvmm_cpu_generations(checkout)
+        arm.unlink()
         # A CPU that only the checkout's profiles cover is benchmarked with
         # them, and not with NVX's copy of the catalog.
         sapphire_rapids_host = time_abi.HostCpu("GenuineIntel", 6, 143, 8)
@@ -2549,10 +2572,11 @@ class DoctorTests(unittest.TestCase):
         # which nvx's restore packet decoder bounds by the time ABI's
         # restore tolerance, the one that OpenVMM's rate policy applies.
         root = Path(__file__).resolve().parents[1]
+        directory = root / "nvx" / "src" / "guest" / "time"
         decoders = rust_integer_constants(
-            (root / "nvx" / "src" / "guest" / "time" / "decoders.rs").read_text(
-                encoding="utf-8"
-            )
+            (directory / "model.rs").read_text(encoding="utf-8")
+            + "\n"
+            + (directory / "decoders.rs").read_text(encoding="utf-8")
         )
         scaled_ppm = decoders["SCALED_PPM"]
         self.assertEqual(scaled_ppm, 1 << 16)

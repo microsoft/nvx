@@ -15,6 +15,7 @@ use crate::protocol::{
 use super::super::seam::Paths;
 use super::super::seam::tests::{TestSystem, attach_calls};
 use super::*;
+#[cfg(target_arch = "x86_64")]
 use crate::guest::init::Capture;
 use crate::guest::mappings::Access;
 use crate::guest::sys::tests::{
@@ -64,19 +65,26 @@ impl Harness {
     }
 
     fn spawn_with(system: TestSystem, config: AgentConfig, mappings: HostMappings) -> Self {
-        Self::spawn_with_capture(system, config, mappings, None)
+        Self::spawn_with_capture(
+            system,
+            config,
+            mappings,
+            #[cfg(target_arch = "x86_64")]
+            None,
+        )
     }
 
     fn spawn_with_capture(
         mut system: TestSystem,
         config: AgentConfig,
         mut mappings: HostMappings,
-        capture: Option<Capture>,
+        #[cfg(target_arch = "x86_64")] capture: Option<Capture>,
     ) -> Self {
         let (host, guest) = UnixStream::pair().unwrap();
         let descriptor = FileDescriptor::from_owned(guest.into());
         let thread = thread::spawn(move || {
             let mut session = Session::new(descriptor);
+            #[cfg(target_arch = "x86_64")]
             if let Some(capture) = capture {
                 session = session.with_capture(capture);
             }
@@ -325,6 +333,29 @@ fn assert_environment_failure(mut harness: Harness, diagnostic_prefix: &[u8]) {
 }
 
 #[test]
+#[cfg(target_arch = "aarch64")]
+fn arm_capture_refuses_before_cleanup_and_preserves_the_request_and_session() {
+    let mut harness = Harness::new();
+    for (request_id, payload) in [(91, &[0][..]), (92, &[1][..]), (93, &[][..])] {
+        assert_eq!(
+            harness.request_all(request_id, protocol::APP_CAPTURE, payload),
+            vec![response(
+                APP_ERROR,
+                request_id,
+                Errno::ENOTSUP as i32,
+                b"unsupported-operation"
+            )]
+        );
+    }
+    assert_eq!(
+        harness.request(APP_PING, &[]),
+        response(APP_READY, 42, 0, &[])
+    );
+    assert!(harness.stop().diagnostics.is_empty());
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
 fn fresh_session_refuses_root_requests_and_routes_capture_before_stopping() {
     let config = AgentConfig::for_test();
     let mappings = HostMappings::announced(0);
@@ -434,6 +465,7 @@ fn mappings_mount_in_order_and_unblock_workloads_through_dispatch() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn init_without_a_restore_answers_a_request_for_ready_as_a_cold_boot_and_keeps_serving() {
     for fresh in [true, false] {
         let config = AgentConfig::for_test();
@@ -477,6 +509,7 @@ fn init_without_a_restore_answers_a_request_for_ready_as_a_cold_boot_and_keeps_s
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn restored_ready_maps_and_first_exec_share_the_existing_start_transition() -> TestResult {
     use crate::guest::init::Capture;
     use crate::guest::restore::GuestRestoreState;
@@ -566,6 +599,7 @@ fn restored_ready_maps_and_first_exec_share_the_existing_start_transition() -> T
 /// Starts a restored agent whose record applied from its restore packet, asks for its Ready, and
 /// starts a workload that runs until it is cancelled. Returns the harness, what Ready reports,
 /// and the workload's process.
+#[cfg(target_arch = "x86_64")]
 fn running_restored_workload(system: TestSystem) -> (Harness, Vec<u8>, sys::ProcessId) {
     let config = AgentConfig::for_test();
     let mappings = HostMappings::announced(0);
@@ -596,6 +630,7 @@ fn running_restored_workload(system: TestSystem) -> (Harness, Vec<u8>, sys::Proc
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn a_restored_clone_s_request_for_ready_during_a_workload_is_busy_as_a_cold_boot_s() -> TestResult {
     if super::super::tests::isolate_process_test(
         "NVX_RESTORED_RUNNING_ACTIVATION_TEST",
@@ -944,6 +979,7 @@ fn data_validation_diagnostics_preserve_the_c_failure_stage_and_status() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn a_request_that_fails_after_validation_reports_the_data_stage() {
     // A restored agent's request for Ready passes the validation of its frame, and, while its
     // record has not applied, which nvx-init's order never lets happen, ends the session.
@@ -1979,6 +2015,7 @@ fn a_running_workload_refuses_other_requests_and_ends_when_cancelled_or_late() -
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn rooted_capture_refuses_both_kill_flags_and_leaves_the_exec_group_running() -> TestResult {
     if super::super::tests::isolate_process_test(
         "NVX_ROOTED_CAPTURE_REFUSAL_TEST_CHILD",

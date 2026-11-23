@@ -1,0 +1,92 @@
+From: NVX maintainers
+Subject: [PATCH] virtio: retain shared status atomics with ARM OF reserved-memory discovery
+
+--- a/drivers/virtio/Kconfig
++++ b/drivers/virtio/Kconfig
+@@ -173,10 +173,12 @@
+ 
+ config VIRTIO_MMIO_SHARED_STATUS
+ 	bool "OpenVMM microVM shared virtio-mmio interrupt status"
+-	depends on VIRTIO_MMIO && VIRTIO_MMIO_CMDLINE_DEVICES && X86
++	depends on VIRTIO_MMIO
++	depends on (X86 && VIRTIO_MMIO_CMDLINE_DEVICES) || (ARM64 && OF_RESERVED_MEM)
+ 	help
+ 	  Use the interrupt-status page defined by the OpenVMM microVM ABI.
+-	  The page is discovered through the Xen PVH E820 map and has one atomic
++	  The page is discovered through E820 on x86 or the exact normal-memory
++	  DT reservation on ARM64 and has one atomic
+ 	  status word for every fixed virtio-mmio transport slot. Interrupt handlers
+ 	  exchange their word to zero instead of reading and acknowledging the
+ 	  virtio-mmio interrupt registers.
+--- a/drivers/virtio/virtio_mmio.c
++++ b/drivers/virtio/virtio_mmio.c
+@@ -71,7 +71,12 @@
+ #include <linux/virtio_ring.h>
+ 
+ #ifdef CONFIG_VIRTIO_MMIO_SHARED_STATUS
++#ifdef CONFIG_X86
+ #include <asm/e820/api.h>
++#else
++#include <linux/of_address.h>
++#include <linux/of_reserved_mem.h>
++#endif
+ #endif
+ 
+ 
+@@ -115,8 +120,14 @@
+ 	phys_addr_t status_gpa;
+ 	u64 offset;
+ 
+-	if (!microvm_shared_status_available)
++	if (!microvm_shared_status_available) {
++#ifdef CONFIG_ARM64
++		dev_err(&pdev->dev, "NVX requires the exact WB shared-status reservation\n");
++		return -EINVAL;
++#else
+ 		return 0;
++#endif
++	}
+ 
+ 	resource = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+ 	if (!resource)
+@@ -899,13 +910,40 @@
+ 	},
+ };
+ 
++#if defined(CONFIG_VIRTIO_MMIO_SHARED_STATUS) && defined(CONFIG_ARM64)
++static bool __init microvm_shared_status_from_of(void)
++{
++	struct device_node *root, *child;
++	unsigned int matches = 0;
++
++	root = of_find_node_by_path("/reserved-memory");
++	if (!root)
++		return false;
++	for_each_available_child_of_node(root, child) {
++		struct reserved_mem *reserved = of_reserved_mem_lookup(child);
++
++		if (reserved &&
++		    reserved->base == MICROVM_SHARED_STATUS_PAGE_GPA &&
++		    reserved->size == MICROVM_SHARED_STATUS_PAGE_SIZE &&
++		    !of_property_present(child, "no-map"))
++			matches++;
++	}
++	of_node_put(root);
++	return matches == 1;
++}
++#endif
++
+ static int __init virtio_mmio_init(void)
+ {
+ #ifdef CONFIG_VIRTIO_MMIO_SHARED_STATUS
++#ifdef CONFIG_X86
+ 	microvm_shared_status_available = e820__mapped_all(
+ 		MICROVM_SHARED_STATUS_PAGE_GPA,
+ 		MICROVM_SHARED_STATUS_PAGE_GPA + MICROVM_SHARED_STATUS_PAGE_SIZE,
+ 		E820_TYPE_RESERVED);
++#else
++	microvm_shared_status_available = microvm_shared_status_from_of();
++#endif
+ #endif
+ 
+ 	return platform_driver_register(&virtio_mmio_driver);

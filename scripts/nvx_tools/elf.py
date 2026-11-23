@@ -44,6 +44,7 @@ class ElfExecutable:
     needed: int
     dynamic: bool
     executable_stack: bool
+    machine: int
 
     @property
     def static(self) -> bool:
@@ -123,15 +124,28 @@ def _parse(path: Path, data: bytes) -> ElfExecutable:
         needed=needed,
         dynamic=dynamic,
         executable_stack=executable_stack,
+        machine=header[2],
     )
 
 
-def check_static_executables(paths: Sequence[Path]) -> list[ElfExecutable]:
-    """Describe each executable, and fail unless every one is static with a
-    non-executable stack."""
+def check_static_executables(
+    paths: Sequence[Path], *, expected_machine: int | None = None
+) -> list[ElfExecutable]:
+    """Require static, non-executable-stack files and the selected guest's machine."""
     executables = [read_elf_executable(path) for path in paths]
     for executable in executables:
         print(executable.describe())
+    if expected_machine is not None:
+        wrong_machine = [
+            str(executable.path)
+            for executable in executables
+            if executable.machine != expected_machine
+        ]
+        if wrong_machine:
+            raise ScriptError(
+                f"executables have the wrong ELF machine (expected {expected_machine}): "
+                + ", ".join(wrong_machine)
+            )
     dynamic = [
         str(executable.path) for executable in executables if not executable.static
     ]

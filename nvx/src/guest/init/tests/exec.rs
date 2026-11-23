@@ -370,6 +370,8 @@ fn failed_start_collector_checks(simulated: bool) {
     let mut runtime = Runtime {
         system: RealSystem {
             signals: Some(signals),
+            #[cfg(target_arch = "aarch64")]
+            platform: None,
         },
         helpers: Helpers {
             time: ProcessId::from_child(&helper.0),
@@ -534,6 +536,8 @@ fn a_failed_start_preserves_its_first_errno_and_the_cleanup_failure() {
         let mut runtime = Runtime {
             system: RealSystem {
                 signals: Some(signals),
+                #[cfg(target_arch = "aarch64")]
+                platform: None,
             },
             helpers: Helpers {
                 time: pid(2_000_000),
@@ -769,6 +773,7 @@ fn a_stolen_or_auto_reaped_status_is_reported_once_and_never_reclassified_by_an_
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn a_capture_sweep_refuses_to_run_outside_pid_1() {
     let helpers = Helpers {
         time: pid(42),
@@ -781,6 +786,7 @@ fn a_capture_sweep_refuses_to_run_outside_pid_1() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn the_sweep_repeats_and_preserves_only_pid_1_and_registered_helpers() {
     let helpers = Helpers {
         time: pid(42),
@@ -834,7 +840,7 @@ fn privileged_exec_resets_priority_credentials_and_signals_before_exec() {
     isolated(
         "privileged_exec_resets_priority_credentials_and_signals_before_exec",
         || {
-            RealSystem { signals: None }.raise_priority(None).unwrap();
+            RealSystem::default().raise_priority(None).unwrap();
             let _signals = SignalDescriptor::new(&SIGNALS).unwrap();
             let groups = [
                 nix::unistd::Gid::from_raw(1000),
@@ -1101,6 +1107,7 @@ fn privileged_every_ending_kills_the_process_group_including_normal_completion()
 
 #[test]
 #[ignore = "requires a guest's root credentials and private PID/procfs mounts"]
+#[cfg(target_arch = "x86_64")]
 fn privileged_capture_sweep_kills_setsid_escapees_and_spares_both_helpers() {
     isolated(
         "privileged_capture_sweep_kills_setsid_escapees_and_spares_both_helpers",

@@ -43,6 +43,7 @@ const FIRST_PARTITION_BOUND: usize = 64 * 1024;
 
 /// Returns why the assembly of `error` failed, for the tests of a clone's application, whose
 /// module can't read the field.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn assembly_failure(error: &AssemblyError) -> &Error {
     &error.error
 }
@@ -91,6 +92,21 @@ impl Guest {
                 SCRATCH + 0x1ff,
             ),
         );
+        #[cfg(target_arch = "aarch64")]
+        {
+            let tree = paths.sys.join("firmware/devicetree/base");
+            for name in ["#address-cells", "#size-cells"] {
+                write(&tree.join(name), 2u32.to_be_bytes());
+            }
+            for mmio in [DISTRO, SCRATCH] {
+                let node = tree.join(format!("virtio@{mmio:x}"));
+                write(
+                    &node.join("reg"),
+                    [mmio.to_be_bytes(), 0x200u64.to_be_bytes()].concat(),
+                );
+                write(&node.join("compatible"), b"virtio,mmio\0");
+            }
+        }
         // The defaults of the overlay's options, as the guest's kernel sets them: all off.
         for parameter in [
             "metacopy",
@@ -271,7 +287,23 @@ fn attach(root: &Path, index: usize, name: &str, sectors: u64) {
 /// window `index` of the guest in `root`, without its node. The device is read-only at window 0,
 /// where the tests attach the distro device, and writable elsewhere, as at the scratch's window 1.
 fn probe(root: &Path, index: usize, name: &str, sectors: u64) {
+    #[cfg(not(target_arch = "aarch64"))]
     let window = format!("sys/devices/virtio-mmio-cmdline/virtio-mmio.{index}");
+    #[cfg(target_arch = "aarch64")]
+    let window = format!("sys/bus/platform/devices/test-window-{index}");
+    #[cfg(target_arch = "aarch64")]
+    {
+        let mmio = if index == 0 { DISTRO } else { SCRATCH };
+        let link = root.join(&window).join("of_node");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        if !link.exists() {
+            std::os::unix::fs::symlink(
+                root.join(format!("sys/firmware/devicetree/base/virtio@{mmio:x}")),
+                link,
+            )
+            .unwrap();
+        }
+    }
     fs::create_dir_all(
         root.join(window)
             .join(format!("virtio{index}/block/{name}")),

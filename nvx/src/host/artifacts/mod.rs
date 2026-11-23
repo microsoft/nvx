@@ -44,6 +44,8 @@ use crate::error::{Error, Result};
 pub(crate) use self::dir::{ArtifactDir, ArtifactPaths, Layout};
 #[cfg(feature = "cli")]
 pub(crate) use self::guest::Guest;
+#[cfg(all(feature = "cli", windows))]
+pub(crate) use self::identity::check_arm64_pe;
 #[cfg(feature = "cli")]
 pub(crate) use self::require::{require_artifact, require_existing};
 

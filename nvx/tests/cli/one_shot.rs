@@ -326,8 +326,12 @@ fn run_launches() -> Vec<Launch> {
 #[test]
 fn one_shot_runs_exit_with_the_workload_or_openvmm_status() {
     let cases: Vec<Launch> = run_launches();
-    let (vendor, family, model, stepping) = crate::reported_cpu();
-    let unserved = !crate::served(&vendor, family, model, stepping);
+    let unserved =
+        crate::reported_cpu()
+            .as_ref()
+            .is_some_and(|(vendor, family, model, stepping)| {
+                !crate::served(vendor, *family, *model, *stepping)
+            });
     in_parallel(&cases, |case| {
         let root = Root::new();
         for (relative, content) in &case.files {

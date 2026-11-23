@@ -29,7 +29,8 @@
 //!   controlling terminal, or to its standard error when the console does not open, and reads
 //!   nothing from it;
 //! - ends the VM itself, without another guest program: it writes every file system's modified
-//!   data to its storage, with `sync`, and then stops the VM through OpenVMM's control port with a
+//!   data to its storage, with `sync`, and then stops the VM through its architecture's platform
+//!   shutdown device with a
 //!   status: 0 after a host `STOP` or `SIGTERM`; after its restored activation failed, which a
 //!   deadline that passed before Ready and a restore packet without a valid activation record
 //!   also are, the status of `nvx::protocol::status` of the failure's class, such as 54,
@@ -42,6 +43,7 @@
 
 use std::ffi::{CStr, CString, OsStr};
 use std::io;
+#[cfg(target_arch = "x86_64")]
 use std::net::Ipv4Addr;
 use std::os::fd::BorrowedFd;
 use std::os::unix::ffi::OsStrExt;
@@ -50,11 +52,14 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus as ProcessStatus};
 use std::time::{Duration, Instant};
 
+#[cfg(target_arch = "x86_64")]
 use crate::guest_restore::Publication;
 use crate::protocol::cmdline;
+#[cfg(target_arch = "x86_64")]
 use crate::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
 
 use super::parse::parse_decimal;
+#[cfg(target_arch = "x86_64")]
 use super::snapshot::{self, CaptureFailure, Captured, Devices, Disks, Repaired};
 use super::status::ExitStatus;
 use super::sys::{
@@ -63,6 +68,7 @@ use super::sys::{
 };
 
 mod boot;
+#[cfg(target_arch = "x86_64")]
 pub(crate) use boot::{RestoreHandoff, Restored};
 
 /// The process ID of the init process.
@@ -128,6 +134,7 @@ impl Helpers {
     /// Kills every remaining userspace process but PID 1 and the registered helpers, repeating
     /// until none remains or the deadline expires, including descendants that left their
     /// execution's process group.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn sweep(self, deadline: Instant) -> Result<(), Errno> {
         if sys::current_process().raw() != INIT_PROCESS {
             return Err(Errno::EPERM);
@@ -138,6 +145,7 @@ impl Helpers {
     }
 
     /// A capture without permission to kill must leave no unregistered process running.
+    #[cfg(target_arch = "x86_64")]
     fn prepare_capture(self, kill: bool, deadline: Instant) -> Result<(), Errno> {
         if kill {
             return self.sweep(deadline);
@@ -155,6 +163,7 @@ impl Helpers {
     }
 
     /// Runs the narrow process-table sweep with the supplied walk, kill and deadline checks.
+    #[cfg(target_arch = "x86_64")]
     fn sweep_with(
         self,
         mut processes: impl FnMut() -> Result<Vec<ProcessId>, Errno>,
@@ -185,9 +194,11 @@ impl Helpers {
 }
 
 /// The capture request's one pre-request deadline, including workload cleanup.
+#[cfg(target_arch = "x86_64")]
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Init's capture inputs and outcome, retained across the existing control session's reset.
+#[cfg(target_arch = "x86_64")]
 pub(crate) struct Capture {
     /// The only processes that capture cleanup spares besides PID 1.
     helpers: Helpers,
@@ -202,6 +213,7 @@ pub(crate) struct Capture {
 }
 
 /// Preparation refused the request, or the acknowledged snapshot call returned.
+#[cfg(target_arch = "x86_64")]
 pub(crate) enum CaptureStep {
     /// Workload preparation failed before the request was acknowledged.
     Refused {
@@ -219,6 +231,7 @@ pub(crate) enum CaptureStep {
     },
 }
 
+#[cfg(target_arch = "x86_64")]
 impl Capture {
     /// Retains init's helpers, without constructing any space.
     fn new(helpers: Helpers, fresh: bool) -> Self {
@@ -321,6 +334,7 @@ impl Capture {
 }
 
 /// Reports capture detail without driving the control transport or starting a helper.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn report_capture(failure: impl std::fmt::Display) {
     write_console(
         kernel::CONSOLE_DEVICE,
@@ -329,6 +343,7 @@ pub(crate) fn report_capture(failure: impl std::fmt::Display) {
 }
 
 /// Reports a guest restore failure before PID 1 ends the VM.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn report_activation(failure: impl std::fmt::Display) {
     write_console(
         kernel::CONSOLE_DEVICE,
@@ -835,9 +850,13 @@ trait System {
 }
 
 /// The production operations.
+#[derive(Default)]
 struct RealSystem {
     /// The descriptor that reads [`SIGNALS`], once [`listen`](System::listen) opened it.
     signals: Option<SignalDescriptor>,
+    /// PID 1 retains shutdown authority without exposing the platform device in the workload root.
+    #[cfg(target_arch = "aarch64")]
+    platform: Option<sys::aarch64::PlatformDevice>,
 }
 
 impl System for RealSystem {
@@ -873,6 +892,10 @@ impl System for RealSystem {
 
     fn shut_down(&mut self, status: u8) {
         kernel::sync();
+        #[cfg(target_arch = "aarch64")]
+        if let Some(platform) = self.platform.take() {
+            platform.power_off(status);
+        }
         sys::power_off(status)
     }
 }
@@ -886,8 +909,15 @@ pub(crate) struct Runtime {
 
 impl Runtime {
     pub(crate) fn new(arguments: &[CString]) -> Result<Self, String> {
-        let mut system = RealSystem { signals: None };
+        let mut system = RealSystem::default();
         let helpers = prepare(&mut system, arguments)?;
+        #[cfg(target_arch = "aarch64")]
+        {
+            system.platform = Some(
+                sys::aarch64::PlatformDevice::open()
+                    .map_err(|error| format!("cannot retain platform shutdown device: {error}"))?,
+            );
+        }
         Ok(Self {
             system,
             helpers,
@@ -897,6 +927,7 @@ impl Runtime {
 
     /// Starts ingress from the applied root's publication and gateway, before its root switch.
     /// The fork keeps the initramfs root and PID 1's priority; the sole collector owns its exit.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn restore_announcer(
         &mut self,
         publication: Publication,
@@ -952,6 +983,7 @@ impl Runtime {
     }
 
     /// Hands the same helper registry to the shared loop's capture caller.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn capture(&self, fresh: bool) -> Capture {
         Capture::new(self.helpers, fresh)
     }
@@ -986,7 +1018,7 @@ pub fn main() -> ExitCode {
             let result = serve_boot(&mut runtime);
             finish(&mut runtime.system, result);
         }
-        Err(failure) => finish(&mut RealSystem { signals: None }, Err(failure)),
+        Err(failure) => finish(&mut RealSystem::default(), Err(failure)),
     }
     ExitStatus::Failure.into()
 }
@@ -995,16 +1027,24 @@ fn serve_boot(runtime: &mut Runtime) -> Result<u8, String> {
     let command_line = std::fs::read("/proc/cmdline")
         .map_err(|error| format!("cannot read the boot command line: {error}"))?;
     if let Some(control) = fresh_capture_control(&command_line)? {
-        let control = super::terminal::Terminal::open(&control)
-            .map_err(|error| format!("cannot open capture control: {error}"))?;
-        control
-            .configure_raw()
-            .map_err(|error| format!("cannot configure capture control: {error}"))?;
-        runtime.system.report(b"NVX-INIT-CAPTURE: waiting\n");
-        return super::managed_agent::AgentConfig::serve_capture(
-            runtime,
-            control.into_descriptor(),
-        );
+        #[cfg(target_arch = "aarch64")]
+        return Err(format!(
+            "Fresh capture is unsupported on aarch64 ({})",
+            control.display()
+        ));
+        #[cfg(target_arch = "x86_64")]
+        {
+            let control = super::terminal::Terminal::open(&control)
+                .map_err(|error| format!("cannot open capture control: {error}"))?;
+            control
+                .configure_raw()
+                .map_err(|error| format!("cannot configure capture control: {error}"))?;
+            runtime.system.report(b"NVX-INIT-CAPTURE: waiting\n");
+            return super::managed_agent::AgentConfig::serve_capture(
+                runtime,
+                control.into_descriptor(),
+            );
+        }
     }
     let boot = boot::cold_boot(&command_line).map_err(|error| error.to_string())?;
     // Keeps the switched root, with its runtime directory's lock and the descriptors of its view
@@ -1029,6 +1069,13 @@ fn serve_boot(runtime: &mut Runtime) -> Result<u8, String> {
 /// Selects only the fixed rootless Fresh entry; malformed capture tokens never fall back.
 fn fresh_capture_control(command_line: &[u8]) -> Result<Option<PathBuf>, String> {
     let tokens: Vec<_> = cmdline::init_tokens(command_line).collect();
+    #[cfg(target_arch = "aarch64")]
+    if tokens
+        .iter()
+        .any(|token| token.name == b"nvx_snapshot_tier")
+    {
+        return Err("Fresh capture is unsupported on aarch64".to_owned());
+    }
     let parameter = |name: &[u8]| {
         let mut matching = tokens.iter().filter(|token| token.name == name);
         let Some(token) = matching.next() else {

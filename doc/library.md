@@ -145,7 +145,8 @@ that a stop reads. Then:
   holds the process by its reference, checks that it serves the endpoint, and
   authenticates with the saved capability: its `Attached` holds the process
   and the `Connection`.
-- `vm::verify(&saved, &identity)` makes the same checks of the runtime and the
+- `vm::verify(&saved, &identity, runtime.architecture)` checks the explicit
+  guest ISA before the opaque runtime identity and the
   process without connecting, and returns the held `Process`, which the
   program can wait for or stop.
 - Both fail with `ErrorKind::RuntimeMismatch` for a VM that another runtime

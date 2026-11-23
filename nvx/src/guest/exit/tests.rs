@@ -1,4 +1,6 @@
+#[cfg(target_arch = "x86_64")]
 use std::fs;
+#[cfg(target_arch = "x86_64")]
 use std::os::unix::ffi::OsStrExt;
 
 use super::*;
@@ -40,6 +42,7 @@ fn exit_code_takes_a_decimal_number_up_to_255() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn writes_one_byte_at_the_control_port() {
     let file = tempfile::NamedTempFile::new().unwrap();
     let port = CString::new(file.path().as_os_str().as_bytes()).unwrap();
@@ -58,6 +61,7 @@ fn writes_one_byte_at_the_control_port() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn fails_when_it_cannot_open_or_write_the_device() {
     let directory = tempfile::tempdir().unwrap();
     let missing = directory.path().join("port");
@@ -65,5 +69,30 @@ fn fails_when_it_cannot_open_or_write_the_device() {
     for port in [missing.as_c_str(), c"/dev/full"] {
         let status = ExitStatus::from(run(&args(&[b"0"]), port));
         assert_eq!(status, ExitStatus::Failure, "{port:?}");
+    }
+}
+
+#[test]
+fn selected_status_reaches_the_architecture_leaf_and_device_failures_stay_failures() {
+    for (arguments, expected) in [
+        (&[][..], 1),
+        (&[b"0".as_slice()][..], 0),
+        (&[b"37".as_slice()][..], 37),
+        (&[b"255".as_slice()][..], 255),
+        (&[b"256".as_slice()][..], 1),
+    ] {
+        let mut observed = None;
+        assert_eq!(
+            ExitStatus::from(run_with(&args(arguments), |code| {
+                observed = Some(code);
+                Ok(())
+            })),
+            ExitStatus::Success
+        );
+        assert_eq!(observed, Some(expected));
+        assert_eq!(
+            ExitStatus::from(run_with(&args(arguments), |_| Err(sys::Errno::EACCES))),
+            ExitStatus::Failure
+        );
     }
 }

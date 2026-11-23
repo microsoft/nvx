@@ -210,6 +210,7 @@ fn a_snapshot_opens_only_from_a_snapshot_directory_and_changes_nothing() {
 /// A runtime whose files no check reads.
 fn runtime() -> Runtime {
     Runtime {
+        architecture: nvx::host::runtime::GuestArchitecture::X86_64,
         openvmm: PathBuf::from("openvmm"),
         kernel: PathBuf::from("vmlinux"),
         initramfs: PathBuf::from("initramfs.cpio.gz"),

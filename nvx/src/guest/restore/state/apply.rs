@@ -64,7 +64,10 @@ use crate::guest_restore::{self, Configuration, GuestRestoreRecord, Publication}
 use crate::protocol::root::{Journal, OverlayMode};
 use crate::protocol::view::View;
 
-pub use crate::guest::view::{MACHINE_ID_FILE, RESOLVER_FILE};
+/// The generated machine ID's file in the root's runtime directory.
+pub const MACHINE_ID_FILE: &str = crate::guest::view::MACHINE_ID_FILE;
+/// The resolver file in the root's runtime directory.
+pub const RESOLVER_FILE: &str = crate::guest::view::RESOLVER_FILE;
 
 /// The root inputs captured by a template, shared by its clones.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

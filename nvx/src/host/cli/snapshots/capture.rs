@@ -184,10 +184,12 @@ pub(in crate::host::cli) fn run(root: Option<&str>, options: Options) -> Result 
         let _lock = store.root.lock(deadline)?;
         remove_capture(&store, deadline)?;
     }
-    let artifacts = Artifacts { root };
+    let artifacts =
+        Artifacts::new(root).with_architecture(crate::host::runtime::GuestArchitecture::X86_64);
     let _hold = artifacts.hold()?;
     let [openvmm, kernel, initramfs] = artifacts.require()?;
     let runtime = Runtime {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         openvmm: openvmm.into(),
         kernel: kernel.into(),
         initramfs: initramfs.into(),

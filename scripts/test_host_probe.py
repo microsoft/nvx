@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -14,7 +15,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import host_probe  # noqa: E402
@@ -101,6 +102,40 @@ class HostProbeTests(unittest.TestCase):
         (build / "nested").mkdir(parents=True)
         (build / "one").write_text("1", encoding="utf-8")
         (build / "nested" / "two").write_text("2", encoding="utf-8")
+
+    def test_artifact_count_does_not_follow_linux_work_tree_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            self.make_checkout(root, initialized=False)
+            runner = FakeRunner(_repository_responses(root, root, initialized=False))
+            regular = Mock(spec=Path)
+            regular.lstat.return_value = Mock(st_mode=stat.S_IFREG)
+            link = Mock(spec=Path)
+            link.lstat.return_value = Mock(st_mode=stat.S_IFLNK)
+            link.is_file.side_effect = OSError(1920, "cannot access Linux link target")
+            with (
+                patch.object(host_probe.platform, "system", return_value="Other"),
+                patch.object(Path, "rglob", return_value=iter((regular, link))),
+            ):
+                document = host_probe.collect_probe(None, True, runner, root)
+                self.assertEqual(document["artifacts"], {"exists": True, "files": 1})
+            link.is_file.assert_not_called()
+
+    def test_artifact_entry_errors_remain_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            self.make_checkout(root, initialized=False)
+            runner = FakeRunner(_repository_responses(root, root, initialized=False))
+            entry = Mock(spec=Path)
+            entry.lstat.side_effect = OSError("metadata unavailable")
+            with (
+                patch.object(host_probe.platform, "system", return_value="Other"),
+                patch.object(Path, "rglob", return_value=iter((entry,))),
+            ):
+                with self.assertRaisesRegex(
+                    host_probe.ProbeError, "metadata unavailable"
+                ):
+                    host_probe.collect_probe(None, True, runner, root)
 
     def test_linux_probe_collects_repository_devices_verify_and_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

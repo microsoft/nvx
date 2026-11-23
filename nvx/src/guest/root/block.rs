@@ -15,15 +15,22 @@ use std::time::{Duration, Instant};
 
 use super::kernel::{Kernel, Paths};
 use super::{Device, DeviceStep, Error, Role};
-use crate::guest::parse::{parse_decimal, parse_hexadecimal};
+use crate::guest::parse::parse_decimal;
+#[cfg(not(target_arch = "aarch64"))]
+use crate::guest::parse::parse_hexadecimal;
 use crate::guest::sys;
 use crate::uuid::Uuid;
+
+#[cfg(target_arch = "aarch64")]
+mod device_tree;
 
 /// The interval between two polls for a block device that has not appeared yet.
 pub(super) const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// The prefix of the name of a virtio MMIO window in `/proc/iomem`.
+#[cfg(not(target_arch = "aarch64"))]
 const WINDOW_PREFIX: &[u8] = b"virtio-mmio.";
 /// The directory, below sysfs, of the virtio MMIO devices that the kernel command line declares.
+#[cfg(not(target_arch = "aarch64"))]
 const WINDOW_DEVICES: &str = "devices/virtio-mmio-cmdline";
 /// The byte offset of the EROFS superblock on its device.
 const EROFS_SUPERBLOCK: u64 = 1024;
@@ -126,6 +133,7 @@ pub(super) fn prepare(
 /// block devices of the partitions that the kernel created from the table that the disk held
 /// before, and creates those of the table that it holds now, and their nodes. It checks nothing
 /// else of the device, whose checks [`prepare`] makes. Returns the path of its node.
+#[cfg(any(test, target_arch = "x86_64"))]
 pub(super) fn reread(
     kernel: &mut dyn Kernel,
     paths: &Paths,
@@ -241,27 +249,35 @@ fn find(paths: &Paths, mmio: u64) -> io::Result<Option<String>> {
 /// and partitions of those. A directory may not exist yet: the kernel lists a window before it adds
 /// the window's device.
 pub(crate) fn window_directories(paths: &Paths, mmio: u64) -> io::Result<Vec<PathBuf>> {
-    let windows = fs::read(paths.proc.join("iomem"))?;
-    let mut directories = Vec::new();
-    for line in windows.split(|&byte| byte == b'\n') {
-        // `START-END : NAME`, indented below the window that holds it.
-        let mut fields = line
-            .split(|&byte| byte == b' ')
-            .filter(|field| !field.is_empty());
-        let (Some(range), Some(b":"), Some(name)) = (fields.next(), fields.next(), fields.next())
-        else {
-            continue;
-        };
-        let start = range.split(|&byte| byte == b'-').next().unwrap_or(range);
-        if parse_hexadecimal(start) != Some(mmio) || !name.starts_with(WINDOW_PREFIX) {
-            continue;
-        }
-        let Ok(name) = std::str::from_utf8(name) else {
-            continue;
-        };
-        directories.push(paths.sys.join(WINDOW_DEVICES).join(name));
+    #[cfg(target_arch = "aarch64")]
+    {
+        device_tree::windows(paths, mmio)
     }
-    Ok(directories)
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let windows = fs::read(paths.proc.join("iomem"))?;
+        let mut directories = Vec::new();
+        for line in windows.split(|&byte| byte == b'\n') {
+            // `START-END : NAME`, indented below the window that holds it.
+            let mut fields = line
+                .split(|&byte| byte == b' ')
+                .filter(|field| !field.is_empty());
+            let (Some(range), Some(b":"), Some(name)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let start = range.split(|&byte| byte == b'-').next().unwrap_or(range);
+            if parse_hexadecimal(start) != Some(mmio) || !name.starts_with(WINDOW_PREFIX) {
+                continue;
+            }
+            let Ok(name) = std::str::from_utf8(name) else {
+                continue;
+            };
+            directories.push(paths.sys.join(WINDOW_DEVICES).join(name));
+        }
+        Ok(directories)
+    }
 }
 
 /// Returns the name of the first block device, in byte order, of the first virtio device of the

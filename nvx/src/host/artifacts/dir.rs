@@ -15,7 +15,7 @@ use super::{
     absolute, is_release_dir, openvmm_executable,
 };
 use crate::error::{Error, Result};
-use crate::host::runtime::{ArtifactIdentity, RuntimeIdentity};
+use crate::host::runtime::{ArtifactIdentity, GuestArchitecture, RuntimeIdentity};
 
 /// The layout of a directory of NVX artifacts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -42,6 +42,8 @@ pub(crate) struct ArtifactDir {
     root: PathBuf,
     /// Its layout.
     layout: Layout,
+    /// Declared guest ISA; the legacy constructor is explicitly x86-64.
+    architecture: GuestArchitecture,
 }
 
 impl ArtifactDir {
@@ -83,7 +85,24 @@ impl ArtifactDir {
         Ok(Self {
             root: absolute(root)?,
             layout,
+            architecture: GuestArchitecture::X86_64,
         })
+    }
+
+    /// Selects guest products without changing the native OpenVMM location.
+    pub(crate) fn with_architecture(mut self, architecture: GuestArchitecture) -> Result<Self> {
+        if architecture == GuestArchitecture::Aarch64 && self.layout == Layout::Release {
+            return Err(Error::unsupported(
+                "AArch64 release artifacts are not qualified; use explicit local ARM products",
+            ));
+        }
+        self.architecture = architecture;
+        Ok(self)
+    }
+
+    /// Returns the explicitly selected guest ISA, independent of the host.
+    pub(crate) fn architecture(&self) -> GuestArchitecture {
+        self.architecture
     }
 
     /// Returns the absolute directory.
@@ -103,7 +122,16 @@ impl ArtifactDir {
             Layout::Repository => REPO_BUILD_DIR,
             Layout::Release => RELEASE_GUEST_DIR,
         };
-        self.root.join(directory).join(name)
+        let directory = self.root.join(directory);
+        let directory = if self.layout == Layout::Repository
+            && self.architecture == GuestArchitecture::Aarch64
+            && name != OPENVMM_PROVENANCE_NAME
+        {
+            directory.join("aarch64")
+        } else {
+            directory
+        };
+        directory.join(name)
     }
 
     /// Returns the path of the OpenVMM executable, `openvmm_binary_path()` of `nvx.py`:
@@ -119,7 +147,15 @@ impl ArtifactDir {
 
     /// Returns the path of the guest kernel, which every guest boots.
     pub(crate) fn kernel(&self) -> PathBuf {
-        self.artifact(KERNEL_NAME)
+        self.artifact(self.kernel_name())
+    }
+
+    /// Selects the kernel filename from the explicit guest ISA, never from the host CPU.
+    fn kernel_name(&self) -> &'static str {
+        match self.architecture {
+            GuestArchitecture::X86_64 => KERNEL_NAME,
+            GuestArchitecture::Aarch64 => "Image",
+        }
     }
 
     /// Returns the path of a guest's initramfs.
@@ -151,7 +187,11 @@ impl ArtifactDir {
     ///
     /// [`ErrorCode::ArtifactMissing`]: crate::ErrorCode::ArtifactMissing
     pub(crate) fn require_kernel(&self) -> Result<PathBuf> {
-        required(self.kernel(), "Linux direct kernel")
+        let kernel = required(self.kernel(), "Linux direct kernel")?;
+        if self.architecture == GuestArchitecture::Aarch64 {
+            super::identity::check_arm64_image(&kernel)?;
+        }
+        Ok(kernel)
     }
 
     /// Checks that a guest's initramfs is a regular file and returns its path, as `nvx run`
@@ -162,10 +202,43 @@ impl ArtifactDir {
     ///
     /// [`ErrorCode::ArtifactMissing`]: crate::ErrorCode::ArtifactMissing
     pub(crate) fn require_initramfs(&self, guest: Guest) -> Result<PathBuf> {
-        required(
+        if self.architecture == GuestArchitecture::Aarch64 && guest == Guest::AzureLinux {
+            return Err(Error::unsupported(
+                "AArch64 cold boot supports Alpine or Ubuntu, not Azure Linux",
+            ));
+        }
+        let initramfs = required(
             self.initramfs(guest),
             &format!("{} initramfs", guest.distribution()),
-        )
+        )?;
+        if self.architecture == GuestArchitecture::Aarch64 {
+            let path = self.package_manifest(guest);
+            let metadata = read_metadata(
+                &path,
+                "ARM guest package manifest",
+                "build the matching architecture-qualified initramfs with nvx.py",
+            )?;
+            let value: serde_json::Value = serde_json::from_str(&metadata).map_err(|error| {
+                Error::unavailable(format!("invalid ARM package manifest {}", path.display()))
+                    .with_source(error)
+            })?;
+            let expected = if guest == Guest::Ubuntu {
+                "arm64"
+            } else {
+                "aarch64"
+            };
+            if value
+                .get("architecture")
+                .and_then(serde_json::Value::as_str)
+                != Some(expected)
+            {
+                return Err(Error::unsupported(format!(
+                    "guest package manifest {} does not declare architecture {expected}",
+                    path.display()
+                )));
+            }
+        }
+        Ok(initramfs)
     }
 
     /// Returns the paths of every artifact, for a caller to show or record.
@@ -221,7 +294,11 @@ impl ArtifactDir {
                     "executable_sha256",
                 )?,
                 provenance_identity(
-                    &self.artifact(KERNEL_PROVENANCE_NAME),
+                    &self.artifact(if self.architecture == GuestArchitecture::Aarch64 {
+                        "Image.provenance.json"
+                    } else {
+                        KERNEL_PROVENANCE_NAME
+                    }),
                     "kernel",
                     "kernel_sha256",
                 )?,

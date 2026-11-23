@@ -1,36 +1,25 @@
 //! Conformance checks C1 through C11 and the CI-only exhaustive check.
 
-use std::ffi::CStr;
 use std::io::Write;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::Phase;
+pub(crate) use super::checks_shared::{
+    BootLog, Checks, Failure, TIMER_LIST_WAIT, Verdict, check_debug_watchdogs, check_platform,
+    daemon_pid, read_kernel_file, record_check, wait_for_checks, wait_for_checks_until,
+};
+use super::checks_shared::{TIMER_LIST_POLL, read_boot_log};
 use super::cpu_mask::CpuMask;
 use super::decoders::{self, CpuInfo, ZERO_HYPERV_LEAVES};
 use super::events::{CheckId, DETAIL_MAX, ViolationCode, escape_text};
-use super::state::{CheckState, CheckStatus, TimeState};
-use super::system::{
-    DAEMON_NAME, DAEMON_PID_PATH, DEFAULT_STALL_TIMEOUT_S, MsrDescriptor, Runtime, msr_error,
-    rates_load, state_apply_until, state_load,
-};
+use super::system::{MsrDescriptor, Runtime, msr_error, rates_load, report_load};
 use crate::guest::status::CommandError;
 use crate::guest::sys::x86::cpuid::{self, Register};
 use crate::guest::sys::x86::{CpuidResult, msr};
-use crate::guest::sys::{self, Errno, MsrAccess, MsrFile, ProcessId, kernel};
+use crate::guest::sys::{self, Errno, MsrAccess, MsrFile, kernel};
 
-/// Maximum timer-list convergence wait during boot and restore.
-pub(crate) const TIMER_LIST_WAIT: Duration = Duration::from_millis(200);
-/// Poll interval while the timer list converges.
-const TIMER_LIST_POLL: Duration = Duration::from_millis(10);
-/// Maximum wait for persisted phase checks to complete.
-const STATUS_WAIT: Duration = Duration::from_secs(30);
-/// Poll interval while waiting for persisted checks.
-const STATUS_POLL: Duration = Duration::from_millis(10);
 /// Hz in a kHz, which `/proc/cpuinfo`'s rates use.
 const HZ_PER_KHZ: u64 = 1000;
-/// The process ID of init, which never runs the daemon.
-const INIT_PROCESS_ID: i64 = 1;
 
 /// The hypervisor vendor signature of Hyper-V's CPUID leaf 0x40000000, "Microsoft Hv".
 const HYPERV_VENDOR: [u32; 3] = [
@@ -194,152 +183,6 @@ fn registers(value: CpuidResult) -> String {
 /// diagnostics print them.
 fn value_and_error(result: &Result<u64, Errno>) -> (u64, i32) {
     (*result.as_ref().unwrap_or(&0), msr_error(result))
-}
-
-/// One conformance failure: the check that failed, and its diagnostic.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Failure {
-    /// The check that failed.
-    id: CheckId,
-    /// The diagnostic, which the violation event escapes byte for byte.
-    detail: Vec<u8>,
-}
-
-impl Failure {
-    /// Returns the failure of check `id`, with `detail`.
-    fn new(id: CheckId, detail: impl Into<Vec<u8>>) -> Self {
-        Self {
-            id,
-            detail: detail.into(),
-        }
-    }
-}
-
-/// The outcome of one conformance check, which reports its first failure.
-pub(crate) type Verdict = Result<(), Failure>;
-
-#[derive(Clone)]
-/// Mutable evidence and failure count for one conformance-check phase.
-pub(crate) struct Checks {
-    /// Phase whose failures are being reported.
-    pub(crate) phase: Phase,
-    /// Number of failed checks.
-    pub(crate) failures: usize,
-    /// Number of possible CPUs.
-    pub(crate) possible: usize,
-    /// The online CPUs.
-    pub(crate) online: CpuMask,
-    /// Parsed per-CPU frequency evidence.
-    pub(crate) cpuinfo: CpuInfo,
-    /// Validated TSC frequency.
-    pub(crate) tsc_hz: u64,
-    /// Validated LAPIC timer frequency.
-    pub(crate) lapic_hz: u64,
-}
-
-impl Checks {
-    /// Creates an empty check set for `phase`.
-    pub(crate) fn empty(phase: Phase) -> Self {
-        Self {
-            phase,
-            failures: 0,
-            possible: 0,
-            online: CpuMask::EMPTY,
-            cpuinfo: CpuInfo::default(),
-            tsc_hz: 0,
-            lapic_hz: 0,
-        }
-    }
-
-    /// Loads the possible and online CPUs, which must each be a nonempty CPU list.
-    pub(crate) fn load(phase: Phase) -> Result<Self, Errno> {
-        let cpus = |path| {
-            let list = sys::read_line(path)?;
-            CpuMask::parse(&list)
-                .filter(|cpus| !cpus.is_empty())
-                .ok_or(Errno::EINVAL)
-        };
-        Ok(Self {
-            possible: cpus(kernel::POSSIBLE_CPUS)?.len(),
-            online: cpus(kernel::ONLINE_CPUS)?,
-            ..Self::empty(phase)
-        })
-    }
-
-    /// Records one failure under an explicit ABI code.
-    fn fail_code(
-        &mut self,
-        runtime: &Runtime<'_>,
-        code: ViolationCode,
-        detail: impl AsRef<[u8]>,
-    ) -> bool {
-        self.failures += 1;
-        runtime.conformance_failure(code, self.phase, detail.as_ref());
-        false
-    }
-
-    /// Records one `G_CONFORMANCE_Cn` failure.
-    pub(crate) fn fail(
-        &mut self,
-        runtime: &Runtime<'_>,
-        id: CheckId,
-        detail: impl AsRef<[u8]>,
-    ) -> bool {
-        self.fail_code(runtime, ViolationCode::Conformance(id), detail)
-    }
-
-    /// Records the failure of a check that failed, and returns whether it passed.
-    pub(crate) fn record(&mut self, runtime: &Runtime<'_>, verdict: Verdict) -> bool {
-        match verdict {
-            Ok(()) => true,
-            Err(Failure { id, detail }) => self.fail(runtime, id, detail),
-        }
-    }
-}
-
-/// Publishes one completed phase's outcome, timing, failures, and rates. Report-only mode records
-/// the failures, and fails a phase that has any.
-pub(crate) fn record_check(
-    runtime: &Runtime<'_>,
-    checks: &Checks,
-    elapsed_us: i64,
-    cpu_us: i64,
-    tsc_hz: u64,
-    lapic_hz: u64,
-) -> Result<(), Errno> {
-    let phase = checks.phase;
-    if phase.check_index().is_none() {
-        return Err(Errno::EINVAL);
-    }
-    let failures = runtime.report_only().then_some(checks.failures as u64);
-    let status = if failures.is_some_and(|failures| failures > 0) {
-        CheckStatus::Fail
-    } else {
-        CheckStatus::Ok
-    };
-    state_apply_until(runtime.deadline, |state| {
-        let generation = if phase == Phase::Boot {
-            0
-        } else {
-            state.generation
-        };
-        if let Some(check) = state.check_mut(phase) {
-            *check = CheckState {
-                status: Some(status),
-                cpus: checks.online.len() as u64,
-                elapsed_us,
-                cpu_us,
-                generation,
-                failures,
-            };
-        }
-        if tsc_hz != 0 {
-            state.tsc_hz = tsc_hz;
-        }
-        if lapic_hz != 0 {
-            state.lapic_hz = lapic_hz;
-        }
-    })
 }
 
 /// Validates the Hyper-V CPUID identity leaves on one CPU, of `possible` possible CPUs.
@@ -556,17 +399,6 @@ fn check_msrs(runtime: &Runtime<'_>, checks: &mut Checks, cpu: usize, full: bool
     Ok(())
 }
 
-/// Reads the whole of the kernel file at `path`, or fails check `id` with a diagnostic that
-/// names the file, such as `read /proc/cmdline: No such file or directory`.
-fn read_kernel_file(id: CheckId, path: &CStr) -> Result<Vec<u8>, Failure> {
-    sys::read_file(path).map_err(|error| {
-        Failure::new(
-            id,
-            format!("read {}: {}", path.to_string_lossy(), error.desc()),
-        )
-    })
-}
-
 /// Validates `/proc/cpuinfo` for the selected CPUs, and records the CPUs' rates in `checks`.
 fn check_cpuinfo(checks: &mut Checks, selected: CpuMask, flags: bool) -> Verdict {
     let text = read_kernel_file(CheckId::C5, kernel::CPU_INFORMATION)?;
@@ -603,54 +435,10 @@ pub(crate) fn check_timer_list(online: CpuMask, wait: Duration) -> Verdict {
     }
 }
 
-/// Validates absence of unsupported platform devices and RCU settings.
-fn check_platform() -> Verdict {
-    if sys::path_exists(kernel::VMBUS) {
-        return Err(Failure::new(
-            CheckId::C8,
-            format!("{} exists", kernel::VMBUS.to_string_lossy()),
-        ));
-    }
-    if sys::path_exists(kernel::CPU_FREQUENCY_POLICY) {
-        return Err(Failure::new(CheckId::C8, "cpufreq policy0 exists"));
-    }
-    // An unreadable setting prints as -1, as in the C program.
-    let suppress = sys::read_number::<i64>(kernel::RCU_STALL_SUPPRESS).unwrap_or(-1);
-    if suppress != 0 {
-        return Err(Failure::new(
-            CheckId::C8,
-            format!("rcu_cpu_stall_suppress is {suppress}"),
-        ));
-    }
-    let timeout = sys::read_number::<i64>(kernel::RCU_STALL_TIMEOUT).unwrap_or(-1);
-    if timeout != DEFAULT_STALL_TIMEOUT_S {
-        return Err(Failure::new(
-            CheckId::C8,
-            format!("rcu_cpu_stall_timeout is {timeout}"),
-        ));
-    }
-    Ok(())
-}
-
 /// Validates the guest kernel command line.
 fn check_cmdline() -> Verdict {
     let text = read_kernel_file(CheckId::C9, kernel::COMMAND_LINE)?;
     decoders::check_cmdline(&text).map_err(|detail| Failure::new(CheckId::C9, detail))
-}
-
-/// Finds and validates the published `nvx-time` daemon process.
-pub(crate) fn daemon_pid() -> Option<ProcessId> {
-    let pid = sys::read_number::<i64>(DAEMON_PID_PATH).ok()?;
-    let process = ProcessId::from_positive(pid).filter(|_| pid > INIT_PROCESS_ID)?;
-    if !sys::process_exists(process) {
-        return None;
-    }
-    is_daemon_name(&sys::process_name(process).ok()?).then_some(process)
-}
-
-/// Returns whether `comm`, the contents of a procfs `comm` file, is the daemon's name.
-fn is_daemon_name(comm: &[u8]) -> bool {
-    comm.strip_suffix(b"\n") == Some(DAEMON_NAME.to_bytes())
 }
 
 /// Validates daemon liveness, state, violations, and RCU stalls.
@@ -658,7 +446,7 @@ fn check_daemon() -> Verdict {
     if daemon_pid().is_none() {
         return Err(Failure::new(CheckId::C10, "the time daemon is not running"));
     }
-    let Ok(state) = state_load() else {
+    let Ok(state) = report_load() else {
         return Err(Failure::new(CheckId::C10, "time state is unreadable"));
     };
     if state.violations != 0 {
@@ -675,33 +463,6 @@ fn check_daemon() -> Verdict {
         ));
     }
     Ok(())
-}
-
-/// Validates the soft-lockup and hung-task detectors when the kernel has either.
-fn check_debug_watchdogs() -> Verdict {
-    // A missing or unreadable setting prints as -1, as in the C program.
-    let setting =
-        |path| sys::path_exists(path).then(|| sys::read_number::<i64>(path).unwrap_or(-1));
-    let (soft, hung) = (
-        setting(kernel::SOFT_WATCHDOG),
-        setting(kernel::HUNG_TASK_TIMEOUT),
-    );
-    if soft.is_none() && hung.is_none() {
-        return Ok(());
-    }
-    if soft != Some(1) {
-        return Err(Failure::new(
-            CheckId::C11,
-            format!("soft_watchdog is {}", soft.unwrap_or(-1)),
-        ));
-    }
-    match hung {
-        Some(timeout) if timeout != 0 => Ok(()),
-        _ => Err(Failure::new(
-            CheckId::C11,
-            format!("hung_task_timeout_secs is {}", hung.unwrap_or(-1)),
-        )),
-    }
 }
 
 /// Runs selected identity and MSR checks on one pinned CPU.
@@ -767,38 +528,17 @@ fn check_cpus(
 }
 
 /// The kernel log that the boot checks read from a buffer allocated before they start.
-pub(crate) struct BootLog<'a> {
-    /// The log's size, as `klogctl` returned it, which a diagnostic gives.
-    pub(crate) size: i64,
-    /// The buffer, unless it could not be allocated.
-    pub(crate) buffer: Option<&'a mut [u8]>,
-}
-
 /// Validates boot-log evidence from a preallocated kernel-log buffer.
 fn boot_log(runtime: &Runtime<'_>, checks: &mut Checks, log: Option<BootLog<'_>>) {
-    let Some(BootLog { size, buffer }) = log else {
-        return;
-    };
-    let Some(buffer) = buffer else {
-        checks.fail(
-            runtime,
-            CheckId::C4,
-            format!("no buffer for the {size}-byte kernel log"),
-        );
-        return;
-    };
-    let count = match sys::kernel::read_kernel_log(buffer) {
-        Ok(count) => count,
-        Err(error) => {
-            checks.fail(
-                runtime,
-                CheckId::C4,
-                format!("read the kernel log: {}", error.desc()),
-            );
+    let log = match read_boot_log(log) {
+        Ok(Some(log)) => log,
+        Ok(None) => return,
+        Err(failure) => {
+            checks.record(runtime, Err(failure));
             return;
         }
     };
-    let log = decoders::scan_boot_log(&buffer[..count], true);
+    let log = decoders::scan_boot_log(log, true);
     if let Err(detail) = log.verdict() {
         checks.fail(runtime, CheckId::C4, detail);
     }
@@ -937,9 +677,14 @@ pub(crate) fn run_capture_checks_until(
     deadline: Option<Instant>,
 ) -> Result<(), Errno> {
     sys::FileLock::check_deadline(deadline)?;
-    if let Ok((tsc, lapic)) = rates_load() {
-        checks.tsc_hz = tsc;
-        checks.lapic_hz = lapic;
+    match rates_load() {
+        Ok((tsc, lapic)) => {
+            checks.tsc_hz = tsc;
+            checks.lapic_hz = lapic;
+        }
+        Err(_) => {
+            checks.fail(runtime, CheckId::C3, "the boot rates are unavailable");
+        }
     }
     // Each failure counts a violation in the state before C10 reads the count.
     sys::FileLock::check_deadline(deadline)?;
@@ -971,30 +716,6 @@ pub(crate) fn run_restore_checks(runtime: &Runtime<'_>, checks: &mut Checks, new
     checks.record(runtime, verdict);
     checks.record(runtime, check_clocksource());
     checks.record(runtime, check_daemon());
-}
-
-/// Waits for boot-only or all persisted checks and returns completion state.
-pub(crate) fn wait_for_checks(boot_only: bool) -> (TimeState, bool) {
-    wait_for_checks_until(boot_only, None)
-}
-
-/// Waits no later than the caller deadline or the existing boot-check wait limit.
-pub(crate) fn wait_for_checks_until(
-    boot_only: bool,
-    deadline: Option<Instant>,
-) -> (TimeState, bool) {
-    let limit = Instant::now() + STATUS_WAIT;
-    let deadline = deadline.map_or(limit, |deadline| deadline.min(limit));
-    loop {
-        let state = state_load().unwrap_or_default();
-        if !state.pending(boot_only) {
-            return (state, true);
-        }
-        if Instant::now() >= deadline {
-            return (state, false);
-        }
-        thread::sleep(STATUS_POLL.min(deadline.saturating_duration_since(Instant::now())));
-    }
 }
 
 /// Aggregate counters and rates for the exhaustive CI-only report.

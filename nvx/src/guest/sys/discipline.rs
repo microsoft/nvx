@@ -30,6 +30,7 @@ pub(crate) enum ClockAdjustment {
     Frequency(FrequencyHold),
     /// Clears the phase offset through the phase-locked loop in nanosecond mode, without changing
     /// its status or held frequency correction.
+    #[cfg(any(test, target_arch = "x86_64"))]
     ClearPhase,
     /// Slews the wall clock by `offset_ns` through the phase-locked loop in nanosecond mode, with
     /// its frequency held, and sets its time constant, the frequency correction, and the error
@@ -44,6 +45,7 @@ pub(crate) enum ClockAdjustment {
     },
     /// Sets the frequency correction alone, and keeps the status, the error estimates, and the
     /// phase offset.
+    #[cfg(any(test, target_arch = "x86_64"))]
     SetFrequency(i64),
     /// Makes the wall clock run at the frequency correction of `hold` alone, from the moment of
     /// the call: it steps the wall clock by zero, which clears the kernel's NTP state, the phase
@@ -51,6 +53,7 @@ pub(crate) enum ClockAdjustment {
     /// phase offset alone leaves in force until the kernel's next second, and then sets the
     /// frequency correction and the error estimates of `hold`, and `status`, which the step reset
     /// to unsynchronized.
+    #[cfg(any(test, target_arch = "x86_64"))]
     Pin {
         /// The frequency correction and the error estimates.
         hold: FrequencyHold,
@@ -81,9 +84,12 @@ impl ClockAdjustment {
             Self::Query => 0,
             Self::Step { .. } => libc::ADJ_SETOFFSET | libc::ADJ_NANO,
             Self::Frequency(_) => HOLD,
+            #[cfg(any(test, target_arch = "x86_64"))]
             Self::ClearPhase => libc::ADJ_OFFSET | libc::ADJ_NANO,
             Self::Slew { .. } => HOLD | libc::ADJ_OFFSET | libc::ADJ_TIMECONST | libc::ADJ_NANO,
+            #[cfg(any(test, target_arch = "x86_64"))]
             Self::SetFrequency(_) => libc::ADJ_FREQUENCY,
+            #[cfg(any(test, target_arch = "x86_64"))]
             Self::Pin { .. } => HOLD | libc::ADJ_SETOFFSET | libc::ADJ_NANO,
         }
     }
@@ -91,8 +97,11 @@ impl ClockAdjustment {
     /// Returns the discipline status that the adjustment sets, or zero for one that sets none.
     pub(crate) fn status(self) -> i32 {
         match self {
-            Self::Query | Self::Step { .. } | Self::ClearPhase | Self::SetFrequency(_) => 0,
+            Self::Query | Self::Step { .. } => 0,
+            #[cfg(any(test, target_arch = "x86_64"))]
+            Self::ClearPhase | Self::SetFrequency(_) => 0,
             Self::Frequency(_) | Self::Slew { .. } => PLL_NANOSECONDS,
+            #[cfg(any(test, target_arch = "x86_64"))]
             Self::Pin { status, .. } => status,
         }
     }
@@ -114,6 +123,7 @@ pub(crate) struct ClockDiscipline {
 impl ClockDiscipline {
     /// Returns the hold of the frequency correction `scaled_ppm` with this discipline's error
     /// estimates.
+    #[cfg(any(test, target_arch = "x86_64"))]
     pub(crate) fn hold(self, scaled_ppm: i64) -> FrequencyHold {
         FrequencyHold {
             scaled_ppm,
@@ -140,7 +150,9 @@ pub(crate) fn adjust_clock(adjustment: ClockAdjustment) -> Result<ClockDisciplin
     value.modes = adjustment.modes();
     value.status = adjustment.status();
     match adjustment {
-        ClockAdjustment::Query | ClockAdjustment::ClearPhase => {}
+        ClockAdjustment::Query => {}
+        #[cfg(any(test, target_arch = "x86_64"))]
+        ClockAdjustment::ClearPhase => {}
         ClockAdjustment::Step {
             seconds,
             nanoseconds,
@@ -151,9 +163,12 @@ pub(crate) fn adjust_clock(adjustment: ClockAdjustment) -> Result<ClockDisciplin
                 tv_usec: nanoseconds,
             };
         }
-        ClockAdjustment::Frequency(hold) | ClockAdjustment::Pin { hold, .. } => {
+        ClockAdjustment::Frequency(hold) => {
             hold.apply(&mut value);
         }
+        #[cfg(any(test, target_arch = "x86_64"))]
+        ClockAdjustment::Pin { hold, .. } => hold.apply(&mut value),
+        #[cfg(any(test, target_arch = "x86_64"))]
         ClockAdjustment::SetFrequency(scaled_ppm) => value.freq = scaled_ppm,
         ClockAdjustment::Slew {
             offset_ns,

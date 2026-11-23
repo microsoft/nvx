@@ -23,6 +23,7 @@ RUN set -eux; \
 
 FROM ${DEBIAN_IMAGE} AS base
 ARG EROFS_UTILS_VERSION
+ARG NVX_KERNEL_JOBS
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bc \
         binutils \
@@ -53,10 +54,14 @@ COPY scripts/ /repo/scripts/
 COPY LICENSE README.md SOURCE-MANIFEST.json THIRD_PARTY_NOTICES.md /repo/
 
 FROM base AS kernel
-RUN python3 scripts/nvx.py build-kernel
+RUN set --; \
+    if [ -n "$NVX_KERNEL_JOBS" ]; then set -- --jobs "$NVX_KERNEL_JOBS"; fi; \
+    python3 scripts/nvx.py build-kernel "$@"
 
 FROM base AS kernel-debug
-RUN python3 scripts/nvx.py build-kernel --debug
+RUN set --; \
+    if [ -n "$NVX_KERNEL_JOBS" ]; then set -- --jobs "$NVX_KERNEL_JOBS"; fi; \
+    python3 scripts/nvx.py build-kernel --debug "$@"
 
 # The kernel configuration and its derived record, generated from the feature
 # inventory with the toolchain that builds the kernel (doc/build.md).

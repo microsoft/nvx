@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 
 pub use super::platform::hypervisor::Hypervisor;
 
+mod architecture;
+pub use architecture::GuestArchitecture;
+
 use super::platform;
 use crate::error::{Error, Result};
 
@@ -22,6 +25,8 @@ use crate::error::{Error, Result};
 /// options of OpenVMM that do not depend on the VM.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Runtime {
+    /// The explicitly selected instruction set of the guest kernel and programs.
+    pub architecture: GuestArchitecture,
     /// The OpenVMM executable.
     pub openvmm: PathBuf,
     /// The guest kernel.

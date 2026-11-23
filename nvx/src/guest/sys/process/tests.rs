@@ -138,12 +138,11 @@ pub(crate) fn deny_system_call(number: nix::libc::c_long) {
 }
 
 /// Rejects negative-ID `kill` with `EPERM`, but leaves positive child IDs usable for cleanup.
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn deny_group_kill() {
     use nix::libc;
 
     // kill takes a 32-bit pid_t: its sign bit is in the low word of seccomp_data.args[0],
-    // at byte 16 on x86-64, even when the caller has zero-extended that syscall argument.
+    // at byte 16 on x86-64 and AArch64, even when the caller zero-extended that argument.
     let mut filter = [
         filter_statement(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
         filter_statement(

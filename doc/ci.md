@@ -613,6 +613,10 @@ its gateway and no other destination, sandboxes whose overlay upper is a
 tmpfs in guest memory, with no scratch image, and sandboxes whose root is a
 GPT disk, over either upper, so that the three backends run the CLI's twelve
 cold cells (see the [case matrix](acceptance-case-matrix.md#cold-boots)). The
+managed lifecycle checks newly written runtime records against the exact
+version-2 schema, including the explicit `x86_64` or `aarch64` architecture,
+and rejects unknown fields, missing metadata, and invalid metadata values.
+It also verifies the VM directory and its owned control capability. The
 public `vm-lifecycle` scenario then creates, spawns, connects to, attaches to
 again, and stops a VM through the public API of `nvx`. The public
 `snapshot-core` and `snapshot-tiers` scenarios capture a named snapshot with
@@ -2648,14 +2652,15 @@ compile-only `host-workflows` and, in the musl check, `guest-workflows`, so
 that the documented workflows keep compiling against the public API.
 
 On Linux, the `nvx` job also checks the public API of `nvx` against its
-snapshots, [`nvx/public-api/linux.txt`](../nvx/public-api/linux.txt) and
+snapshots, [`nvx/public-api/linux.txt`](../nvx/public-api/linux.txt),
+[`linux-aarch64.txt`](../nvx/public-api/linux-aarch64.txt) and
 [`windows.txt`](../nvx/public-api/windows.txt), with
 [`public_api.py`](../scripts/public_api.py). The script builds the library's
 rustdoc JSON with every feature, on the pinned Rust release, for
-`x86_64-unknown-linux-musl`, the guests' target, and for
-`x86_64-pc-windows-msvc`, after it adds both targets to that release with
+`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, the guests' targets, and for
+`x86_64-pc-windows-msvc`, after it adds all three targets to that release with
 rustup. rustdoc needs only a target's standard library, not its linker, so the
-Linux runner checks both snapshots, and any host lists both platforms alike.
+Linux runner checks all snapshots, and any host lists the same OS/ISA-specific APIs.
 Each snapshot lists one public item a line, sorted by path: its kind, its path,
 and `(hidden)` if `#[doc(hidden)]` hides it or an item that contains it. The
 list follows re-exports, and leaves trait implementations out. The check,

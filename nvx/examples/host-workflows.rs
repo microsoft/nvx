@@ -91,6 +91,7 @@ pub fn cold_boot(
     let launched = vm::spawn(prepared)?;
     let saved = Saved {
         vm: SavedVm {
+            architecture: runtime.architecture,
             vm_dir: dir,
             endpoint: launched.outputs.endpoint.clone(),
             capability: *launched.capability.as_bytes(),

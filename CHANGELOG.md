@@ -5,6 +5,28 @@ This file lists NVX's breaking releases: those of the
 CI publishes the crate's other versions every night, as
 [crates.io releases](doc/ci.md#cratesio-releases) describes.
 
+## 0.3.0-alpha.1
+
+Unreleased.
+
+Guest architecture is an explicit part of a launch, separate from the caller's
+opaque runtime identity.
+
+- Set `host::runtime::Runtime.architecture` to
+  `GuestArchitecture::X86_64` or `GuestArchitecture::Aarch64`, based on the
+  staged guest products, not the host ISA.
+- Save that selection in `host::vm::SavedVm.architecture`.
+- Pass the expected architecture as the third argument of `vm::verify`;
+  `vm::attach` uses the architecture in the expected `Runtime`. An ISA mismatch
+  fails before process or endpoint I/O.
+- `RuntimeIdentity` retains its four opaque fields, and x86 SnapshotKey v1's
+  canonical encoding is unchanged. ARM capture, restore and memory growth remain
+  unsupported.
+- CLI launch journals/runtime records now write explicit version 2 architecture
+  metadata. Only the exact historical unversioned CLI v5 schema, whose supported
+  producers were x86-only, gets legacy-x86 treatment. Missing, null, unknown or
+  contradictory new metadata is refused.
+
 ## 0.2.0-alpha.1
 
 `nvx` becomes a library of mechanisms and value types for microVMs, on which

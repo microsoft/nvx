@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
-from nvx_tools import guest_binaries  # noqa: E402
+from nvx_tools import build, guest_binaries  # noqa: E402
 from nvx_tools.build_constants import (  # noqa: E402
     BuildConstants,
     GuestRustBuildConstants,
@@ -33,6 +33,7 @@ def _write_build_output(
     manifest = {
         "domain": GuestRustBuildConstants.BUILD_MANIFEST_DOMAIN,
         "format": GuestRustBuildConstants.BUILD_MANIFEST_FORMAT,
+        "target": GuestRustBuildConstants.TARGET,
         "binaries": {binary: "0" * 64 for binary in recorded},
     }
     (output / GuestRustBuildConstants.BUILD_MANIFEST_NAME).write_text(
@@ -76,7 +77,7 @@ def _fake_guest_build(
         rendered = [os.fspath(part) for part in command]
         destination = (
             Path(env["CARGO_TARGET_DIR"])
-            / GuestRustBuildConstants.TARGET
+            / rendered[rendered.index("--target") + 1]
             / GuestRustBuildConstants.PROFILE
         )
         destination.mkdir(parents=True, exist_ok=True)
@@ -103,6 +104,66 @@ def _fake_guest_build(
 
 
 class GuestBinaryBuildTests(unittest.TestCase):
+    def test_arm_build_keeps_target_inventory_manifest_and_elf_check_together(self):
+        with tempfile.TemporaryDirectory() as temporary, _fake_guest_build() as cargo:
+            output = Path(temporary) / "arm"
+            with patch.object(guest_binaries, "check_static_executables") as check:
+                result = guest_binaries.build_guest_binaries(
+                    output, architecture="aarch64"
+                )
+                self.assertEqual(
+                    guest_binaries.inspect_guest_binaries(
+                        output, architecture="aarch64"
+                    ),
+                    result,
+                )
+            command = [
+                os.fspath(part)
+                for part in cast(
+                    Sequence[str | os.PathLike[str]], cargo.call_args.args[0]
+                )
+            ]
+            self.assertEqual(
+                command[command.index("--target") + 1], "aarch64-unknown-linux-musl"
+            )
+            self.assertEqual(
+                set(result.binaries), set(GuestRustBuildConstants.ARM_BINARIES)
+            )
+            self.assertNotIn("nvx-mmio-write", result.binaries)
+            self.assertNotIn("nvx-time-probe", result.binaries)
+            manifest = json.loads((output / "manifest.json").read_text())
+            self.assertEqual(manifest["target"], "aarch64-unknown-linux-musl")
+            self.assertEqual(manifest["binaries"], result.binaries)
+            self.assertEqual(check.call_count, 2)
+            for call in check.call_args_list:
+                self.assertEqual(call.kwargs, {"expected_machine": 183})
+
+    def test_arm_output_with_an_x86_manifest_is_refused_without_overwriting(self):
+        with tempfile.TemporaryDirectory() as temporary, _fake_guest_build() as cargo:
+            output = Path(temporary) / "arm"
+            guest_binaries.build_guest_binaries(output, architecture="aarch64")
+            manifest_path = output / GuestRustBuildConstants.BUILD_MANIFEST_NAME
+            manifest = json.loads(manifest_path.read_text())
+            manifest["target"] = GuestRustBuildConstants.TARGET
+            manifest_path.write_text(json.dumps(manifest))
+            before = _contents(output)
+            with self.assertRaisesRegex(guest_binaries.ScriptError, "unrecognized"):
+                guest_binaries.inspect_guest_binaries(output, architecture="aarch64")
+            with self.assertRaisesRegex(guest_binaries.ScriptError, "unrecognized"):
+                guest_binaries.build_guest_binaries(output, architecture="aarch64")
+            self.assertEqual(_contents(output), before)
+            self.assertEqual(cargo.call_count, 1)
+
+    def test_unsupported_architecture_cannot_create_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "new-parent" / "output"
+            with (
+                patch.object(guest_binaries.sys, "platform", "linux"),
+                self.assertRaisesRegex(guest_binaries.ScriptError, "architecture"),
+            ):
+                guest_binaries.build_guest_binaries(output, architecture="unsupported")
+            self.assertFalse(output.parent.exists())
+
     def test_source_identity_covers_the_guest_build_inputs_only(self):
         root = BuildConstants.REPO_ROOT
         relative = {
@@ -962,6 +1023,33 @@ class GuestBinaryCheckTests(unittest.TestCase):
 
 
 class GuestBinaryCliTests(unittest.TestCase):
+    def test_explicit_jobs_reach_native_and_docker_kernel_producers(self):
+        for debug in (False, True):
+            argv = ["build-kernel", "--jobs", "1"]
+            if debug:
+                argv.append("--debug")
+            args = nvx.parse_args(argv)
+            with patch.object(nvx, "build_kernel") as kernel:
+                args.handler(args)
+            self.assertEqual(kernel.call_args.args[0].jobs, 1)
+            self.assertEqual(kernel.call_args.args[0].debug, debug)
+        default = nvx._build_config(nvx.parse_args(["build-guest"]))
+        self.assertIsNone(default.kernel.jobs)
+        self.assertIsNone(default.docker.kernel_jobs)
+        config = nvx._build_config(nvx.parse_args(["build-guest", "--jobs", "1"]))
+        self.assertEqual(config.kernel.jobs, 1)
+        command = build.docker_build_command(
+            config.docker, build.DockerBuildConstants.LINUX_SOURCE_TARGET
+        )
+        self.assertIn("NVX_KERNEL_JOBS=1", command)
+        for invalid in ("0", "-1", "many"):
+            with self.subTest(invalid=invalid):
+                with (
+                    contextlib.redirect_stderr(io.StringIO()),
+                    self.assertRaises(SystemExit),
+                ):
+                    nvx.parse_args(["build-kernel", "--jobs", invalid])
+
     def test_check_command_passes_the_selected_toolchain(self):
         for argv, toolchain in (
             (["check-guest-binaries"], None),
@@ -971,7 +1059,7 @@ class GuestBinaryCliTests(unittest.TestCase):
                 args = nvx.parse_args(argv)
                 with patch.object(nvx, "check_guest_binaries") as check:
                     args.handler(args)
-                check.assert_called_once_with(toolchain)
+                check.assert_called_once_with(toolchain, architecture="x86_64")
 
     def test_build_command_reports_digests(self):
         args = nvx.parse_args(
@@ -987,7 +1075,9 @@ class GuestBinaryCliTests(unittest.TestCase):
             contextlib.redirect_stdout(stdout),
         ):
             args.handler(args)
-        build.assert_called_once_with(Path("build/guest-binaries"))
+        build.assert_called_once_with(
+            Path("build/guest-binaries"), architecture="x86_64"
+        )
         self.assertEqual(
             json.loads(stdout.getvalue()),
             {
@@ -1002,7 +1092,41 @@ class GuestBinaryCliTests(unittest.TestCase):
         )
         with patch.object(nvx, "test_guest_binaries") as test:
             args.handler(args)
-        test.assert_called_once_with(Path("build/guest-binaries"))
+        test.assert_called_once_with(
+            Path("build/guest-binaries"), architecture="x86_64"
+        )
+
+    def test_arm_architecture_reaches_each_guest_binary_command(self):
+        cases: tuple[tuple[str, list[str], str, Path | None], ...] = (
+            ("check-guest-binaries", [], "check_guest_binaries", None),
+            (
+                "build-guest-binaries",
+                ["--output", "build/arm"],
+                "build_guest_binaries",
+                Path("build/arm"),
+            ),
+            (
+                "test-guest-binaries",
+                ["--binaries", "build/arm"],
+                "test_guest_binaries",
+                Path("build/arm"),
+            ),
+        )
+        for command, options, function, argument in cases:
+            with self.subTest(command=command):
+                args = nvx.parse_args([command, "--architecture", "aarch64", *options])
+                with (
+                    patch.object(
+                        nvx,
+                        function,
+                        return_value=guest_binaries.GuestBinaryBuildResult(
+                            "a" * 64, {}, architecture="aarch64"
+                        ),
+                    ) as called,
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    args.handler(args)
+                called.assert_called_once_with(argument, architecture="aarch64")
 
     def test_source_identity_command_prints_the_recorded_source_digest(self):
         # The guest image cache keys end with this output, so it must be the

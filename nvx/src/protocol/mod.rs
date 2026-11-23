@@ -38,7 +38,7 @@ pub mod cmdline;
 #[cfg(any(
     feature = "cli",
     feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+    all(feature = "guest", target_os = "linux")
 ))]
 pub(crate) mod exec;
 pub mod export;
@@ -82,28 +82,28 @@ pub mod view;
 
 #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) use app::ACTIVATION_IDENTITY_LEN;
-#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(feature = "guest", target_os = "linux"))]
 pub(crate) use app::APP_CAPTURE;
-#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(feature = "guest", target_os = "linux"))]
 pub(crate) use app::APP_EXIT;
 #[cfg(any(
     feature = "cli",
     feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+    all(feature = "guest", target_os = "linux")
 ))]
 pub(crate) use app::APP_HEADER_LEN;
-#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(feature = "guest", target_os = "linux"))]
 pub(crate) use app::AppFrame;
 #[cfg(any(
     feature = "cli",
     feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+    all(feature = "guest", target_os = "linux")
 ))]
 pub(crate) use app::MAPPING_FAILED;
 #[cfg(any(
     feature = "cli",
     feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+    all(feature = "guest", target_os = "linux")
 ))]
 pub(crate) use app::UNSUPPORTED_OPERATION;
 #[cfg(feature = "cli")]
@@ -113,7 +113,7 @@ pub(crate) use app::encode_capture_payload;
 #[cfg(any(
     feature = "cli",
     feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+    all(feature = "guest", target_os = "linux")
 ))]
 pub(crate) use app::v2;
 #[cfg(any(
@@ -121,25 +121,19 @@ pub(crate) use app::v2;
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) use app::workload;
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) use app::{
     APP_CANCEL, APP_ERROR, APP_EXEC, APP_MAPS, APP_PING, APP_READY, APP_STDERR, APP_STDOUT,
     APP_STOP, APP_STOPPED,
 };
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(any(feature = "testing", all(feature = "guest", target_os = "linux")))]
 pub(crate) use app::{BUSY, CWD_FAILED, INVALID_REQUEST, LAUNCH_FAILED, MAPPINGS_INCOMPLETE};
 #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) use app::{decode_activation_record, decode_capture_payload};
 pub use boot::{MAPS_TOKEN, parse_host_mapping_count};
 #[cfg(feature = "testing")]
 pub(crate) use exec::decode_exec_payload;
-#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(feature = "guest", target_os = "linux"))]
 pub(crate) use exec::{GuestExecPayload, decode_guest_exec_payload};
 #[cfg(feature = "cli")]
 pub(crate) use exec::{Workload, WorkloadEnvironment, encode_exec_payload};

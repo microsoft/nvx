@@ -168,7 +168,7 @@ unless validate-nvx runs every `scripts/test_*.py` module on both operating
 systems, so add a new script or test module to those lists.
 
 A change to the public API of `nvx` updates its snapshots in
-`nvx/public-api/`, which list it on Linux and on Windows, so that the
+`nvx/public-api/`, which list it on Linux x86-64, Linux ARM64 and Windows, so that the
 change shows in the pull request's diff. The first command checks the
 snapshots, as the `nvx` job does on Linux, and the second rewrites them:
 
@@ -178,7 +178,7 @@ python3 scripts/public_api.py --update
 ```
 
 The script builds rustdoc's JSON with the Rust release that
-`rust-toolchain.toml` pins, and adds the musl and MSVC targets to it. It also
+`rust-toolchain.toml` pins, and adds the x86-64/ARM64 musl and x86-64 MSVC targets to it. It also
 fails unless the API's hidden items are one `main` per binary, the entry point
 that the binary's source calls, and the modules that hold it; see
 [Rust crates](ci.md#rust-crates).
@@ -290,6 +290,14 @@ list how many each production file may hold. A change that adds a hook
 records it there, and a reviewer checks that the hook cannot move. A change
 that removes one runs `--tighten`, which lowers the seams to the hooks that
 the files hold; it never raises an entry or adds one.
+
+Cross-ISA tests use the same portable production helpers by extending their
+compile predicates for tests, such as `cfg(any(test, target_arch = "x86_64"))`.
+Those predicates stay beside the production types, match arms and functions
+they select, and have exact seam counts; their implementations are not copied
+into tests. Methods used only by tests still belong in the `tests` module.
+Extending a test build's availability does not enable unsupported runtime
+capabilities on the other ISA.
 
 Python unit tests are the `test_*.py` modules of `scripts/`,
 `.github/specula/tests/`, and `.github/skills/*/scripts/`, and the end-to-end

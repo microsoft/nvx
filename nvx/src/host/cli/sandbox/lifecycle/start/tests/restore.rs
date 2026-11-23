@@ -750,6 +750,7 @@ fn deprovision_removes_a_restored_sandboxs_view_only_under_its_snapshots_lock() 
     );
     let binding = DistroBinding::verify(&layer).unwrap();
     let options = ProvisionConfig {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         hypervisor: "kvm",
         memory_mib: 512,
         cmdline: "",
@@ -763,7 +764,7 @@ fn deprovision_removes_a_restored_sandboxs_view_only_under_its_snapshots_lock() 
     let text = serialize_launch(&distro, None, &options, Some(&source)).unwrap();
     write_json(&state_dir.join(CONFIG_NAME), &text).unwrap();
     let state_path = state_dir.to_str().unwrap();
-    let artifacts = Artifacts { root: None };
+    let artifacts = Artifacts::new(None);
     let held = fixture.store.lock(&name(), Deadline::after(5.0)).unwrap();
     let error = deprovision(state_path, &artifacts, 0.5).unwrap_err();
     assert_eq!(error.code(), Some(ErrorCode::SandboxBusy), "{error:?}");
@@ -802,6 +803,7 @@ fn a_restored_start_refuses_a_share_of_its_snapshot_store() {
     validate_mounts(&mounts).unwrap();
     let export = plan_mounts(&mounts).unwrap();
     let options = ProvisionConfig {
+        architecture: crate::host::runtime::GuestArchitecture::X86_64,
         hypervisor: "kvm",
         memory_mib: 512,
         cmdline: "",
@@ -816,9 +818,7 @@ fn a_restored_start_refuses_a_share_of_its_snapshot_store() {
     let text = serialize_launch(&distro, None, &options, Some(&source)).unwrap();
     write_json(&state_dir.join(CONFIG_NAME), &text).unwrap();
     let root = fixture.state("checkout");
-    let artifacts = Artifacts {
-        root: Some(root.to_str().unwrap()),
-    };
+    let artifacts = Artifacts::new(Some(root.to_str().unwrap()));
     let error = start(state_dir.to_str().unwrap(), &artifacts, 5.0, false).unwrap_err();
     assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
     let message = error.message().unwrap_or_default();
@@ -919,9 +919,7 @@ fn snapshot_restore_records_its_source_and_starts_a_restore_of_it() {
     );
     assert_eq!(fixture.view("command"), 0);
     assert!(fixture.snapshot_free());
-    let artifacts = Artifacts {
-        root: Some(root.as_str()),
-    };
+    let artifacts = Artifacts::new(Some(root.as_str()));
     deprovision(state.to_str().unwrap(), &artifacts, 5.0).unwrap();
     assert!(!state.exists());
 }

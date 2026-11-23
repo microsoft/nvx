@@ -4,8 +4,13 @@ use std::fmt::{self, Write as _};
 use std::str::FromStr;
 
 use super::Phase;
-use super::decoders;
-use super::system::BestSample;
+pub(crate) use super::model::HostClockStatus;
+use super::model::{BestSample, bound_to_ppb, frequency_to_ppb};
+use crate::guest::counter::PublishedRateFields;
+#[cfg(any(test, target_arch = "aarch64"))]
+use crate::guest::counter::{ClockError, ClockState, PublishedRateContext};
+#[cfg(target_arch = "x86_64")]
+use crate::guest::sys::Errno;
 
 /// Defines an enumeration of the tokens of one state-file field, with each token's spelling.
 macro_rules! tokens {
@@ -99,35 +104,6 @@ tokens! {
     }
 }
 
-tokens! {
-    /// The status of host UTC that the latest accepted time sample reported.
-    #[derive(Default)]
-    HostClockStatus {
-        /// The host does not report its clock's status.
-        #[default]
-        Unknown => "unknown",
-        /// A time service synchronizes host UTC with a reference.
-        Synchronized => "synchronized",
-        /// No time service synchronizes host UTC, which runs on its own.
-        FreeRunning => "free-running",
-        /// The host reports a fault of its clock.
-        Unreliable => "unreliable",
-    }
-}
-
-impl HostClockStatus {
-    /// Returns the status that a time sample's status byte encodes, if any.
-    pub(crate) const fn from_byte(byte: u8) -> Option<Self> {
-        match byte {
-            0 => Some(Self::Unknown),
-            1 => Some(Self::Synchronized),
-            2 => Some(Self::FreeRunning),
-            3 => Some(Self::Unreliable),
-            _ => None,
-        }
-    }
-}
-
 /// Writes an optional bound of the state file: its value, or `unknown`.
 struct Bound(Option<u64>);
 
@@ -158,17 +134,18 @@ pub(crate) struct CheckState {
     pub(crate) failures: Option<u64>,
 }
 
-/// Complete state published under `/run/nvx/time/state`, of version one of its format.
+/// A version-one published report, not clock or hardware admission.
+///
+/// Status readers may inspect reported phase/accounting flags without hardware privileges.
+/// Only an explicit binding context may turn its private published rate fields into clock metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TimeState {
+pub(crate) struct StateReport {
     /// Current VM generation.
     pub(crate) generation: u64,
     /// Boot, capture, and restore records, in the order of `Phase::CHECKS`.
     checks: [CheckState; 3],
-    /// Validated TSC frequency in hertz.
-    pub(crate) tsc_hz: u64,
-    /// Validated local-APIC timer frequency in hertz.
-    pub(crate) lapic_hz: u64,
+    /// Opaque legacy rate slots, not an independently admitted hardware clock.
+    published_rates: PublishedRateFields,
     /// Number of observed clock discontinuities.
     pub(crate) discontinuities: u64,
     /// The latest discontinuity.
@@ -218,7 +195,7 @@ pub(crate) struct TimeState {
     pub(crate) violations: u64,
 }
 
-impl Default for TimeState {
+impl Default for StateReport {
     /// Returns a fresh state, whose only record is the pending boot check.
     fn default() -> Self {
         let boot = CheckState {
@@ -228,8 +205,10 @@ impl Default for TimeState {
         Self {
             generation: 0,
             checks: [boot, CheckState::default(), CheckState::default()],
-            tsc_hz: 0,
-            lapic_hz: 0,
+            published_rates: PublishedRateFields {
+                tsc_hz: 0,
+                lapic_hz: 0,
+            },
             discontinuities: 0,
             last_discontinuity: Discontinuity::None,
             last_step_ns: 0,
@@ -255,7 +234,46 @@ impl Default for TimeState {
     }
 }
 
-impl TimeState {
+impl StateReport {
+    /// Reads the x86 guest's own legacy boot record, without new profile/MSR admission.
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn x86_persisted_rates(&self) -> Result<(u64, u64), Errno> {
+        let fields = self.published_rates;
+        if fields.tsc_hz == 0 || fields.lapic_hz == 0 {
+            Err(Errno::EINVAL)
+        } else {
+            Ok((fields.tsc_hz, fields.lapic_hz))
+        }
+    }
+
+    /// Supplies x86's existing restore-cache seed; zero remains ignored by the runtime.
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn x86_persisted_tsc_hz(&self) -> u64 {
+        self.published_rates.tsc_hz
+    }
+
+    /// Records only the encoding admitted by the caller's explicit clock context.
+    #[cfg(any(test, target_arch = "aarch64"))]
+    pub(crate) fn record_clock(
+        &mut self,
+        clock: &ClockState,
+        context: PublishedRateContext<'_>,
+    ) -> Result<(), ClockError> {
+        self.published_rates = PublishedRateFields::encode(clock, context)?;
+        Ok(())
+    }
+
+    /// Keeps partial x86 check observations report-only, including failed-admission diagnostics.
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn record_x86_observations(&mut self, counter_hz: u64, local_timer_hz: u64) {
+        if counter_hz != 0 {
+            self.published_rates.tsc_hz = counter_hz;
+        }
+        if local_timer_hz != 0 {
+            self.published_rates.lapic_hz = local_timer_hz;
+        }
+    }
+
     /// Records the accepted time sample `sample`: the wall clock's offset from host UTC and its
     /// uncertainty, the frequency correction that the discipline holds, whether Linux's limit
     /// clamped it, the discipline of host UTC that the sample published, and whether host test
@@ -265,11 +283,11 @@ impl TimeState {
         self.samples += 1;
         self.offset_ns = sample.theta;
         self.uncertainty_ns = sample.epsilon;
-        self.frequency_ppb = decoders::frequency_to_ppb(sample.frequency);
+        self.frequency_ppb = frequency_to_ppb(sample.frequency);
         self.frequency_limited = sample.limited;
         self.host_status = host.status;
-        self.host_correction_ppb = decoders::frequency_to_ppb(host.correction);
-        self.host_correction_bound_ppb = host.correction_bound.map(decoders::bound_to_ppb);
+        self.host_correction_ppb = frequency_to_ppb(host.correction);
+        self.host_correction_bound_ppb = host.correction_bound.map(bound_to_ppb);
         self.host_max_error_us = host.max_error_us.map(u64::from);
         self.host_disruption = u64::from(host.disruption);
         self.host_test_hooks = sample.test_hooks;
@@ -323,8 +341,8 @@ impl TimeState {
         }
         match key {
             "generation" => self.generation = number(value)?,
-            "tsc_hz" => self.tsc_hz = number(value)?,
-            "lapic_hz" => self.lapic_hz = number(value)?,
+            "tsc_hz" => self.published_rates.tsc_hz = number(value)?,
+            "lapic_hz" => self.published_rates.lapic_hz = number(value)?,
             "discontinuities" => self.discontinuities = number(value)?,
             "last_discontinuity" => self.last_discontinuity = Discontinuity::parse(value)?,
             "last_step_ns" => self.last_step_ns = number(value)?,
@@ -352,6 +370,7 @@ impl TimeState {
     }
 
     /// Returns the record of `phase`, unless it is the runtime phase, which has none.
+    #[cfg(any(test, target_arch = "x86_64"))]
     pub(crate) fn check(&self, phase: Phase) -> Option<&CheckState> {
         self.checks.get(phase.check_index()?)
     }
@@ -398,8 +417,8 @@ impl TimeState {
                  generation={}",
                 phase.name(),
                 check.cpus,
-                self.tsc_hz,
-                self.lapic_hz,
+                self.published_rates.tsc_hz,
+                self.published_rates.lapic_hz,
                 check.generation
             );
             if status != CheckStatus::Pending {
@@ -434,7 +453,7 @@ impl TimeState {
     }
 }
 
-impl fmt::Display for TimeState {
+impl fmt::Display for StateReport {
     /// Writes the state file, with its keys in the order that the ABI fixes.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(formatter, "version=1")?;
@@ -469,8 +488,8 @@ impl fmt::Display for TimeState {
                 writeln!(formatter, "{}_failures={failures}", phase.name())?;
             }
         }
-        writeln!(formatter, "tsc_hz={}", self.tsc_hz)?;
-        writeln!(formatter, "lapic_hz={}", self.lapic_hz)?;
+        writeln!(formatter, "tsc_hz={}", self.published_rates.tsc_hz)?;
+        writeln!(formatter, "lapic_hz={}", self.published_rates.lapic_hz)?;
         writeln!(formatter, "discontinuities={}", self.discontinuities)?;
         writeln!(formatter, "last_discontinuity={}", self.last_discontinuity)?;
         writeln!(formatter, "last_step_ns={}", self.last_step_ns)?;

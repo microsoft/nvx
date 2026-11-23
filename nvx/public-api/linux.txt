@@ -392,6 +392,8 @@ variant nvx::guest::time::TimeError::EntropyFile
 field nvx::guest::time::TimeError::EntropyFile::path
 field nvx::guest::time::TimeError::EntropyFile::source
 variant nvx::guest::time::TimeError::GenerationIdUnavailable
+variant nvx::guest::time::TimeError::PlatformIo
+field nvx::guest::time::TimeError::PlatformIo::0
 variant nvx::guest::time::TimeError::PortAccess
 field nvx::guest::time::TimeError::PortAccess::0
 variant nvx::guest::time::TimeError::PortLock
@@ -401,6 +403,8 @@ field nvx::guest::time::TimeError::PortRelease::0
 variant nvx::guest::time::TimeError::Spawn
 field nvx::guest::time::TimeError::Spawn::0
 variant nvx::guest::time::TimeError::StateUnavailable
+variant nvx::guest::time::TimeError::Unsupported
+field nvx::guest::time::TimeError::Unsupported::0
 variant nvx::guest::time::TimeError::Violation
 field nvx::guest::time::TimeError::Violation::0
 struct nvx::guest::time::Violation
@@ -835,6 +839,10 @@ method nvx::host::runtime::ArtifactIdentity::sha256
 struct nvx::host::runtime::CompatibilityIdentity
 method nvx::host::runtime::CompatibilityIdentity::as_str
 method nvx::host::runtime::CompatibilityIdentity::new
+enum nvx::host::runtime::GuestArchitecture
+variant nvx::host::runtime::GuestArchitecture::Aarch64
+variant nvx::host::runtime::GuestArchitecture::X86_64
+method nvx::host::runtime::GuestArchitecture::as_str
 enum nvx::host::runtime::GuestPowerAction
 variant nvx::host::runtime::GuestPowerAction::Exit
 variant nvx::host::runtime::GuestPowerAction::Halt
@@ -860,6 +868,7 @@ field nvx::host::runtime::LaunchOptions::control_auth_timeout
 field nvx::host::runtime::LaunchOptions::guest_shutdown
 const nvx::host::runtime::MAX_IDENTITY_LEN
 struct nvx::host::runtime::Runtime
+field nvx::host::runtime::Runtime::architecture
 field nvx::host::runtime::Runtime::cpu_profile
 field nvx::host::runtime::Runtime::hypervisor
 field nvx::host::runtime::Runtime::identity
@@ -1016,6 +1025,7 @@ field nvx::host::vm::Launched::outputs
 field nvx::host::vm::Launched::process
 field nvx::host::vm::Launched::ready
 struct nvx::host::vm::Prepared
+method nvx::host::vm::Prepared::architecture
 method nvx::host::vm::Prepared::arguments
 method nvx::host::vm::Prepared::capability
 method nvx::host::vm::Prepared::capture_context
@@ -1027,6 +1037,7 @@ method nvx::host::vm::Prepared::nic
 method nvx::host::vm::Prepared::outputs
 method nvx::host::vm::Prepared::supply_activation_record
 struct nvx::host::vm::SavedVm
+field nvx::host::vm::SavedVm::architecture
 field nvx::host::vm::SavedVm::capability
 field nvx::host::vm::SavedVm::endpoint
 field nvx::host::vm::SavedVm::process

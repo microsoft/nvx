@@ -164,6 +164,17 @@ of the root's Python minor version, which Debian's is not, so such a root
 builds natively; see
 [Ubuntu guest support](guests/ubuntu-guest.md#root-filesystem-builder).
 
+For an ARM managed cold root, pass `--architecture aarch64` to
+`build-distro-layer` and to the native Ubuntu or Alpine guest producer. Their
+outputs default to `build/aarch64/`; Ubuntu uses its separate pinned
+`ubuntu/packages-arm64.lock.json`, not the x86 package lock. The scratch
+template's canonical bytes are shared across ISAs: the producer normalizes
+e2fsprogs' signed-directory-hash superblock flag using the matching `debugfs`.
+Keep the kernel, initramfs, EROFS manifest, and Rust guest-binary source
+identities together; a retained OS used for unit tests is not a current managed
+root product. Invoke managed ARM CLI launches with `--architecture aarch64`;
+omitting it preserves the x86-64 contract on every host.
+
 The sandbox scratch template, `build/ubuntu-smoke-scratch.ext4`, is the empty
 ext4 file system of which the sandbox scenarios boot a copy as their scratch.
 [`build-scratch-template`](usage.md#build-scratch-template) formats it on
@@ -304,6 +315,19 @@ records each one with the rule that sets it:
 | `default` | it is a value that keeps its default |
 | `default, prompt hidden by C` | its prompt is hidden while `C` does not hold, and its default holds |
 | `no prompt` | no user can set it: its architecture, its toolchain, or other symbols decide it |
+
+The ARM binding of that same inventory generates
+[`config-microvm-arm64`](../kernel/config-microvm-arm64) and
+[`config-microvm-arm64.derived`](../kernel/config-microvm-arm64.derived):
+`python3 scripts/nvx.py kernel-config --architecture aarch64 --native`.
+It selects the ARM Kconfig tree, Image/DT boot, generic timer and restricted
+platform MMIO device, without interpreting x86 TSC/APIC or port settings as
+ARM settings. Neither ARM file is hand-maintained. The default x86 files and
+their generation remain unchanged.
+
+The corresponding-source tool also takes `--architecture aarch64`: it uses
+the selected patch context and packages the final `Image.config`, not the x86
+`vmlinux.config`. `SOURCE-MANIFEST.json` records that kernel binding separately.
 
 So every symbol that the configuration sets is either an inventory setting or
 derived from one by a Kconfig dependency or default, and every other feature is
@@ -565,7 +589,8 @@ The package's binaries build with these features, profiles, and targets:
 | --- | --- | --- | --- | --- |
 | `nvx` | `cli` | `release`, for the host's target in a checkout; for release packages, static `x86_64-unknown-linux-musl` on Linux and `x86_64-pc-windows-msvc` with a static C runtime on Windows | The [`nvx` build command](usage.md#nvx), which `nvx.py` and the setup scripts run, and CI's `nvx` build jobs | `bin/nvx[.exe]` of every [release package](#release-packages) |
 | `nvx-fake-openvmm` | `testing` | The tests' | `cargo test` with `testing`, for the crate's tests, which run it as OpenVMM | No package |
-| `nvx-console-pending`, `nvx-device-io`, `nvx-exit`, `nvx-ingress`, `nvx-init`, `nvx-managed-agent`, `nvx-mmio-write`, `nvx-reseed`, `nvx-time`, `nvx-time-probe` | `guest` | `guest`, static `x86_64-unknown-linux-musl` | [`build-guest-binaries`](usage.md#build-guest-binaries), for every guest image | `/sbin` of every initramfs; other guests [install them from the crate](distribution.md#the-guest-tools) |
+| `nvx-console-pending`, `nvx-device-io`, `nvx-exit`, `nvx-ingress`, `nvx-init`, `nvx-managed-agent`, `nvx-reseed`, `nvx-time` | `guest` | `guest`, static `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl` | [`build-guest-binaries`](usage.md#build-guest-binaries), with the explicit guest architecture | `/sbin` of the matching initramfs; other guests [install them from the crate](distribution.md#the-guest-tools) |
+| `nvx-mmio-write`, `nvx-time-probe` | `guest` | `guest`, static `x86_64-unknown-linux-musl` only | The same guest-binary builder, for x86 guests only | x86 initramfs images; never unsupported ARM stubs |
 
 Its examples, `external-launch` and `host-workflows` with `host`, and
 `guest-workflows` with `guest`, build with the crate's checks of all targets;

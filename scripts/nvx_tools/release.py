@@ -27,7 +27,7 @@ from .build import (
     initramfs_provenance_inputs,
     kernel_provenance_inputs,
 )
-from .build_config import DockerBuildConfig
+from .build_config import DockerBuildConfig, KernelBuildConfig
 from .build_constants import (
     AlpineBuildConstants,
     AzureLinuxBuildConstants,
@@ -614,32 +614,54 @@ def _ubuntu_source_archive(
     _create_source_archive(output, inputs)
 
 
-def _validate_linux_source_archive(path: Path) -> None:
+def _validate_linux_source_archive(path: Path, *, architecture: str = "x86_64") -> None:
+    config = KernelBuildConfig.for_architecture(architecture)
+    config_name = f"{config.output.name}.config"
+    final_config = (
+        BuildConstants.REPO_ROOT
+        / BuildConstants.BUILD_DIRECTORY_NAME
+        / "aarch64"
+        / config_name
+        if architecture == "aarch64"
+        else artifact_path(KernelBuildConstants.CONFIG_NAME)
+    )
     expected_members = {
-        KernelBuildConstants.CONFIG_NAME: artifact_path(
-            KernelBuildConstants.CONFIG_NAME
-        ).read_bytes(),
+        config_name: final_config.read_bytes(),
         "SOURCE-MANIFEST.json": (
             BuildConstants.REPO_ROOT / "SOURCE-MANIFEST.json"
         ).read_bytes(),
     }
     manifest = json.loads(expected_members["SOURCE-MANIFEST.json"])
+    metadata = (
+        manifest["linux"]["architectures"]["aarch64"]
+        if architecture == "aarch64"
+        else manifest["linux"]
+    )
     expected_members.update(
         {
             patch: (BuildConstants.REPO_ROOT / patch).read_bytes()
-            for patch in manifest["linux"]["patches"]
+            for patch in metadata["patches"]
         }
     )
+    if architecture == "aarch64":
+        for member in (config.input_config, config.derived_config):
+            expected_members[member.as_posix()] = (
+                BuildConstants.REPO_ROOT / member
+            ).read_bytes()
     with tarfile.open(path, "r:gz") as archive:
         members = archive.getmembers()
         names = [member.name for member in members]
+        driver = "hvc_nvx_mmio.c" if architecture == "aarch64" else "hvc_xe9.c"
         if not any(
             name.endswith(
-                f"{KernelBuildConstants.SOURCE_NAME}/drivers/tty/hvc/hvc_xe9.c"
+                f"{KernelBuildConstants.SOURCE_NAME}/drivers/tty/hvc/{driver}"
             )
             for name in names
         ):
-            raise ScriptError(f"{path} does not contain the patched xe9 HVC driver")
+            description = "ARM platform MMIO" if architecture == "aarch64" else "xe9"
+            raise ScriptError(
+                f"{path} does not contain the patched {description} HVC driver"
+            )
         for suffix, expected in expected_members.items():
             matches = [member for member in members if member.name.endswith(suffix)]
             if len(matches) != 1:
@@ -1142,10 +1164,14 @@ def _validate_source_manifest_metadata(
     guest_rust = cast(dict[str, object], guest_rust_value)
     source = cast(dict[str, object], source_value)
     input_config = cast(dict[str, object], config_value)
-    expected_guest_rust = {
+    expected_guest_rust: dict[str, object] = {
         "toolchain": pinned_guest_rust_toolchain(),
         "target": GuestRustBuildConstants.TARGET,
     }
+    if "architectures" in guest_rust:
+        expected_guest_rust["architectures"] = {
+            "aarch64": {"target": GuestRustBuildConstants.ARM_TARGET}
+        }
     if guest_rust != expected_guest_rust:
         raise ScriptError(
             "SOURCE-MANIFEST.json Rust guest toolchain does not match the build pin"
@@ -1187,6 +1213,35 @@ def _validate_source_manifest_metadata(
             raise ScriptError(
                 f"SOURCE-MANIFEST.json Linux {field} does not match the build pin"
             )
+    architecture_metadata = linux.get("architectures")
+    if architecture_metadata is not None:
+        expected_arm = {
+            "source_cache": (
+                Path(BuildConstants.CACHE_DIRECTORY_NAME)
+                / KernelBuildConstants.SOURCE_DIRECTORY_NAME
+                / "aarch64"
+                / KernelBuildConstants.SOURCE_NAME
+            ).as_posix(),
+            "source_archive": (
+                BuildConstants.SOURCE_RELATIVE_DIRECTORY
+                / KernelBuildConstants.SOURCE_DIRECTORY_NAME
+                / "aarch64"
+                / f"{KernelBuildConstants.SOURCE_ARCHIVE_ROOT}-aarch64.tar.gz"
+            ).as_posix(),
+            "generated_final_config": (
+                Path(BuildConstants.BUILD_DIRECTORY_NAME) / "aarch64" / "Image.config"
+            ).as_posix(),
+            "input_config": KernelBuildConstants.ARM_INPUT_CONFIG.as_posix(),
+            "derived_config": KernelBuildConstants.ARM_DERIVED_CONFIG.as_posix(),
+            "patches": [
+                *patch_paths,
+                *(path.as_posix() for path in KernelBuildConstants.ARM_PATCHES),
+            ],
+        }
+        if architecture_metadata != {"aarch64": expected_arm}:
+            raise ScriptError(
+                "SOURCE-MANIFEST.json ARM Linux inputs do not match the build pin"
+            )
     expected_alpine: dict[str, object] = {
         "version": AlpineBuildConstants.VERSION,
         "branch": AlpineBuildConstants.BRANCH,
@@ -1210,6 +1265,13 @@ def _validate_source_manifest_metadata(
             BuildConstants.SOURCE_RELATIVE_DIRECTORY / AlpineBuildConstants.GUEST_NAME
         ).as_posix(),
     }
+    if "architectures" in alpine:
+        expected_alpine["architectures"] = {
+            "aarch64": {
+                "minirootfs_url": AlpineBuildConstants.ARM_MINIROOTFS_URL,
+                "minirootfs_sha256": AlpineBuildConstants.ARM_MINIROOTFS_SHA256,
+            }
+        }
     for field, expected in expected_alpine.items():
         if alpine.get(field) != expected:
             raise ScriptError(
