@@ -1,7 +1,6 @@
 use std::env;
 use std::fs;
 use std::os::unix::fs::symlink;
-use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 
 use super::*;
@@ -166,26 +165,15 @@ fn a_process_runs_until_its_last_thread_exits() {
 #[test]
 fn a_process_whose_command_name_is_not_utf8_can_be_examined() {
     // A process takes as its command name the first 15 bytes of the name of the file that it
-    // executes: here a link to `sleep` whose 15th byte is the first of a two-byte character.
-    // `argv[0]` still says `sleep`, which multi-call executables such as BusyBox read.
-    let path = env::var_os("PATH").unwrap_or_default();
-    let sleep = env::split_paths(&path)
-        .map(|directory| directory.join("sleep"))
-        .find(|candidate| candidate.is_file())
-        .expect("sleep is on PATH");
+    // executes: here a link to this test executable whose 15th byte starts a two-byte character.
+    // System utilities may refuse a renamed executable even when argv[0] names the utility.
     let directory = tempfile::tempdir().unwrap();
     let link = directory.path().join("vmm-reused-pid\u{e9}");
-    // A `PATH` entry may be relative to the current directory, but a link resolves a relative
-    // target from its own.
-    symlink(std::path::absolute(sleep).unwrap(), &link).unwrap();
-    let mut child = Reaped(
-        Command::new(&link)
-            .arg0("sleep")
-            .arg("60")
-            .stdin(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    symlink(env::current_exe().unwrap(), &link).unwrap();
+    let mut child = Reaped(super::orchestrator::spawn_process_from(
+        directory.path(),
+        &link,
+    ));
     let pid = child.0.id();
     // The child may take the name only after `spawn` returns.
     let deadline = Instant::now() + Duration::from_secs(10);

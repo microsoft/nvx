@@ -102,8 +102,13 @@ fn fixture_arguments(name: &str) -> Vec<OsString> {
 
 /// Starts a process fixture in `directory`, which it marks, without standard streams.
 fn spawn_process(directory: &Path) -> Child {
+    spawn_process_from(directory, &env::current_exe().unwrap())
+}
+
+/// Starts the same fixture through `program`, which may be a link to this test executable.
+pub(super) fn spawn_process_from(directory: &Path, program: &Path) -> Child {
     File::create(directory.join(PROCESS_MARKER)).unwrap();
-    let mut command = Command::new(env::current_exe().unwrap());
+    let mut command = Command::new(program);
     command
         .args(fixture_arguments("process_fixture"))
         .current_dir(directory)
