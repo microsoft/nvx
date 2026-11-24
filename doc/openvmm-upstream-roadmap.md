@@ -9,10 +9,10 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126.
-- NVX's pinned OpenVMM revision: `9805f89843ee01890f19d47d2f04f6460bd22024`, position 368, the head
-  of microsoft/openvmm#5257, whose commits follow position 365, `be75ab532`, the head of
-  microsoft/openvmm#5255, whose commit follows position 364, `5e0e72d72`, the head of
-  microsoft/openvmm#5254, whose commits follow position 361, `09966aa63`, the head of
+- NVX's pinned OpenVMM revision: `8c1204c68381d11d90e58c4ee710a879f71fb601`, position 369, the head
+  of microsoft/openvmm#5260, whose commit follows position 368, `9805f8984`, the head of
+  `feature/microvm/dev` since microsoft/openvmm#5254, microsoft/openvmm#5255, and
+  microsoft/openvmm#5257 landed positions 362-368 on position 361, `09966aa63`, the head of
   `feature/microvm/dev` since microsoft/openvmm#5248, microsoft/openvmm#5249,
   microsoft/openvmm#5251, microsoft/openvmm#5252, and microsoft/openvmm#5253 landed positions
   356-361 on position 355, `899dcd63f`, the head of the `feature/microvm/release/v8.0` branch of
@@ -23,8 +23,8 @@
   commits that they fix, so each later commit's position is its v7.2 position less the number of
   those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
   `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
-  tests. The pin is 242 commits past the mapped tip on the same first-parent chain, and positions
-  127-368 are not yet assigned to PRs; see
+  tests. The pin is 243 commits past the mapped tip on the same first-parent chain, and positions
+  127-369 are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1770,7 +1770,8 @@ bf353460f
   -> microVM saves refused while the guest holds a replaced virtio-fs object [362-364]
   -> FUSE_COPY_FILE_RANGE_64 requests failed with ENOSYS rather than EINVAL [365]
   -> FUSE_INIT negotiations that the session discards destroyed before the next one [366-368]
-  -> 9805f8984 (NVX pin)
+  -> reserved DFR models of the software APIC decoded by bit 31 [369]
+  -> 8c1204c68 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1793,7 +1794,7 @@ reorganization folded the fixups of PR13 and PR18 and of the v7.1 and v7.2 rebas
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges, and its 242 later commits are not
+The NVX pin extends the chain past position 126 without merges, and its 243 later commits are not
 yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
@@ -1802,17 +1803,17 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356-368 followed the v8.0 reorganization, so they combine none, apart
+v7.2 rebase, and positions 356-369 followed the v8.0 reorganization, so they combine none, apart
 from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
 v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which through
 position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
-335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-368 lack.
+335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-369 lack.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-368 have no position before v7.0; see
+positions 297-369 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2069,6 +2070,7 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 366 | `9737fc609` | - | - | - | - | - | - | - | fuse: let FUSE_INIT negotiate only once a session has ended (microsoft/openvmm#5257) |
 | 367 | `1a0f6be2d` | - | - | - | - | - | - | - | fuse: call destroy after an init that the session does not adopt (microsoft/openvmm#5257) |
 | 368 | `9805f8984` | - | - | - | - | - | - | - | fuse: say which FUSE_INIT waits for the end of a session (microsoft/openvmm#5257) |
+| 369 | `8c1204c68` | - | - | - | - | - | - | - | virt_support_apic: select a reserved DFR model by bit 31 (microsoft/openvmm#5260) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2079,11 +2081,12 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-305, `c4419be15`
 2026-11-19, for positions 319-322, `78af54a51`, upstream main on 2026-11-20, for position 323,
 `d83f87209`, upstream main later that day, for position 324, `265f0a73f`, upstream main later still,
 for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork base of v7.2 and
-v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356, and
-`5d6ab1cfa`, upstream main later that day, for positions 357-368. They name the positions that the
-commits have now, but neither the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`,
-the v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked them again, nor
-did the v6.1 rebase check the earlier ones on `7d90c4104`.
+v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356,
+`5d6ab1cfa`, upstream main later that day, for positions 357-368, and `efe0b08df`, upstream main
+later still, for position 369. They name the positions that the commits have now, but neither the
+v8.0 reorganization and the v7.2 rebase, both on `bf353460f`, the v7.1 rebase on `9a875b563`, nor
+the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the earlier
+ones on `7d90c4104`.
 
 Some of these commits change mapped work rather than add to it. Position 142 removes the legacy
 microVM clock paths, changing files that PR10 and PR17 also change, and makes manifest version 6 the
@@ -5272,6 +5275,27 @@ initialized session, and only one that it dispatches once the flag is clear wait
 session, as `Session::destroy` and position 366's test now say. The pairing of position 367 holds
 either way, since the duplicate calls no `Fuse::init`. It changes only comments, in lines that
 position 366 adds, so, as position 366, it cannot go upstream on its own.
+
+Position 369 has `cluster_mode`, which decodes the model of the xAPIC DFR for the local APIC
+emulator of `virt_support_apic`, select the flat model for a reserved model whose bit 31 is set and
+the cluster model for one whose bit 31 is clear, with a rate-limited warning, rather than reach
+`unreachable!` (microsoft/nvx#1473). The DFR's bits 31:28 select the flat model with `0b1111` and
+the cluster model with `0b0000`, and the SDM reserves their other 14 values, so a guest's xAPIC
+write of the DFR, whole or of its high byte, or a restore of a saved state whose DFR held one
+aborted the VMM of WHP's user-mode APIC and of OpenHCL's SNP and TDX backends. Hyper-V's APIC, which
+WHP uses otherwise, selects the model the same way: as microsoft/nvx#1473 measured, and a guest of a
+few bytes on WHP's in-hypervisor xAPIC confirmed on an Intel host, a write of `0x7fffffff` switches
+the flat model to the cluster model, and one of `0xefffffff` switches it back, after which the DFR
+reads back `0x0fffffff` or `0xffffffff`. The DFR reads back, and a save stores, the selected model,
+so no saved state holds a reserved one, and the saved state keeps its format. NVX's microVMs use the
+APICs of KVM, MSHV, and WHP itself, which never run the emulator. The commit adds a test to the
+crate's tests in `lib.rs`, where PR10's position 026 makes `TIMER_FREQUENCY` public, none of the
+lines that the commit changes. It is not a fixup: the `unreachable!` is upstream's, and upstream
+main panics the same way. It applies to upstream main as it is, and `virt_support_apic` type-checks
+and passes its tests on the merged tree, so it can go upstream on its own. microsoft/openvmm#5247,
+open upstream, proposes another fix of the same panic, which ignores such a write, so that the APIC
+keeps its model, and restores such a DFR as the flat model; replaying the commit on it conflicts in
+`lib.rs`, so once it lands, the next rebase must keep one of the two behaviors.
 
 ## PR summary
 
