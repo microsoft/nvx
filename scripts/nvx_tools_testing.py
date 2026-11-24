@@ -346,3 +346,103 @@ def posix_shell() -> str | None:
 def shell_function(source: str, name: str) -> str:
     start = source.index(f"\n{name}() {{\n") + 1
     return source[start : source.index("\n}\n", start) + 3]
+
+
+def composite_action_step(action: str, step_name: str) -> str:
+    lines = action.splitlines()
+    start = lines.index(f"    - name: {step_name}")
+    end = next(
+        (
+            index
+            for index, line in enumerate(lines[start + 1 :], start + 1)
+            if line.startswith("    - ")
+        ),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def composite_action_script(action: str, step_name: str) -> str:
+    lines = composite_action_step(action, step_name).splitlines()
+    start = lines.index("      run: |") + 1
+    end = next(
+        (
+            index
+            for index, line in enumerate(lines[start:], start)
+            if line and not line.startswith("        ")
+        ),
+        len(lines),
+    )
+    return "\n".join(line[8:] for line in lines[start:end])
+
+
+def yaml_scalar(configuration: str, field: str) -> str:
+    lines = configuration.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith("- "):
+            stripped = stripped[2:]
+        if not stripped.startswith(f"{field}: "):
+            continue
+        value = stripped[len(field) + 2 :].rstrip()
+        indent = len(line) - len(line.lstrip())
+        if line.lstrip().startswith("- "):
+            indent += 2
+        values: list[str] = [] if value in {">", ">-", "|", "|-"} else [value]
+        for block_line in lines[index + 1 :]:
+            block_value = block_line.strip()
+            if block_value and len(block_line) - len(block_line.lstrip()) <= indent:
+                break
+            if block_value:
+                values.append(block_value)
+        return " ".join(values)
+    raise AssertionError(f"configuration has no {field} field")
+
+
+def outer_parentheses_enclose(expression: str) -> bool:
+    expression = expression.strip()
+    if not expression.startswith("("):
+        return False
+    depth = 0
+    quote: str | None = None
+    for index, character in enumerate(expression):
+        if quote is not None:
+            if character == quote and (index == 0 or expression[index - 1] != "\\"):
+                quote = None
+            continue
+        if character in {"'", '"'}:
+            quote = character
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0 and index != len(expression) - 1:
+                return False
+            if depth < 0:
+                return False
+    return depth == 0 and quote is None
+
+
+def expression_conjuncts(expression: str) -> list[str]:
+    """Split a GitHub Actions expression at its top-level && operators."""
+    expression = " ".join(expression.split())
+    if expression.startswith("${{") and expression.endswith("}}"):
+        expression = expression[3:-2].strip()
+    conjuncts: list[str] = []
+    depth = 0
+    quoted = False
+    start = 0
+    for index, character in enumerate(expression):
+        if character == "'":
+            quoted = not quoted
+        elif quoted:
+            continue
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        elif depth == 0 and expression.startswith("&&", index):
+            conjuncts.append(expression[start:index].strip())
+            start = index + 2
+    conjuncts.append(expression[start:].strip())
+    return conjuncts

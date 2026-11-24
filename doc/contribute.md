@@ -247,6 +247,21 @@ mechanics, such as the conformance vectors of the control protocol, belong in
 `nvx`. [Continuous integration](ci.md) describes how CI checks OpenVMM's own CI
 and what the NVX microVM suite covers.
 
+The build-tooling tests are grouped by build step:
+
+- [Build configuration and OpenVMM](../scripts/test_nvx_build.py).
+- [Kernel builds and configuration](../scripts/test_nvx_kernel_build.py).
+- [Ubuntu image builds](../scripts/test_nvx_ubuntu_build.py).
+- [Azure Linux image builds](../scripts/test_nvx_azurelinux_build.py).
+- [Shared guest files and scratch templates](../scripts/test_nvx_guest_build.py).
+- [Release source collection and Ubuntu source validation](../scripts/test_nvx_source_collection.py).
+- [Build CI and Docker wiring](../scripts/test_nvx_build_ci.py).
+
+Run a module independently with, for example,
+`python -m unittest scripts.test_nvx_kernel_build`. Shared parsing helpers
+live in [nvx_tools_testing.py](../scripts/nvx_tools_testing.py), not in another
+test module.
+
 ## Test layout
 
 Tests live apart from the code that they test, so that a change to one never
