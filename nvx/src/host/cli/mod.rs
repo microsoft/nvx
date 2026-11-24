@@ -49,6 +49,7 @@ mod exec_lock;
 mod json;
 mod network;
 mod output;
+mod percent;
 mod run;
 mod sandbox;
 mod session;

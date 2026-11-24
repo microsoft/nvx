@@ -638,13 +638,6 @@ fn origins_compare_schemes_and_authorities_in_lowercase() {
 }
 
 #[test]
-fn path_segments_are_encoded_as_python_quotes_them() {
-    assert_eq!(percent_encoded("v0.1.0-dev.abc_~"), "v0.1.0-dev.abc_~");
-    assert_eq!(percent_encoded("a b/c?d#e%"), "a%20b%2Fc%3Fd%23e%25");
-    assert_eq!(percent_encoded("ü"), "%C3%BC");
-}
-
-#[test]
 fn repositories_have_an_owner_and_a_name() {
     assert_eq!(repository_parts("octo/nvx"), Some(("octo", "nvx")));
     for invalid in ["octo", "/nvx", "octo/", "octo/nvx/dev", ""] {
