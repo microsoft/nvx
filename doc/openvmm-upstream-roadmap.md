@@ -8,27 +8,26 @@
   `9a875b563d62eaca040137c0227224c9a17e944d`, upstream main on 2026-11-18; see
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
-  summary, and commit mapping below cover positions 001-126.
-- NVX's pinned OpenVMM revision: `82ff6d2f70923196f4ece591a0ff4c60dc94aa65`, position 373, the head
-  of microsoft/openvmm#5264, whose commit follows position 372, `6ace73360`, the head of
+  summary, and commit mapping below cover positions 001-126 and the PR20 fixup at position 375.
+- NVX's pinned OpenVMM revision: `d44a113bed1b597bb6cbd4e50c3388ce7d67c4d3`, position 375, the head
+  of microsoft/openvmm#5265, whose commits follow position 373, `82ff6d2f7`, the head of
+  microsoft/openvmm#5264, whose commit follows position 372, `6ace73360`, the head of
   microsoft/openvmm#5263, whose commit follows position 371, `2bb009b01`, the head of
   microsoft/openvmm#5262, whose commit follows position 370, `aa145aff9`, the head of
-  microsoft/openvmm#5261, whose commit follows position 369, `8c1204c68`, the head of
-  microsoft/openvmm#5260, whose commit follows position 368, `9805f8984`, the head of
-  `feature/microvm/dev` since microsoft/openvmm#5254, microsoft/openvmm#5255, and
-  microsoft/openvmm#5257 landed positions 362-368 on position 361, `09966aa63`, the head of
-  `feature/microvm/dev` since microsoft/openvmm#5248, microsoft/openvmm#5249,
-  microsoft/openvmm#5251, microsoft/openvmm#5252, and microsoft/openvmm#5253 landed positions
-  356-361 on position 355, `899dcd63f`, the head of the `feature/microvm/release/v8.0` branch of
-  microsoft/openvmm. The
+  `feature/microvm/dev` since microsoft/openvmm#5260 and microsoft/openvmm#5261 landed positions
+  369 and 370 on position 368, `9805f8984`, where microsoft/openvmm#5254, microsoft/openvmm#5255,
+  and microsoft/openvmm#5257 had landed positions 362-368 on position 361, `09966aa63`, where
+  microsoft/openvmm#5248, microsoft/openvmm#5249, microsoft/openvmm#5251, microsoft/openvmm#5252,
+  and microsoft/openvmm#5253 had landed positions 356-361 on position 355, `899dcd63f`, the head of
+  the `feature/microvm/release/v8.0` branch of microsoft/openvmm. The
   v8.0 reorganization replayed the 370 commits of `feature/microvm/dev` at `09524b79c`, the pin
   before it, on their own fork base and folded the 15 fixups that the roadmap assigned to earlier
   commits, v7.2 positions 302, 316, 333, 335-340, 342, 345, 347, 349, 351, and 365, into the
   commits that they fix, so each later commit's position is its v7.2 position less the number of
   those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
   `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
-  tests. The pin is 247 commits past the mapped tip on the same first-parent chain, and positions
-  127-373 are not yet assigned to PRs; see
+  tests. The pin is 249 commits past the mapped tip on the same first-parent chain. Positions
+  127-374 are not yet assigned to PRs, and position 375 is a PR20 fixup; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1540,7 +1539,7 @@ flowchart TB
         P17["PR17<br/>Capture + authoritative restore<br/>P - 11 commits"]
         P18["PR18<br/>Host attachments<br/>P - 10 commits"]
         P19["PR19<br/>Block roles + tiers<br/>N/P - 3 commits"]
-        P20["PR20<br/>Restore activation<br/>P - 7 commits"]
+        P20["PR20<br/>Restore activation<br/>P - 7 commits + 1 fixup"]
         P21["PR21<br/>Network egress policy<br/>P/N - 6 commits"]
         P22["PR22<br/>Filesystem deny policy<br/>P - 2 commits"]
         P23["PR23<br/>Authenticated control console<br/>N - 10 commits"]
@@ -1779,7 +1778,9 @@ bf353460f
   -> microVM directory listings read to their end on Windows hosts [371]
   -> debugger breaks into a paused VM kept out of its saved state [372]
   -> KVM paravirtual kicks cleared when a VP's activity is set, or its halt refused [373]
-  -> 82ff6d2f7 (NVX pin)
+  -> post-restore input gates armed by petri [374]
+  -> PR20 fixup [375]
+  -> d44a113be (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1798,12 +1799,17 @@ PR10, as positions 016 and 017, which can go upstream on their own in that order
 reorganization folded the fixups of PR13 and PR18 and of the v7.1 and v7.2 rebases; see
 [The v6.0 reorganization](#the-v60-reorganization),
 [The v7.0 reorganization](#the-v70-reorganization), and
-[The v8.0 reorganization](#the-v80-reorganization).
+[The v8.0 reorganization](#the-v80-reorganization). Fold position 375 into PR20's position 090
+before submission, which arms the post-restore input gate's deadline and clears it only at the
+release of the snapshot boundary that holds the guest's acknowledgement, with its changes of
+`SnapshotRestore::restore_acknowledged` and of its call, and its unit tests, into position 134,
+which adds that method and `SnapshotRestore::next_event`, and its VMM test into position 374, whose
+petri option arms the gate.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges, and its 247 later commits are not
-yet classified or assigned to PRs.
+The NVX pin extends the chain past position 126 without merges. Of its 249 later commits, position
+375 is a PR20 fixup, and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 are the ABI restart
@@ -1811,17 +1817,17 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356-373 followed the v8.0 reorganization, so they combine none, apart
+v7.2 rebase, and positions 356-375 followed the v8.0 reorganization, so they combine none, apart
 from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
 v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which through
 position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
-335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-373 lack.
+335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-375 lack.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-373 have no position before v7.0; see
+positions 297-375 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2083,6 +2089,8 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 371 | `2bb009b01` | - | - | - | - | - | - | - | virtiofs: read microVM directory listings to the end on Windows (microsoft/openvmm#5262) |
 | 372 | `6ace73360` | - | - | - | - | - | - | - | vmm_core: keep a debugger break into a paused VM out of its saved state (microsoft/openvmm#5263) |
 | 373 | `82ff6d2f7` | - | - | - | - | - | - | - | virt_kvm: clear a vCPU's paravirtual kick when its activity is set (microsoft/openvmm#5264) |
+| 374 | `4760f77f0` | - | - | - | - | - | - | - | petri: let a microVM test arm the post-restore input gate (microsoft/openvmm#5265) |
+| 375 | `d44a113be` | - | - | - | - | - | - | - | openvmm_core: stop a gated restore's deadline at its acknowledgement (microsoft/openvmm#5265); fold into 090, its `restore_acknowledged` changes and unit tests into 134, its VMM test into 374 |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2095,7 +2103,7 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-305, `c4419be15`
 for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork base of v7.2 and
 v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356,
 `5d6ab1cfa`, upstream main later that day, for positions 357-368, and `efe0b08df`, upstream main
-later still, for positions 369-373. They name the positions that the commits have now, but neither
+later still, for positions 369-375. They name the positions that the commits have now, but neither
 the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`, the v7.1 rebase on `9a875b563`,
 nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the
 earlier ones on `7d90c4104`.
@@ -5413,6 +5421,67 @@ the module list of `virt_backend_tests`, which lacks the `nmi` and `registers` o
 260, and in the Guide's VMM-test page, which lacks the sentence and the paragraph of position 301,
 so it cannot go upstream on its own.
 
+Position 374 lets a VMM test arm the post-restore input gate of PR20's position 090, which petri
+launched the VM worker without, so that no VMM test could check how the worker handles the gate
+(microsoft/nvx#1739). `PetriVmConfigOpenVmm::with_microvm_restore_gate` keeps the gate's timeout
+with the microVM's runtime resources until the worker launches, and `Worker::launch` hands it to
+the worker, which gates the first start of a cold boot as it gates a restore's, so a test arms the
+gate without a snapshot to restore. The worker holds the guest's acknowledgement at a snapshot
+boundary, so such a test is also the VM's snapshot controller, as position 234 makes it. The commit
+adds the option and its resource after position 234's in `petri/src/vm/openvmm/microvm.rs`, which
+PR15's position 060, PR16's position 062, PR17's position 071, PR20's position 089, PR24's position
+114, and positions 132, 142, 155, 157, 202, 218, and 234 also change, and it passes the timeout
+beside position 234's channels in `start.rs`, which PR13's position 046 and position 234 also
+change, and in `worker.rs`, which PR09's position 012, PR12's positions 034 and 035, PR15's position
+060, PR17's positions 067, 070, and 073, PR20's positions 090 and 092, and positions 134, 142, 234,
+and 236 also change, where it replaces the empty timeout in the line of `Worker::launch` that
+position 090 adds. Its VMM test follows position 312's in the microVM lifecycle tests, which PR15's
+position 060, PR17's position 075, and positions 202, 234, 235, and 312 also change, and uses the
+helpers of positions 060 and 234. It follows position 373, whose commit and those of positions
+369-372 change none of its files. It fixes no defect of position 090, whose petri launch arms no
+gate, so it is not a PR20 fixup. Replaying the commit on upstream main conflicts in all four of its
+files: upstream main lacks petri's microVM module and the microVM VMM tests, which position 060
+adds, the VM worker's gate timeout, which position 090 adds, and the snapshot boundary channels
+that position 234 passes in `start.rs` and `worker.rs`, so it follows PR20 and position 234
+upstream.
+
+Position 375 stops the deadline of the post-restore input gate when the guest acknowledges the
+restore, rather than when the snapshot controller releases the snapshot boundary that holds the
+acknowledgement (microsoft/nvx#1739). PR20's position 090 arms the deadline when the VM worker
+starts a gated VM and clears it only in `release_snapshot_boundary`, although its message bounds
+only the acknowledgement, so when a controller released the boundary after the deadline, the
+worker had already stopped the VM and torn it down, although the guest had acknowledged in time.
+`SnapshotRestore::restore_acknowledged`, which position 134 adds and which
+`establish_snapshot_boundary` calls for a boundary under the armed gate, now clears the deadline
+and keeps host input gated, so the boundary holds the acknowledged VM until the controller releases
+it or rolls it back; a boundary that fails to establish still tears the VM down, and a guest that
+does not acknowledge in time is still stopped. An acknowledgement that the run loop handles only
+after the deadline is too late: `restore_acknowledged` then keeps the deadline and reports it, and
+`establish_snapshot_boundary` stops the VM as the deadline does, so the order in which the run loop
+handles the two cannot stop an expired deadline. In `restore.rs`, which PR12's positions 034 and
+035, PR17's position 073, PR20's positions 090 and 092, and positions 134, 139, 142, 155, 236, and
+246 also change, it changes the documentation of the `gate_deadline` that position 090 adds and
+`restore_acknowledged`, which position 134 adds. In the VM worker's microVM module, which PR15's
+positions 051, 057, and 058, PR16's positions 062 and 064, PR17's positions 067, 068, 070, and 072,
+PR18's positions 078 and 082, PR19's positions 086 and 087, PR20's positions 090 and 093, PR23's
+position 110, and 17 positions that no PR has yet also change, it changes position 134's call and
+its comment. In the snapshot guide, which PR11's position 030, PR12's positions 033-035, PR13's
+positions 041 and 046, PR17's positions 071 and 074, PR18's positions 077, 079, 084, and 085,
+PR19's positions 087 and 088, PR20's positions 089, 090, 092, and 094, PR23's positions 108 and 113,
+PR24's position 118, and 70 positions that no PR has yet also change, it extends the sentence of
+position 090 that bounds the acknowledgement, in the line that PR23's position 108 extends. Its unit
+tests follow position 134's test of the gate's expiry and call position 134's `next_event`, and its
+VMM test follows position 374's and uses position 374's option and the helpers of PR15's position
+060 and position 234. Positions 369-373 change none of its files. It fixes a defect of position 090
+and needs nothing that a later position adds but, for its changes of the call and its tests, the
+`restore_acknowledged` and `next_event` of position 134 and the option of position 374, so it is a
+PR20 fixup: fold it into position 090, its changes of `restore_acknowledged` and of its call, and
+its unit tests, into position 134, and its VMM test into position 374. Upstream main has no
+post-restore input gate. Replaying the commit there conflicts in all four of its files: upstream
+main lacks the VM worker's restore module, which PR12's position 034 adds, its microVM module, which
+PR15's position 051 adds, the microVM VMM tests of position 060, and the guide's paragraph on the
+gate, which position 090 adds, so it follows PR20 upstream.
+
 ## PR summary
 
 Each count is of v8.0 commits, which include the fixups that the v3.0, v4.0, v5.0, v6.0, v7.0, and
@@ -5444,7 +5513,7 @@ v8.0 reorganizations folded into them; see [The v8.0 reorganization](#the-v80-re
 | PR17 | P | microVM snapshot capture and authoritative restore | 065-075 | `548bf2ec2..464aa9d27` | 11 | PR16 |
 | PR18 | P | microVM host attachments and device persistence | 076-085 | `d3d2a088f..77eebd10f` | 10 | PR17 |
 | PR19 | N/P | Sandbox block roles and snapshot tiers | 086-088 | `6830760b7..ce4ead69a` | 3 | PR18 |
-| PR20 | P | Restore-time processor and memory activation | 089-095 | `16b103720..e960c809b` | 7 | PR19 |
+| PR20 | P | Restore-time processor and memory activation | 089-095; 375 (fixup) | `16b103720..e960c809b`; `d44a113be` | 8 | PR19 |
 | PR21 | P/N | Network egress policy | 096-101 | `8db534880..de90ec83b` | 6 | PR20; core can start after PR13 |
 | PR22 | P | Filesystem deny policy | 102-103 | `9f1580ceb..3811c4580` | 2 | PR21 |
 | PR23 | N | Authenticated control console | 104-113 | `a28d4337a..6c4c9bcdf` | 10 | PR22; protocol/broker can start after PR13 |
@@ -5460,8 +5529,9 @@ Each entry, at the position that the commit had in v7.0, v7.1, and v7.2 too, nam
 position of the commit, its v6.0 position, which it had in v5.0 and v5.1 too, the v4.0 position,
 the v3.0 and v2.4 positions that v4.0 recorded, and the v2.4, v5.1, v6.1, and v7.2 fixups that it
 folds; "(part)" marks a fixup that split across commits. Positions 016 and 017, which followed
-the v6.0 reorganization and the v6.1 rebase, name their OpenVMM pull request instead of earlier
-positions. A v7.2 position counts in `feature/microvm/dev` at `09524b79c`, whose first 339
+the v6.0 reorganization and the v6.1 rebase, and position 375, which followed the v8.0
+reorganization, name their OpenVMM pull request instead of earlier positions. A v7.2 position
+counts in `feature/microvm/dev` at `09524b79c`, whose first 339
 commits are those of `feature/microvm/release/v7.2`. A v6.1
 position counts in `feature/microvm/dev` at `fe61f9cbf`, whose first
 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 position in `feature/microvm/dev`
@@ -5798,7 +5868,7 @@ Landed upstream and dropped from the chain:
 </details>
 
 <details>
-<summary><strong>PR20 - Restore-time processor and memory activation (P)</strong> - 7 commits</summary>
+<summary><strong>PR20 - Restore-time processor and memory activation (P)</strong> - 8 commits</summary>
 
 - 089 `16b103720` - chipset: expose a stable generation ID and restore entropy on portb (v6.1 087, v6.0 094, v4.0 098, v3.0 107, v2.4 107)
 - 090 `f8ad9b978` - openvmm: gate external input until post-restore repair completes (v6.1 088, v6.0 095, v4.0 099, v3.0 108, v2.4 108; folds v2.4 335 (part), and v6.1 240 (part))
@@ -5807,6 +5877,7 @@ Landed upstream and dropped from the chain:
 - 093 `7b26a119f` - openvmm_core: back expandable restore RAM with fresh private memory (v6.1 091, v6.0 098, v4.0 102, v3.0 111, v2.4 111; folds v6.1 242 (part), and v7.2 302 (part))
 - 094 `85d5d0828` - openvmm: add bounded restore-time memory expansion (v6.1 092, v6.0 099, v4.0 103, v3.0 112, v2.4 112; folds v2.4 320 (part))
 - 095 `e960c809b` - openvmm_entry: pre-expand the Linux descriptor table at startup (v6.1 093, v6.0 100, v4.0 104, v3.0 113, v2.4 113)
+- 375 `d44a113be` - openvmm_core: stop a gated restore's deadline at its acknowledgement (microsoft/openvmm#5265; **fold into 090**, its `restore_acknowledged` changes and unit tests into 134, its VMM test into 374)
 
 </details>
 
