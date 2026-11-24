@@ -3,7 +3,7 @@
 
 use std::cell::Cell;
 use std::fs;
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -365,17 +365,40 @@ fn launch_locked(
         .report
         .map_err(|report| with_attribution(error_with_cause(report), failure.as_ref()))?;
     if stopped.self_exited && !stopping && !matches!(error, Exit::Interrupted) {
-        return Err(with_attribution(
-            exited_during_startup(report),
+        return Err(exited_during_startup(
+            report,
             failure.as_ref(),
+            &launched.outputs.log,
         ));
     }
     Err(error)
 }
 
+/// The bytes at the end of OpenVMM's log in which the lines that [`log_tail`] quotes begin.
+const LOG_TAIL_BYTES: u64 = 4096;
+
+/// The most lines of OpenVMM's log that [`log_tail`] quotes.
+const LOG_TAIL_LINES: usize = 12;
+
+/// The start of the line that begins the fatal error with which OpenVMM ends a failed launch.
+const FATAL_ERROR: &str = "fatal error: ";
+
 /// Returns the error of a launch whose OpenVMM exited on its own before its guest was ready, with
-/// the category and status of `report`, its outcome report, if it holds them.
-fn exited_during_startup(report: Option<Report>) -> Exit {
+/// the category and status of `report`, its outcome report, if it holds them, and what the
+/// restore driver's error `restore`, if any, attributes the failure to, as [`with_attribution`]
+/// adds it. Unless the report names an end of the guest's own, `success` or `guest-exit`, the
+/// error ends with the end of OpenVMM's log at `log`, as [`log_tail`] reads it: an OpenVMM that
+/// fails on its own, as one that cannot set up a disk does, says why only in its log, which a run
+/// removes with its VM directory.
+fn exited_during_startup(
+    report: Option<Report>,
+    restore: Option<&RestoreError>,
+    log: &Path,
+) -> Exit {
+    let guest_ended = report
+        .as_ref()
+        .and_then(|report| report.category.as_deref())
+        .is_some_and(|category| matches!(category, "success" | "guest-exit"));
     let detail = match report {
         Some(report) => match (report.category, report.status_code) {
             (Some(category), Some(status)) => format!(": {category} status {status}"),
@@ -383,9 +406,71 @@ fn exited_during_startup(report: Option<Report>) -> Exit {
         },
         None => " without an outcome report".to_owned(),
     };
-    Exit::error(
-        ErrorCode::Exited,
-        format!("OpenVMM exited during startup{detail}"),
+    let error = with_attribution(
+        Exit::error(
+            ErrorCode::Exited,
+            format!("OpenVMM exited during startup{detail}"),
+        ),
+        restore,
+    );
+    let tail = if guest_ended { None } else { log_tail(log) };
+    match (error, tail) {
+        (Exit::Error { code, message }, Some(tail)) => {
+            Exit::error(code, format!("{message}; OpenVMM's log ends with: {tail}"))
+        }
+        (error, _) => error,
+    }
+}
+
+/// Returns the end of OpenVMM's log at `path`, as the error of a launch that failed during
+/// startup quotes it: of the lines that begin in its last [`LOG_TAIL_BYTES`] bytes, at most
+/// [`LOG_TAIL_LINES`], from the last that begins OpenVMM's fatal error with `fatal error: `, or
+/// else the last ones, without their trailing whitespace or the blank lines at their end. A
+/// control character, which the guest may have written to the log, shows as Rust escapes it, such
+/// as `\u{1b}`. A log that holds no text, whose last bytes begin no line, or that cannot be read,
+/// has none, which leaves the error as it is.
+fn log_tail(path: &Path) -> Option<String> {
+    let mut file = fs::File::open(path).ok()?;
+    let start = file.metadata().ok()?.len().saturating_sub(LOG_TAIL_BYTES);
+    // The byte before the last bytes, if any, tells whether they begin a line: unless it ends
+    // one, they begin with the rest of a line, which the tail leaves out.
+    let from = start.saturating_sub(1);
+    file.seek(SeekFrom::Start(from)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(start - from + LOG_TAIL_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if start > 0 {
+        let end = bytes.iter().position(|&byte| byte == b'\n')?;
+        bytes.drain(..=end);
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let lines = text.lines().map(str::trim_end).collect::<Vec<_>>();
+    let lines = match lines.iter().rposition(|line| line.starts_with(FATAL_ERROR)) {
+        Some(fatal) => &lines[fatal..lines.len().min(fatal + LOG_TAIL_LINES)],
+        None => {
+            let end = lines.iter().rposition(|line| !line.is_empty())? + 1;
+            &lines[end.saturating_sub(LOG_TAIL_LINES)..end]
+        }
+    };
+    let end = lines.iter().rposition(|line| !line.is_empty())? + 1;
+    let escape = |line: &&str| {
+        line.chars()
+            .map(|c| {
+                if c.is_control() {
+                    c.escape_debug().to_string()
+                } else {
+                    c.into()
+                }
+            })
+            .collect::<String>()
+    };
+    Some(
+        lines[..end]
+            .iter()
+            .map(escape)
+            .collect::<Vec<_>>()
+            .join("\n"),
     )
 }
 
@@ -845,7 +930,7 @@ pub(crate) fn run(
         if !started {
             let report = stopped.report.map_err(error_with_cause)?;
             if self_exited && !stopping && !matches!(executed, Err(Exit::Interrupted)) {
-                return Err(exited_during_startup(report));
+                return Err(exited_during_startup(report, None, &launched.outputs.log));
             }
         } else if executed.is_ok() && !self_exited {
             end_line();

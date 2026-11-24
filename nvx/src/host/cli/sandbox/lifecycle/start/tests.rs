@@ -275,6 +275,71 @@ fn interrupted_force_down() {
     assert!(unconfirmed.is_none(), "the held exit showed");
 }
 
+/// The error of a launch whose OpenVMM failed during startup quotes the end of OpenVMM's log: at
+/// most 12 of the lines that begin in its last 4096 bytes, from its last fatal error, or else its
+/// last lines, without trailing whitespace or blank lines at their end, and with control
+/// characters escaped; and nothing of a log that holds no text, whose last bytes begin no line, or
+/// that does not exist.
+#[test]
+fn launches_that_fail_during_startup_quote_the_end_of_openvmm_s_log() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join(StateFile::Log.name());
+    let tail = |text: &str| {
+        fs::write(&log, text).unwrap();
+        log_tail(&log)
+    };
+    let lines = |range: std::ops::Range<usize>, name: &str| {
+        range
+            .map(|index| format!("{name} {index}"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        tail(
+            "trace\nfatal error: first\n\nCaused by:\n    0: first cause\nfatal error: second\n\n\
+             Caused by:\n    0: second cause \t\n\n"
+        )
+        .as_deref(),
+        Some("fatal error: second\n\nCaused by:\n    0: second cause")
+    );
+    let backtrace = lines(0..20, "frame").join("\n");
+    assert_eq!(
+        tail(&format!("trace\nfatal error: failed\n{backtrace}\n")),
+        Some(
+            [
+                vec!["fatal error: failed".to_owned()],
+                lines(0..11, "frame")
+            ]
+            .concat()
+            .join("\n")
+        )
+    );
+    assert_eq!(
+        tail(&lines(0..20, "trace").join("\r\n")),
+        Some(lines(8..20, "trace").join("\n"))
+    );
+    assert_eq!(
+        tail("\u{1b}[31mred\u{7}\tend\r\n").as_deref(),
+        Some("\\u{1b}[31mred\\u{7}\\tend")
+    );
+    // The last 4096 bytes begin with the rest of a line, which the tail leaves out, or with a
+    // whole line, which it keeps, as it keeps nothing of bytes that begin no line.
+    assert_eq!(
+        tail(&format!("fatal error: early\n{}\nlast\n", "x".repeat(5000))).as_deref(),
+        Some("last")
+    );
+    let window = format!("fatal error: late\n{}\n", "y".repeat(4096 - 19));
+    assert_eq!(window.len(), 4096);
+    assert_eq!(
+        tail(&format!("early\n{window}")),
+        Some(format!("fatal error: late\n{}", "y".repeat(4096 - 19)))
+    );
+    assert_eq!(tail(&"z".repeat(5000)), None);
+    assert_eq!(tail(" \n\n"), None);
+    assert_eq!(tail(""), None);
+    fs::remove_file(&log).unwrap();
+    assert_eq!(log_tail(&log), None);
+}
+
 /// A run removes its VM directory with the staging file of an outcome report that OpenVMM did
 /// not finish writing, as one that the run forced down can leave, and keeps a directory that
 /// holds a file of another name.

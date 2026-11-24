@@ -114,7 +114,7 @@ each code, which callers of the `nvx` library see in its place.
 | `foreign-files` | 1 | `deprovision` found files that NVX does not own in the state directory, which the message names, and kept them with the directory. |
 | `outcome-report-exists` | 1 | A file exists at the `--outcome-report` path. |
 | `scratch-claimed` | 1 | Another sandbox claims the scratch image. |
-| `exited` | 1 | OpenVMM exited, as when a start fails, whose message names the category and status of OpenVMM's outcome report when it has one. |
+| `exited` | 1 | OpenVMM exited, as when a start fails, whose message names the category and status of OpenVMM's outcome report when it has one, and, for an OpenVMM that failed on its own, ends with the end of OpenVMM's log. |
 | `still-running` | 1 | A stop could not confirm the VM process's exit, so the caller keeps its verified process. The message says that a process that its forced termination reached is stuck exiting. |
 | `exec-refused` | 1 | The guest agent refused the workload, as for a working directory that it cannot use. |
 | `endpoint-closed` | 1 | OpenVMM closed the control endpoint, as it does when the VM shuts down. |

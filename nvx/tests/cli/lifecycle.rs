@@ -1788,6 +1788,30 @@ fn refusals_of_lifecycle_operations() {
     });
 }
 
+/// A start whose OpenVMM fails on its own during startup, as one whose VM worker cannot set up the
+/// io-uring of a disk does, fails with the end of OpenVMM's log, from its fatal error, which says
+/// why, and keeps the log and the outcome report.
+#[test]
+fn a_start_whose_openvmm_fails_quotes_the_end_of_its_log() {
+    let root = Root::new();
+    root.nvx(&provision(
+        "{root/state}",
+        &["--cmdline", "fake_vmm_failure=1"],
+    ))
+    .assert_silent_success();
+    let message = operate(&root, "start", "state", &[]).assert_error("exited", &[]);
+    assert_eq!(
+        message,
+        "OpenVMM exited during startup: vmm-failure status 1; OpenVMM's log ends with: fatal \
+         error: failed to launch vm worker\\n\\nCaused by:\\n    0: failed to launch worker\\n    \
+         1: failed to resolve resource of type virtio:virtio-blk\\n    2: failed to resolve \
+         resource of type disk_handle:block\\n    3: failed to create new device\\n    4: failed \
+         to set up io-uring\\n    5: Cannot allocate memory (os error 12)"
+    );
+    assert_eq!(entries(&root.below("state")), STOPPED);
+    operate(&root, "deprovision", "state", &[]).assert_silent_success();
+}
+
 /// The host paths of shares of a sandbox's own files, which `provision` and `start` refuse, as
 /// `sandbox run` does all but those of the state directory, which it has none of, and which of its
 /// files each one reaches first: its state directory, image, scratch image, kernel, initramfs, and
