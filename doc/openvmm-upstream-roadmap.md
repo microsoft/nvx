@@ -9,8 +9,9 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126.
-- NVX's pinned OpenVMM revision: `be75ab532b77ce90fa46371f2ced3cb547fd00c7`, position 365, the head
-  of microsoft/openvmm#5255, whose commit follows position 364, `5e0e72d72`, the head of
+- NVX's pinned OpenVMM revision: `9805f89843ee01890f19d47d2f04f6460bd22024`, position 368, the head
+  of microsoft/openvmm#5257, whose commits follow position 365, `be75ab532`, the head of
+  microsoft/openvmm#5255, whose commit follows position 364, `5e0e72d72`, the head of
   microsoft/openvmm#5254, whose commits follow position 361, `09966aa63`, the head of
   `feature/microvm/dev` since microsoft/openvmm#5248, microsoft/openvmm#5249,
   microsoft/openvmm#5251, microsoft/openvmm#5252, and microsoft/openvmm#5253 landed positions
@@ -22,8 +23,8 @@
   commits that they fix, so each later commit's position is its v7.2 position less the number of
   those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
   `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
-  tests. The pin is 239 commits past the mapped tip on the same first-parent chain, and positions
-  127-365 are not yet assigned to PRs; see
+  tests. The pin is 242 commits past the mapped tip on the same first-parent chain, and positions
+  127-368 are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1768,7 +1769,8 @@ bf353460f
   -> virtio-fs nodes of LINK replies kept until the guest forgets them [361]
   -> microVM saves refused while the guest holds a replaced virtio-fs object [362-364]
   -> FUSE_COPY_FILE_RANGE_64 requests failed with ENOSYS rather than EINVAL [365]
-  -> be75ab532 (NVX pin)
+  -> FUSE_INIT negotiations that the session discards destroyed before the next one [366-368]
+  -> 9805f8984 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1791,7 +1793,7 @@ reorganization folded the fixups of PR13 and PR18 and of the v7.1 and v7.2 rebas
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges, and its 239 later commits are not
+The NVX pin extends the chain past position 126 without merges, and its 242 later commits are not
 yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
@@ -1800,17 +1802,17 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356-365 followed the v8.0 reorganization, so they combine none, apart
+v7.2 rebase, and positions 356-368 followed the v8.0 reorganization, so they combine none, apart
 from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
 v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which through
 position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
-335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-365 lack.
+335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-368 lack.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-365 have no position before v7.0; see
+positions 297-368 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2064,6 +2066,9 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 363 | `b2ac1073d` | - | - | - | - | - | - | - | virtiofs: fail a microVM save of nodes or handles that a restore rejects (microsoft/openvmm#5254) |
 | 364 | `5e0e72d72` | - | - | - | - | - | - | - | virtiofs: say which nodes a microVM save keeps apart (microsoft/openvmm#5254) |
 | 365 | `be75ab532` | - | - | - | - | - | - | - | fuse: fail FUSE_COPY_FILE_RANGE_64 with ENOSYS, not EINVAL (microsoft/openvmm#5255) |
+| 366 | `9737fc609` | - | - | - | - | - | - | - | fuse: let FUSE_INIT negotiate only once a session has ended (microsoft/openvmm#5257) |
+| 367 | `1a0f6be2d` | - | - | - | - | - | - | - | fuse: call destroy after an init that the session does not adopt (microsoft/openvmm#5257) |
+| 368 | `9805f8984` | - | - | - | - | - | - | - | fuse: say which FUSE_INIT waits for the end of a session (microsoft/openvmm#5257) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2075,7 +2080,7 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-305, `c4419be15`
 `d83f87209`, upstream main later that day, for position 324, `265f0a73f`, upstream main later still,
 for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork base of v7.2 and
 v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356, and
-`5d6ab1cfa`, upstream main later that day, for positions 357-365. They name the positions that the
+`5d6ab1cfa`, upstream main later that day, for positions 357-368. They name the positions that the
 commits have now, but neither the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`,
 the v7.1 rebase on `9a875b563`, nor the v7.0 reorganization on `e6b458cc0` checked them again, nor
 did the v6.1 rebase check the earlier ones on `7d90c4104`.
@@ -5203,6 +5208,70 @@ position handles the opcode, and the catch-all is upstream's. Upstream main lack
 fails it the same way, but replaying the commit there conflicts in `lib.rs`, which lacks position
 327's paragraph, and in `session.rs`, which lacks the session's test modules, so it cannot go
 upstream on its own.
+
+Position 366 has `Session::destroy` lock the session's negotiation before it marks the session
+uninitialized and calls `Fuse::destroy`, and keep it locked until it has reset the negotiation, as
+`dispatch_init` keeps it locked while it negotiates (microsoft/nvx#1900). It locked the negotiation
+only to reset it, after `Fuse::destroy`, so a `FUSE_INIT` that the session dispatched meanwhile, as
+from another queue while it handled `FUSE_DESTROY`, ran `Fuse::init` while `Fuse::destroy` was still
+undoing the previous negotiation, and the reset then cleared the negotiation that the `FUSE_INIT`
+had just adopted, leaving an initialized session with version 0 and no flags, whose saved state the
+`SessionState::validate` of PR13's position 047 refuses. A `FUSE_INIT` that the session dispatches
+once `Session::destroy` has marked it uninitialized now negotiates only once the session has ended,
+and the session keeps that negotiation, so it calls `Fuse::init` and `Fuse::destroy` one at a time,
+which position 367's pairing needs. OpenVMM's virtio-fs device runs all its queues on the VM's
+device thread and stops them before it resets, so its dispatches do not overlap, and the microVM
+behaves as it did. In `session.rs`, it changes `Session::destroy`, in the line of PR13's position
+047 that resets the negotiation, and documents the wait there; PR13's position 047 and positions
+321, 323, 324, 326-328, 356, and 365 also change the file, none of the other lines that it changes.
+Its test, which it adds to position 328's tests of `FUSE_INIT` after position 356's, uses the
+session's test harness of positions 321 and 325 and the session state of PR13's position 047. It is
+not a PR13 fixup: the unlocked `Fuse::destroy` is upstream's, and position 047's reset only adds the
+cleared negotiation to the race. Upstream main calls `Fuse::destroy` outside the lock too, so a
+racing `FUSE_INIT` can run `Fuse::init` while it runs, but it resets no negotiation. Replaying the
+commit there conflicts in `session.rs`, whose line of position 047 it changes, and in position 328's
+`init.rs`, which upstream main lacks, so it cannot go upstream on its own.
+
+Position 367 has `Session::dispatch_init` call `Fuse::destroy` right after a `Fuse::init` whose
+negotiation it does not adopt, while it still holds the negotiation's lock (microsoft/nvx#1900):
+before it fails with `EIO` a `FUSE_INIT` whose `init` wants a flag that the guest did not offer,
+which position 328 refuses, and when it cannot send the reply, after which position 356 adopts
+nothing. The guest completes no such `FUSE_INIT`, and Linux sends no `FUSE_DESTROY` for a connection
+that it did not initialize, so the next `FUSE_INIT` ran `Fuse::init` again over what the first one
+had set up, and `Session::destroy`, which calls `Fuse::destroy` only for an initialized session,
+never undid it either. `VirtioFs::init` records the negotiation that it agrees to, so after an
+`INIT` reply that the device could not send, that record and the session's state disagreed, and a
+microVM save failed until the guest negotiated again, which position 356 left to microsoft/nvx#1900;
+`VirtioFs::destroy` resets that record, so such a save now stores no session. The session stays
+uninitialized, so neither `FUSE_DESTROY` nor `Session::destroy` calls `Fuse::destroy` again, and an
+adopted negotiation is still destroyed once, when the session ends. In `lib.rs`, it documents this
+pairing on `Fuse::init`, after position 356's paragraph, and on `Fuse::destroy`, and in
+`saved_state.rs` it says on PR13's `Session::restore_state` that a restore replaces a negotiation
+without `Fuse::destroy`, so it restores only into a session without one. NVX's virtio-fs servers
+never want a flag that the guest did not offer, so in the microVM only a reply that the device
+cannot send reaches the new `Fuse::destroy`; the saved state keeps its format. In `session.rs`, it
+changes `dispatch_init`, in lines that positions 328 and 356 add; PR13's position 047 and positions
+321, 323, 324, 326, 327, and 365 also change the file, and all of them but position 324 also change
+`lib.rs`, none of the lines that it changes. It adds four tests to position 328's tests of
+`FUSE_INIT`, after position 366's, which use the session's test harness of positions 321 and 325 and
+position 356's sender that fails each reply, and one to the microVM's file-system tests, after the
+`initialized_microvm_negotiation_restores` of PR18's position 083, which uses the microVM profile of
+PR18's position 081 and the state checks of position 083; PR22's position 102 and positions 164,
+329-331, 335, 350, 354, 355, 362, and 363 also change that file. It is not a fixup of position 328
+or 356: neither pairs `Fuse::init` with `Fuse::destroy`, which upstream's `dispatch_init` never did.
+Upstream main also returns without `Fuse::destroy` when it cannot send the reply, and asserts that
+`init` wants only offered flags rather than refuse them. Replaying the commit there conflicts in
+`lib.rs` and `session.rs`, whose lines of positions 328 and 356 it changes, and in `saved_state.rs`,
+position 328's `init.rs`, and the microVM's `fs_tests.rs`, which upstream main lacks, so it cannot
+go upstream on its own.
+
+Position 368 corrects comments of position 366: `Session::dispatch` routes a request by the
+session's initialized flag, which `Session::destroy` clears only once it holds the lock, so a
+`FUSE_INIT` that the session dispatches before then fails with `EIO` as a duplicate, as on any
+initialized session, and only one that it dispatches once the flag is clear waits for the end of the
+session, as `Session::destroy` and position 366's test now say. The pairing of position 367 holds
+either way, since the duplicate calls no `Fuse::init`. It changes only comments, in lines that
+position 366 adds, so, as position 366, it cannot go upstream on its own.
 
 ## PR summary
 
