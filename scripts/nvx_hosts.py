@@ -5,7 +5,8 @@ The developer-local inventory selects a configured SSH destination and backend.
 Commands and scripts use non-interactive SSH calls that fail instead of prompting,
 and linked worktrees can reuse the ignored inventory from the main worktree. The
 probe, worktree, and benchmark tools run on a host from this checkout, since the
-host's checkout can predate them.
+host's checkout can predate them. `select` chooses where to run a backend: a
+reachable host, or else this workstation or, for KVM on Windows, its WSL.
 """
 
 from __future__ import annotations
@@ -14,12 +15,14 @@ import argparse
 import base64
 import io
 import json
+import os
 import re
 import shlex
 import subprocess
 import sys
 import zipfile
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
@@ -36,7 +39,24 @@ BACKEND_PLATFORMS = {
 HOST_TYPES = frozenset({"baremetal", "virtual-machine"})
 PROFILE_KEYS = frozenset({"ssh_target", "backend", "host_type", "remote_repo", "notes"})
 SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=20")
-COMMANDS = frozenset({"list", "show", "exec", "run", "probe", "worktree", "benchmark"})
+COMMANDS = frozenset(
+    {"list", "show", "select", "exec", "run", "probe", "worktree", "benchmark"}
+)
+# `exit` ends the session successfully in sh, cmd, and PowerShell alike, so it
+# checks that a host accepts a non-interactive login whatever its shell. One
+# connection attempt overrides an SSH configuration that retries, which would
+# multiply the connect timeout for every unreachable host.
+REACHABILITY_OPTIONS = ("-o", "ConnectionAttempts=1")
+REACHABILITY_COMMAND = "exit"
+# The backends that this workstation runs natively, by sys.platform.
+LOCAL_BACKENDS = {"linux": ("kvm", "mshv"), "win32": ("whp",)}
+LINUX_DEVICES = {"kvm": "/dev/kvm", "mshv": "/dev/mshv"}
+# WSL 2 runs KVM only with nested virtualization, which exposes /dev/kvm; the
+# check also prints the checkout's WSL path so one wsl.exe launch answers both.
+WSL_KVM_CHECK = (
+    "test -r /dev/kvm && test -w /dev/kvm && command -v python3 >/dev/null && "
+    'wslpath -a -u "$1"'
+)
 # The tools that run on a host from this checkout, since a host's checkout can
 # predate them, with the modules that each imports.
 REMOTE_TOOLS = {
@@ -534,6 +554,146 @@ def _probe(
     return result.returncode
 
 
+def _reachable(profile: HostProfile, runner: Runner) -> bool:
+    """Return whether the host accepts a non-interactive SSH session."""
+    try:
+        result = runner.run(
+            [
+                "ssh",
+                *SSH_OPTIONS,
+                *REACHABILITY_OPTIONS,
+                "-n",
+                profile.ssh_target,
+                REACHABILITY_COMMAND,
+            ],
+            capture_stdout=True,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def _native_backend_usable(backend: str, platform: str) -> bool:
+    """Return whether this workstation can run the backend natively. WHP is
+    the only Windows backend, and the host probe checks its access."""
+    if backend not in LOCAL_BACKENDS.get(platform, ()):
+        return False
+    device = LINUX_DEVICES.get(backend)
+    return device is None or os.access(device, os.R_OK | os.W_OK)
+
+
+def _wsl_checkout(runner: Runner) -> str | None:
+    """Return this checkout's path in the default WSL distribution when that
+    distribution can run KVM with Python, or None otherwise."""
+    try:
+        result = runner.run(
+            [
+                "wsl.exe",
+                "--exec",
+                "sh",
+                "-c",
+                WSL_KVM_CHECK,
+                "sh",
+                str(REPOSITORY_ROOT),
+            ],
+            capture_stdout=True,
+        )
+    except OSError:
+        return None
+    path = result.stdout.strip()
+    if result.returncode != 0 or not path.startswith("/"):
+        return None
+    return path
+
+
+def select_execution(
+    profiles: Sequence[HostProfile],
+    backend: str,
+    host_type: str | None,
+    runner: Runner,
+    platform: str | None = None,
+) -> dict[str, object]:
+    """Choose where to run a backend: the first reachable profile, in inventory
+    order, that serves it, then this workstation natively, then, for KVM on
+    Windows, its default WSL distribution. A requested host type rules out the
+    local fallbacks, whose host type the inventory does not record."""
+    platform = sys.platform if platform is None else platform
+    candidates = [
+        profile
+        for profile in profiles
+        if profile.backend == backend
+        and (host_type is None or profile.host_type == host_type)
+    ]
+    selection: dict[str, object] = {
+        "backend": backend,
+        "platform": BACKEND_PLATFORMS[backend],
+        "host_type": host_type,
+        "execution": None,
+        "host": None,
+        "checkout": None,
+        "unreachable": [],
+    }
+
+    def reachable_with_runner(profile: HostProfile) -> bool:
+        return _reachable(profile, runner)
+
+    # Probe concurrently, so unreachable hosts cost one connect timeout in
+    # total, and keep the inventory's order for the choice.
+    with ThreadPoolExecutor(max_workers=max(1, len(candidates))) as executor:
+        reachable = list(executor.map(reachable_with_runner, candidates))
+    for profile, accepted in zip(candidates, reachable, strict=True):
+        if accepted:
+            selection.update(
+                execution="ssh",
+                host=profile.to_json(),
+                host_type=profile.host_type,
+                checkout=profile.remote_repo,
+                reason=f"host profile {profile.name!r} is reachable",
+            )
+            break
+    selection["unreachable"] = [
+        profile.name
+        for profile, accepted in zip(candidates, reachable, strict=True)
+        if not accepted
+    ]
+    if selection["execution"] is not None:
+        return selection
+
+    if candidates:
+        remote = f"no configured {backend} host is reachable"
+    else:
+        remote = f"no configured host serves {backend}"
+    if host_type is not None:
+        selection["reason"] = (
+            f"{remote} with host type {host_type}; local execution has no "
+            "recorded host type"
+        )
+        return selection
+    if _native_backend_usable(backend, platform):
+        selection.update(
+            execution="local",
+            checkout=str(REPOSITORY_ROOT),
+            reason=f"{remote}; this workstation runs {backend} natively",
+        )
+        return selection
+    if backend == "kvm" and platform == "win32":
+        wsl_checkout = _wsl_checkout(runner)
+        if wsl_checkout is not None:
+            selection.update(
+                execution="wsl",
+                checkout=wsl_checkout,
+                reason=f"{remote}; the default WSL distribution exposes /dev/kvm",
+            )
+            return selection
+        selection["reason"] = (
+            f"{remote}, and the default WSL distribution does not start or "
+            "lacks a usable /dev/kvm or python3"
+        )
+        return selection
+    selection["reason"] = f"{remote}, and this workstation cannot run {backend}"
+    return selection
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
@@ -544,6 +704,18 @@ def _parser() -> argparse.ArgumentParser:
     show_parser = subparsers.add_parser("show", help="show one profile")
     show_parser.add_argument("profile", help="host profile name")
     show_parser.add_argument("--file", type=Path, help="inventory path")
+
+    select_parser = subparsers.add_parser(
+        "select",
+        help="choose a reachable host for a backend, or a local fallback",
+    )
+    select_parser.add_argument("backend", choices=sorted(BACKEND_PLATFORMS))
+    select_parser.add_argument(
+        "--host-type",
+        choices=sorted(HOST_TYPES),
+        help="require this host type, which rules out the local fallbacks",
+    )
+    select_parser.add_argument("--file", type=Path, help="inventory path")
 
     exec_parser = subparsers.add_parser("exec", help="run one remote command")
     exec_parser.add_argument("profile", help="host profile name")
@@ -639,6 +811,15 @@ def run_cli(argv: Sequence[str] | None, runner: Runner) -> int:
             else _default_inventory(runner)
         )
         profiles = load_inventory(inventory_path)
+        if subcommand == "select":
+            selection = select_execution(
+                profiles or [],
+                cast(str, namespace.backend),
+                cast(str | None, namespace.host_type),
+                runner,
+            )
+            _write_json({"inventory": str(inventory_path), **selection})
+            return 0 if selection["execution"] is not None else 1
         if not profiles:
             reason = (
                 f"{INVENTORY_FILENAME} is missing or has no hosts; "

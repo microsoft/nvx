@@ -11,7 +11,9 @@ Commands use `python3`; use `python` on Windows.
 1. Prepare the host with [nvx-prepare-host](../nvx-prepare-host/SKILL.md), and
    reuse its checkout, backend, revision, artifacts, and `host_type`. For a
    local run, ask whether the host is `baremetal` or `virtual-machine` unless
-   the user said so; never infer it from probes.
+   the user said so; never infer it from probes. Select a host with
+   `nvx_hosts.py select BACKEND --host-type HOST_TYPE`, which never falls back
+   to this workstation or WSL, and never measure in a WSL fallback.
 2. Choose one profile, and name it in the report:
    - `smoke` checks that the suites work; never persist, gate, or compare it.
    - `ci` reproduces CI's sampling, which the tool reads from the measured

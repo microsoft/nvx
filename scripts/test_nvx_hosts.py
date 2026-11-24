@@ -52,6 +52,39 @@ class FakeRunner:
         return self.results.pop(0)
 
 
+class SelectRunner:
+    """Answers reachability checks by SSH target, in whatever order threads
+    make them, and the WSL check with one result or exception."""
+
+    def __init__(
+        self,
+        *,
+        reachable: set[str],
+        wsl: nvx_hosts.CommandResult | OSError | None = None,
+    ) -> None:
+        self.reachable = reachable
+        self.wsl = wsl
+        self.calls: list[tuple[str, ...]] = []
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        input_text: str | None = None,
+        capture_stdout: bool = False,
+    ) -> nvx_hosts.CommandResult:
+        del input_text, capture_stdout
+        call = tuple(args)
+        self.calls.append(call)
+        if call[0] == "wsl.exe":
+            if self.wsl is None:
+                raise AssertionError(f"unexpected command: {list(args)}")
+            if isinstance(self.wsl, OSError):
+                raise self.wsl
+            return self.wsl
+        return nvx_hosts.CommandResult(0 if call[-2] in self.reachable else 255)
+
+
 def _git(repo: Path, *arguments: str) -> str:
     return subprocess.run(
         ["git", "-C", str(repo), *arguments],
@@ -124,7 +157,7 @@ class HostInventoryTests(unittest.TestCase):
     def run_cli(
         self,
         arguments: Sequence[str],
-        runner: FakeRunner,
+        runner: nvx_hosts.Runner,
     ) -> tuple[int, str, str]:
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -392,6 +425,110 @@ class HostInventoryTests(unittest.TestCase):
                     self.assertEqual(status, 1)
                     self.assertEqual(output, "")
                     self.assertIn("only local NVX development is enabled", error)
+
+    def test_select_prefers_the_first_reachable_profile_in_inventory_order(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            hosts = {
+                "a-down": {**self.profile(), "ssh_target": "down"},
+                "b-up": {
+                    **self.profile(host_type="virtual-machine"),
+                    "ssh_target": "up",
+                },
+                "c-up": {**self.profile(), "ssh_target": "also-up"},
+                "d-whp": self.profile(backend="whp"),
+            }
+            path = self.write_inventory(Path(temporary), hosts)
+            runner = SelectRunner(reachable={"up", "also-up"})
+            status, output, error = self.run_cli(
+                ["select", "kvm", "--file", str(path)], runner
+            )
+            self.assertEqual(status, 0)
+            self.assertEqual(error, "")
+            payload = cast(dict[str, object], json.loads(output))
+            self.assertEqual(payload["execution"], "ssh")
+            self.assertEqual(cast(dict[str, object], payload["host"])["name"], "b-up")
+            self.assertEqual(payload["host_type"], "virtual-machine")
+            self.assertEqual(payload["checkout"], "/srv/nvx")
+            self.assertEqual(payload["unreachable"], ["a-down"])
+            # A configured retry count must not multiply the connect timeout,
+            # and hosts of other backends are never contacted.
+            self.assertCountEqual(
+                runner.calls,
+                [
+                    (*SSH, "-o", "ConnectionAttempts=1", "-n", target, "exit")
+                    for target in ("down", "up", "also-up")
+                ],
+            )
+
+    def test_select_falls_back_to_this_windows_workstation_for_whp(self) -> None:
+        profiles = [
+            nvx_hosts.HostProfile("win", "down", "whp", "virtual-machine", None, None)
+        ]
+        runner = SelectRunner(reachable=set())
+        selection = nvx_hosts.select_execution(
+            profiles, "whp", None, runner, platform="win32"
+        )
+        self.assertEqual(selection["execution"], "local")
+        self.assertIsNone(selection["host_type"])
+        self.assertEqual(selection["checkout"], str(nvx_hosts.REPOSITORY_ROOT))
+        self.assertEqual(selection["unreachable"], ["win"])
+        self.assertNotIn("wsl.exe", [call[0] for call in runner.calls])
+
+    def test_select_falls_back_to_wsl_for_kvm_on_windows(self) -> None:
+        for wsl, execution, checkout in (
+            (nvx_hosts.CommandResult(0, "/mnt/c/nvx\n"), "wsl", "/mnt/c/nvx"),
+            (nvx_hosts.CommandResult(1), None, None),
+            (OSError("wsl.exe not found"), None, None),
+        ):
+            with self.subTest(wsl=wsl):
+                runner = SelectRunner(reachable=set(), wsl=wsl)
+                selection = nvx_hosts.select_execution(
+                    [], "kvm", None, runner, platform="win32"
+                )
+                self.assertEqual(selection["execution"], execution)
+                self.assertEqual(selection["checkout"], checkout)
+                self.assertEqual(
+                    runner.calls,
+                    [
+                        (
+                            "wsl.exe",
+                            "--exec",
+                            "sh",
+                            "-c",
+                            nvx_hosts.WSL_KVM_CHECK,
+                            "sh",
+                            str(nvx_hosts.REPOSITORY_ROOT),
+                        )
+                    ],
+                )
+                if execution is None:
+                    self.assertIn("WSL", cast(str, selection["reason"]))
+
+    def test_select_never_falls_back_to_wsl_for_mshv_or_off_windows(self) -> None:
+        for backend, platform in (("mshv", "win32"), ("kvm", "darwin")):
+            with self.subTest(backend=backend, platform=platform):
+                runner = SelectRunner(reachable=set())
+                selection = nvx_hosts.select_execution(
+                    [], backend, None, runner, platform=platform
+                )
+                self.assertIsNone(selection["execution"])
+                self.assertEqual(runner.calls, [])
+
+    def test_select_with_a_host_type_rules_out_local_fallbacks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / ".nvx-hosts.json"
+            runner = SelectRunner(reachable=set())
+            status, output, _ = self.run_cli(
+                ["select", "whp", "--host-type", "baremetal", "--file", str(missing)],
+                runner,
+            )
+            self.assertEqual(status, 1)
+            payload = cast(dict[str, object], json.loads(output))
+            self.assertIsNone(payload["execution"])
+            self.assertIn("no recorded host type", cast(str, payload["reason"]))
+            self.assertEqual(runner.calls, [])
 
     @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
     def test_windows_scripts_run_quietly_in_real_powershell(self) -> None:

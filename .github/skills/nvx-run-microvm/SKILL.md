@@ -8,8 +8,9 @@ argument-hint: "[local|host-profile] [kvm|mshv|whp] [run options or failure]"
 
 Prepare the host with [nvx-prepare-host](../nvx-prepare-host/SKILL.md) first,
 and reuse its host, checkout, backend, revision, and artifacts. Run the
-commands below from that checkout in an interactive terminal, locally or in
-`ssh -tt <ssh_target>` on a remote host. They read the same in bash and
+commands below from that checkout in an interactive terminal, locally, in
+`wsl.exe --cd WSL_CHECKOUT` for a WSL fallback, or in `ssh -tt <ssh_target>`
+on a remote host. They read the same in bash and
 PowerShell, except where noted; use `python` instead of `python3` on Windows.
 
 ## Run

@@ -77,6 +77,10 @@
 - Use `nvx-prepare-host` before host work, then `nvx-run-microvm` to run or
   debug NVX, or `nvx-collect-benchmarks` to measure it. Never expose
   `.nvx-hosts.json` or authentication material.
+- When the configured hosts are unreachable or absent,
+  `scripts/nvx_hosts.py select BACKEND` falls back to the local workstation,
+  natively or, for KVM on Windows, in WSL 2. Report such runs as local or WSL,
+  never as a configured host's, and never benchmark in them.
 
 ## Copilot Cloud Agent Sessions
 
