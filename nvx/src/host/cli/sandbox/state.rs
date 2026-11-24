@@ -18,6 +18,11 @@
 //! The network is the [`NetworkRecord`] of the sandbox's network options, from which each start
 //! builds the network's policy again, as provision built it.
 //!
+//! The configuration of a sandbox that `--cpu-profile` provisioned records that CPU profile under
+//! `cpu_profile`, which each start requests of OpenVMM; that of a sandbox provisioned without it
+//! records none, and each cold start then takes OpenVMM's default, `auto`, and each restore its
+//! snapshot's profile.
+//!
 //! The configuration of a restored sandbox also records its [`Source`]: the name of its snapshot
 //! under `source_snapshot`, the absolute path of the snapshot's store under `source_store`, and
 //! the program and arguments of the workload that each restore runs under `workload`, which
@@ -50,6 +55,7 @@ use crate::host::sandbox::layer::{LayerRole, SandboxLayer};
 use crate::host::sandbox::mount::{HostQueries, check_distinct_export_roots, os_error};
 use crate::host::sandbox::scratch::ScratchBinding;
 use crate::host::sandbox::{DEFAULT_ENTRYPOINT, has_kernel_separator, require_file};
+use crate::host::snapshot::key::cpu_profile_problem;
 use crate::net::is_valid_hostname;
 use crate::protocol::root::{Journal, OverlayMode, RAM_UPPER_CAPS, RootImage};
 use crate::protocol::view::{MachineIdMode, View};
@@ -415,6 +421,7 @@ pub(crate) fn serialize_launch(
         workload_uid,
         workload_gid,
         hypervisor: config.hypervisor.to_owned(),
+        cpu_profile: config.cpu_profile.map(str::to_owned),
         memory_mib: config.memory_mib,
         network: config.network.cloned(),
         cmdline: config.cmdline.to_owned(),
@@ -468,6 +475,10 @@ pub(crate) struct Config {
     workload_gid: u32,
     /// The hypervisor that OpenVMM uses.
     hypervisor: String,
+    /// The CPU profile that OpenVMM presents to the guest, as `--cpu-profile` gave it, absent for
+    /// OpenVMM's default, `auto`, with which a restore takes its snapshot's profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cpu_profile: Option<String>,
     /// The guest RAM in MiB, from 1 to [`MAX_MEMORY_MIB`].
     memory_mib: u64,
     /// The user's kernel command line.
@@ -579,6 +590,12 @@ impl Config {
         &self.hypervisor
     }
 
+    /// Returns the CPU profile that OpenVMM presents to the guest, or `None` for OpenVMM's
+    /// default, `auto`, with which a restore takes its snapshot's profile.
+    pub(crate) fn cpu_profile(&self) -> Option<&str> {
+        self.cpu_profile.as_deref()
+    }
+
     /// Returns the user's kernel command line.
     pub(crate) fn cmdline(&self) -> &str {
         &self.cmdline
@@ -589,10 +606,18 @@ impl Config {
     /// is malformed; the image's identity, a UUID in its canonical text; the workload, as
     /// [`check_workload`] checks it with the default entrypoint; the export plan and its pins, for
     /// the container root; and the images and the export plan with its pins, as [`check_images`]
-    /// checks them, before [`vm_config`](Self::vm_config) passes the plan to the VM.
+    /// checks them, before [`vm_config`](Self::vm_config) passes the plan to the VM. A recorded CPU
+    /// profile that `--cpu-profile` refuses makes the configuration malformed too.
     pub(crate) fn check(&self) -> Result {
         if let Upper::Ram { max_memory_percent } = &self.upper
             && !RAM_UPPER_CAPS.contains(max_memory_percent)
+        {
+            return Err(malformed());
+        }
+        if self
+            .cpu_profile
+            .as_deref()
+            .is_some_and(|profile| cpu_profile_problem(profile).is_some())
         {
             return Err(malformed());
         }

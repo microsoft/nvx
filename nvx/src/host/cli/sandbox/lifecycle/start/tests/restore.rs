@@ -751,6 +751,7 @@ fn deprovision_removes_a_restored_sandboxs_view_only_under_its_snapshots_lock() 
     let binding = DistroBinding::verify(&layer).unwrap();
     let options = ProvisionConfig {
         hypervisor: "kvm",
+        cpu_profile: None,
         memory_mib: 512,
         cmdline: "",
         ram_upper_percent: None,
@@ -803,6 +804,7 @@ fn a_restored_start_refuses_a_share_of_its_snapshot_store() {
     let export = plan_mounts(&mounts).unwrap();
     let options = ProvisionConfig {
         hypervisor: "kvm",
+        cpu_profile: None,
         memory_mib: 512,
         cmdline: "",
         ram_upper_percent: None,

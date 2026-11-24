@@ -67,6 +67,8 @@ const OUTCOME_SCHEMA_VERSION: u64 = 1;
 pub(crate) struct ProvisionConfig<'a> {
     /// `--hypervisor`, resolved.
     pub(crate) hypervisor: &'a str,
+    /// `--cpu-profile`, or `None` for OpenVMM's default, `auto`.
+    pub(crate) cpu_profile: Option<&'a str>,
     /// `--memory-mib`.
     pub(crate) memory_mib: u64,
     /// `--cmdline`.
@@ -242,7 +244,7 @@ fn runtime_for(
         initramfs: dir.initramfs(Guest::Alpine),
         identity,
         hypervisor: config.hypervisor().parse().map_err(error_with_cause)?,
-        cpu_profile: None,
+        cpu_profile: config.cpu_profile().map(str::to_owned),
         windows_breakaway: false,
         options: LaunchOptions::default(),
     })

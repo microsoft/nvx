@@ -20,6 +20,7 @@ use crate::host::sandbox::options::{PolicyPathOption, SandboxOperation};
 use crate::host::sandbox::{
     DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, parse_workload_identity,
 };
+use crate::host::snapshot::key::cpu_profile_problem;
 use crate::net::{Ipv4Cidr, guest_gateway};
 use crate::protocol::root::RootUpper;
 
@@ -76,6 +77,10 @@ options:
                         over the guest default environment instead of
                         replacing it
   --hypervisor {auto,whp,kvm,mshv}
+  --cpu-profile ID      the OpenVMM CPU profile of run and provision: auto
+                        (OpenVMM's default) for the built-in profile of the
+                        host's CPU, a built-in profile ID, or host to derive a
+                        development profile from this host (doc/usage.md)
   --mount GUEST_TARGET,HOST_PATH[,ro|rw]
                         live-share a host directory, or a single regular host
                         file without its directory, inside the container
@@ -153,7 +158,7 @@ fn seconds(value: &str) -> std::result::Result<f64, String> {
 
 /// The options of `nvx sandbox`, which parse with the defaults of the former
 /// `nvx.py sandbox`.
-pub(in crate::host::cli) const OPTIONS: [Spec; 37] = [
+pub(in crate::host::cli) const OPTIONS: [Spec; 38] = [
     Spec::one("--layer"),
     Spec::one("--layer-format"),
     Spec::one("--scratch"),
@@ -173,6 +178,7 @@ pub(in crate::host::cli) const OPTIONS: [Spec; 37] = [
     Spec::one("--environment-file"),
     Spec::flag("--inherit-default-environment"),
     Spec::one("--hypervisor"),
+    Spec::one("--cpu-profile"),
     Spec::one("--mount"),
     Spec::one("--mount-deny"),
     Spec::one("--mount-allow"),
@@ -236,6 +242,9 @@ pub(crate) struct Options {
     pub(crate) inherit_default_environment: bool,
     /// `--hypervisor`, `auto` by default.
     pub(crate) hypervisor: &'static str,
+    /// `--cpu-profile`, if given, which [`cpu_profile_problem`] accepts; OpenVMM's default,
+    /// `auto`, without it.
+    pub(crate) cpu_profile: Option<String>,
     /// The `--mount` options.
     pub(crate) mounts: Vec<String>,
     /// The `--mount-deny`, `--mount-allow`, and `--mount-write` options, with the `--mount`
@@ -276,6 +285,7 @@ impl Default for Options {
             environment_file: None,
             inherit_default_environment: false,
             hypervisor: "auto",
+            cpu_profile: None,
             mounts: Vec::new(),
             policy_paths: Vec::new(),
             mount_owner: None,
@@ -339,6 +349,13 @@ impl Receiver for Options {
             "--environment-file" => self.environment_file = Some(text()),
             "--inherit-default-environment" => self.inherit_default_environment = true,
             "--hypervisor" => self.hypervisor = choice(&text(), &HYPERVISORS)?,
+            "--cpu-profile" => {
+                let profile = text();
+                if let Some(problem) = cpu_profile_problem(&profile) {
+                    return Err(problem);
+                }
+                self.cpu_profile = Some(profile);
+            }
             "--mount" => self.mounts.push(text()),
             "--mount-deny" | "--mount-allow" | "--mount-write" => {
                 let kind = match name {

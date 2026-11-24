@@ -93,6 +93,63 @@ fn image_options_are_only_valid_for_run_and_provision() {
     assert!(parse(&["--layer-format".to_owned(), "ext4".to_owned()]).is_err());
 }
 
+/// `--cpu-profile` takes what OpenVMM's `--cpu-profile` takes, `auto`, `host`, or a profile ID,
+/// and only for a run or a provision: a provisioned sandbox starts on the profile that its
+/// provision recorded.
+#[test]
+fn the_cpu_profile_is_a_request_of_openvmm_for_run_and_provision() {
+    let profile = |value: &str| {
+        parse(&["--cpu-profile".to_owned(), value.to_owned()])
+            .map(|(options, _)| options.cpu_profile)
+    };
+    assert_eq!(parse(&[]).unwrap().0.cpu_profile, None);
+    for value in [
+        "auto",
+        "host",
+        "intel.alderlake.v1",
+        "intel.skylake-sp.v1",
+        "amd.genoa.v2",
+    ] {
+        assert_eq!(profile(value).unwrap().as_deref(), Some(value));
+    }
+    for value in [
+        "",
+        "Host",
+        "AUTO",
+        "alderlake",
+        "intel.alderlake",
+        "intel.alderlake.v0",
+        "intel.alderlake.v01",
+        "intel.alderlake.1",
+        "intel..v1",
+        "intel.alderlake.v1.x",
+        "intel.alder lake.v1",
+    ] {
+        let error = profile(value).unwrap_err();
+        assert_eq!(error.code(), Some(ErrorCode::ArgumentInvalid), "{value:?}");
+        let message = error.message().unwrap();
+        assert!(
+            message.contains("--cpu-profile") && message.contains(&format!("{value:?}")),
+            "{message}"
+        );
+    }
+    for operation in ["start", "exec", "stop", "deprovision"] {
+        let (options, _) = parse(&[
+            operation.to_owned(),
+            "--cpu-profile".to_owned(),
+            "host".to_owned(),
+        ])
+        .unwrap();
+        let error = run(None, options).unwrap_err();
+        assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{operation}");
+        assert_eq!(
+            error.message(),
+            Some("--cpu-profile is only valid for sandbox run or provision"),
+            "{operation}"
+        );
+    }
+}
+
 /// Provision records the bindings that explicit verification of the distro layer and the binding
 /// of the scratch image make, which each start checks, and records no binding of a scratch image
 /// for an upper in RAM.

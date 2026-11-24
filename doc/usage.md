@@ -312,6 +312,7 @@ nvx/target/release/nvx sandbox
     [--environment-file PATH]
     [--inherit-default-environment]
     [--hypervisor {auto,whp,kvm,mshv}]
+    [--cpu-profile ID]
     [--mount GUEST_TARGET,HOST_PATH[,ro|rw]]...
     [--mount-deny HOST_PATH]...
     [--mount-allow HOST_PATH]...
@@ -373,6 +374,7 @@ those of [`run`](#run) do, and their names cannot be abbreviated either.
 | `--environment-file PATH` | omitted | Read the exact environment of the workload of `run` or `exec` from a strict UTF-8 JSON array of `KEY=VALUE` strings, limited to 1 MiB of input. Invalid JSON, non-finite numbers, and unpaired surrogate escapes are refused. An empty array requests an empty environment. This option is mutually exclusive with `--environment`; omitting both preserves guest defaults. |
 | `--inherit-default-environment` | off | Layer the environment of the workload of `run` or `exec` from `--environment` or `--environment-file` over the guest default environment instead of replacing it; an entry replaces the default variable of the same name. Without either option the workload already receives the defaults, so the flag has no effect. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the host hypervisor. |
+| `--cpu-profile ID` | `auto` | Select the guest's [CPU profile](#cpu-profiles) for `run` or `provision`, as for [`run`](#run): `auto` for the built-in profile of the host's CPU, which falls back with a warning to a development profile derived from this host on an Intel or AMD CPU that no built-in profile serves, a built-in profile ID, or `host` for that development profile, as on a host whose hypervisor does not support its CPU's built-in profile. Any other value, which is not of the form `VENDOR.GENERATION.vREVISION`, is a usage error. `provision` records the profile, and each `start` requests it of OpenVMM; other sandbox operations reject this option. |
 | `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Live-share a host directory, or a single regular host file without its directory, at the absolute target inside the container rootfs for `run` or `provision`; defaults to `ro`. The target cannot contain whitespace, control characters, double quotes, backslashes, `=`, or any UTF-8 byte that Linux treats as whitespace, such as the `0xa0` in `à`. The mode follows the last comma, so `HOST_PATH` may contain commas when the mode is given. Repeat to attach more shares, each with its own target and mode, for example a read-write workspace and a read-only tool cache, as the children of an aggregate that the guest binds at their targets. Targets and host paths must not overlap, and `run`, `provision`, and `start` refuse a host path that equals, contains, or lies inside the sandbox's image, scratch image, OpenVMM, whether the artifact root's or the one that `NVX_OPENVMM` names, kernel, or initramfs, the state directory of `provision` and `start`, or the temporary VM directory of `run`; see [Live host shares](run.md#live-host-shares). The kernel command line announces only the number of the shares, whose mapping table the sandbox sends once its guest agent is ready, for at most 256 shares. An `rw` share accepts guest-created symbolic links, which the host never follows. `/`, `/etc`, `/run`, and `/run/nvx`, and the `/etc/machine-id`, `/etc/resolv.conf`, `/proc`, `/sys`, `/dev`, `/.nvx-agent`, and `/run/nvx/time` trees, are reserved. |
 | `--mount-deny HOST_PATH` | none | Hide one existing file or directory inside a `--mount` host directory; relative paths are resolved inside it. It may name the directory itself when `--mount-allow` paths inside it remain. With several shares, it applies to the `--mount` before it, which must share a directory. Repeat to deny multiple paths. |
 | `--mount-allow HOST_PATH` | none | Expose one existing file or directory inside a `--mount-deny` path of the same share again, for example a readable `mcp-payloads` directory inside hidden logs. The hidden directories on the way list only the entries that lead to it, and the workload cannot modify them. Relative paths are resolved inside the share; with several shares, it applies to the `--mount` before it. Repeat to allow multiple paths. See [Access policy](run.md#access-policy). |
@@ -472,22 +474,22 @@ nvx/target/release/nvx snapshot restore baseline \
 options of [`sandbox provision`](#sandbox), but for those that only an
 execution or a cold boot takes, `--cwd`, `--environment`, `--environment-file`,
 `--inherit-default-environment`, `--exec-timeout-ms`, `--wait`,
-`--outcome-report`, `--cmdline`, `--dry-run`, and `--net`, then starts it from
-the named snapshot of `--store-dir`. The sandbox's configuration records the
-snapshot, its store, and the sandbox's workload, `--entrypoint` with its `--arg`
-values, and each later `sandbox start` of the sandbox restores the snapshot
-again. Each restore runs the workload over the control protocol, as `run` and
-`exec` do, not from the kernel command line, so its entrypoint and arguments
-may contain whitespace and double quotes, which `sandbox provision` refuses;
-the command checks them as `exec` checks its workload before it provisions
-anything. The state directory must be outside the store. The guest of a
-restore accepts only a fresh scratch image, whose upper no earlier root wrote,
+`--outcome-report`, `--cmdline`, `--dry-run`, `--net`, and `--cpu-profile`, then
+starts it from the named snapshot of `--store-dir`. The sandbox's configuration
+records the snapshot, its store, and the sandbox's workload, `--entrypoint` with
+its `--arg` values, and each later `sandbox start` of the sandbox restores the
+snapshot again. Each restore runs the workload over the control protocol, as
+`run` and `exec` do, not from the kernel command line, so its entrypoint and
+arguments may contain whitespace and double quotes, which `sandbox provision`
+refuses; the command checks them as `exec` checks its workload before it
+provisions anything. The state directory must be outside the store. The guest of
+a restore accepts only a fresh scratch image, whose upper no earlier root wrote,
 such as a new empty ext4 image, so a later start of a restored sandbox with a
 scratch image refuses once an earlier start has created the sandbox's view of
-the snapshot, as each start does before its guest can use the image:
-deprovision the sandbox and restore the snapshot again with a fresh one. A
-missing snapshot provisions nothing; a sandbox whose start fails stays
-provisioned, as after `sandbox provision`.
+the snapshot, as each start does before its guest can use the image: deprovision
+the sandbox and restore the snapshot again with a fresh one. A missing snapshot
+provisions nothing; a sandbox whose start fails stays provisioned, as after
+`sandbox provision`.
 
 A restore attaches the sandbox's image and upper in place of the snapshot's
 placeholder image and dormant scratch: the image must fit the placeholder,
@@ -1669,7 +1671,8 @@ Linux 6.13.
 
 On an Intel or AMD development host that no built-in profile serves,
 `--cpu-profile auto` falls back to a host profile, `intel.host.v1` or
-`amd.host.v1`, which `nvx run --cpu-profile host` also selects, for
+`amd.host.v1`, which `--cpu-profile host` of `nvx run`, and of
+`nvx sandbox run` and `nvx sandbox provision`, also selects, for
 example where the hypervisor does not support the built-in profile. OpenVMM
 fingerprints the
 hypervisor on this host and applies the built-in profiles' derivation policy

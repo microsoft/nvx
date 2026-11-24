@@ -1782,6 +1782,16 @@ format, such as a VHD, as a raw file first.
 to 17592186044415 MiB, as `run` does, and `start` refuses a configuration that
 records memory outside that range before it launches OpenVMM.
 
+`provision` also records the [CPU profile](usage.md#cpu-profiles) of
+`--cpu-profile`, if given, which each `start` requests of OpenVMM, as
+`nvx run --cpu-profile` does: `host`, for example, starts the sandbox on a
+development profile derived from the host, where the hypervisor does not
+support the built-in profile of the host's CPU. A sandbox provisioned without
+it boots on OpenVMM's default, `auto`, and one that
+[`snapshot restore`](usage.md#snapshot-restore) provisioned on its snapshot's
+profile; `start` takes no `--cpu-profile` of its own, so changing a sandbox's
+profile means deprovisioning it and provisioning it again.
+
 Lifecycle transitions fail closed: `start` rejects a sandbox that is already
 running; `exec` and `stop` require a live OpenVMM process; and `deprovision`
 refuses to remove a running sandbox or unknown files. The state directory is

@@ -244,8 +244,10 @@ impl Invariants {
     }
 }
 
-/// The CPU profile that a capture requests: OpenVMM's `--cpu-profile`.
-fn cpu_profile_problem(profile: &str) -> Option<String> {
+/// Returns why `profile` is no request of OpenVMM's `--cpu-profile`, which a capture and a
+/// sandbox's launch make: `auto`, `host`, or a profile ID, `VENDOR.GENERATION.vREVISION`. Returns
+/// `None` for a request.
+pub(crate) fn cpu_profile_problem(profile: &str) -> Option<String> {
     (profile != "auto" && profile != "host" && parse_profile_id(profile).is_none()).then(|| {
         format!(
             "CPU profile {profile:?} must be \"auto\", \"host\", or a profile ID, \

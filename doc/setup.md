@@ -44,7 +44,8 @@ generations and AMD's EPYC Milan, Genoa, and Turin, on a hypervisor that
 supports that profile. On another Intel or AMD CPU, `--cpu-profile auto`, the
 default, falls back to a development profile derived from the host and warns
 at every cold boot, asking for the CPU's fingerprint so that a built-in
-profile can serve it; `nvx run --cpu-profile host` selects that profile
+profile can serve it; `--cpu-profile host` of `nvx run`, and of
+`nvx sandbox run` and `nvx sandbox provision`, selects that profile
 explicitly, for example where the hypervisor does not support the built-in
 profile (`E_PROFILE_UNSUPPORTED`, whose message names this option). OpenVMM
 verifies a host profile as it verifies a built-in profile: the cold boot

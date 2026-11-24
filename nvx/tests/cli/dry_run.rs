@@ -201,6 +201,18 @@ fn sandbox_dry_runs() -> Vec<DryRun> {
             sandbox_run(&["--hypervisor", "kvm"]),
             managed_run().with("--hypervisor", ["kvm"]),
         ),
+        // The CPU profile that OpenVMM presents, such as a development profile derived from the
+        // host, on a host whose hypervisor does not support its CPU's built-in profile.
+        dry_run(
+            "host CPU profile",
+            sandbox_run(&["--cpu-profile", "host"]),
+            managed_run().with("--cpu-profile", ["host"]),
+        ),
+        dry_run(
+            "built-in CPU profile",
+            sandbox_run(&["--cpu-profile", "intel.alderlake.v1"]),
+            managed_run().with("--cpu-profile", ["intel.alderlake.v1"]),
+        ),
         // `--memory-mib` takes from 1 MiB to the most whose count of bytes fits in 64 bits, as
         // OpenVMM reads a size of RAM.
         dry_run(
