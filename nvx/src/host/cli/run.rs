@@ -429,12 +429,15 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
         return restore(root, options);
     }
     let rules = options.network.egress_rules()?;
+    let (name, vm_path) = vm_directory()?;
     // The shares and the network follow the artifacts on the command line, and a missing artifact
     // is reported before them, as `command_run` did, but a command that they refuse downloads
     // nothing, though it reads the artifacts under the lock of downloads all the same. Their
     // arguments are built again once the artifacts are in place, as a share's kind depends on what
     // its host path holds, which a download may install.
-    let refused = cold_preflight(&options, &rules).is_err();
+    let refused = cold_preflight(&options, &rules)
+        .and_then(|()| refuse_vm_directory_shares(&options, &vm_path))
+        .is_err();
     let located = locate(root)?;
     let hold = if refused {
         download::hold(&located)?
@@ -443,7 +446,35 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     };
     let Located { dir, openvmm } = located;
     require_artifact(&openvmm, "OpenVMM release binary")?;
-    run_cold(dir, openvmm, &options, &rules, hold)
+    run_cold(dir, openvmm, &options, &rules, hold, &name, vm_path)
+}
+
+/// Returns the random name of a cold run's private VM directory, and its path in the host's
+/// temporary directory, which the run creates only once it has checked its shares.
+fn vm_directory() -> Result<(String, std::path::PathBuf)> {
+    let mut random = [0; 16];
+    getrandom::fill(&mut random).map_err(|error| {
+        Exit::error(
+            ErrorCode::Io,
+            format!("cannot name the temporary VM: {error}"),
+        )
+    })?;
+    let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let path = std::env::temp_dir().join(format!("{RUN_DIRECTORY}{name}"));
+    Ok((name, path))
+}
+
+/// Refuses a `--mount` of `options` whose host path equals, contains, or lies inside `vm_path`, the
+/// cold run's VM directory, which holds the VM's control endpoint and what OpenVMM writes. A share
+/// inside another lies inside `vm_path` only if the outer one overlaps it too, so comparing the
+/// requested host paths refuses what comparing the planned children does.
+fn refuse_vm_directory_shares(options: &Options, vm_path: &Path) -> Result {
+    let shares = cold_shares(options)?;
+    sandbox::refuse_shares_of(
+        "run",
+        vec![("VM directory", vm_path.to_owned())],
+        shares.iter().map(|(_, host, _)| Path::new(host)),
+    )
 }
 
 /// Restores the named snapshot of `--store-dir` once, through the path of `snapshot restore`, as
@@ -1141,23 +1172,27 @@ fn run_cold(
     options: &Options,
     rules: &NativeRules,
     hold: Hold,
+    name: &str,
+    path: std::path::PathBuf,
 ) -> Result {
     let kernel = dir.require_kernel()?;
     let initramfs = dir.require_initramfs(options.guest)?;
     let config = cold_config(options, rules)?;
+    // A share of the VM directory, or of a directory that holds it, would give the guest the
+    // VM's control endpoint and the files that OpenVMM writes. The planned children are checked
+    // again, since a download may have changed what the requested host paths resolve to.
+    if let Some(export) = &config.filesystem {
+        sandbox::refuse_shares_of(
+            "run",
+            vec![("VM directory", path.clone())],
+            export.children.iter().map(|child| child.root.as_path()),
+        )?;
+    }
     if !options.dry_run
         && let Some(report) = &options.outcome_report
     {
         validate_outcome_destination(report)?;
     }
-    let mut random = [0; 16];
-    getrandom::fill(&mut random).map_err(|error| {
-        Exit::error(
-            ErrorCode::Io,
-            format!("cannot name the temporary VM: {error}"),
-        )
-    })?;
-    let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
     // Cold CLI runs neither capture nor reattach; this per-invocation identity is not persisted.
     let identity = ArtifactIdentity::new(format!("unrecorded-run:{name}"))?;
     let runtime = Runtime {
@@ -1175,7 +1210,6 @@ fn run_cold(
         windows_breakaway: false,
         options: LaunchOptions::default(),
     };
-    let path = std::env::temp_dir().join(format!("{RUN_DIRECTORY}{name}"));
     if path.try_exists().map_err(Exit::from_os_error)? {
         return Err(Exit::error(
             ErrorCode::Io,

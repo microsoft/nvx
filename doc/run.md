@@ -927,6 +927,11 @@ instead, whose mapping reaches the file's siblings. Guest targets that equal or
 contain one another are rejected before boot.
 The number of mappings is bounded only by the 1024-byte
 budget that their tokens and `--cmdline` share on the kernel command line.
+A cold boot refuses a mapping whose resolved host path equals, contains, or
+lies inside the temporary VM directory in which it launches its VM, such as
+the temporary directory itself, before it downloads artifacts or creates that
+directory: the guest could otherwise reach the VM's control endpoint and the
+files that OpenVMM writes there.
 A repeatable `--mount-deny HOST_PATH` hides an existing file or directory
 inside a mapped root. With several mappings, or a shared file, each
 `--mount-deny`, `--mount-allow`, and `--mount-write` path must be absolute, and

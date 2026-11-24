@@ -459,7 +459,8 @@ fn recorded<'a>(
 /// prefix. Resolution follows symbolic links and junctions, but not hard links or bind mounts.
 /// `provision` checks before it records the sandbox, and `start` again before it launches it,
 /// since the shares' paths may have come to resolve elsewhere; `run`, which has no state
-/// directory, checks before it creates its VM directory and launches its VM.
+/// directory, checks before it creates its VM directory and launches its VM. A cold `nvx run`
+/// checks its own VM directory with [`refuse_shares_of`].
 fn refuse_own_files(
     directory: Option<(&str, &Path)>,
     image: &Path,
@@ -484,6 +485,22 @@ fn refuse_own_files(
             ("initramfs", dir.initramfs(Guest::Alpine)),
         ]);
     }
+    refuse_shares_of(
+        "sandbox",
+        owned,
+        export.children.iter().map(|child| child.root.as_path()),
+    )
+}
+
+/// Refuses a share among the host paths `shares` that equals, contains, or lies inside one of
+/// `owned`, the named files of `owner`, such as `sandbox` or `run`, with the first that it
+/// reaches. The paths are compared once [`paths::resolve`] has resolved them, without a Windows
+/// verbatim prefix, as [`refuse_own_files`] describes; a path in `owned` need not exist yet.
+pub(super) fn refuse_shares_of<'a>(
+    owner: &str,
+    owned: Vec<(&str, PathBuf)>,
+    shares: impl IntoIterator<Item = &'a Path>,
+) -> Result {
     let resolve = |path: &Path| {
         paths::resolve(path)
             .map(without_verbatim_prefix)
@@ -493,8 +510,8 @@ fn refuse_own_files(
         .into_iter()
         .map(|(name, path)| Ok((name, resolve(&path)?)))
         .collect::<Result<Vec<_>>>()?;
-    for child in &export.children {
-        let shared = resolve(&child.root)?;
+    for share in shares {
+        let shared = resolve(share)?;
         let overlap = owned
             .iter()
             .find(|(_, path)| shared.starts_with(path) || path.starts_with(&shared));
@@ -502,8 +519,8 @@ fn refuse_own_files(
             return Err(Exit::error(
                 ErrorCode::Unsupported,
                 format!(
-                    "sandbox mount host path {} overlaps the sandbox's {name} {}; a share cannot \
-                     expose the sandbox's own files",
+                    "{owner} mount host path {} overlaps the {owner}'s {name} {}; a share cannot \
+                     expose the {owner}'s own files",
                     shared.display(),
                     path.display()
                 ),
