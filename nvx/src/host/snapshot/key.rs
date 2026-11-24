@@ -126,6 +126,24 @@ fn read_geometry(reader: &mut Reader<'_>, what: &str) -> Result<BlockGeometry, C
     })
 }
 
+/// Writes a list of memory ranges.
+fn write_ranges(writer: &mut Writer, ranges: &[MemoryRange]) {
+    writer.list(ranges, |writer, range| {
+        writer.u64(range.start);
+        writer.u64(range.length);
+    });
+}
+
+/// Reads a list of memory ranges, which `what` names.
+fn read_ranges(reader: &mut Reader<'_>, what: &str) -> Result<Vec<MemoryRange>, CanonicalError> {
+    reader.list(MAX_MEMORY_RANGES, what, |reader| {
+        Ok(MemoryRange {
+            start: reader.u64(what)?,
+            length: reader.u64(what)?,
+        })
+    })
+}
+
 /// Returns the SHA-256 digest of `bytes` after `domain`.
 fn digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
     let mut digest = Sha256::new();
@@ -754,12 +772,8 @@ fn write_machine(writer: &mut Writer, machine: &Machine, tag: &str) {
     writer.u64(memory.boot);
     writer.u64(memory.capacity);
     writer.u64(memory.block_size);
-    for ranges in [&memory.ranges, &memory.expansion] {
-        writer.list(ranges, |writer, range| {
-            writer.u64(range.start);
-            writer.u64(range.length);
-        });
-    }
+    write_ranges(writer, &memory.ranges);
+    write_ranges(writer, &memory.expansion);
     writer.text(&machine.command_line);
     writer.fixed(&machine.command_line_digest);
     write_geometry(writer, &machine.distro);
@@ -845,17 +859,8 @@ fn read_machine(reader: &mut Reader<'_>) -> Result<(Machine, String), CanonicalE
     let boot = reader.u64("the RAM")?;
     let capacity = reader.u64("the RAM capacity")?;
     let block_size = reader.u64("the RAM block size")?;
-    let mut range_lists = Vec::with_capacity(2);
-    for what in ["the RAM ranges", "the RAM expansion ranges"] {
-        range_lists.push(reader.list(MAX_MEMORY_RANGES, what, |reader| {
-            Ok(MemoryRange {
-                start: reader.u64(what)?,
-                length: reader.u64(what)?,
-            })
-        })?);
-    }
-    let expansion = range_lists.pop().expect("two lists were read");
-    let ranges = range_lists.pop().expect("two lists were read");
+    let ranges = read_ranges(reader, "the RAM ranges")?;
+    let expansion = read_ranges(reader, "the RAM expansion ranges")?;
     let command_line = reader
         .text(MAX_COMMAND_LINE_LEN, "the command line")?
         .to_owned();
