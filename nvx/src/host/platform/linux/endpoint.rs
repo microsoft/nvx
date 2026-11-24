@@ -323,8 +323,11 @@ pub(crate) fn endpoint_server_pid_until(
             }
             // A full listen backlog drains as OpenVMM accepts clients.
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                /// Bounds each wait for the backlog to drain to 25 ms before rechecking the
+                /// endpoint and the caller's deadline.
+                const MAX_BACKLOG_WAIT: Duration = Duration::from_millis(25);
                 let left = time_left(Some(deadline))?.expect("the probe has a deadline");
-                thread::sleep(left.min(Duration::from_millis(25)));
+                thread::sleep(left.min(MAX_BACKLOG_WAIT));
             }
             Err(error) => return Err(error),
         }
