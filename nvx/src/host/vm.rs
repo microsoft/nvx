@@ -964,12 +964,15 @@ pub struct Launched {
     pub capability: Capability,
     /// The preparation's same restore-ready listener, absent for a cold launch.
     pub ready: Option<ReadyListener>,
-    /// Retains only a foreground caller's child, for its status.
+    /// Retains only a foreground caller's child, for its status, and on Windows its job, which
+    /// ends the child once this is dropped.
     #[cfg(feature = "cli")]
     child: ForegroundChild,
 }
 
-/// Reaps a foreground child on release without adding `Drop` to the public launch value.
+/// Reaps a foreground child on release without adding `Drop` to the public launch value; on
+/// Windows, the release closes the job that ends the child if it still runs, as the job does when
+/// its caller ends, however that ends.
 #[cfg(feature = "cli")]
 #[derive(Debug)]
 struct ForegroundChild(Option<spawn::Launched>);
@@ -1093,7 +1096,10 @@ pub struct Stopped {
 /// when that final wait confirms exit.
 ///
 /// An unconfirmed exit fails with [`ErrorKind::StillRunning`](crate::ErrorKind::StillRunning),
-/// retaining host errors. The caller keeps the process in that case.
+/// retaining host errors. The caller keeps the process in that case. A process that the forced
+/// termination reached, but that has not exited by `deadline`, is stuck exiting, and the error
+/// says so: it runs no code of its own any longer, but the host has not let it exit, as Windows
+/// keeps a process whose I/O a driver neither completes nor cancels.
 /// Report-read errors have kind [`ErrorKind::Io`](crate::ErrorKind::Io)
 /// inside [`Stopped::report`], never hiding confirmed exit.
 pub fn stop(
@@ -1131,10 +1137,16 @@ pub fn stop(
             .wait(deadline)
             .map_err(|error| failure(kill_error.as_ref()).with_source(error))?;
         if exited.is_none() {
-            let error = failure(kill_error.as_ref());
             return Err(match kill_error {
-                Some(source) => error.with_source(source),
-                None => error,
+                Some(source) => failure(Some(&source)).with_source(source),
+                None => Error::new(
+                    crate::ErrorKind::StillRunning,
+                    format!(
+                        "cannot confirm exit of VM process {}: it is stuck exiting after its forced \
+                         termination",
+                        process.reference().pid
+                    ),
+                ),
             });
         }
     }

@@ -2317,6 +2317,487 @@ fn a_run_refuses_a_batch_file_as_openvmm() {
     assert!(!marker.exists());
 }
 
+/// Starts `nvx sandbox run` in the background, in the temporary directory `temporary`, with the
+/// layer and the scratch image of `root`, and then `arguments`.
+#[cfg(windows)]
+fn spawn_sandbox_run(root: &Root, temporary: &Path, arguments: &[&str]) -> std::process::Child {
+    let path = |name: &str| root.path.join(name).to_str().unwrap().to_owned();
+    let layer = format!(
+        "distro,{},11111111-1111-1111-1111-111111111111",
+        path("distro.erofs")
+    );
+    let scratch = path("scratch.ext4");
+    root.command(&[
+        "sandbox",
+        "run",
+        "--layer",
+        layer.as_str(),
+        "--scratch",
+        scratch.as_str(),
+    ])
+    .args(arguments)
+    .env("TMP", temporary)
+    .env("TEMP", temporary)
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap()
+}
+
+/// Starts `nvx sandbox run` in the background, with `--timeout` of `timeout` and the temporary
+/// directory `temporary`, whose workload leaves the marker that it returns once it runs and then
+/// sleeps.
+#[cfg(windows)]
+fn background_run(root: &Root, timeout: &str, temporary: &Path) -> (std::process::Child, PathBuf) {
+    let started = root.path.join("started");
+    let script = format!("touch {}; sleep 60000", started.display());
+    let cli = spawn_sandbox_run(
+        root,
+        temporary,
+        &[
+            "--timeout",
+            timeout,
+            "--entrypoint",
+            "/bin/sh",
+            "--arg=-c",
+            "--arg",
+            script.as_str(),
+        ],
+    );
+    (cli, started)
+}
+
+/// Opens process `pid` to wait for its exit, which the handle shows whatever process takes its ID
+/// afterwards, and to see whether it has begun to exit.
+#[cfg(windows)]
+fn exit_handle(pid: u32) -> std::os::windows::io::OwnedHandle {
+    use std::os::windows::io::FromRawHandle;
+
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
+
+    // SAFETY: OpenProcess has no memory-safety preconditions.
+    let process = unsafe {
+        OpenProcess(
+            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        )
+    };
+    assert!(
+        !process.is_null(),
+        "cannot open process {pid}: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: the handle is new, and nothing else owns it.
+    unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(process) }
+}
+
+/// Returns whether the process of `handle` exits within `timeout`.
+#[cfg(windows)]
+fn exits_within(handle: &std::os::windows::io::OwnedHandle, timeout: Duration) -> bool {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+    let milliseconds = u32::try_from(timeout.as_millis()).unwrap();
+    // SAFETY: the handle has synchronize access.
+    unsafe { WaitForSingleObject(handle.as_raw_handle(), milliseconds) == WAIT_OBJECT_0 }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_killed_run_ends_its_openvmm_and_the_next_run_removes_its_vm_directory() {
+    let root = Root::new();
+    let temporary = root.path.join("tmp");
+    fs::create_dir(&temporary).unwrap();
+    let (mut cli, started) = background_run(&root, "60", &temporary);
+    wait_for(&started);
+    let openvmm = children_named(cli.id(), "openvmm.exe");
+    let handles: Vec<_> = openvmm.iter().map(|&pid| exit_handle(pid)).collect();
+    // `TerminateProcess` gives the CLI no chance to stop its VM.
+    cli.kill().unwrap();
+    cli.wait().unwrap();
+    let ended: Vec<bool> = handles
+        .iter()
+        .map(|handle| exits_within(handle, Duration::from_secs(30)))
+        .collect();
+    for (&pid, &ended) in openvmm.iter().zip(&ended) {
+        if !ended {
+            harness::kill(u64::from(pid));
+        }
+    }
+    let abandoned = harness::entries(&temporary);
+    // The next run removes the VM directory that the killed one left, and then its own.
+    let layer = format!(
+        "distro,{},11111111-1111-1111-1111-111111111111",
+        root.path.join("distro.erofs").display()
+    );
+    let scratch = root.path.join("scratch.ext4");
+    let next = root
+        .command(&[
+            "sandbox",
+            "run",
+            "--layer",
+            layer.as_str(),
+            "--scratch",
+            scratch.to_str().unwrap(),
+            "--entrypoint",
+            "/bin/echo",
+        ])
+        .env("TMP", &temporary)
+        .env("TEMP", &temporary)
+        .output()
+        .unwrap();
+    assert_eq!(openvmm.len(), 1, "{openvmm:?}");
+    assert_eq!(ended, [true], "OpenVMM outlived the run that was killed");
+    assert_eq!(abandoned.len(), 1, "{abandoned:?}");
+    assert!(
+        abandoned[0].starts_with("nvx-sandbox-run-"),
+        "{abandoned:?}"
+    );
+    assert!(next.status.success(), "{}", text(&next.stderr));
+    assert_eq!(harness::entries(&temporary), Vec::<String>::new());
+}
+
+/// A debugger, a thread of the test, of a running process, which holds the process's exit once
+/// it has begun, as Windows holds the exit of a terminated process until a driver completes or
+/// cancels its pending I/O: Windows signals the exit of a debugged process only once its debugger
+/// continues the event of that exit, which this one does when it is released, or dropped.
+#[cfg(windows)]
+struct HeldExit {
+    /// The process.
+    pid: u32,
+    /// Lets the process exit when it sends or is dropped.
+    release: Option<std::sync::mpsc::Sender<()>>,
+    /// The debugger.
+    debugger: Option<thread::JoinHandle<()>>,
+}
+
+#[cfg(windows)]
+impl HeldExit {
+    /// Attaches a debugger that holds the exit of process `pid`.
+    fn attach(pid: u32) -> Self {
+        use std::sync::mpsc;
+
+        use windows_sys::Win32::Foundation::{CloseHandle, DBG_CONTINUE};
+        use windows_sys::Win32::System::Diagnostics::Debug::{
+            CREATE_PROCESS_DEBUG_EVENT, ContinueDebugEvent, DEBUG_EVENT, DebugActiveProcess,
+            EXIT_PROCESS_DEBUG_EVENT, LOAD_DLL_DEBUG_EVENT, WaitForDebugEvent,
+        };
+        use windows_sys::Win32::System::Threading::INFINITE;
+
+        let (attached, attachment) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        // A debugger receives the events of a process on the thread that attached to it.
+        let debugger = thread::spawn(move || {
+            // SAFETY: DebugActiveProcess has no memory-safety preconditions.
+            if unsafe { DebugActiveProcess(pid) } == 0 {
+                let _ = attached.send(Err(std::io::Error::last_os_error()));
+                return;
+            }
+            let _ = attached.send(Ok(()));
+            loop {
+                let mut event = DEBUG_EVENT::default();
+                // SAFETY: the output pointer is valid.
+                if unsafe { WaitForDebugEvent(&mut event, INFINITE) } == 0 {
+                    return;
+                }
+                match event.dwDebugEventCode {
+                    // SAFETY: the union holds the information of the event's code, whose file
+                    // handle the debugger closes.
+                    CREATE_PROCESS_DEBUG_EVENT => unsafe {
+                        CloseHandle(event.u.CreateProcessInfo.hFile);
+                    },
+                    // SAFETY: as above.
+                    LOAD_DLL_DEBUG_EVENT => unsafe {
+                        CloseHandle(event.u.LoadDll.hFile);
+                    },
+                    EXIT_PROCESS_DEBUG_EVENT => {
+                        let _ = released.recv();
+                    }
+                    _ => {}
+                }
+                // The break-in of the attachment raises a breakpoint, which the debugger handles.
+                // SAFETY: the event is this thread's debuggee's.
+                unsafe { ContinueDebugEvent(event.dwProcessId, event.dwThreadId, DBG_CONTINUE) };
+                if event.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT {
+                    return;
+                }
+            }
+        });
+        attachment.recv().unwrap().unwrap();
+        Self {
+            pid,
+            release: Some(release),
+            debugger: Some(debugger),
+        }
+    }
+
+    /// Lets the process exit, once it has begun to, and waits for its debugger to end.
+    fn release(&mut self) {
+        drop(self.release.take());
+        if let Some(debugger) = self.debugger.take() {
+            debugger.join().unwrap();
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for HeldExit {
+    fn drop(&mut self) {
+        if self.debugger.is_some() {
+            // A process that no one ended yet begins its exit, which its debugger then lets it
+            // finish.
+            harness::kill(u64::from(self.pid));
+            self.release();
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_run_whose_openvmm_is_stuck_exiting_says_so_and_removes_its_vm_directory() {
+    let root = Root::new();
+    let temporary = root.path.join("tmp");
+    fs::create_dir(&temporary).unwrap();
+    // The debugger attaches well within `--timeout`, which the workload then outlives.
+    let (cli, started) = background_run(&root, "10", &temporary);
+    wait_for(&started);
+    let openvmm = children_named(cli.id(), "openvmm.exe");
+    assert_eq!(openvmm.len(), 1, "{openvmm:?}");
+    let handle = exit_handle(openvmm[0]);
+    let mut held = HeldExit::attach(openvmm[0]);
+    // The workload outlives `--timeout`, after which the run terminates OpenVMM, whose exit the
+    // debugger holds, as Windows holds that of an OpenVMM whose I/O a driver keeps.
+    let output = cli.wait_with_output().unwrap();
+    let stuck = !exits_within(&handle, Duration::ZERO);
+    let entries = harness::entries(&temporary);
+    held.release();
+    let exited = exits_within(&handle, Duration::from_secs(30));
+    let stderr = text(&output.stderr);
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    // The run reports the workload's failure, and then that of the VM's stop.
+    assert_eq!(lines.len(), 2, "{stderr}");
+    assert!(lines[0].starts_with("error[timed-out]: "), "{stderr}");
+    assert_eq!(
+        lines[1],
+        format!(
+            "error[still-running]: cannot confirm exit of VM process {}: it is stuck exiting \
+             after its forced termination",
+            openvmm[0]
+        )
+    );
+    assert!(stuck, "the held exit showed");
+    assert!(
+        entries.is_empty(),
+        "the run kept the directory of a VM that it terminated: {entries:?}"
+    );
+    assert!(exited, "OpenVMM did not exit once released");
+}
+
+/// The variable that marks the helper of
+/// [`an_interrupted_run_reports_a_failed_workload_and_a_stuck_openvmm`].
+#[cfg(windows)]
+const PRIVATE_CONSOLE: &str = "NVX_TEST_PRIVATE_CONSOLE";
+
+/// Returns the IDs of the processes of the console of this process, in ascending order.
+#[cfg(windows)]
+fn console_processes() -> Vec<u32> {
+    use windows_sys::Win32::System::Console::GetConsoleProcessList;
+
+    let mut members = [0u32; 16];
+    // SAFETY: the array is writable for its length.
+    let count = unsafe { GetConsoleProcessList(members.as_mut_ptr(), members.len() as u32) };
+    let count = usize::try_from(count).unwrap();
+    assert!(
+        count <= members.len(),
+        "{count} processes share the console"
+    );
+    let mut members = members[..count].to_vec();
+    members.sort_unstable();
+    members
+}
+
+/// Returns whether the process of `handle` has begun to exit, which a debugger may hold.
+#[cfg(windows)]
+fn exiting(handle: &std::os::windows::io::OwnedHandle) -> bool {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Foundation::STILL_ACTIVE;
+    use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+
+    let mut status = 0u32;
+    // SAFETY: the handle has query access, and the output pointer is valid.
+    assert_ne!(
+        unsafe { GetExitCodeProcess(handle.as_raw_handle(), &mut status) },
+        0
+    );
+    status != STILL_ACTIVE as u32
+}
+
+/// A run that Ctrl-C interrupts ends as interrupted, which is all that `nvx` reports of a command
+/// that Ctrl-C reached, but it reports first the failure of its workload, if the workload failed
+/// before, and an OpenVMM whose exit it cannot confirm, as stuck exiting. Ctrl-C reaches every
+/// process of a console, so the run has a console of its own, that of a helper of this test,
+/// which raises Ctrl-C there.
+#[cfg(windows)]
+#[test]
+fn an_interrupted_run_reports_a_failed_workload_and_a_stuck_openvmm() {
+    use std::os::windows::process::CommandExt;
+
+    use windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE;
+
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "interrupted_run_helper",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(PRIVATE_CONSOLE, "interrupt")
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+/// The helper of [`an_interrupted_run_reports_a_failed_workload_and_a_stuck_openvmm`], which
+/// runs in a console of its own and raises Ctrl-C there, in a run whose OpenVMM's exit a debugger
+/// holds: while the workload runs, while the run waits for its VM to stop after the guest refused
+/// the workload, and while the run forces its VM down after the workload outlived `--timeout`.
+#[cfg(windows)]
+#[test]
+#[ignore = "run in a console of its own by the test that raises Ctrl-C there"]
+fn interrupted_run_helper() {
+    use windows_sys::Win32::System::Console::{
+        CTRL_C_EVENT, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
+    };
+
+    assert_eq!(
+        std::env::var(PRIVATE_CONSOLE).as_deref(),
+        Ok("interrupt"),
+        "only a test in a console of its own raises Ctrl-C"
+    );
+    assert_eq!(console_processes(), [std::process::id()]);
+    for case in ["workload", "grace", "forced stop"] {
+        let root = Root::new();
+        let temporary = root.path.join("tmp");
+        fs::create_dir(&temporary).unwrap();
+        let started = root.path.join("started");
+        let script = format!("touch {}; sleep 60000", started.display());
+        let arguments = match case {
+            // The guest refuses the workload, and its VM exits 3 seconds after the run asked it
+            // to stop.
+            "grace" => vec![
+                "--timeout",
+                "60",
+                "--cmdline",
+                "fake_exit_delay_ms=3000",
+                "--entrypoint",
+                "/bin/pwd",
+                "--cwd",
+                "/missing",
+            ],
+            "workload" => vec!["--timeout", "60", "--entrypoint", "/bin/sh", "--arg=-c"],
+            _ => vec!["--timeout", "5", "--entrypoint", "/bin/sh", "--arg=-c"],
+        };
+        let arguments: Vec<&str> = if case == "grace" {
+            arguments
+        } else {
+            arguments
+                .into_iter()
+                .chain(["--arg", script.as_str()])
+                .collect()
+        };
+        // The run ignores Ctrl-C if the helper does, as when its parent was created with
+        // CREATE_NEW_PROCESS_GROUP.
+        // SAFETY: this changes only the Ctrl-C processing of the helper, alone in its console.
+        assert_ne!(unsafe { SetConsoleCtrlHandler(None, 0) }, 0);
+        let cli = spawn_sandbox_run(&root, &temporary, &arguments);
+        // SAFETY: as above; the helper then ignores the Ctrl-C that it raises for the run.
+        assert_ne!(unsafe { SetConsoleCtrlHandler(None, 1) }, 0);
+        // The debugger attaches once the workload runs, or once the VM stopped its guest and
+        // wrote its outcome report, before it exits.
+        if case == "grace" {
+            let until = Instant::now() + Duration::from_secs(30);
+            while !harness::entries(&temporary)
+                .iter()
+                .any(|name| temporary.join(name).join("outcome.json").exists())
+            {
+                assert!(Instant::now() < until, "{case}: the VM did not stop");
+                thread::sleep(Duration::from_millis(5));
+            }
+        } else {
+            wait_for(&started);
+        }
+        let openvmm = children_named(cli.id(), "openvmm.exe");
+        assert_eq!(openvmm.len(), 1, "{case}: {openvmm:?}");
+        let handle = exit_handle(openvmm[0]);
+        let mut held = HeldExit::attach(openvmm[0]);
+        let mut members = vec![std::process::id(), cli.id(), openvmm[0]];
+        members.sort_unstable();
+        assert_eq!(console_processes(), members, "{case}");
+        // Ctrl-C comes once the VM's exit has begun, while the run waits for it: the exit that the
+        // VM began itself after its delay, or the one that the run's termination began after
+        // `--timeout`.
+        if case != "workload" {
+            let until = Instant::now() + Duration::from_secs(60);
+            while !exiting(&handle) {
+                assert!(
+                    Instant::now() < until,
+                    "{case}: OpenVMM did not begin to exit"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        // SAFETY: the console holds the run, its OpenVMM, and the helper, which ignores the event.
+        assert_ne!(unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }, 0);
+        let output = cli.wait_with_output().unwrap();
+        let stuck = !exits_within(&handle, Duration::ZERO);
+        let entries = harness::entries(&temporary);
+        held.release();
+        let exited = exits_within(&handle, Duration::from_secs(30));
+        let stderr = text(&output.stderr);
+        assert_eq!(output.status.code(), Some(130), "{case}: {stderr}");
+        let lines: Vec<&str> = stderr.lines().collect();
+        let stop = format!(
+            "error[still-running]: cannot confirm exit of VM process {}: it is stuck exiting \
+             after its forced termination",
+            openvmm[0]
+        );
+        let (failure, rest) = lines.split_at(lines.len().saturating_sub(2));
+        assert_eq!(rest, [stop.as_str(), "Interrupted"], "{case}: {stderr}");
+        match case {
+            "workload" => assert!(failure.is_empty(), "{stderr}"),
+            "grace" => assert_eq!(
+                failure,
+                [
+                    "nvx-managed-agent: cannot enter working directory /missing: No such file or \
+                     directory",
+                    "error[exec-refused]: managed guest rejected exec (status=2, \
+                     category=cwd-failed)",
+                ],
+                "{stderr}"
+            ),
+            _ => assert!(
+                matches!(failure, [line] if line.starts_with("error[timed-out]: ")),
+                "{stderr}"
+            ),
+        }
+        assert!(stuck, "{case}: the held exit showed");
+        assert!(
+            entries.is_empty(),
+            "{case}: the run kept the directory of a VM that it terminated: {entries:?}"
+        );
+        assert!(exited, "{case}: OpenVMM did not exit once released");
+    }
+}
+
 #[test]
 fn artifacts_default_to_the_checkout_that_holds_the_executable() {
     let output = Command::new(NVX)

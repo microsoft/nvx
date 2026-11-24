@@ -5,11 +5,16 @@ pub(crate) use super::windows::tests::disconnect_control;
 #[cfg(windows)]
 pub(crate) use super::windows::tests::set_access;
 #[cfg(windows)]
-pub(crate) use super::windows::tests::{accept_control, control_server, wait_exit_handle};
+pub(crate) use super::windows::tests::{
+    HeldExit, accept_control, control_server, wait_exit_handle,
+};
 #[cfg(windows)]
 pub(crate) use super::windows::tests::{access, inherits_file, untrusted_log_job, user_sid};
 #[cfg(all(windows, feature = "cli"))]
-pub(crate) use super::windows::tests::{claim_released_within, with_spawn_window};
+pub(crate) use super::windows::tests::{
+    claim_released_within, in_private_console, interrupt_private_console, watch_private_interrupts,
+    with_spawn_window,
+};
 use super::*;
 
 #[test]

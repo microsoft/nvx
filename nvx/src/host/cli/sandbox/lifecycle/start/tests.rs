@@ -187,6 +187,92 @@ fn starts_check_the_kernel_command_line_that_they_launch() {
     );
 }
 
+/// A run that Ctrl-C interrupts while it forces its VM down still waits for the VM's exit, for
+/// [`KILL_TIMEOUT`], without heeding Ctrl-C, as after Ctrl-C during the workload, and says that a
+/// VM that has not exited by then is stuck exiting. Ctrl-C reaches every process of a console, so
+/// a helper of a console of its own raises it.
+#[cfg(windows)]
+#[test]
+fn a_run_that_ctrl_c_interrupts_while_it_forces_its_vm_down_waits_for_the_vm_all_the_same() {
+    let output = platform::tests::in_private_console(
+        "host::cli::sandbox::lifecycle::start::tests::interrupted_force_down",
+    );
+    assert!(output.status.success(), "{output:?}");
+}
+
+/// The helper of the test above, which runs in a console of its own.
+#[cfg(windows)]
+#[test]
+#[ignore = "run in a console of its own by the test that raises Ctrl-C there"]
+fn interrupted_force_down() {
+    use std::time::Duration;
+
+    use crate::host::process::{BootId, Opened, ProcessRef};
+
+    platform::tests::watch_private_interrupts();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("vm");
+    vm::create_private_dir(&path).unwrap();
+    let outputs = VmDir::open(&path).unwrap().outputs(false).unwrap();
+    let open = |pid| {
+        let reference = ProcessRef {
+            pid,
+            start_time: platform::process_start_time(pid).unwrap().unwrap(),
+            boot: BootId::current().unwrap(),
+        };
+        let Opened::Running(process) = Process::open(&reference).unwrap() else {
+            panic!("the debugged process runs");
+        };
+        process
+    };
+    // Ctrl-C comes while the run waits for the exit of the VM that it terminated, which the
+    // debugger holds until shortly after.
+    let mut held = platform::tests::HeldExit::start();
+    let process = open(held.pid());
+    let stopped = thread::scope(|scope| {
+        let held = &mut held;
+        scope.spawn(move || {
+            let until = Instant::now() + Duration::from_secs(30);
+            while !held.exiting() {
+                assert!(Instant::now() < until, "the run did not terminate the VM");
+                thread::sleep(Duration::from_millis(5));
+            }
+            platform::tests::interrupt_private_console();
+            thread::sleep(Duration::from_millis(500));
+            held.release();
+        });
+        force_down(&process, &outputs, Deadline::after(60.0))
+    });
+    let exited = process.wait(Instant::now()).unwrap();
+    let (self_exited, _) = stopped.unwrap();
+    assert!(!self_exited);
+    assert!(exited.is_some(), "the run returned before the VM exited");
+    // Ctrl-C has come before the run forces another VM down, whose exit the debugger holds past
+    // the wait.
+    let mut held = platform::tests::HeldExit::start();
+    let pid = held.pid();
+    let process = open(pid);
+    let began = Instant::now();
+    let stopped = force_down(&process, &outputs, Deadline::after(60.0));
+    let waited = began.elapsed();
+    let unconfirmed = process.wait(Instant::now()).unwrap();
+    held.release();
+    let error = stopped.unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::StillRunning), "{error:?}");
+    assert_eq!(
+        error.message(),
+        Some(
+            format!(
+                "cannot confirm exit of VM process {pid}: it is stuck exiting after its forced \
+                 termination"
+            )
+            .as_str()
+        )
+    );
+    assert!(waited >= KILL_TIMEOUT, "{waited:?}");
+    assert!(unconfirmed.is_none(), "the held exit showed");
+}
+
 /// A run removes its VM directory with the staging file of an outcome report that OpenVMM did
 /// not finish writing, as one that the run forced down can leave, and keeps a directory that
 /// holds a file of another name.
@@ -207,4 +293,52 @@ fn a_run_removes_its_vm_directory_with_a_report_s_staging_file() {
             fs::remove_dir_all(&path).unwrap();
         }
     }
+}
+
+/// A run removes the VM directories of runs that ended without removing them, whose logs no
+/// process holds any longer, and leaves every other directory as it is: one whose log a process
+/// holds, as a run that still runs or its OpenVMM does, one without a log, one that holds a file
+/// of another name, one that is not private, and one of another name.
+#[cfg(windows)]
+#[test]
+fn a_run_removes_only_the_vm_directories_that_runs_abandoned() {
+    let directory = tempfile::tempdir().unwrap();
+    let parent = directory.path();
+    let digits = |digit: char| digit.to_string().repeat(32);
+    let private = |name: &str, files: &[&str]| {
+        let path = parent.join(name);
+        vm::create_private_dir(&path).unwrap();
+        for file in files {
+            fs::write(path.join(file), "").unwrap();
+        }
+        path
+    };
+    let log = StateFile::Log.name();
+    let outcome = StateFile::Outcome.name();
+    let abandoned = private(
+        &format!("{RUN_DIRECTORY}{}", digits('a')),
+        &[log, outcome, ".tmpA1b2C3"],
+    );
+    let running = private(&format!("{RUN_DIRECTORY}{}", digits('b')), &[log]);
+    let held = fs::File::open(running.join(log)).unwrap();
+    let starting = private(&format!("{RUN_DIRECTORY}{}", digits('c')), &[]);
+    let foreign = private(&format!("{RUN_DIRECTORY}{}", digits('d')), &[log, "other"]);
+    let shared = parent.join(format!("{RUN_DIRECTORY}{}", digits('e')));
+    fs::create_dir(&shared).unwrap();
+    fs::write(shared.join(log), "").unwrap();
+    let uppercase = private(&format!("{RUN_DIRECTORY}{}", digits('F')), &[log]);
+    let short = private(&format!("{RUN_DIRECTORY}{}", "0".repeat(31)), &[log]);
+    let other = private(&format!("nvx-run-{}", digits('0')), &[log]);
+    remove_abandoned_vm_directories(parent, RUN_DIRECTORY);
+    drop(held);
+    assert!(!abandoned.exists(), "an abandoned directory was kept");
+    for kept in [
+        &running, &starting, &foreign, &shared, &uppercase, &short, &other,
+    ] {
+        assert!(kept.exists(), "{}", kept.display());
+    }
+    for kept in [&running, &foreign, &shared, &uppercase, &short, &other] {
+        assert!(kept.join(log).exists(), "{}", kept.display());
+    }
+    assert!(foreign.join("other").exists());
 }

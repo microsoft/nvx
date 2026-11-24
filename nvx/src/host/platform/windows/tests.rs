@@ -1154,3 +1154,301 @@ fn a_thread_that_holds_the_spawn_lock_spawns_under_it_until_its_last_lock_is_dro
     );
     assert!(late, "another thread could not take the lock once released");
 }
+
+#[test]
+fn a_foreground_child_ends_with_its_spawn_and_a_detached_one_outlives_it() {
+    use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+
+    let directory = tempfile::tempdir().unwrap();
+    let system = std::env::var_os("SystemRoot").unwrap();
+    let ping = Path::new(&system).join("System32").join("PING.EXE");
+    // A stand-in that runs for a minute in the job of its log, as the spawn of a VMM starts it,
+    // and a handle of this test to that job.
+    let start = |name: &str, mode| {
+        let log = fs::File::create(directory.path().join(name)).unwrap();
+        let job = create_log_job(&log)
+            .unwrap()
+            .expect("a log on a disk volume has a job");
+        let log_job = job.try_clone().unwrap();
+        let (stdin, _stdin_writer) = io::pipe().unwrap();
+        let stderr = log.try_clone().unwrap();
+        let child = spawn_with_stdio(
+            &ping,
+            &["-n", "60", "127.0.0.1"].map(OsString::from),
+            &std::env::temp_dir(),
+            [stdin.into(), log.into(), stderr.into()],
+            &[],
+            mode,
+            Some(job),
+        )
+        .unwrap();
+        (child, log_job)
+    };
+    let (foreground, log_job) = start("foreground.log", SpawnMode::Foreground);
+    let (detached, _) = start(
+        "detached.log",
+        SpawnMode::Detached {
+            breakaway_from_job: false,
+        },
+    );
+    let (foreground_process, _) = foreground.pin().unwrap();
+    let (detached_process, _) = detached.pin().unwrap();
+    // The foreground child's own job nests in the job of its log, which the child stays in.
+    let mut in_log_job = 0;
+    // SAFETY: both handles are open, and the output pointer is valid.
+    let queried = unsafe {
+        IsProcessInJob(
+            raw(&foreground_process.process),
+            raw(&log_job),
+            &mut in_log_job,
+        )
+    } != 0;
+    // Releasing the spawn of the foreground child closes its job, which ends it, but leaves the
+    // detached child running.
+    drop(foreground);
+    let ended = foreground_process
+        .wait(Instant::now() + WINDOW_TIMEOUT)
+        .unwrap();
+    let running = detached_process.wait(Instant::now()).unwrap();
+    detached
+        .terminate_and_wait()
+        .expect("the detached child did not exit");
+    assert!(queried, "{}", io::Error::last_os_error());
+    assert_ne!(
+        in_log_job, 0,
+        "the foreground child left the job of its log"
+    );
+    assert_eq!(
+        ended,
+        Some(true),
+        "the foreground child outlived the spawn that held its job"
+    );
+    assert_eq!(
+        running,
+        Some(false),
+        "the detached child ended with its spawn"
+    );
+}
+
+/// A process whose exit a debugger, a thread of the test, holds once the exit has begun, as
+/// Windows holds the exit of a terminated process until a driver completes or cancels its pending
+/// I/O: Windows signals the exit of a debugged process only once its debugger continues the event
+/// of that exit, which this one does when it is released, or dropped.
+pub(crate) struct HeldExit {
+    /// The process, held with every access, to end it when the test did not.
+    process: OwnedHandle,
+    /// The process's ID.
+    pid: u32,
+    /// Lets the process exit when it sends or is dropped.
+    release: Option<std::sync::mpsc::Sender<()>>,
+    /// The debugger.
+    debugger: Option<thread::JoinHandle<()>>,
+}
+
+impl HeldExit {
+    /// Starts `PING.EXE`, which runs for a minute, under a debugger that holds its exit.
+    pub(crate) fn start() -> Self {
+        use windows_sys::Win32::Foundation::{CloseHandle, DBG_CONTINUE};
+        use windows_sys::Win32::System::Diagnostics::Debug::{
+            CREATE_PROCESS_DEBUG_EVENT, ContinueDebugEvent, DEBUG_EVENT, EXIT_PROCESS_DEBUG_EVENT,
+            LOAD_DLL_DEBUG_EVENT, WaitForDebugEvent,
+        };
+        use windows_sys::Win32::System::Threading::{
+            CREATE_NO_WINDOW, CreateProcessW, DEBUG_ONLY_THIS_PROCESS, PROCESS_INFORMATION,
+            STARTUPINFOW,
+        };
+
+        let (started, debuggee) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        // A debugger receives the events of a process on the thread that started it.
+        let debugger = thread::spawn(move || {
+            let system = std::env::var_os("SystemRoot").unwrap();
+            let ping = Path::new(&system).join("System32").join("PING.EXE");
+            let arguments = ["-n", "60", "127.0.0.1"].map(OsString::from);
+            let mut command_line = match command_line(ping.as_os_str(), &arguments) {
+                Ok(line) => line,
+                Err(error) => {
+                    let _ = started.send(Err(error));
+                    return;
+                }
+            };
+            let startup = STARTUPINFOW {
+                cb: mem::size_of::<STARTUPINFOW>() as u32,
+                ..Default::default()
+            };
+            let mut information = PROCESS_INFORMATION::default();
+            // SAFETY: the command line is mutable and NUL-terminated, the structures outlive the
+            // call, and the child inherits no handle.
+            let created = unsafe {
+                CreateProcessW(
+                    ptr::null(),
+                    command_line.as_mut_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    0,
+                    DEBUG_ONLY_THIS_PROCESS | CREATE_NO_WINDOW,
+                    ptr::null(),
+                    ptr::null(),
+                    &startup,
+                    &mut information,
+                )
+            } != 0;
+            if !created {
+                let _ = started.send(Err(io::Error::last_os_error()));
+                return;
+            }
+            drop(owned(information.hThread));
+            let process = owned(information.hProcess).expect("CreateProcessW returned a process");
+            let _ = started.send(Ok((process, information.dwProcessId)));
+            loop {
+                let mut event = DEBUG_EVENT::default();
+                // SAFETY: the output pointer is valid.
+                if unsafe { WaitForDebugEvent(&mut event, INFINITE) } == 0 {
+                    return;
+                }
+                match event.dwDebugEventCode {
+                    // SAFETY: the union holds the information of the event's code, whose file
+                    // handle the debugger closes.
+                    CREATE_PROCESS_DEBUG_EVENT => unsafe {
+                        CloseHandle(event.u.CreateProcessInfo.hFile);
+                    },
+                    // SAFETY: as above.
+                    LOAD_DLL_DEBUG_EVENT => unsafe {
+                        CloseHandle(event.u.LoadDll.hFile);
+                    },
+                    EXIT_PROCESS_DEBUG_EVENT => {
+                        let _ = released.recv();
+                    }
+                    _ => {}
+                }
+                // SAFETY: the event is this thread's debuggee's.
+                unsafe { ContinueDebugEvent(event.dwProcessId, event.dwThreadId, DBG_CONTINUE) };
+                if event.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT {
+                    return;
+                }
+            }
+        });
+        let (process, pid) = debuggee.recv().unwrap().unwrap();
+        Self {
+            process,
+            pid,
+            release: Some(release),
+            debugger: Some(debugger),
+        }
+    }
+
+    /// Returns the process's ID.
+    pub(crate) fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// Returns whether the process has begun its exit, as its termination begins it, although
+    /// the debugger holds the exit.
+    #[cfg(feature = "cli")]
+    pub(crate) fn exiting(&self) -> bool {
+        use windows_sys::Win32::Foundation::STILL_ACTIVE;
+        use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+
+        let mut status = 0u32;
+        // SAFETY: the handle has every access, and the output pointer is valid.
+        assert_ne!(
+            unsafe { GetExitCodeProcess(raw(&self.process), &mut status) },
+            0
+        );
+        status != STILL_ACTIVE as u32
+    }
+
+    /// Lets the process exit, once it has begun to, and waits for its debugger to end.
+    pub(crate) fn release(&mut self) {
+        drop(self.release.take());
+        if let Some(debugger) = self.debugger.take() {
+            debugger.join().unwrap();
+        }
+    }
+}
+
+impl Drop for HeldExit {
+    fn drop(&mut self) {
+        if self.debugger.is_some() {
+            // A process that the test did not end begins its exit, which its debugger then lets
+            // it finish.
+            // SAFETY: the handle has every access.
+            unsafe { TerminateProcess(raw(&self.process), 1) };
+            self.release();
+        }
+    }
+}
+
+/// The variable that marks the test helper that [`in_private_console`] runs.
+#[cfg(feature = "cli")]
+const PRIVATE_CONSOLE: &str = "NVX_TEST_PRIVATE_CONSOLE";
+
+/// Runs `test`, an ignored test of this test executable, in a console of its own, where it may
+/// raise Ctrl-C, which reaches every process of a console, with [`interrupt_private_console`],
+/// and returns its output.
+#[cfg(feature = "cli")]
+pub(crate) fn in_private_console(test: &str) -> std::process::Output {
+    use std::os::windows::process::CommandExt;
+
+    use windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE;
+
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            test,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(PRIVATE_CONSOLE, "interrupt")
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .output()
+        .unwrap()
+}
+
+/// Records Ctrl-C for [`interrupted`] in the test helper that [`in_private_console`] runs, once
+/// it has checked that the helper is alone in its console.
+#[cfg(feature = "cli")]
+pub(crate) fn watch_private_interrupts() {
+    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+
+    assert_eq!(
+        std::env::var(PRIVATE_CONSOLE).as_deref(),
+        Ok("interrupt"),
+        "only a test in a console of its own raises Ctrl-C"
+    );
+    assert_alone_in_console();
+    // A parent that ignores Ctrl-C, as one created with CREATE_NEW_PROCESS_GROUP does, passes
+    // that on to the helper, whose handler would then never see the event.
+    // SAFETY: this changes only the Ctrl-C processing of the helper, alone in its console.
+    assert_ne!(unsafe { SetConsoleCtrlHandler(None, 0) }, 0);
+    watch_interrupts().unwrap();
+}
+
+/// Raises Ctrl-C in the console of the test helper that [`in_private_console`] runs, once it
+/// has checked that the helper is alone there, and waits until [`interrupted`] records it.
+#[cfg(feature = "cli")]
+pub(crate) fn interrupt_private_console() {
+    use windows_sys::Win32::System::Console::{CTRL_C_EVENT, GenerateConsoleCtrlEvent};
+
+    assert_alone_in_console();
+    // SAFETY: the console holds the helper alone, so the event reaches no other process.
+    assert_ne!(unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !interrupted() {
+        assert!(Instant::now() < deadline, "Ctrl-C was not recorded");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Checks that the console of this process holds no other process.
+#[cfg(feature = "cli")]
+fn assert_alone_in_console() {
+    use windows_sys::Win32::System::Console::GetConsoleProcessList;
+
+    let mut members = [0u32; 4];
+    // SAFETY: the array is writable for its length.
+    let count = unsafe { GetConsoleProcessList(members.as_mut_ptr(), members.len() as u32) };
+    assert_eq!(count, 1, "the console holds other processes: {members:?}");
+    assert_eq!(members[0], std::process::id());
+}

@@ -90,12 +90,25 @@ fn stop_verified(
         endpoint: saved.endpoint.clone(),
         console: None,
     };
+    force_exit(process, &outputs, Deadline::after(timeout))
+}
+
+/// Ends the OpenVMM of `outputs` through its verified process without a guest shutdown, as
+/// [`terminate_within`] does by `deadline`, and returns how its stop ended and what it left.
+///
+/// Fails if Ctrl-C ends the wait, or with the error of [`vm::stop`] if OpenVMM has not exited by
+/// `deadline`, which says that OpenVMM is stuck exiting if the termination reached it.
+pub(super) fn force_exit(
+    process: &Process,
+    outputs: &VmOutputs,
+    deadline: Deadline,
+) -> Result<(StopOutcome, vm::Stopped)> {
     let (mut stopped, mut failure) = (None, None);
     let outcome = terminate_within(
-        Deadline::after(timeout),
+        deadline,
         |bound| {
             let now = Instant::now();
-            match vm::stop(process, &outputs, |_| false, now, now + bound) {
+            match vm::stop(process, outputs, |_| false, now, now + bound) {
                 Ok(result) => {
                     let outcome = if result.forced {
                         StopOutcome::Forced

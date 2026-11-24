@@ -115,7 +115,7 @@ each code, which callers of the `nvx` library see in its place.
 | `outcome-report-exists` | 1 | A file exists at the `--outcome-report` path. |
 | `scratch-claimed` | 1 | Another sandbox claims the scratch image. |
 | `exited` | 1 | OpenVMM exited, as when a start fails, whose message names the category and status of OpenVMM's outcome report when it has one. |
-| `still-running` | 1 | A stop could not confirm the VM process's exit, so the caller keeps its verified process. |
+| `still-running` | 1 | A stop could not confirm the VM process's exit, so the caller keeps its verified process. The message says that a process that its forced termination reached is stuck exiting. |
 | `exec-refused` | 1 | The guest agent refused the workload, as for a working directory that it cannot use. |
 | `endpoint-closed` | 1 | OpenVMM closed the control endpoint, as it does when the VM shuts down. |
 | `protocol` | 1 | The control session failed otherwise, as when the guest breaks the protocol or the session is reset. |
@@ -208,10 +208,14 @@ combined with `--network-egress-allow` rules for direct connections.
 `nvx run` checks its options, prints the OpenVMM command of a cold boot
 after `>> `, and unless `--dry-run` is given, runs OpenVMM in a private
 temporary VM directory, which it removes once OpenVMM has exited, on the
-terminal. A cold boot attaches the guest's console, the boot console `hvc1`,
-to the standard streams, so that the terminal's input reaches the guest through
-it rather than through the byte channel, `hvc0`, whose output, such as the
-kernel's early messages, goes to standard error with OpenVMM's log. It exits
+terminal. On Windows, a cold boot's OpenVMM ends with `nvx run`, whatever ends
+it, in a job object that only the run holds, as the OpenVMM of a
+[`sandbox run`](#sandbox) does, and the next cold boot removes the VM
+directory that one that was terminated left. A cold boot attaches the guest's
+console, the boot console `hvc1`, to the standard streams, so that the
+terminal's input reaches the guest through it rather than through the byte
+channel, `hvc0`, whose output, such as the kernel's early messages, goes to
+standard error with OpenVMM's log. It exits
 with status 1 for an error, 2 for a usage error, and 130 after Ctrl-C, and
 otherwise with the status that OpenVMM returns. Its errors and usage errors
 carry their [error codes](#error-codes), as `error[CODE]: MESSAGE` and
@@ -393,8 +397,10 @@ artifacts before they launch, as `nvx run` does. A `run` keeps no state:
 it launches the VM that a `provision` and a `start` of its options would
 launch, in a temporary VM directory that it removes, executes its workload
 once, as `exec` does, with its streams, has the guest shut the VM down, which
-it terminates if it does not exit within `--timeout` seconds, and exits with
-the workload's status; see
+it terminates if it does not exit within `--timeout` seconds, as it terminates
+the VM of a workload that outlives `--timeout`, and exits with the workload's
+status. On Windows, its VM ends with it, whatever ends it, and the next `run`
+removes the VM directory of one that was terminated; see
 [Experimental single-workload sandbox](run.md#experimental-single-workload-sandbox).
 
 See [Run](run.md) for artifact preparation, the security boundary, the

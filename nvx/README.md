@@ -468,7 +468,9 @@ OpenVMM's verified process once the grace deadline passes, and returns a
 `Stopped` only once the process exited, with the read of its outcome report
 kept apart, so that a report that can't be read never hides the exit. An exit
 that it cannot confirm fails with `ErrorKind::StillRunning`, and the caller
-keeps the process.
+keeps the process. The error says that a process that the termination reached,
+which runs no code of its own any longer, is stuck exiting, as Windows keeps a
+terminated process until its pending I/O completes or is canceled.
 
 `SavedVm` bundles what a caller saves to find its VM again: the `VmDir`, the
 control endpoint, the capability's bytes, the process's `ProcessRef`, and the
@@ -1324,7 +1326,9 @@ exit with status 2, as `argparse` does, and help exits with status 0. Callers
 tell errors apart by their codes and by stable fragments of their messages,
 such as the names of options, fields, and files, since the wording may change.
 Ctrl-C prints `Interrupted` and exits with status 130, without a code, since it
-reports no error. `run`, `sandbox run`, and `sandbox exec` exit with the status
+reports no error; a `sandbox run` reports first the error of a workload that
+failed before Ctrl-C, and the `still-running` error of an OpenVMM whose exit it
+cannot confirm. `run`, `sandbox run`, and `sandbox exec` exit with the status
 of OpenVMM or of the workload, which is no error of `nvx` either. Text ends
 its lines as Python's `print` ends them, with `\r\n` on Windows and `\n`
 elsewhere, while workload output passes through unchanged; an error that
@@ -1523,7 +1527,10 @@ boot prints `>> COMMAND`, OpenVMM's command line, quoted as `sandbox run`
 quotes it, and unless `--dry-run` is given, it runs OpenVMM with the standard
 streams, so that the guest's console and the terminal settings that OpenVMM
 restores behave as they do for OpenVMM itself, and exits with OpenVMM's
-status; a restore does none of these, as the second item says.
+status; a restore does none of these, as the second item says. On Windows, a
+cold boot's OpenVMM runs in a job object that only `nvx` holds, as that of a
+`sandbox run` does, which ends OpenVMM with `nvx`, whatever ends it, and the
+next cold boot removes the VM directory that one that was terminated left.
 
 - A cold boot runs the kernel and the initramfs of `--guest`, `alpine` by
   default, with `--memory-mib` or else the guest's default, 128 MiB for Alpine
@@ -1604,7 +1611,15 @@ before them.
   shut the VM down, waits up to `--timeout` seconds for OpenVMM to exit before
   it terminates it, removes the VM directory, and exits with the workload's
   status. `--outcome-report` forwards OpenVMM's outcome report of the VM's
-  stop.
+  stop. A workload that outlives `--timeout` fails with `timed-out`, after
+  which the run terminates OpenVMM as `stop` does, waiting up to `--timeout`
+  seconds, and at least 10, for it to exit, and fails with `still-running`,
+  which says that OpenVMM is stuck exiting, if it has not. On Windows, OpenVMM
+  runs in a job object that only the run holds, which ends OpenVMM once it
+  closes, so that the VM never outlives the run, whatever ends the run, and in
+  the jobs of `nvx` that keep their processes' children; the next run removes
+  the VM directory that a run that was terminated left, once no process holds
+  its log, which a run holds until it returns and its OpenVMM until it exits.
 - `provision` records the sandbox in its state directory. `start` launches
   OpenVMM detached with the managed lifecycle, passes it a fresh capability
   through its standard input, and waits until the guest answers. `exec` runs a
@@ -1970,7 +1985,7 @@ wording of a message may change; callers of the CLI also have its codes.
 | `Unavailable` | A missing or unusable artifact, hypervisor, or release, or an unsupported host |
 | `Unsupported` | A request that NVX refuses: a value that it does not accept, such as a malformed or out-of-range one, options that it cannot combine, or a request that it cannot represent or enforce, such as a policy beyond a limit of OpenVMM or the guest agent |
 | `Exited` | The VM's OpenVMM process exited |
-| `StillRunning` | The exit of a VM's process could not be confirmed, so the VM may still run: a stop's, whose caller keeps its verified process, or that of the process that a failed spawn started and tried to end |
+| `StillRunning` | The exit of a VM's process could not be confirmed, so the VM may still run: a stop's, whose caller keeps its verified process, or that of the process that a failed spawn started and tried to end; a process that a stop's termination reached is stuck exiting |
 | `Io` | A host I/O failure, or state that NVX recorded on the host and cannot read |
 | `NotFound` | State that an operation names and that does not exist on the host, such as the store of a sandbox that was never created or that a removal deleted |
 | `Protocol` | A control session that failed, or a request that the guest agent refused |
@@ -2000,7 +2015,7 @@ has.
 | `unavailable` | `Unavailable` | A dependency is missing or unusable, other than as a finer code says: install metadata, the hypervisor, a release, a distro layer or scratch image that the request names, or a host that NVX does not support |
 | `unsupported` | `Unsupported` | NVX refuses the request: options that it cannot combine, a value that it does not accept, or a policy that it cannot represent or enforce. The message names the option or field |
 | `exited` | `Exited` | OpenVMM exited, as when a start fails, whose message names the category and status of OpenVMM's outcome report when it has one |
-| `still-running` | `StillRunning` | The exit of a VM's process could not be confirmed, as by a stop or after a start whose launch failed, so the VM may still run |
+| `still-running` | `StillRunning` | The exit of a VM's process could not be confirmed, as by a stop or after a start whose launch failed, so the VM may still run; the message says that a process that the stop's termination reached is stuck exiting |
 | `io` | `Io` | A host I/O operation failed, or state that NVX recorded on the host is unreadable or malformed |
 | `not-found` | `NotFound` | Other state that the operation names does not exist on the host |
 | `protocol` | `Protocol` | The control session failed otherwise: the peer violated the protocol, reset the session, or failed authentication |

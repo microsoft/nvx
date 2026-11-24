@@ -180,6 +180,9 @@ const MACHINES: [&str; 1] = ["microvm"];
 /// The choices of `--processors`, the processor counts that a microVM takes.
 const PROCESSORS: [&str; 4] = ["1", "2", "4", "8"];
 
+/// The name of a cold run's temporary VM directory, before 32 random lowercase hexadecimal digits.
+const RUN_DIRECTORY: &str = "nvx-run-";
+
 /// The options of `snapshot restore` that a restore of `run` takes, which `sandbox` defines and
 /// parses for both: the sandbox's state directory, the image, its upper, the workload, and the
 /// timeout of the restore.
@@ -677,7 +680,9 @@ fn cold_vm_config(
 
 /// Removes the temporary VM directory of a cold run, with what its VM left in it: OpenVMM's log
 /// and outcome report, its control and boot-console sockets on Linux, and the staging file of a
-/// report that OpenVMM did not finish writing, which [`StateFile::owns_temporary`] names.
+/// report that OpenVMM did not finish writing, which [`StateFile::owns_temporary`] names. A
+/// directory that is gone already, as another run on Windows removes one whose log nothing holds
+/// any longer, is removed.
 fn remove_vm_directory(dir: &VmDir) -> Result {
     let remove = |path: &Path| match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -692,7 +697,12 @@ fn remove_vm_directory(dir: &VmDir) -> Result {
     ] {
         remove(&dir.path().join(name))?;
     }
-    for entry in fs::read_dir(dir.path()).map_err(Exit::from_os_error)? {
+    let entries = match fs::read_dir(dir.path()) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(Exit::from_os_error(error)),
+    };
+    for entry in entries {
         let entry = entry.map_err(Exit::from_os_error)?;
         if entry
             .file_name()
@@ -702,7 +712,10 @@ fn remove_vm_directory(dir: &VmDir) -> Result {
             remove(&entry.path())?;
         }
     }
-    fs::remove_dir(dir.path()).map_err(Exit::from_os_error)
+    match fs::remove_dir(dir.path()) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        removed => removed.map_err(Exit::from_os_error),
+    }
 }
 
 fn connect_running(
@@ -1162,12 +1175,19 @@ fn run_cold(
         windows_breakaway: false,
         options: LaunchOptions::default(),
     };
-    let path = std::env::temp_dir().join(format!("nvx-run-{name}"));
+    let path = std::env::temp_dir().join(format!("{RUN_DIRECTORY}{name}"));
     if path.try_exists().map_err(Exit::from_os_error)? {
         return Err(Exit::error(
             ErrorCode::Io,
             "the temporary VM directory already exists",
         ));
+    }
+    // A run that ended without removing its VM directory, as one that was terminated does, leaves
+    // it to the next run, which tells it by its log, which no process holds any longer: this run
+    // reads its own until it returns.
+    #[cfg(windows)]
+    if !options.dry_run {
+        sandbox::remove_abandoned_vm_directories(&std::env::temp_dir(), RUN_DIRECTORY);
     }
     vm::create_private_dir(&path)?;
     let vm_dir = VmDir::open(&path)?;
