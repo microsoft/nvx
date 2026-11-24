@@ -123,6 +123,29 @@ fn the_window_closes_after_the_longest_downtime() {
 }
 
 #[test]
+fn the_window_is_the_time_abis_365_days() {
+    // 365 days of 86,400 seconds, a fixed duration rather than a calendar year, the bound
+    // included, as OpenVMM and the guest accept it (doc/design/3.2-clock-and-time.md, 3.2.8).
+    let bound = 31_536_000 * SECOND;
+    let capture = contract(1, 1);
+    for (start, source) in [
+        (at(1, 1, 0, 0), DowntimeSource::HostMonotonic),
+        (at(1, 2, 0, 0), DowntimeSource::Utc),
+    ] {
+        assert_eq!(
+            capture.eligibility(&later(start, bound)),
+            Eligibility::Eligible(downtime(bound, source)),
+            "{source:?}"
+        );
+        assert_eq!(
+            capture.eligibility(&later(start, bound + 1)),
+            Eligibility::Expired(downtime(bound + 1, source)),
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
 fn the_window_counts_the_interval_from_the_cut_of_the_vm_time() {
     let mut capture = contract(1, 1);
     capture.cut_to_anchor_ns = Some(200);

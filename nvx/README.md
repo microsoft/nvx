@@ -585,7 +585,16 @@ compatibility prefix, is its identity, a `KeyIdentity`; the
 `TimeContract::eligibility` decides whether a VM may restore a capture at a
 host's time, a `HostTime`, which `HostTime::now` samples as OpenVMM does: the
 downtime must not be negative, and the interval by which a restore advances
-the VM's time at most `MAX_DOWNTIME_NS`, 30 days.
+the VM's time at most `MAX_DOWNTIME_NS`, the
+[time ABI's 365 days](../doc/design/3.2-clock-and-time.md#328-downtime-and-continuity).
+The bound, which the time ABI raised from 30 days, holds only where the
+snapshot's guest and the restoring OpenVMM both have it, as those of each NVX
+release either both have it or both lack it, and a snapshot restores only
+under its runtime identity. An earlier OpenVMM refuses a restore beyond 30 days
+before the guest runs, and an earlier guest refuses one too, but beyond about
+104 days its kernel can hang the restore first, so a caller whose runtime pairs
+a later OpenVMM with an earlier guest restores its snapshots within 30 days
+itself.
 
 `finish_capture(&VmDir, &CaptureContext, &Exited)` finishes a capture once its
 VM provably exited: it requires a successful outcome, checks OpenVMM's snapshot
