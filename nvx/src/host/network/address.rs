@@ -323,8 +323,10 @@ impl Part<'_> {
 
 /// Parses an IPv6 address without a scope as `IPv6Address._ip_int_from_string` does.
 fn parse_ipv6(text: &[u8]) -> Option<u128> {
+    /// Mixed notation has at most six four-digit hex groups, six colons, and a 15-byte IPv4 tail.
+    const MAX_IPV6_TEXT_BYTES: usize = 45;
     // Python counts characters, not bytes, but no address with a non-ASCII character is valid.
-    if text.is_empty() || text.len() > 45 || !text.is_ascii() {
+    if text.is_empty() || text.len() > MAX_IPV6_TEXT_BYTES || !text.is_ascii() {
         return None;
     }
     // At most eight groups and one more part for a leading or trailing `::`; `split` keeps the
