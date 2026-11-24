@@ -295,7 +295,7 @@ fn handle_identity(handle: HANDLE) -> io::Result<(u64, u64)> {
     let information = handle_information(handle)?;
     Ok((
         u64::from(information.dwVolumeSerialNumber),
-        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
+        crate::host::seal::join_dwords(information.nFileIndexHigh, information.nFileIndexLow),
     ))
 }
 

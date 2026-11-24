@@ -45,7 +45,10 @@ pub(super) fn creation_time(process: &OwnedHandle) -> io::Result<u64> {
         )
     } != 0;
     if succeeded {
-        Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+        Ok(crate::host::seal::join_dwords(
+            created.dwHighDateTime,
+            created.dwLowDateTime,
+        ))
     } else {
         Err(io::Error::last_os_error())
     }
