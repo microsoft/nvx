@@ -1,7 +1,7 @@
 ---
 name: nvx-prepare-host
-description: "Prepare a local host or a configured SSH host for NVX work: resolve its profile, probe its KVM, MSHV, or WHP backend and checkout, check out the requested revision in a temporary worktree, and stage nvx and the artifacts. Use before running, debugging, or benchmarking NVX on a host, or to diagnose a host's prerequisites."
-argument-hint: "[local|host-profile] [revision]"
+description: "Prepare a local host, its WSL, or a configured SSH host for NVX work: select a reachable host or a local fallback, probe its KVM, MSHV, or WHP backend and checkout, check out the requested revision in a temporary worktree, and stage nvx and the artifacts. Use before running, debugging, or benchmarking NVX on a host, when remote test hosts are unreachable, or to diagnose a host's prerequisites."
+argument-hint: "[local|wsl|host-profile] [revision]"
 ---
 
 # Prepare An NVX Host
@@ -13,24 +13,80 @@ from the NVX checkout. They use `python3`; use `python` on Windows.
 
 ## 1. Choose The Host
 
-Work locally when the user asks for it or the local host provides the backend.
-Otherwise, list the profiles of the developer's inventory, the ignored
-`.nvx-hosts.json` that [Setup](../../../doc/setup.md#remote-agent-hosts) describes,
-which the tool reads from the main worktree when you work in a linked one:
+Work locally when the user asks for it or the local host provides the backend
+natively. Use the profile that the user or the calling skill named; otherwise
+let the inventory, the ignored `.nvx-hosts.json` that
+[Setup](../../../doc/setup.md#remote-agent-hosts) describes, which the tool
+reads from the main worktree when you work in a linked one, choose one for each
+backend that the task needs:
 
 ```console
-python3 scripts/nvx_hosts.py list
+python3 scripts/nvx_hosts.py select BACKEND [--host-type HOST_TYPE]
 ```
 
-- When `remote_enabled` is `false`, no remote host is configured: say so and
-  work locally.
-- Use the profile that the user or the calling skill named, or ask the user to
-  choose one. `python3 scripts/nvx_hosts.py show PROFILE` returns its
+It checks the backend's profiles over SSH concurrently, giving each a minute
+to accept and end a session, and picks the first reachable one in the order
+that the inventory declares them. When none is
+reachable or configured, it falls back to this workstation: natively for its
+own backend, WHP on Windows when the Windows Hypervisor Platform API reports a
+hypervisor, or KVM or MSHV on Linux with access to the device, and for KVM on
+Windows to the default WSL 2 distribution, when it exposes a usable `/dev/kvm`
+and `python3`. MSHV never runs in WSL. `--host-type` rules out both fallbacks,
+whose host type no one recorded, so pass it only when the task depends on the
+host type, such as benchmarks and performance or hardware reproductions. Its
+JSON names the `execution` (`ssh`, `local`, `wsl`, or `null`, with exit status
+1), the `host`, the `checkout`, the `unreachable` profiles, and the `reason`.
+Report the unreachable profiles and the fallback; when the result is `null`,
+leave that backend to CI and say so. Never repair a host, the network, WSL, or
+its configuration to make a target reachable without the user's approval.
+
+- `python3 scripts/nvx_hosts.py list` shows every profile; when its
+  `remote_enabled` is `false`, no remote host is configured.
+- `python3 scripts/nvx_hosts.py show PROFILE` returns a profile's
   `ssh_target`, `backend`, `platform`, `host_type`, and `remote_repo`, which
   are authoritative: never connect to a target outside the inventory, override
   its backend, or infer bare metal or a virtual machine from probes. When
   `remote_repo` is `null`, ask for the checkout's absolute path, and pass it
   as `--cwd`.
+- A local or WSL fallback has no host type: report it as `local` or `wsl`, not
+  as `virtual-machine` or `baremetal`, and never use it for benchmarks or
+  evidence that depends on the host type.
+
+### WSL
+
+The `wsl` execution runs Linux commands for KVM in WSL, as the Windows
+benchmark coordinator does, in a checkout that WSL sees, `WSL_CHECKOUT`:
+
+```console
+wsl.exe --cd WSL_CHECKOUT --exec bash -lc "python3 scripts/nvx.py verify"
+```
+
+The `checkout` that `select` prints, this checkout's WSL path, serves when its
+`.git` is a directory. Linux Git cannot open a linked worktree that Git for
+Windows created, such as an agent session's, since its `.git` file names a
+Windows path, and in WSL it can fail to create a repository on a Windows
+drive, so a temporary worktree cannot replace it; yet the probe and the NVX
+commands that read the revision need Git. Then commit the work that you test,
+asking before you commit the user's, and test that commit in a clone in the
+WSL file system that borrows the objects of the main checkout, the first entry
+of `git worktree list`, whose WSL path `wsl.exe --exec wslpath -a -u PATH`
+prints as `MAIN_WSL`:
+
+```console
+wsl.exe --exec bash -lc 'git clone -q --shared --no-checkout MAIN_WSL ~/nvx-wsl-REV && cd ~/nvx-wsl-REV && git remote set-url origin https://github.com/microsoft/nvx.git && git checkout -q --detach REV && git submodule update -q --init --checkout --reference MAIN_WSL/.git/modules/openvmm openvmm'
+```
+
+Drop `--reference` when the main checkout has no `.git/modules/openvmm`. The
+clone's `origin` would name `MAIN_WSL`, so the command points it at NVX, as
+[step 4](#4-revision)'s `host_worktree.py` requires. The clone is
+`WSL_CHECKOUT`, whose Git commands run in WSL; it registers nothing in the
+Windows repository, and `rm -rf` removes it at the end.
+
+The login shell puts `cargo` on `PATH`. Run every Linux command of the steps
+below, the probe and the Linux builds of `nvx` and OpenVMM included, this way,
+with `python3`, and keep the Git commands of a Windows checkout in Windows.
+Never change `.wslconfig`, the distribution's packages, or its device
+permissions without the user's approval.
 
 ## 2. Safety
 
@@ -114,7 +170,8 @@ nvx/target/release/nvx run --hypervisor BACKEND --dry-run
 
 ## Handoff
 
-Report the host or local execution, the checkout and any temporary worktree,
+Report the host, local, or WSL execution, the unreachable profiles that a
+fallback replaced, the checkout and any temporary worktree or WSL clone,
 the OS, backend, platform, and host type, the commit and dirty state, the
 artifact source and the commands that staged it, the dry run's result, any
 running OpenVMM process, and every privilege or platform limitation. For

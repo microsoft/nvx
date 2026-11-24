@@ -28,7 +28,8 @@ The user's invocation, and nothing else, grants for issue `N` only:
   or rebasing onto `origin/dev`;
 - one Ready pull request against `dev`, edits of its title and body, and
   replies to and resolution of its review threads;
-- any profile of the host inventory, with temporary worktrees, builds, and
+- any profile of the host inventory, and this workstation's default WSL
+  distribution, with temporary worktrees, builds, and
   files on those hosts, which the session removes afterwards;
 - comments on the issue, and closing it when no change is needed;
 - for an OpenVMM fix, a branch of `microsoft/openvmm`, new commits on it, and a
@@ -80,11 +81,16 @@ anything public and ask the user to handle it under
    the host type, the guest, the processor counts, and whether the defect lies
    in host tooling, `nvx`, the guest, or OpenVMM.
 2. Prepare hosts with [nvx-prepare-host](../nvx-prepare-host/SKILL.md),
-   choosing the profiles yourself: every backend whose behavior the change can
-   affect, virtual machines for functional checks, and bare metal when the
-   issue concerns timing, performance, or hardware, or was reported there.
-   Work only in temporary worktrees on them. Without configured hosts, work
-   locally, leave the other backends to CI, and say so.
+   choosing them yourself with `python3 scripts/nvx_hosts.py select` for every
+   backend whose behavior the change can affect. For functional checks, run
+   `select BACKEND --host-type virtual-machine` first, and only when it returns
+   `execution: null`, `select BACKEND`, which takes any reachable host and
+   otherwise falls back to this workstation, natively or, for KVM on Windows,
+   in WSL. When the issue concerns timing, performance, or hardware, or was
+   reported there, run `select BACKEND --host-type baremetal`, which rules out
+   the fallbacks. Work only in temporary worktrees on remote hosts. Leave a
+   backend that `select` cannot place to CI, and say so; an unreachable host
+   alone never stops the fix.
 3. Reproduce the failure at the base revision before changing code, and record
    the command, revision, profile, backend, artifacts, and result. Repeat an
    intermittent failure often enough to catch it. When it does not reproduce,
@@ -94,7 +100,8 @@ anything public and ask the user to handle it under
    `python3 scripts/nvx_hosts.py run PROFILE SCRIPT`, never by piping a script
    into a remote shell. Run independent hosts concurrently. Stop using a host
    that asks for a secret or reports a changed host key, and tell the user.
-   Run Linux checks on a Linux host, never in WSL.
+   Run Linux checks on a reachable Linux host, and in WSL only when `select`
+   falls back to it; record such results as WSL, never as a Linux host's.
 
 ## 3. Fix
 
@@ -133,7 +140,7 @@ anything public and ask the user to handle it under
 - `python3 scripts/local_gates.py --base origin/dev --run` runs the gates that
   the change selects, from CI's own definitions, cheapest first. Report every
   gate that it blocks. Run them on a Linux host too when the change affects
-  Linux code paths.
+  Linux code paths, or in WSL when `select kvm` falls back to it.
 - On the hosts, rerun the reproduction with the fix, with the same command,
   then the affected microVM scenarios
   (`nvx.py test-microvm --backend BACKEND --scenario NAME`) and runtime checks.
@@ -155,7 +162,8 @@ change?**, the change and what it leaves out; under **Why is this change
 needed?**, the root cause and the alternatives rejected, such as a patch that
 the issue proposes; under **How was this change validated?**, the local
 checks, a table of the remote runs before and after the fix by profile,
-backend, and host type, and the gates left to CI; and the **Checklist**,
+backend, and host type, with local and WSL fallbacks and the unreachable
+profiles that they replaced named as such, and the gates left to CI; and the **Checklist**,
 checking each item that holds or does not apply. When
 `python3 scripts/check_test_changes.py --base origin/dev` lists changes,
 explain each one under **Changes to existing tests**; the Test changes

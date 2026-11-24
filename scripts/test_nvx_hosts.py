@@ -45,11 +45,56 @@ class FakeRunner:
         *,
         input_text: str | None = None,
         capture_stdout: bool = False,
+        timeout: float | None = None,
     ) -> nvx_hosts.CommandResult:
+        del timeout
         self.calls.append(Call(tuple(args), input_text, capture_stdout))
         if not self.results:
             raise AssertionError(f"unexpected command: {list(args)}")
         return self.results.pop(0)
+
+
+class SelectRunner:
+    """Answers reachability checks by SSH target, in whatever order threads
+    make them, stalling past the timeout for the stalled targets, and the WSL
+    check with one result or exception. It records each call's timeout."""
+
+    def __init__(
+        self,
+        *,
+        reachable: set[str],
+        stalled: frozenset[str] = frozenset(),
+        wsl: nvx_hosts.CommandResult | Exception | None = None,
+    ) -> None:
+        self.reachable = reachable
+        self.stalled = stalled
+        self.wsl = wsl
+        self.calls: list[tuple[str, ...]] = []
+        self.timeouts: dict[str, float | None] = {}
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        input_text: str | None = None,
+        capture_stdout: bool = False,
+        timeout: float | None = None,
+    ) -> nvx_hosts.CommandResult:
+        del input_text, capture_stdout
+        call = tuple(args)
+        self.calls.append(call)
+        if call[0] == "wsl.exe":
+            self.timeouts["wsl.exe"] = timeout
+            if self.wsl is None:
+                raise AssertionError(f"unexpected command: {list(args)}")
+            if isinstance(self.wsl, Exception):
+                raise self.wsl
+            return self.wsl
+        target = call[-2]
+        self.timeouts[target] = timeout
+        if target in self.stalled:
+            raise subprocess.TimeoutExpired(list(args), cast(float, timeout))
+        return nvx_hosts.CommandResult(0 if target in self.reachable else 255)
 
 
 def _git(repo: Path, *arguments: str) -> str:
@@ -83,8 +128,9 @@ class LocalPowerShellRunner:
         *,
         input_text: str | None = None,
         capture_stdout: bool = False,
+        timeout: float | None = None,
     ) -> nvx_hosts.CommandResult:
-        del capture_stdout
+        del capture_stdout, timeout
         command = list(args)
         result = run_powershell(
             command[command.index("powershell") :], input=input_text
@@ -124,7 +170,7 @@ class HostInventoryTests(unittest.TestCase):
     def run_cli(
         self,
         arguments: Sequence[str],
-        runner: FakeRunner,
+        runner: nvx_hosts.Runner,
     ) -> tuple[int, str, str]:
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -392,6 +438,190 @@ class HostInventoryTests(unittest.TestCase):
                     self.assertEqual(status, 1)
                     self.assertEqual(output, "")
                     self.assertIn("only local NVX development is enabled", error)
+
+    def test_select_prefers_the_first_reachable_profile_in_inventory_order(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            # Declared out of name order, so a sorted choice would pick c-up.
+            hosts = {
+                "z-down": {**self.profile(), "ssh_target": "down"},
+                "m-up": {
+                    **self.profile(host_type="virtual-machine"),
+                    "ssh_target": "up",
+                },
+                "c-up": {**self.profile(), "ssh_target": "also-up"},
+                "a-whp": self.profile(backend="whp"),
+            }
+            path = self.write_inventory(Path(temporary), hosts)
+            runner = SelectRunner(reachable={"up", "also-up"})
+            status, output, error = self.run_cli(
+                ["select", "kvm", "--file", str(path)], runner
+            )
+            self.assertEqual(status, 0)
+            self.assertEqual(error, "")
+            payload = cast(dict[str, object], json.loads(output))
+            self.assertEqual(payload["execution"], "ssh")
+            self.assertEqual(cast(dict[str, object], payload["host"])["name"], "m-up")
+            self.assertEqual(payload["host_type"], "virtual-machine")
+            self.assertEqual(payload["checkout"], "/srv/nvx")
+            self.assertEqual(payload["unreachable"], ["z-down"])
+            # A configured retry count must not multiply the connect timeout,
+            # and hosts of other backends are never contacted.
+            self.assertCountEqual(
+                runner.calls,
+                [
+                    (*SSH, "-o", "ConnectionAttempts=1", "-n", target, "exit")
+                    for target in ("down", "up", "also-up")
+                ],
+            )
+
+    def test_select_bounds_each_probe_and_skips_a_stalled_host(self) -> None:
+        # ConnectTimeout leaves a host that accepts the connection but stalls
+        # its login unbounded, so it must not block the next profile.
+        profiles = [
+            nvx_hosts.HostProfile("stall", "stalled", "kvm", "baremetal", None, None),
+            nvx_hosts.HostProfile("up", "up", "kvm", "baremetal", "/srv/nvx", None),
+        ]
+        runner = SelectRunner(
+            reachable={"stalled", "up"}, stalled=frozenset({"stalled"})
+        )
+        selection = nvx_hosts.select_execution(
+            profiles, "kvm", None, runner, platform="linux"
+        )
+        self.assertEqual(selection["execution"], "ssh")
+        self.assertEqual(cast(dict[str, object], selection["host"])["name"], "up")
+        self.assertEqual(selection["unreachable"], ["stall"])
+        self.assertEqual(
+            runner.timeouts,
+            {
+                "stalled": nvx_hosts.REACHABILITY_TIMEOUT,
+                "up": nvx_hosts.REACHABILITY_TIMEOUT,
+            },
+        )
+
+    def test_select_falls_back_to_this_windows_workstation_only_with_whp(
+        self,
+    ) -> None:
+        profiles = [
+            nvx_hosts.HostProfile("win", "down", "whp", "virtual-machine", None, None)
+        ]
+        for state, execution, reason in (
+            ({"available": True, "hypervisor_present": True}, "local", "natively"),
+            (
+                {"available": True, "hypervisor_present": False},
+                None,
+                "reports no hypervisor",
+            ),
+            (
+                {"available": False, "detail": "WinHvPlatform.dll is unavailable"},
+                None,
+                "WinHvPlatform.dll is unavailable",
+            ),
+        ):
+            with (
+                self.subTest(state=state),
+                patch.object(nvx_hosts.host_probe, "whp_api_state", return_value=state),
+            ):
+                runner = SelectRunner(reachable=set())
+                selection = nvx_hosts.select_execution(
+                    profiles, "whp", None, runner, platform="win32"
+                )
+                self.assertEqual(selection["execution"], execution)
+                self.assertIn(reason, cast(str, selection["reason"]))
+                self.assertIsNone(selection["host_type"])
+                self.assertEqual(
+                    selection["checkout"],
+                    str(nvx_hosts.REPOSITORY_ROOT) if execution else None,
+                )
+                self.assertEqual(selection["unreachable"], ["win"])
+                self.assertNotIn("wsl.exe", [call[0] for call in runner.calls])
+
+    def test_select_falls_back_to_this_linux_workstation_with_device_access(
+        self,
+    ) -> None:
+        for backend, device in (("kvm", "/dev/kvm"), ("mshv", "/dev/mshv")):
+            for allowed, execution, reason in (
+                (True, "local", "natively"),
+                (False, None, f"cannot read and write {device}"),
+            ):
+                with (
+                    self.subTest(backend=backend, allowed=allowed),
+                    patch.object(
+                        nvx_hosts.os, "access", return_value=allowed
+                    ) as access,
+                ):
+                    runner = SelectRunner(reachable=set())
+                    selection = nvx_hosts.select_execution(
+                        [], backend, None, runner, platform="linux"
+                    )
+                    access.assert_called_once_with(device, os.R_OK | os.W_OK)
+                    self.assertEqual(selection["execution"], execution)
+                    self.assertIn(reason, cast(str, selection["reason"]))
+                    self.assertIsNone(selection["host_type"])
+                    self.assertEqual(
+                        selection["checkout"],
+                        str(nvx_hosts.REPOSITORY_ROOT) if allowed else None,
+                    )
+                    self.assertEqual(runner.calls, [])
+
+    def test_select_falls_back_to_wsl_for_kvm_on_windows(self) -> None:
+        for wsl, execution, checkout in (
+            (nvx_hosts.CommandResult(0, "/mnt/c/nvx\n"), "wsl", "/mnt/c/nvx"),
+            (nvx_hosts.CommandResult(1), None, None),
+            (OSError("wsl.exe not found"), None, None),
+            (subprocess.TimeoutExpired("wsl.exe", 120.0), None, None),
+        ):
+            with self.subTest(wsl=wsl):
+                runner = SelectRunner(reachable=set(), wsl=wsl)
+                selection = nvx_hosts.select_execution(
+                    [], "kvm", None, runner, platform="win32"
+                )
+                self.assertEqual(selection["execution"], execution)
+                self.assertEqual(selection["checkout"], checkout)
+                self.assertEqual(
+                    runner.calls,
+                    [
+                        (
+                            "wsl.exe",
+                            "--exec",
+                            "sh",
+                            "-c",
+                            nvx_hosts.WSL_KVM_CHECK,
+                            "sh",
+                            str(nvx_hosts.REPOSITORY_ROOT),
+                        )
+                    ],
+                )
+                self.assertEqual(
+                    runner.timeouts, {"wsl.exe": nvx_hosts.WSL_CHECK_TIMEOUT}
+                )
+                if execution is None:
+                    self.assertIn("WSL", cast(str, selection["reason"]))
+
+    def test_select_never_falls_back_to_wsl_for_mshv_or_off_windows(self) -> None:
+        for backend, platform in (("mshv", "win32"), ("kvm", "darwin")):
+            with self.subTest(backend=backend, platform=platform):
+                runner = SelectRunner(reachable=set())
+                selection = nvx_hosts.select_execution(
+                    [], backend, None, runner, platform=platform
+                )
+                self.assertIsNone(selection["execution"])
+                self.assertEqual(runner.calls, [])
+
+    def test_select_with_a_host_type_rules_out_local_fallbacks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / ".nvx-hosts.json"
+            runner = SelectRunner(reachable=set())
+            status, output, _ = self.run_cli(
+                ["select", "whp", "--host-type", "baremetal", "--file", str(missing)],
+                runner,
+            )
+            self.assertEqual(status, 1)
+            payload = cast(dict[str, object], json.loads(output))
+            self.assertIsNone(payload["execution"])
+            self.assertIn("no recorded host type", cast(str, payload["reason"]))
+            self.assertEqual(runner.calls, [])
 
     @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
     def test_windows_scripts_run_quietly_in_real_powershell(self) -> None:
@@ -829,6 +1059,14 @@ class SubprocessRunnerTests(unittest.TestCase):
     def test_status_is_returned_and_uncaptured_stdout_is_empty(self) -> None:
         result = self.run_child("import sys; sys.exit(7)", capture_stdout=False)
         self.assertEqual(result, nvx_hosts.CommandResult(7, ""))
+
+    def test_timeout_kills_a_stalled_child(self) -> None:
+        with self.assertRaises(subprocess.TimeoutExpired):
+            nvx_hosts.SubprocessRunner().run(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                capture_stdout=True,
+                timeout=0.5,
+            )
 
 
 if __name__ == "__main__":

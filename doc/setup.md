@@ -200,7 +200,20 @@ python scripts\nvx_hosts.py
 If the inventory is absent or contains no hosts, the resolver disables remote access and reports
 that only local NVX development is enabled. A linked worktree has no copy of the ignored inventory,
 so the resolver reads the main worktree's. `nvx_hosts.py show PROFILE` resolves one profile;
-`exec` and `run` run a command or a script in the host's checkout over SSH, and `probe`,
+`nvx_hosts.py select BACKEND` chooses where to run a backend: the first profile for it, in the
+order that the inventory declares them, that accepts a non-interactive SSH session within one
+20-second connection attempt, whatever retries the SSH configuration sets, and completes it within
+60 seconds, checking them concurrently. When none does, or none is configured, it falls back to
+this workstation: natively for WHP on Windows when the Windows Hypervisor Platform API reports a
+hypervisor, and for KVM or MSHV on Linux when the user can read and write its device, and for KVM
+on Windows to the default WSL 2 distribution when that exposes a readable and writable `/dev/kvm`
+and `python3` within 2 minutes. Linux Git cannot open a linked worktree that Git for Windows
+created, so the [nvx-prepare-host](../.github/skills/nvx-prepare-host/SKILL.md#wsl) skill tests the
+commit of such a worktree in a clone in the WSL file system.
+`--host-type` keeps only the profiles of that host type and rules out the fallbacks, whose host
+type is unknown. It prints the choice as JSON, whose `execution` is `ssh`, `local`, `wsl`, or
+`null`, and exits with status 1 when nothing can run the backend. `exec` and `run` run a command or
+a script in the host's checkout over SSH, and `probe`,
 `worktree`, and `benchmark` run this checkout's `host_probe.py`, `host_worktree.py`, and
 `benchmark_series.py` against that checkout, which can predate them. None of them prompts for
 secrets. `run` turns the CRLF line endings of a script for a Linux host into LF and leaves those of
