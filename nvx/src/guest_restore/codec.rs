@@ -102,13 +102,16 @@ impl Field {
     /// [module](super#encoding) lists them, or `None` for the proxy endpoint and the hostname,
     /// whose lengths [`Configuration::check`] limits.
     const fn lengths(self) -> Option<&'static [usize]> {
+        /// The resource field holds a four-byte CPU count followed by an eight-byte memory size,
+        /// with no padding.
+        const RESOURCES_LEN: usize = 12;
         Some(match self {
             Self::Restore | Self::ImageIdentity => &[16],
             Self::Image => &[1, 9],
             Self::Upper | Self::Mappings => &[2],
             Self::Overlay | Self::Export | Self::Network | Self::MachineId => &[1],
             Self::Dns => &[4, 16],
-            Self::Resources => &[12],
+            Self::Resources => &[RESOURCES_LEN],
             Self::Proxy | Self::Hostname => return None,
         })
     }
