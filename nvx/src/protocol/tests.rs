@@ -14,6 +14,7 @@
 use proptest::prelude::*;
 
 use super::nvxs::{RecordParser, RecordType, encode_record};
+use super::outer::{HeaderFields, decode_header, encode_header};
 use super::*;
 #[cfg(all(
     feature = "cli",
@@ -632,6 +633,33 @@ fn decoders_reject_malformed_input() {
     header[4] = 1;
     header[40..44].copy_from_slice(&(OUTER_MAX_PAYLOAD as u32 + 1).to_le_bytes());
     assert!(decode_outer_header(&header).is_err());
+}
+
+/// The header reader returns each field that the header writer puts at its offset, and reads the
+/// fields unchecked, so that each decoder can refuse them with its own errors.
+#[test]
+fn header_reader_returns_the_fields_that_the_writer_puts() {
+    let instance_id: [u8; 16] = std::array::from_fn(|index| 0x10 + index as u8);
+    let epoch = 0x2726_2524_2322_2120;
+    let sequence = 0x3736_3534_3332_3130;
+    let mut header = encode_header(0x06, &instance_id, epoch, sequence, 0x4342_4140);
+    let mut fields = HeaderFields {
+        magic: OUTER_MAGIC,
+        version: OUTER_VERSION,
+        record_type: 0x06,
+        flags: 0,
+        instance_id,
+        epoch,
+        sequence,
+        length: 0x4342_4140,
+    };
+    assert_eq!(decode_header(&header), fields);
+    header[..8].copy_from_slice(b"BAD!\x02\x01\xff\x80");
+    fields.magic = *b"BAD!";
+    fields.version = 0x0102;
+    fields.record_type = 0xff;
+    fields.flags = 0x80;
+    assert_eq!(decode_header(&header), fields);
 }
 
 fn map(source: &str, target: &str, read_only: bool) -> HostMap {

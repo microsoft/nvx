@@ -112,14 +112,49 @@ pub(super) fn encode_header(
     header
 }
 
+/// Fields of a record header, as [`decode_header`] reads them, none of them checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct HeaderFields {
+    /// Magic, which a valid record sets to [`OUTER_MAGIC`].
+    pub(super) magic: [u8; 4],
+    /// Version, which a valid record sets to [`OUTER_VERSION`].
+    pub(super) version: u16,
+    /// Code of the record type.
+    pub(super) record_type: u8,
+    /// Flags, which a valid record sets to zero.
+    pub(super) flags: u8,
+    /// Instance ID of the session.
+    pub(super) instance_id: [u8; 16],
+    /// Epoch of the session.
+    pub(super) epoch: u64,
+    /// Sequence number of the record.
+    pub(super) sequence: u64,
+    /// Length of the payload.
+    pub(super) length: u32,
+}
+
+/// Reads the fields of a record header at the offsets at which [`encode_header`] writes them. It
+/// checks nothing: [`decode_outer_header`] and the NVXS record parser each validate the fields.
+pub(super) fn decode_header(header: &[u8; OUTER_HEADER_LEN]) -> HeaderFields {
+    HeaderFields {
+        magic: array(&header[..4]),
+        version: u16::from_le_bytes(array(&header[4..6])),
+        record_type: header[6],
+        flags: header[7],
+        instance_id: array(&header[8..24]),
+        epoch: u64::from_le_bytes(array(&header[24..32])),
+        sequence: u64::from_le_bytes(array(&header[32..40])),
+        length: u32::from_le_bytes(array(&header[40..])),
+    }
+}
+
 /// Decodes and validates an outer record header.
 pub(crate) fn decode_outer_header(
     header: &[u8; OUTER_HEADER_LEN],
 ) -> Result<OuterHeader, ProtocolError> {
-    let version = u16::from_le_bytes([header[4], header[5]]);
-    let flags = header[7];
-    let length = u32::from_le_bytes(array(&header[40..44])) as usize;
-    if header[..4] != OUTER_MAGIC || version != OUTER_VERSION || flags != 0 {
+    let fields = decode_header(header);
+    let length = fields.length as usize;
+    if fields.magic != OUTER_MAGIC || fields.version != OUTER_VERSION || fields.flags != 0 {
         return Err(violation(
             "control endpoint returned an invalid outer record",
         ));
@@ -130,10 +165,10 @@ pub(crate) fn decode_outer_header(
         ));
     }
     Ok(OuterHeader {
-        record_type: header[6],
-        instance_id: array(&header[8..24]),
-        epoch: u64::from_le_bytes(array(&header[24..32])),
-        sequence: u64::from_le_bytes(array(&header[32..40])),
+        record_type: fields.record_type,
+        instance_id: fields.instance_id,
+        epoch: fields.epoch,
+        sequence: fields.sequence,
         length,
     })
 }

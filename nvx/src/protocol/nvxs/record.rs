@@ -3,7 +3,7 @@
 use std::fmt;
 
 use crate::hex::write_hex;
-use crate::protocol::outer::encode_header;
+use crate::protocol::outer::{decode_header, encode_header};
 use crate::protocol::{
     CAPABILITY_LEN, OUTER_ACK, OUTER_CREDIT, OUTER_DATA, OUTER_ERROR, OUTER_GUEST_ATTACH,
     OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_MAGIC, OUTER_MAX_PAYLOAD, OUTER_MAX_RECEIVE_WINDOW,
@@ -328,24 +328,24 @@ struct Header {
 /// Decodes and validates a record header: its magic, version, type, flags, payload length, and,
 /// for a bootstrap record, its zero identity.
 fn parse_header(bytes: &[u8; OUTER_HEADER_LEN]) -> Result<Header, RecordError> {
-    let magic: [u8; 4] = array(&bytes[..4]);
-    if magic != OUTER_MAGIC {
-        return Err(RecordError::Magic(magic));
+    let fields = decode_header(bytes);
+    if fields.magic != OUTER_MAGIC {
+        return Err(RecordError::Magic(fields.magic));
     }
-    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if version != OUTER_VERSION {
-        return Err(RecordError::Version(version));
+    if fields.version != OUTER_VERSION {
+        return Err(RecordError::Version(fields.version));
     }
-    let record_type = RecordType::from_code(bytes[6]).ok_or(RecordError::Type(bytes[6]))?;
-    if bytes[7] != 0 {
-        return Err(RecordError::Flags(bytes[7]));
+    let record_type =
+        RecordType::from_code(fields.record_type).ok_or(RecordError::Type(fields.record_type))?;
+    if fields.flags != 0 {
+        return Err(RecordError::Flags(fields.flags));
     }
     let header = Header {
         record_type,
-        instance_id: array(&bytes[8..24]),
-        epoch: u64::from_le_bytes(array(&bytes[24..32])),
-        sequence: u64::from_le_bytes(array(&bytes[32..40])),
-        length: u32::from_le_bytes(array(&bytes[40..44])) as usize,
+        instance_id: fields.instance_id,
+        epoch: fields.epoch,
+        sequence: fields.sequence,
+        length: fields.length as usize,
     };
     check_length(record_type, header.length)?;
     check_bootstrap(
