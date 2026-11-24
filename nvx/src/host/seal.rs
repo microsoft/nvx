@@ -188,7 +188,7 @@ impl FileSeal {
 /// A file ID, which the serde form of a seal writes as 32 lowercase hexadecimal digits.
 #[cfg(any(feature = "cli", windows))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct FileId(pub(crate) u128);
+pub(super) struct FileId(pub(super) u128);
 
 #[cfg(any(feature = "cli", windows))]
 impl fmt::Display for FileId {
