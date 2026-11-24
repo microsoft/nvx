@@ -25,18 +25,19 @@ python3 scripts/nvx_hosts.py select BACKEND [--host-type HOST_TYPE]
 ```
 
 It checks the backend's profiles over SSH concurrently and picks the first
-reachable one in the inventory's order. When none is reachable or configured,
-it falls back to this workstation: natively for its own backend, WHP on
-Windows or KVM or MSHV on Linux, and for KVM on Windows to the default WSL 2
-distribution, when it exposes a usable `/dev/kvm` and `python3`. MSHV never
-runs in WSL. `--host-type` rules out both fallbacks, whose host type no one
-recorded, so pass it only when the task depends on the host type, such as
-benchmarks and performance or hardware reproductions. Its JSON names the
-`execution` (`ssh`, `local`, `wsl`, or `null`, with exit status 1), the
-`host`, the `checkout`, the `unreachable` profiles, and the `reason`. Report
-the unreachable profiles and the fallback; when the result is `null`, leave
-that backend to CI and say so. Never repair a host, the network, WSL, or its
-configuration to make a target reachable without the user's approval.
+reachable one in the order that the inventory declares them. When none is
+reachable or configured, it falls back to this workstation: natively for its
+own backend, WHP on Windows when the Windows Hypervisor Platform API reports a
+hypervisor, or KVM or MSHV on Linux with access to the device, and for KVM on
+Windows to the default WSL 2 distribution, when it exposes a usable `/dev/kvm`
+and `python3`. MSHV never runs in WSL. `--host-type` rules out both fallbacks,
+whose host type no one recorded, so pass it only when the task depends on the
+host type, such as benchmarks and performance or hardware reproductions. Its
+JSON names the `execution` (`ssh`, `local`, `wsl`, or `null`, with exit status
+1), the `host`, the `checkout`, the `unreachable` profiles, and the `reason`.
+Report the unreachable profiles and the fallback; when the result is `null`,
+leave that backend to CI and say so. Never repair a host, the network, WSL, or
+its configuration to make a target reachable without the user's approval.
 
 - `python3 scripts/nvx_hosts.py list` shows every profile; when its
   `remote_enabled` is `false`, no remote host is configured.

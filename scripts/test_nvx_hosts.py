@@ -430,14 +430,15 @@ class HostInventoryTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
+            # Declared out of name order, so a sorted choice would pick c-up.
             hosts = {
-                "a-down": {**self.profile(), "ssh_target": "down"},
-                "b-up": {
+                "z-down": {**self.profile(), "ssh_target": "down"},
+                "m-up": {
                     **self.profile(host_type="virtual-machine"),
                     "ssh_target": "up",
                 },
                 "c-up": {**self.profile(), "ssh_target": "also-up"},
-                "d-whp": self.profile(backend="whp"),
+                "a-whp": self.profile(backend="whp"),
             }
             path = self.write_inventory(Path(temporary), hosts)
             runner = SelectRunner(reachable={"up", "also-up"})
@@ -448,10 +449,10 @@ class HostInventoryTests(unittest.TestCase):
             self.assertEqual(error, "")
             payload = cast(dict[str, object], json.loads(output))
             self.assertEqual(payload["execution"], "ssh")
-            self.assertEqual(cast(dict[str, object], payload["host"])["name"], "b-up")
+            self.assertEqual(cast(dict[str, object], payload["host"])["name"], "m-up")
             self.assertEqual(payload["host_type"], "virtual-machine")
             self.assertEqual(payload["checkout"], "/srv/nvx")
-            self.assertEqual(payload["unreachable"], ["a-down"])
+            self.assertEqual(payload["unreachable"], ["z-down"])
             # A configured retry count must not multiply the connect timeout,
             # and hosts of other backends are never contacted.
             self.assertCountEqual(
@@ -462,19 +463,42 @@ class HostInventoryTests(unittest.TestCase):
                 ],
             )
 
-    def test_select_falls_back_to_this_windows_workstation_for_whp(self) -> None:
+    def test_select_falls_back_to_this_windows_workstation_only_with_whp(
+        self,
+    ) -> None:
         profiles = [
             nvx_hosts.HostProfile("win", "down", "whp", "virtual-machine", None, None)
         ]
-        runner = SelectRunner(reachable=set())
-        selection = nvx_hosts.select_execution(
-            profiles, "whp", None, runner, platform="win32"
-        )
-        self.assertEqual(selection["execution"], "local")
-        self.assertIsNone(selection["host_type"])
-        self.assertEqual(selection["checkout"], str(nvx_hosts.REPOSITORY_ROOT))
-        self.assertEqual(selection["unreachable"], ["win"])
-        self.assertNotIn("wsl.exe", [call[0] for call in runner.calls])
+        for state, execution, reason in (
+            ({"available": True, "hypervisor_present": True}, "local", "natively"),
+            (
+                {"available": True, "hypervisor_present": False},
+                None,
+                "reports no hypervisor",
+            ),
+            (
+                {"available": False, "detail": "WinHvPlatform.dll is unavailable"},
+                None,
+                "WinHvPlatform.dll is unavailable",
+            ),
+        ):
+            with (
+                self.subTest(state=state),
+                patch.object(nvx_hosts.host_probe, "whp_api_state", return_value=state),
+            ):
+                runner = SelectRunner(reachable=set())
+                selection = nvx_hosts.select_execution(
+                    profiles, "whp", None, runner, platform="win32"
+                )
+                self.assertEqual(selection["execution"], execution)
+                self.assertIn(reason, cast(str, selection["reason"]))
+                self.assertIsNone(selection["host_type"])
+                self.assertEqual(
+                    selection["checkout"],
+                    str(nvx_hosts.REPOSITORY_ROOT) if execution else None,
+                )
+                self.assertEqual(selection["unreachable"], ["win"])
+                self.assertNotIn("wsl.exe", [call[0] for call in runner.calls])
 
     def test_select_falls_back_to_wsl_for_kvm_on_windows(self) -> None:
         for wsl, execution, checkout in (

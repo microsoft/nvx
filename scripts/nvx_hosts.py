@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
+import host_probe
+
 INVENTORY_FILENAME = ".nvx-hosts.json"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = Path(__file__).resolve().parent
@@ -217,8 +219,12 @@ def _parse_profile(name: str, value: object) -> HostProfile:
     )
 
 
-def load_inventory(path: Path) -> list[HostProfile] | None:
-    """Load and validate an inventory, or return None when it does not exist."""
+def load_inventory(
+    path: Path, *, in_inventory_order: bool = False
+) -> list[HostProfile] | None:
+    """Load and validate an inventory, or return None when it does not exist.
+    Profiles come sorted by name, or in the order that the inventory declares
+    them when `in_inventory_order` is set."""
     if not path.is_file():
         return None
     try:
@@ -234,7 +240,8 @@ def load_inventory(path: Path) -> list[HostProfile] | None:
         )
 
     hosts = _mapping(inventory.get("hosts"), "inventory.hosts")
-    return [_parse_profile(name, hosts[name]) for name in sorted(hosts)]
+    names = list(hosts) if in_inventory_order else sorted(hosts)
+    return [_parse_profile(name, hosts[name]) for name in names]
 
 
 def _default_inventory(runner: Runner) -> Path:
@@ -573,13 +580,23 @@ def _reachable(profile: HostProfile, runner: Runner) -> bool:
     return result.returncode == 0
 
 
-def _native_backend_usable(backend: str, platform: str) -> bool:
-    """Return whether this workstation can run the backend natively. WHP is
-    the only Windows backend, and the host probe checks its access."""
+def _native_backend_problem(backend: str, platform: str) -> str | None:
+    """Return why this workstation cannot run the backend natively, or None
+    when it can. WHP needs the Windows Hypervisor Platform API to report a
+    hypervisor, which `nvx.py doctor` checks too without elevation."""
     if backend not in LOCAL_BACKENDS.get(platform, ()):
-        return False
-    device = LINUX_DEVICES.get(backend)
-    return device is None or os.access(device, os.R_OK | os.W_OK)
+        return f"this workstation cannot run {backend}"
+    if backend == "whp":
+        state = host_probe.whp_api_state()
+        if state.get("available") is not True:
+            return f"the Windows Hypervisor Platform is unusable: {state.get('detail')}"
+        if state.get("hypervisor_present") is not True:
+            return "the Windows Hypervisor Platform reports no hypervisor"
+        return None
+    device = LINUX_DEVICES[backend]
+    if not os.access(device, os.R_OK | os.W_OK):
+        return f"this workstation cannot read and write {device}"
+    return None
 
 
 def _wsl_checkout(runner: Runner) -> str | None:
@@ -669,7 +686,8 @@ def select_execution(
             "recorded host type"
         )
         return selection
-    if _native_backend_usable(backend, platform):
+    native_problem = _native_backend_problem(backend, platform)
+    if native_problem is None:
         selection.update(
             execution="local",
             checkout=str(REPOSITORY_ROOT),
@@ -690,7 +708,7 @@ def select_execution(
             "lacks a usable /dev/kvm or python3"
         )
         return selection
-    selection["reason"] = f"{remote}, and this workstation cannot run {backend}"
+    selection["reason"] = f"{remote}, and {native_problem}"
     return selection
 
 
@@ -810,7 +828,9 @@ def run_cli(argv: Sequence[str] | None, runner: Runner) -> int:
             if requested_file is not None
             else _default_inventory(runner)
         )
-        profiles = load_inventory(inventory_path)
+        profiles = load_inventory(
+            inventory_path, in_inventory_order=subcommand == "select"
+        )
         if subcommand == "select":
             selection = select_execution(
                 profiles or [],
