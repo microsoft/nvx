@@ -711,6 +711,43 @@ fn other_encodings_of_a_key_are_refused() {
 }
 
 #[test]
+fn memory_range_lists_read_back_in_order_and_name_their_truncation() {
+    let ranges = [
+        MemoryRange {
+            start: 0,
+            length: 512 * MIB,
+        },
+        MemoryRange {
+            start: 1024 * MIB,
+            length: 2 * MIB,
+        },
+    ];
+    let expansion = [MemoryRange {
+        start: 512 * MIB,
+        length: 512 * MIB,
+    }];
+    let mut writer = Writer::default();
+    write_ranges(&mut writer, &ranges);
+    write_ranges(&mut writer, &expansion);
+    let bytes = writer.finish();
+    let mut reader = Reader::new(&bytes);
+    assert_eq!(read_ranges(&mut reader, "the RAM ranges").unwrap(), ranges);
+    assert_eq!(
+        read_ranges(&mut reader, "the RAM expansion ranges").unwrap(),
+        expansion
+    );
+    reader.finish().unwrap();
+    // The count (4 bytes) and the first range (16) fit, but the second range's length does not.
+    let mut reader = Reader::new(&bytes[..30]);
+    assert_eq!(
+        read_ranges(&mut reader, "the RAM ranges")
+            .unwrap_err()
+            .to_string(),
+        "the RAM ranges is truncated"
+    );
+}
+
+#[test]
 fn a_key_that_holds_its_network_s_lowering_after_its_invariants_is_refused() {
     // A build that kept each network policy's template apart wrote version 1 with one more part:
     // OpenVMM's arguments to which the class lowered the network, a list of texts after the
