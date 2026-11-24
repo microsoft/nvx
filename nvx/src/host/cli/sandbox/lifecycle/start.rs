@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use super::directory::prepare_state_directory;
 use super::outcome::{copy_openvmm_outcome, validate_outcome_destination};
+use super::stop::StopOutcome;
 use super::{
     CONFIG_NAME, Found, ProvisionConfig, connect, find_vm, mismatched, require_config, running_vm,
     runtime_for,
@@ -39,7 +40,7 @@ use crate::host::cli::store::StateFile;
 use crate::host::cli::{Exit, Result, io_error, output, random_bytes};
 use crate::host::config::{COMMAND_LINE_BUDGET, RootConfig, UpperConfig, VmConfig};
 use crate::host::platform;
-use crate::host::process::KILL_TIMEOUT;
+use crate::host::process::{KILL_TIMEOUT, Process};
 use crate::host::report::Report;
 use crate::host::restore::{Attribution, RestoreError, RestoreEvidence};
 use crate::host::restore_driver::{self, Cancel, ControlRestoreError, Workload};
@@ -48,7 +49,7 @@ use crate::host::sandbox::distro::DISTRO_POLICY_REVISION;
 use crate::host::sandbox::scratch::{CLAIM_RELEASE_WAIT, CheckedScratch};
 use crate::host::session::{ExecEvent, SessionError};
 use crate::host::snapshot::OPENVMM_DIR;
-use crate::host::vm::{self, Launched, Prepared, SavedVm, VmDir};
+use crate::host::vm::{self, Launched, Prepared, SavedVm, VmDir, VmOutputs};
 use crate::protocol::cmdline::{self, Parameter};
 use crate::protocol::root::RootLayout;
 use crate::protocol::v2::Outcome;
@@ -609,10 +610,16 @@ pub(crate) fn exec_workload(
 ///
 /// Once nvx-init is ready and has mapped the shares, the run executes `request` over NVXC, asks
 /// nvx-init to stop the VM, and waits up to `--timeout` seconds for the VM to exit before it
-/// forces it down. A VM that exits before it is ready fails the run as it fails `start`. Once the
-/// VM has exited, the run forwards OpenVMM's outcome report to `--outcome-report`, if given, and
-/// removes the VM directory, which it keeps only if it cannot confirm that exit. It holds `held`,
-/// the lock of the downloads, until the VM is ready or has failed to be.
+/// forces it down, as `stop` does: it terminates OpenVMM and waits up to `--timeout` seconds, and
+/// at least [`KILL_TIMEOUT`], for it to exit, a wait that Ctrl-C ends. After Ctrl-C, it forces the
+/// VM down at once, and waits [`KILL_TIMEOUT`] for it. A VM that exits before it is ready fails the
+/// run as it fails `start`. Once the VM has exited, the run forwards OpenVMM's outcome report to
+/// `--outcome-report`, if given, and removes the VM directory. A VM whose exit it cannot confirm
+/// fails the run with `still-running`, after the workload's own failure, if any: the run then
+/// removes the VM directory only if it terminated the VM, which runs no code of its own any
+/// longer, even while it is stuck exiting. On Windows, the VM ends with the run, whatever ends
+/// the run, as the job that owns a one-shot run's OpenVMM ensures. It holds `held`, the lock of
+/// the downloads, until the VM is ready or has failed to be.
 pub(crate) fn run(
     distro: &RecordedDistro,
     scratch: Option<&Path>,
@@ -721,7 +728,6 @@ pub(crate) fn run(
             cleanup = error.kind() != ErrorKind::StillRunning;
             error_with_cause(error)
         })?;
-        cleanup = false;
         let saved = SavedVm {
             vm_dir: dir.clone(),
             endpoint: launched.outputs.endpoint.clone(),
@@ -748,6 +754,9 @@ pub(crate) fn run(
                 .exec(request, timeout)
         });
         open_line.set(executed.as_ref().ok().and_then(|result| result.stderr_end));
+        // A failure that came before Ctrl-C is the workload's own; one that came after it may be
+        // Ctrl-C's, as when the terminal's Ctrl-C also ends OpenVMM, which closes its endpoint.
+        let ended_before_interrupt = !platform::interrupted();
         // A VM whose control endpoint closed is shutting down already.
         let requested = match session.take() {
             Some(mut session)
@@ -765,19 +774,50 @@ pub(crate) fn run(
             Deadline::after(0.0)
         };
         let mut executed = executed;
-        // No record of the VM outlives the run, so it forces the VM down whatever ended the wait.
-        if let Err(error) = super::stop::wait_for_exit(&launched.process, grace) {
-            executed = Err(error);
+        // No record of the VM outlives the run, so it forces the VM down whatever ended the wait,
+        // Ctrl-C included, which leaves the workload's own failure for the run to report below.
+        match super::stop::wait_for_exit(&launched.process, grace) {
+            Ok(_) | Err(Exit::Interrupted) => {}
+            Err(error) => executed = Err(error),
         }
-        let now = Instant::now();
-        let stopped = vm::stop(
+        let stopped = force_down(
             &launched.process,
             &launched.outputs,
-            |_| false,
-            now,
-            now + KILL_TIMEOUT,
-        )
-        .map_err(error_with_cause)?;
+            Deadline::after(timeout.max(KILL_TIMEOUT.as_secs_f64())),
+        );
+        // A run that Ctrl-C reached ends as interrupted, which is all that `main` reports of it, so
+        // the run reports itself a failure of the workload that came before Ctrl-C, and below the
+        // stop's.
+        let interrupted = platform::interrupted();
+        if interrupted
+            && let Err(failure) = std::mem::replace(&mut executed, Err(Exit::Interrupted))
+            && ended_before_interrupt
+            && !matches!(failure, Exit::Interrupted)
+        {
+            end_line();
+            failure.report();
+        }
+        let (self_exited, stopped) = match stopped {
+            Ok(stopped) => stopped,
+            Err(error) => {
+                // A VM that a termination reached runs no code of its own any longer, even while
+                // it is stuck exiting, as a second termination shows, so its directory can go;
+                // one that no termination reached may still write there.
+                cleanup = launched.process.kill().is_ok();
+                if let Err(failure) = executed
+                    && !matches!(failure, Exit::Interrupted)
+                {
+                    end_line();
+                    failure.report();
+                }
+                if interrupted {
+                    end_line();
+                    error.report();
+                    return Err(Exit::Interrupted);
+                }
+                return Err(error);
+            }
+        };
         cleanup = true;
         if let Some(report) = &options.outcome_report
             && let Err(error) = copy_openvmm_outcome(&launched.outputs.outcome, report)
@@ -796,10 +836,10 @@ pub(crate) fn run(
         }
         if !started {
             let report = stopped.report.map_err(error_with_cause)?;
-            if stopped.self_exited && !stopping && !matches!(executed, Err(Exit::Interrupted)) {
+            if self_exited && !stopping && !matches!(executed, Err(Exit::Interrupted)) {
                 return Err(exited_during_startup(report));
             }
-        } else if executed.is_ok() && stopped.forced {
+        } else if executed.is_ok() && !self_exited {
             end_line();
             output::print_stderr("warning: OpenVMM was forcibly terminated after the run");
         }
@@ -816,6 +856,30 @@ pub(crate) fn run(
         end_line();
     }
     result
+}
+
+/// Forces down the VM of a run, whose verified process is `process`, once the run's grace has
+/// passed, and returns whether OpenVMM exited before its termination, and what it left.
+///
+/// As `stop` does, it terminates OpenVMM and waits until `deadline` for it to exit, a wait that
+/// Ctrl-C ends. Ctrl-C would end a wait that heeds it at once, so after Ctrl-C, before the stop or
+/// during it, it terminates OpenVMM at once and waits [`KILL_TIMEOUT`] for it without heeding
+/// Ctrl-C, as a run always did. An OpenVMM that has not exited by then fails the stop with
+/// `still-running`.
+fn force_down(
+    process: &Process,
+    outputs: &VmOutputs,
+    deadline: Deadline,
+) -> Result<(bool, vm::Stopped)> {
+    match super::stop::force_exit(process, outputs, deadline) {
+        Err(Exit::Interrupted) => {
+            let now = Instant::now();
+            vm::stop(process, outputs, |_| false, now, now + KILL_TIMEOUT)
+                .map(|stopped| (stopped.self_exited, stopped))
+                .map_err(error_with_cause)
+        }
+        forced => forced.map(|(outcome, stopped)| (outcome == StopOutcome::Graceful, stopped)),
+    }
 }
 
 /// Returns the configuration that `provision` records for the options of `config`, with the

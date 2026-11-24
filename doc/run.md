@@ -1021,8 +1021,20 @@ control session, as [`sandbox exec`](#managed-lifecycle) does, with the same
 its standard input, output and error as `sandbox exec` does. It then asks
 nvx-init to stop the VM, terminates OpenVMM if it does not exit within
 `--timeout` seconds, warning that it did, and removes the VM directory, and
-finally exits with the workload's status. A VM that exits before nvx-init is
-ready, as when the guest
+finally exits with the workload's status. A workload that outlives
+`--timeout` fails the run with `timed-out`, and the run then terminates
+OpenVMM as `stop` does once its grace has passed, waiting up to `--timeout`
+seconds, and at least 10, for OpenVMM to exit, a wait that ends at most 10
+seconds after Ctrl-C. When the run cannot confirm that OpenVMM exited, it fails
+with `still-running`, after the workload's own error, and after Ctrl-C it
+reports that error before it exits with status 130. An OpenVMM that the
+termination reached runs no code of its own any longer, so the error says that
+it is stuck exiting, and the run removes the VM directory all the same. Windows
+keeps a terminated process until its pending I/O completes or is canceled, and
+an OpenVMM terminated while its virtio-fs device had I/O in flight has stayed
+so until the host restarted
+([#1910](https://github.com/microsoft/nvx/issues/1910)). A VM that exits before
+nvx-init is ready, as when the guest
 refuses the workload identity, fails the run as it fails a `start`, with the
 category and status of the outcome report that OpenVMM published, such as
 `guest-exit status 125`. `--outcome-report` forwards that report, of the VM's
@@ -1788,7 +1800,10 @@ terminates its OpenVMM without a guest shutdown, waits up to `--timeout`
 seconds for it to exit, and warns that it did. A `stop` that cannot determine
 the OpenVMM process, whose terminated OpenVMM does not exit in time, or whose
 wait Ctrl-C ends, keeps the sandbox's runtime record, and the next `stop`
-retries. The store's records belong to the version of NVX that wrote them, so
+retries. The error of one whose terminated OpenVMM does not exit in time,
+`still-running`, says that OpenVMM is stuck exiting, as for
+[`sandbox run`](#experimental-single-workload-sandbox). The store's records
+belong to the version of NVX that wrote them, so
 stop and deprovision each sandbox with the version that started it before you
 switch versions, as [Upgrades](#upgrades) says.
 

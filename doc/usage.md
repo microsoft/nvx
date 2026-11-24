@@ -115,7 +115,7 @@ each code, which callers of the `nvx` library see in its place.
 | `outcome-report-exists` | 1 | A file exists at the `--outcome-report` path. |
 | `scratch-claimed` | 1 | Another sandbox claims the scratch image. |
 | `exited` | 1 | OpenVMM exited, as when a start fails, whose message names the category and status of OpenVMM's outcome report when it has one. |
-| `still-running` | 1 | A stop could not confirm the VM process's exit, so the caller keeps its verified process. |
+| `still-running` | 1 | A stop could not confirm the VM process's exit, so the caller keeps its verified process. The message says that a process that its forced termination reached is stuck exiting. |
 | `exec-refused` | 1 | The guest agent refused the workload, as for a working directory that it cannot use. |
 | `endpoint-closed` | 1 | OpenVMM closed the control endpoint, as it does when the VM shuts down. |
 | `protocol` | 1 | The control session failed otherwise, as when the guest breaks the protocol or the session is reset. |
@@ -396,8 +396,9 @@ artifacts before they launch, as `nvx run` does. A `run` keeps no state:
 it launches the VM that a `provision` and a `start` of its options would
 launch, in a temporary VM directory that it removes, executes its workload
 once, as `exec` does, with its streams, has the guest shut the VM down, which
-it terminates if it does not exit within `--timeout` seconds, and exits with
-the workload's status. On Windows, its VM ends with it, whatever ends it; see
+it terminates if it does not exit within `--timeout` seconds, as it terminates
+the VM of a workload that outlives `--timeout`, and exits with the workload's
+status. On Windows, its VM ends with it, whatever ends it; see
 [Experimental single-workload sandbox](run.md#experimental-single-workload-sandbox).
 
 See [Run](run.md) for artifact preparation, the security boundary, the

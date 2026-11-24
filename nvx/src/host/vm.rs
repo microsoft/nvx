@@ -1096,7 +1096,10 @@ pub struct Stopped {
 /// when that final wait confirms exit.
 ///
 /// An unconfirmed exit fails with [`ErrorKind::StillRunning`](crate::ErrorKind::StillRunning),
-/// retaining host errors. The caller keeps the process in that case.
+/// retaining host errors. The caller keeps the process in that case. A process that the forced
+/// termination reached, but that has not exited by `deadline`, is stuck exiting, and the error
+/// says so: it runs no code of its own any longer, but the host has not let it exit, as Windows
+/// keeps a process whose I/O a driver neither completes nor cancels.
 /// Report-read errors have kind [`ErrorKind::Io`](crate::ErrorKind::Io)
 /// inside [`Stopped::report`], never hiding confirmed exit.
 pub fn stop(
@@ -1134,10 +1137,16 @@ pub fn stop(
             .wait(deadline)
             .map_err(|error| failure(kill_error.as_ref()).with_source(error))?;
         if exited.is_none() {
-            let error = failure(kill_error.as_ref());
             return Err(match kill_error {
-                Some(source) => error.with_source(source),
-                None => error,
+                Some(source) => failure(Some(&source)).with_source(source),
+                None => Error::new(
+                    crate::ErrorKind::StillRunning,
+                    format!(
+                        "cannot confirm exit of VM process {}: it is stuck exiting after its forced \
+                         termination",
+                        process.reference().pid
+                    ),
+                ),
             });
         }
     }

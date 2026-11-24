@@ -2728,3 +2728,41 @@ fn stop_returns_still_running_without_exit_confirmation_at_its_deadline() {
     assert!(process.wait(Instant::now()).unwrap().is_none());
     assert!(child.child.try_wait().unwrap().is_none());
 }
+
+#[cfg(windows)]
+#[test]
+fn stop_says_that_a_process_that_its_forced_termination_reached_is_stuck_exiting() {
+    let (_directory, vm) = vm_dir();
+    let outputs = vm.outputs(false).unwrap();
+    let mut held = platform::tests::HeldExit::start();
+    let reference = crate::host::process::ProcessRef {
+        pid: held.pid(),
+        start_time: platform::process_start_time(held.pid()).unwrap().unwrap(),
+        boot: crate::host::process::BootId::current().unwrap(),
+    };
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the debugged process runs");
+    };
+    let grace = Instant::now();
+    let deadline = grace + Duration::from_millis(500);
+    let error = stop(&process, &outputs, |_| false, grace, deadline).unwrap_err();
+    let unconfirmed = process.wait(Instant::now()).unwrap();
+    held.release();
+    let exited = process
+        .wait(Instant::now() + Duration::from_secs(30))
+        .unwrap();
+    assert!(Instant::now() >= deadline);
+    assert_eq!(error.kind(), ErrorKind::StillRunning);
+    assert_eq!(
+        error.message(),
+        format!(
+            "cannot confirm exit of VM process {}: it is stuck exiting after its forced \
+             termination",
+            reference.pid
+        )
+    );
+    // The termination reached the process, so no error of the host caused the failure.
+    assert!(std::error::Error::source(&error).is_none(), "{error:?}");
+    assert!(unconfirmed.is_none(), "the held exit showed");
+    assert!(exited.is_some(), "the process did not exit once released");
+}
