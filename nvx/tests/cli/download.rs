@@ -192,6 +192,27 @@ fn commands_download_nothing_for_options_that_they_refuse() {
 }
 
 #[test]
+fn a_cold_run_downloads_nothing_for_a_share_of_its_vm_directory() {
+    // The VM directory lies in the temporary directory, so a share of that directory is refused
+    // before the download that would install the missing artifacts.
+    let root = checkout(&INSTALLED);
+    fs::create_dir(root.below("temporary")).unwrap();
+    let before = root.snapshot();
+    let outcome = root.nvx_with(
+        &["run", "--dry-run", "--mount", "/data,{root/temporary}"],
+        &[
+            ("TMPDIR", "{root/temporary}"),
+            ("TMP", "{root/temporary}"),
+            ("TEMP", "{root/temporary}"),
+        ],
+    );
+    outcome.assert_error("artifact-missing", &["OpenVMM"]);
+    let mut after = root.snapshot();
+    after.remove("build/.nvx-download.lock");
+    assert_eq!(after, before);
+}
+
+#[test]
 fn restores_download_nothing_for_snapshots_that_they_cannot_open() {
     // A restore refuses a raw OpenVMM snapshot, and opens its snapshot's store, before it reads
     // anything else: one that it cannot open fails it before the download that a provision of

@@ -1448,6 +1448,30 @@ fn a_cold_spawn_without_a_child_removes_its_private_directory() {
     );
 }
 
+/// A cold run refuses a share that reaches the VM directory that it would create in the temporary
+/// directory, which holds the VM's control socket and what OpenVMM writes, before it creates
+/// anything, and accepts a share beside that directory.
+#[test]
+fn a_cold_run_refuses_a_share_of_its_vm_directory() {
+    let root = Root::new();
+    std::fs::create_dir_all(root.below("temporary/beside")).unwrap();
+    let temporary = [
+        ("TMPDIR", "{root/temporary}"),
+        ("TMP", "{root/temporary}"),
+        ("TEMP", "{root/temporary}"),
+    ];
+    let before = root.snapshot();
+    root.nvx_with(&["run", "--mount", "/data,{root/temporary}"], &temporary)
+        .assert_error("unsupported", &["overlaps the run's VM directory "]);
+    assert_eq!(root.snapshot(), before);
+
+    let outcome = root.nvx_with(
+        &["run", "--mount", "/data,{root/temporary/beside}"],
+        &temporary,
+    );
+    assert_eq!(outcome.status, Some(0), "{}", outcome.describe());
+}
+
 #[test]
 fn managed_boot_diagnostics_arrive_before_the_control_endpoint() {
     use std::io::{BufRead, BufReader, Read};
