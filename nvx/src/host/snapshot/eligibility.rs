@@ -1,5 +1,5 @@
-//! Eligibility: whether a clone may restore a generation of a template at a host's time, by the
-//! restore window that the time contract of its capture sets, apart from its compatibility.
+//! Eligibility: whether a clone may restore a snapshot at a host's time, by the restore window
+//! that the time contract of its capture sets, apart from its compatibility.
 
 #[cfg(test)]
 mod tests;
@@ -14,18 +14,20 @@ use crate::host::platform;
 use crate::host::process::BootId;
 
 /// The longest interval by which a restore advances a clone's VM time, from the cut of the
-/// captured VM's time to the restoring host's time, in nanoseconds: 30 days, the bound that every
-/// runtime of version 1 of OpenVMM's time ABI accepts.
+/// captured VM's time to the restoring host's time, in nanoseconds: 365 days, the fixed duration
+/// of 31,536,000 seconds rather than a calendar year, the bound of version 1 of OpenVMM's time
+/// ABI.
 ///
-/// Later releases of OpenVMM and of the guest accept 365 days under the same version, but this
-/// window cannot tell their captures from those of a runtime whose OpenVMM or guest predates
-/// them, to which a template's key binds its clones, and which restores a capture only within
-/// 30 days: such an OpenVMM refuses a later restore with `E_DOWNTIME_EXCESSIVE`, and such a
-/// guest, which the snapshot holds, with `G_REPAIR_PACKET`. Neither failure quarantines the
-/// generation, so a longer window would keep the store selecting a generation that no clone can
-/// restore, instead of capturing a replacement. The window therefore keeps the bound that every
-/// runtime accepts.
-pub const MAX_DOWNTIME_NS: u64 = 30 * 24 * 60 * 60 * 1_000_000_000;
+/// The time ABI's bound grew from 30 days to 365 under the same version, and holds only for a
+/// snapshot whose guest and restoring OpenVMM both have it, as those of each release of NVX either
+/// both have it or both lack it. A snapshot restores only under the runtime identity that its key
+/// records, so the OpenVMM and the guest that captured it restore it, and this window cannot tell
+/// whether they have the bound. An OpenVMM that lacks it refuses a restore beyond 30 days with
+/// `E_DOWNTIME_EXCESSIVE`, before the guest runs. A guest that lacks it, which the snapshot holds,
+/// refuses one with `G_REPAIR_PACKET`, but beyond about 104 days its kernel can oops first and
+/// hang the restore instead. A caller whose runtime pairs an OpenVMM that has the bound with a
+/// guest that lacks it must therefore restore its snapshots within 30 days itself.
+pub const MAX_DOWNTIME_NS: u64 = 365 * 24 * 60 * 60 * 1_000_000_000;
 
 /// The time of a host as a restore samples it: the identities of the host and of its boot, its
 /// monotonic clock with that clock's reading, and its UTC.

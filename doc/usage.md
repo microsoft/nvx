@@ -492,7 +492,11 @@ its capacity. The snapshot's key records the runtime identity that captured
 it: the OpenVMM, kernel, and Alpine initramfs of the artifacts, and the
 versions of the CLI's contracts with its guests. A restore under another one,
 as after an upgrade that installs new artifacts, is refused, and the snapshot
-must be captured again; see [Upgrades](run.md#upgrades).
+must be captured again; see [Upgrades](run.md#upgrades). A restore must also
+come within 365 days of the capture, the time ABI's
+[downtime bound](design/3.2-clock-and-time.md#328-downtime-and-continuity): a
+later one fails with `unavailable` before its VM starts, and the snapshot must
+be captured again.
 
 The sandbox's NIC comes from the snapshot, with its presence and its address:
 `--net` belongs to [`snapshot capture`](#snapshot-capture), which gives a
