@@ -282,3 +282,12 @@ fn a_guarded_file_denies_writers_and_deleters_until_it_is_closed() {
     fs::rename(&other, &path).unwrap();
     assert_eq!(fs::read(&path).unwrap(), b"other");
 }
+
+#[cfg(windows)]
+#[test]
+fn join_dwords_places_the_high_dword_above_the_low_one() {
+    assert_eq!(join_dwords(0x0123_4567, 0x89AB_CDEF), 0x0123_4567_89AB_CDEF);
+    assert_eq!(join_dwords(1, 0), 1 << 32);
+    assert_eq!(join_dwords(0, u32::MAX), u64::from(u32::MAX));
+    assert_eq!(join_dwords(u32::MAX, u32::MAX), u64::MAX);
+}

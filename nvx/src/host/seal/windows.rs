@@ -22,8 +22,6 @@ use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_S
 
 use super::{FileId, FileKind, FileSeal, SEAL_VERSION, SealScheme, SealTime};
 
-/// Windows splits file sizes, file indices, and FILETIME into low and high 32-bit DWORDs.
-const HIGH_DWORD_SHIFT: u32 = 32;
 /// The 100-nanosecond intervals from 1601-01-01, the epoch of `FILETIME`, to the Unix epoch.
 const UNIX_EPOCH_TICKS: i128 = 116_444_736_000_000_000;
 /// The 100-nanosecond intervals in a second.
@@ -66,8 +64,10 @@ pub(super) fn seal(file: &File) -> io::Result<FileSeal> {
     } else {
         (
             u64::from(information.dwVolumeSerialNumber),
-            (u128::from(information.nFileIndexHigh) << HIGH_DWORD_SHIFT)
-                | u128::from(information.nFileIndexLow),
+            u128::from(join_dwords(
+                information.nFileIndexHigh,
+                information.nFileIndexLow,
+            )),
         )
     };
     let kind = if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
@@ -81,20 +81,23 @@ pub(super) fn seal(file: &File) -> io::Result<FileSeal> {
         device,
         file_id: FileId(file_id),
         kind,
-        length: (u64::from(information.nFileSizeHigh) << HIGH_DWORD_SHIFT)
-            | u64::from(information.nFileSizeLow),
+        length: join_dwords(information.nFileSizeHigh, information.nFileSizeLow),
         modified: time(information.ftLastWriteTime),
         changed: None,
     })
+}
+
+/// Joins the `high` and `low` 32-bit DWORDs of a 64-bit value, as Windows splits file indices,
+/// file sizes, and `FILETIME`s.
+pub(in crate::host) fn join_dwords(high: u32, low: u32) -> u64 {
+    (u64::from(high) << u32::BITS) | u64::from(low)
 }
 
 /// Returns the time of a `FILETIME`, in seconds and nanoseconds since the Unix epoch.
 fn time(time: FILETIME) -> SealTime {
     /// Windows FILETIME counts 100-nanosecond intervals.
     const NANOS_PER_FILETIME_TICK: i128 = 100;
-    let ticks = ((i128::from(time.dwHighDateTime) << HIGH_DWORD_SHIFT)
-        | i128::from(time.dwLowDateTime))
-        - UNIX_EPOCH_TICKS;
+    let ticks = i128::from(join_dwords(time.dwHighDateTime, time.dwLowDateTime)) - UNIX_EPOCH_TICKS;
     SealTime {
         // A `FILETIME` spans fewer than 2^41 seconds, and the remainder is below a second.
         seconds: ticks.div_euclid(TICKS_PER_SECOND) as i64,

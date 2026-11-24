@@ -35,6 +35,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[allow(unsafe_code)]
 mod windows;
 
+#[cfg(windows)]
+pub(in crate::host) use windows::join_dwords;
+
 /// The version of the seals that this build takes. Seals of different versions never compare
 /// equal.
 #[cfg(any(all(feature = "cli", target_os = "linux"), windows))]
