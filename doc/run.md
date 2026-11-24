@@ -1028,7 +1028,11 @@ category and status of the outcome report that OpenVMM published, such as
 `guest-exit status 125`. `--outcome-report` forwards that report, of the VM's
 stop, with the permissions that OpenVMM gave it. Ctrl-C ends the VM, and the
 run then exits with status 130. `--dry-run` prints the command and launches
-nothing.
+nothing. On Windows, OpenVMM runs in a job object that only the run holds and
+that ends OpenVMM once it closes, so the VM ends with the run, whatever ends
+the run, as when a supervisor terminates `nvx.exe`. OpenVMM also stays in the
+jobs of `nvx.exe`, as its other child processes do, unless a job lets them
+leave it silently, so that such a job can end it too.
 
 CI runs `/sbin/nvx-sandbox-smoke`, with `--arg init`, as below, as the workload
 of `sandbox run` and `sandbox exec`, to verify the security profile of the

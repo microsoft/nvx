@@ -13,6 +13,10 @@ use windows_sys::Win32::Foundation::{
     GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0,
     WAIT_TIMEOUT,
 };
+use windows_sys::Win32::System::JobObjects::{
+    CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectExtendedLimitInformation, SetInformationJobObject,
+};
 use windows_sys::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
     CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
@@ -29,12 +33,17 @@ use crate::host::platform::check_working_dir;
 use crate::host::platform::inherit::{Inherited, lock_spawns};
 use crate::host::platform::unconfirmed_exit;
 
-/// An OpenVMM process launched by this caller, held through its process handle.
+/// An OpenVMM process launched by this caller, held through its process handle, and, for a
+/// foreground spawn, through the job that ends it once this is dropped, as [`owning_job`]
+/// describes.
 pub(crate) struct LaunchedProcess {
     /// Process handle retained for termination and waiting.
     pub(super) process: OwnedHandle,
     /// Numeric process identifier reported to instance state.
     pid: u32,
+    /// The only handle of the job that ends the process once it closes, which a foreground spawn
+    /// creates; `None` for a detached one.
+    _owner: Option<OwnedHandle>,
 }
 
 impl LaunchedProcess {
@@ -185,8 +194,10 @@ impl Drop for InheritableForSpawn {
     }
 }
 
-/// Starts OpenVMM without the caller's console so it outlives the caller, in the job object
-/// `job`, if any, which [`create_log_job`] creates for the log of its standard output.
+/// Starts OpenVMM, in the job object `job`, if any, which [`create_log_job`] creates for the log
+/// of its standard output: as `mode` says, without the caller's console, so that it outlives the
+/// caller, or in the foreground, in the caller's console and in a job of its own that ends it with
+/// the caller, as [`owning_job`] describes.
 ///
 /// `std::process::Command` lets the child inherit every inheritable handle of the caller. A
 /// caller whose own standard output is a pipe, such as a phase process whose parent collects
@@ -210,7 +221,9 @@ impl Drop for InheritableForSpawn {
 /// `stdio` handles until after the spawn closes them, so that a process that inherits the log in
 /// the window inherits the job too, and keeps it open while it holds the log: [`log_claim_held`]
 /// then decides the log's claim by the processes of the job, of which that process is none. The
-/// spawn closes its own handle of `job` before it returns.
+/// spawn closes its own handle of `job` before it returns. A foreground OpenVMM also joins its
+/// owning job, which nests in `job`, as jobs nest in the jobs of the processes in them, and whose
+/// handle, which is never inheritable, the returned [`LaunchedProcess`] holds.
 ///
 /// Fails with [`io::ErrorKind::InvalidInput`] for a working directory beyond Windows' limit or
 /// for a batch file, as [`refuse_batch_file`] says.
@@ -227,32 +240,22 @@ pub(crate) fn spawn_with_stdio(
     mode: SpawnMode,
     job: Option<OwnedHandle>,
 ) -> io::Result<LaunchedProcess> {
-    let flags = match mode {
-        SpawnMode::Foreground => 0,
-        SpawnMode::Detached { breakaway_from_job } => {
-            CREATE_NEW_PROCESS_GROUP
-                | CREATE_NO_WINDOW
-                | if breakaway_from_job {
-                    CREATE_BREAKAWAY_FROM_JOB
-                } else {
-                    0
-                }
-        }
-    };
     spawn_listed(
         program,
         arguments,
         Some(working_dir),
         stdio.map(Some),
         inherit,
+        mode,
         job,
-        flags,
     )
 }
 
 /// Whether the child stays in the caller's console and job.
 pub(crate) enum SpawnMode {
-    /// Keeps the caller's console, process group, and job membership.
+    /// Keeps the caller's console, process group, and job membership, and starts in an
+    /// [`owning_job`] too, which ends the child once the [`LaunchedProcess`] that the spawn returns
+    /// is dropped, or the caller ends.
     Foreground,
     /// Starts without a console, in a new process group.
     Detached {
@@ -261,19 +264,72 @@ pub(crate) enum SpawnMode {
     },
 }
 
-/// Starts `program` with `arguments` in `working_dir`, or in the caller's working directory, with
-/// the creation flags `flags`, the handles `stdio` as its standard handles, a missing one null,
-/// and the caller's handles `inherit`, and no other handle of the caller, in the job object
-/// `job`, if any, as [`spawn_with_stdio`] describes. Fails with [`io::ErrorKind::InvalidInput`] for
-/// a working directory beyond Windows' limit or for a batch file, as [`refuse_batch_file`] says.
+impl SpawnMode {
+    /// Returns the creation flags of a child that starts as the mode says.
+    fn flags(&self) -> PROCESS_CREATION_FLAGS {
+        match self {
+            Self::Foreground => 0,
+            Self::Detached { breakaway_from_job } => {
+                CREATE_NEW_PROCESS_GROUP
+                    | CREATE_NO_WINDOW
+                    | if *breakaway_from_job {
+                        CREATE_BREAKAWAY_FROM_JOB
+                    } else {
+                        0
+                    }
+            }
+        }
+    }
+}
+
+/// Creates the job that owns a foreground child: it limits no resource, but ends every process
+/// in it, the child and any process that the child starts, which cannot break away from it, once
+/// its last handle closes. That handle is the caller's alone: no name leads to the job, and its
+/// handle is not inheritable, so no process inherits it, even in the window of another spawn.
+/// Windows closes it when the caller ends, whatever ends the caller, such as a
+/// `TerminateProcess` that gives it no chance to stop the child, so that the child never outlives
+/// the caller.
+///
+/// A child of a caller in a job of its own starts in that job too, unless the job lets it break
+/// away, and its owning job then nests in the caller's, as Windows nests jobs since Windows 8,
+/// when neither sets limits on the user interface. The caller's job, too, can end the child.
+fn owning_job() -> io::Result<OwnedHandle> {
+    // SAFETY: null attributes give the job the default security and a handle that is not
+    // inheritable, and a null name leaves it unnamed.
+    let job = owned(unsafe { CreateJobObjectW(ptr::null(), ptr::null()) })
+        .ok_or_else(io::Error::last_os_error)?;
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: the handle is a new job object with every access, and the information has the size
+    // given.
+    if unsafe {
+        SetInformationJobObject(
+            raw(&job),
+            JobObjectExtendedLimitInformation,
+            (&raw const limits).cast(),
+            mem::size_of_val(&limits) as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(job)
+}
+
+/// Starts `program` with `arguments` in `working_dir`, or in the caller's working directory, as
+/// `mode` says, with the handles `stdio` as its standard handles, a missing one null, and the
+/// caller's handles `inherit`, and no other handle of the caller, in the job object `job`, if
+/// any, and, in the foreground, in its [`owning_job`] too, as [`spawn_with_stdio`] describes.
+/// Fails with [`io::ErrorKind::InvalidInput`] for a working directory beyond Windows' limit or
+/// for a batch file, as [`refuse_batch_file`] says.
 fn spawn_listed(
     program: &Path,
     arguments: &[OsString],
     working_dir: Option<&Path>,
     stdio: [Option<OwnedHandle>; 3],
     inherit: &[Inherited<'_>],
+    mode: SpawnMode,
     job: Option<OwnedHandle>,
-    flags: PROCESS_CREATION_FLAGS,
 ) -> io::Result<LaunchedProcess> {
     refuse_batch_file(program)?;
     let application = wide(program);
@@ -286,6 +342,10 @@ fn spawn_listed(
             Ok(wide(&path))
         })
         .transpose()?;
+    let owner = match mode {
+        SpawnMode::Foreground => Some(owning_job()?),
+        SpawnMode::Detached { .. } => None,
+    };
     // No handle may be inheritable for this spawn outside the lock. Locals are dropped in the
     // reverse of their order, so every return restores the handles `inherit`, closes the `stdio`
     // handles and then the job's, which it moves here for that, before it releases the lock.
@@ -322,8 +382,14 @@ fn spawn_listed(
         }
     }
     let inheritable = InheritableForSpawn::new(&handles[standard_handles..])?;
-    let jobs = job.as_ref().map(raw);
-    let jobs = jobs.as_slice();
+    // The child joins the job of its log, and then its owning job, which nests in the first.
+    let mut jobs = [ptr::null_mut(); 2];
+    let mut listed = 0;
+    for listed_job in [&job, &owner].into_iter().flatten() {
+        jobs[listed] = raw(listed_job);
+        listed += 1;
+    }
+    let jobs = &jobs[..listed];
     // A list cannot be empty: a child that inherits no handle at all is created without one, and
     // without inheritance.
     let lists = u32::from(!handles.is_empty()) + u32::from(!jobs.is_empty());
@@ -334,7 +400,7 @@ fn spawn_listed(
     };
     let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
-    let mut flags = flags | CREATE_UNICODE_ENVIRONMENT;
+    let mut flags = mode.flags() | CREATE_UNICODE_ENVIRONMENT;
     if let Some(attributes) = &mut attributes {
         if !handles.is_empty() {
             // SAFETY: the list has room for this attribute, and `handles` outlives
@@ -359,8 +425,8 @@ fn spawn_listed(
             startup.StartupInfo.hStdError = standard[2];
         }
         if !jobs.is_empty() {
-            // SAFETY: the list has room for this attribute, and `jobs`, whose handle `job` keeps
-            // open, outlives CreateProcessW.
+            // SAFETY: the list has room for this attribute, and `jobs`, whose handles `job` and
+            // `owner` keep open, outlives CreateProcessW.
             if unsafe {
                 UpdateProcThreadAttribute(
                     attributes.as_ptr(),
@@ -405,7 +471,7 @@ fn spawn_listed(
     } else {
         Ok(())
     };
-    // The child holds its own copies of the handles now, and is in its job, so the caller's need
+    // The child holds its own copies of the handles now, and is in its jobs, so the caller's need
     // not be inheritable any longer, and the window closes.
     drop(inheritable);
     drop(stdio);
@@ -422,6 +488,7 @@ fn spawn_listed(
     Ok(LaunchedProcess {
         process,
         pid: information.dwProcessId,
+        _owner: owner,
     })
 }
 

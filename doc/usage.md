@@ -208,10 +208,13 @@ combined with `--network-egress-allow` rules for direct connections.
 `nvx run` checks its options, prints the OpenVMM command of a cold boot
 after `>> `, and unless `--dry-run` is given, runs OpenVMM in a private
 temporary VM directory, which it removes once OpenVMM has exited, on the
-terminal. A cold boot attaches the guest's console, the boot console `hvc1`,
-to the standard streams, so that the terminal's input reaches the guest through
-it rather than through the byte channel, `hvc0`, whose output, such as the
-kernel's early messages, goes to standard error with OpenVMM's log. It exits
+terminal. On Windows, a cold boot's OpenVMM ends with `nvx run`, whatever ends
+it, in a job object that only the run holds, as the OpenVMM of a
+[`sandbox run`](#sandbox) does. A cold boot attaches the guest's console, the
+boot console `hvc1`, to the standard streams, so that the terminal's input
+reaches the guest through it rather than through the byte channel, `hvc0`,
+whose output, such as the kernel's early messages, goes to standard error with
+OpenVMM's log. It exits
 with status 1 for an error, 2 for a usage error, and 130 after Ctrl-C, and
 otherwise with the status that OpenVMM returns. Its errors and usage errors
 carry their [error codes](#error-codes), as `error[CODE]: MESSAGE` and
@@ -394,7 +397,7 @@ it launches the VM that a `provision` and a `start` of its options would
 launch, in a temporary VM directory that it removes, executes its workload
 once, as `exec` does, with its streams, has the guest shut the VM down, which
 it terminates if it does not exit within `--timeout` seconds, and exits with
-the workload's status; see
+the workload's status. On Windows, its VM ends with it, whatever ends it; see
 [Experimental single-workload sandbox](run.md#experimental-single-workload-sandbox).
 
 See [Run](run.md) for artifact preparation, the security boundary, the

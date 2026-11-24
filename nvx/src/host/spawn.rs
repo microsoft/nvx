@@ -66,7 +66,10 @@ pub(crate) struct VmmCommand<'a> {
 /// which limits no resource but lets no process that the VMM starts break away from it. A process
 /// that the caller spawns while the VMM is created, which can inherit the log as [`Inherited`]
 /// describes, never joins the VMM's job. A `foreground` VMM, which the CLI's one-shot runs start,
-/// stays in the caller's session and console instead.
+/// stays in the caller's session and console instead, and, on Windows, starts in a job that the
+/// returned [`Launched`] alone holds, nested in the job of its log, which ends the VMM once that
+/// `Launched` is released, or the caller ends, whatever ends it, so that the VMM of a one-shot run
+/// never outlives the run.
 ///
 /// Record the VMM's identity right after the spawn, through [`Launched::process`], if the caller
 /// recovers its launches. Fails, before it creates any child, with
@@ -170,9 +173,10 @@ fn spawn_inner(
 }
 
 /// A VMM that [`spawn_vm_with_mode`] started, which the caller has not released yet: on Unix,
-/// its child process; on Windows, its process handle. On Unix the child's ID names no other
-/// process until [`wait_timeout`](Self::wait_timeout) reaps it; hold it with
-/// [`process`](Self::process) before waiting to keep a verified handle after it exits.
+/// its child process; on Windows, its process handle, and the job that ends a foreground VMM. On
+/// Unix the child's ID names no other process until [`wait_timeout`](Self::wait_timeout) reaps
+/// it; hold it with [`process`](Self::process) before waiting to keep a verified handle after it
+/// exits.
 ///
 /// Hold it with [`process`](Self::process). Then release it with [`detach`](Self::detach), or end it
 /// with [`kill_and_confirm_exit`](Self::kill_and_confirm_exit); the [`Process`] stays valid
@@ -185,7 +189,7 @@ pub(crate) struct Launched {
     /// Whether the child has been reaped, after which its process ID may name another process.
     reaped: bool,
     #[cfg(windows)]
-    /// Owned Windows process handle and identifier.
+    /// Owned Windows process handle and identifier, and a foreground VMM's job.
     process: platform::LaunchedProcess,
 }
 
@@ -238,7 +242,8 @@ impl Launched {
         Ok(Process::held(reference, handle))
     }
 
-    /// Releases the process without waiting for it: it keeps running.
+    /// Releases the process without waiting for it: it keeps running, but for a foreground VMM on
+    /// Windows, which its job then ends, as [`spawn_vm_with_mode`] describes.
     ///
     /// On Unix a background thread reaps the child once it exits so it does not linger as a
     /// zombie while this process lives. If that thread cannot start, the child becomes a zombie

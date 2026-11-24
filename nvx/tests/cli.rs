@@ -2317,6 +2317,102 @@ fn a_run_refuses_a_batch_file_as_openvmm() {
     assert!(!marker.exists());
 }
 
+/// Starts `nvx sandbox run` in the background, with `--timeout` of `timeout` and the temporary
+/// directory `temporary`, whose workload leaves the marker that it returns once it runs and then
+/// sleeps.
+#[cfg(windows)]
+fn background_run(root: &Root, timeout: &str, temporary: &Path) -> (std::process::Child, PathBuf) {
+    let path = |name: &str| root.path.join(name).to_str().unwrap().to_owned();
+    let started = root.path.join("started");
+    let layer = format!(
+        "distro,{},11111111-1111-1111-1111-111111111111",
+        path("distro.erofs")
+    );
+    let scratch = path("scratch.ext4");
+    let script = format!("touch {}; sleep 60000", started.display());
+    let cli = root
+        .command(&[
+            "sandbox",
+            "run",
+            "--layer",
+            layer.as_str(),
+            "--scratch",
+            scratch.as_str(),
+            "--timeout",
+            timeout,
+            "--entrypoint",
+            "/bin/sh",
+            "--arg=-c",
+            "--arg",
+            script.as_str(),
+        ])
+        .env("TMP", temporary)
+        .env("TEMP", temporary)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    (cli, started)
+}
+
+/// Opens process `pid` to wait for its exit, which the handle shows whatever process takes its ID
+/// afterwards.
+#[cfg(windows)]
+fn exit_handle(pid: u32) -> std::os::windows::io::OwnedHandle {
+    use std::os::windows::io::FromRawHandle;
+
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+
+    // SAFETY: OpenProcess has no memory-safety preconditions.
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    assert!(
+        !process.is_null(),
+        "cannot open process {pid}: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: the handle is new, and nothing else owns it.
+    unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(process) }
+}
+
+/// Returns whether the process of `handle` exits within `timeout`.
+#[cfg(windows)]
+fn exits_within(handle: &std::os::windows::io::OwnedHandle, timeout: Duration) -> bool {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+    let milliseconds = u32::try_from(timeout.as_millis()).unwrap();
+    // SAFETY: the handle has synchronize access.
+    unsafe { WaitForSingleObject(handle.as_raw_handle(), milliseconds) == WAIT_OBJECT_0 }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_run_whose_cli_is_killed_ends_its_openvmm() {
+    let root = Root::new();
+    let temporary = root.path.join("tmp");
+    fs::create_dir(&temporary).unwrap();
+    let (mut cli, started) = background_run(&root, "60", &temporary);
+    wait_for(&started);
+    let openvmm = children_named(cli.id(), "openvmm.exe");
+    let handles: Vec<_> = openvmm.iter().map(|&pid| exit_handle(pid)).collect();
+    // `TerminateProcess` gives the CLI no chance to stop its VM.
+    cli.kill().unwrap();
+    cli.wait().unwrap();
+    let ended: Vec<bool> = handles
+        .iter()
+        .map(|handle| exits_within(handle, Duration::from_secs(30)))
+        .collect();
+    for (&pid, &ended) in openvmm.iter().zip(&ended) {
+        if !ended {
+            harness::kill(u64::from(pid));
+        }
+    }
+    assert_eq!(openvmm.len(), 1, "{openvmm:?}");
+    assert_eq!(ended, [true], "OpenVMM outlived the run that was killed");
+}
+
 #[test]
 fn artifacts_default_to_the_checkout_that_holds_the_executable() {
     let output = Command::new(NVX)

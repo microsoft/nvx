@@ -1154,3 +1154,78 @@ fn a_thread_that_holds_the_spawn_lock_spawns_under_it_until_its_last_lock_is_dro
     );
     assert!(late, "another thread could not take the lock once released");
 }
+
+#[test]
+fn a_foreground_child_ends_with_its_spawn_and_a_detached_one_outlives_it() {
+    use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+
+    let directory = tempfile::tempdir().unwrap();
+    let system = std::env::var_os("SystemRoot").unwrap();
+    let ping = Path::new(&system).join("System32").join("PING.EXE");
+    // A stand-in that runs for a minute in the job of its log, as the spawn of a VMM starts it,
+    // and a handle of this test to that job.
+    let start = |name: &str, mode| {
+        let log = fs::File::create(directory.path().join(name)).unwrap();
+        let job = create_log_job(&log)
+            .unwrap()
+            .expect("a log on a disk volume has a job");
+        let log_job = job.try_clone().unwrap();
+        let (stdin, _stdin_writer) = io::pipe().unwrap();
+        let stderr = log.try_clone().unwrap();
+        let child = spawn_with_stdio(
+            &ping,
+            &["-n", "60", "127.0.0.1"].map(OsString::from),
+            &std::env::temp_dir(),
+            [stdin.into(), log.into(), stderr.into()],
+            &[],
+            mode,
+            Some(job),
+        )
+        .unwrap();
+        (child, log_job)
+    };
+    let (foreground, log_job) = start("foreground.log", SpawnMode::Foreground);
+    let (detached, _) = start(
+        "detached.log",
+        SpawnMode::Detached {
+            breakaway_from_job: false,
+        },
+    );
+    let (foreground_process, _) = foreground.pin().unwrap();
+    let (detached_process, _) = detached.pin().unwrap();
+    // The foreground child's own job nests in the job of its log, which the child stays in.
+    let mut in_log_job = 0;
+    // SAFETY: both handles are open, and the output pointer is valid.
+    let queried = unsafe {
+        IsProcessInJob(
+            raw(&foreground_process.process),
+            raw(&log_job),
+            &mut in_log_job,
+        )
+    } != 0;
+    // Releasing the spawn of the foreground child closes its job, which ends it, but leaves the
+    // detached child running.
+    drop(foreground);
+    let ended = foreground_process
+        .wait(Instant::now() + WINDOW_TIMEOUT)
+        .unwrap();
+    let running = detached_process.wait(Instant::now()).unwrap();
+    detached
+        .terminate_and_wait()
+        .expect("the detached child did not exit");
+    assert!(queried, "{}", io::Error::last_os_error());
+    assert_ne!(
+        in_log_job, 0,
+        "the foreground child left the job of its log"
+    );
+    assert_eq!(
+        ended,
+        Some(true),
+        "the foreground child outlived the spawn that held its job"
+    );
+    assert_eq!(
+        running,
+        Some(false),
+        "the detached child ended with its spawn"
+    );
+}

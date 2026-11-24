@@ -964,12 +964,15 @@ pub struct Launched {
     pub capability: Capability,
     /// The preparation's same restore-ready listener, absent for a cold launch.
     pub ready: Option<ReadyListener>,
-    /// Retains only a foreground caller's child, for its status.
+    /// Retains only a foreground caller's child, for its status, and on Windows its job, which
+    /// ends the child once this is dropped.
     #[cfg(feature = "cli")]
     child: ForegroundChild,
 }
 
-/// Reaps a foreground child on release without adding `Drop` to the public launch value.
+/// Reaps a foreground child on release without adding `Drop` to the public launch value; on
+/// Windows, the release closes the job that ends the child if it still runs, as the job does when
+/// its caller ends, however that ends.
 #[cfg(feature = "cli")]
 #[derive(Debug)]
 struct ForegroundChild(Option<spawn::Launched>);
