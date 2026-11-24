@@ -47,9 +47,12 @@ COMMANDS = frozenset(
 # `exit` ends the session successfully in sh, cmd, and PowerShell alike, so it
 # checks that a host accepts a non-interactive login whatever its shell. One
 # connection attempt overrides an SSH configuration that retries, which would
-# multiply the connect timeout for every unreachable host.
+# multiply the connect timeout for every unreachable host. ConnectTimeout bounds
+# only the connection, so a wall-clock timeout, in seconds, bounds the login and
+# `exit` too, and one that expires leaves the host unreachable.
 REACHABILITY_OPTIONS = ("-o", "ConnectionAttempts=1")
 REACHABILITY_COMMAND = "exit"
+REACHABILITY_TIMEOUT = 60.0
 # The backends that this workstation runs natively, by sys.platform.
 LOCAL_BACKENDS = {"linux": ("kvm", "mshv"), "win32": ("whp",)}
 LINUX_DEVICES = {"kvm": "/dev/kvm", "mshv": "/dev/mshv"}
@@ -59,6 +62,9 @@ WSL_KVM_CHECK = (
     "test -r /dev/kvm && test -w /dev/kvm && command -v python3 >/dev/null && "
     'wslpath -a -u "$1"'
 )
+# Starting a stopped distribution takes seconds; one that never starts leaves
+# WSL unusable instead of blocking the selection.
+WSL_CHECK_TIMEOUT = 120.0
 # The tools that run on a host from this checkout, since a host's checkout can
 # predate them, with the modules that each imports.
 REMOTE_TOOLS = {
@@ -123,6 +129,7 @@ class Runner(Protocol):
         *,
         input_text: str | None = None,
         capture_stdout: bool = False,
+        timeout: float | None = None,
     ) -> CommandResult: ...
 
 
@@ -143,13 +150,16 @@ class SubprocessRunner:
         *,
         input_text: str | None = None,
         capture_stdout: bool = False,
+        timeout: float | None = None,
     ) -> CommandResult:
         # The input travels as bytes, since text mode would write each LF of an
-        # uploaded script as os.linesep, which is CRLF on Windows.
+        # uploaded script as os.linesep, which is CRLF on Windows. A timeout
+        # kills the command and raises subprocess.TimeoutExpired.
         completed = subprocess.run(
             list(args),
             input=None if input_text is None else input_text.encode("utf-8"),
             stdout=subprocess.PIPE if capture_stdout else None,
+            timeout=timeout,
             check=False,
         )
         return CommandResult(completed.returncode, _decode_output(completed.stdout))
@@ -562,7 +572,8 @@ def _probe(
 
 
 def _reachable(profile: HostProfile, runner: Runner) -> bool:
-    """Return whether the host accepts a non-interactive SSH session."""
+    """Return whether the host accepts a non-interactive SSH session within
+    the reachability timeout."""
     try:
         result = runner.run(
             [
@@ -574,8 +585,9 @@ def _reachable(profile: HostProfile, runner: Runner) -> bool:
                 REACHABILITY_COMMAND,
             ],
             capture_stdout=True,
+            timeout=REACHABILITY_TIMEOUT,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0
 
@@ -614,8 +626,9 @@ def _wsl_checkout(runner: Runner) -> str | None:
                 str(REPOSITORY_ROOT),
             ],
             capture_stdout=True,
+            timeout=WSL_CHECK_TIMEOUT,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return None
     path = result.stdout.strip()
     if result.returncode != 0 or not path.startswith("/"):

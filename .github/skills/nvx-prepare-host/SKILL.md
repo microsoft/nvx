@@ -24,8 +24,9 @@ backend that the task needs:
 python3 scripts/nvx_hosts.py select BACKEND [--host-type HOST_TYPE]
 ```
 
-It checks the backend's profiles over SSH concurrently and picks the first
-reachable one in the order that the inventory declares them. When none is
+It checks the backend's profiles over SSH concurrently, giving each a minute
+to accept and end a session, and picks the first reachable one in the order
+that the inventory declares them. When none is
 reachable or configured, it falls back to this workstation: natively for its
 own backend, WHP on Windows when the Windows Hypervisor Platform API reports a
 hypervisor, or KVM or MSHV on Linux with access to the device, and for KVM on
@@ -53,20 +54,37 @@ its configuration to make a target reachable without the user's approval.
 
 ### WSL
 
-The `wsl` execution runs Linux commands for KVM in the Windows checkout, as the
-Windows benchmark coordinator does, at the `checkout` path that `select` prints
-(`wsl.exe --exec wslpath -a -u PATH` translates another one, such as a
-temporary worktree):
+The `wsl` execution runs Linux commands for KVM in WSL, as the Windows
+benchmark coordinator does, in a checkout that WSL sees, `WSL_CHECKOUT`:
 
 ```console
 wsl.exe --cd WSL_CHECKOUT --exec bash -lc "python3 scripts/nvx.py verify"
 ```
 
+The `checkout` that `select` prints, this checkout's WSL path, serves when its
+`.git` is a directory. Linux Git cannot open a linked worktree that Git for
+Windows created, such as an agent session's, since its `.git` file names a
+Windows path, and in WSL it can fail to create a repository on a Windows
+drive, so a temporary worktree cannot replace it; yet the probe and the NVX
+commands that read the revision need Git. Then commit the work that you test,
+asking before you commit the user's, and test that commit in a clone in the
+WSL file system that borrows the objects of the main checkout, the first entry
+of `git worktree list`, whose WSL path `wsl.exe --exec wslpath -a -u PATH`
+prints as `MAIN_WSL`:
+
+```console
+wsl.exe --exec bash -lc 'git clone -q --shared --no-checkout MAIN_WSL ~/nvx-wsl-REV && cd ~/nvx-wsl-REV && git checkout -q --detach REV && git submodule update -q --init --checkout --reference MAIN_WSL/.git/modules/openvmm openvmm'
+```
+
+Drop `--reference` when the main checkout has no `.git/modules/openvmm`. The
+clone is `WSL_CHECKOUT`, whose Git commands run in WSL; it registers nothing in
+the Windows repository, and `rm -rf` removes it at the end.
+
 The login shell puts `cargo` on `PATH`. Run every Linux command of the steps
 below, the probe and the Linux builds of `nvx` and OpenVMM included, this way,
-with `python3`, and keep Windows commands, such as `git`, in Windows. Never
-change `.wslconfig`, the distribution's packages, or its device permissions
-without the user's approval.
+with `python3`, and keep the Git commands of a Windows checkout in Windows.
+Never change `.wslconfig`, the distribution's packages, or its device
+permissions without the user's approval.
 
 ## 2. Safety
 
@@ -151,7 +169,7 @@ nvx/target/release/nvx run --hypervisor BACKEND --dry-run
 ## Handoff
 
 Report the host, local, or WSL execution, the unreachable profiles that a
-fallback replaced, the checkout and any temporary worktree,
+fallback replaced, the checkout and any temporary worktree or WSL clone,
 the OS, backend, platform, and host type, the commit and dirty state, the
 artifact source and the commands that staged it, the dry run's result, any
 running OpenVMM process, and every privilege or platform limitation. For

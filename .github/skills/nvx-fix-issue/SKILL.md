@@ -81,12 +81,13 @@ anything public and ask the user to handle it under
    the host type, the guest, the processor counts, and whether the defect lies
    in host tooling, `nvx`, the guest, or OpenVMM.
 2. Prepare hosts with [nvx-prepare-host](../nvx-prepare-host/SKILL.md),
-   choosing them yourself with `python3 scripts/nvx_hosts.py select BACKEND`
-   for every backend whose behavior the change can affect: it picks a
-   reachable virtual machine for functional checks, and falls back to this
-   workstation, natively or, for KVM on Windows, in WSL, when no configured
-   host is reachable. Pass `--host-type baremetal` when the issue concerns
-   timing, performance, or hardware, or was reported there, which rules out
+   choosing them yourself with `python3 scripts/nvx_hosts.py select` for every
+   backend whose behavior the change can affect. For functional checks, run
+   `select BACKEND --host-type virtual-machine` first, and only when it returns
+   `execution: null`, `select BACKEND`, which takes any reachable host and
+   otherwise falls back to this workstation, natively or, for KVM on Windows,
+   in WSL. When the issue concerns timing, performance, or hardware, or was
+   reported there, run `select BACKEND --host-type baremetal`, which rules out
    the fallbacks. Work only in temporary worktrees on remote hosts. Leave a
    backend that `select` cannot place to CI, and say so; an unreachable host
    alone never stops the fix.
