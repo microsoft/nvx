@@ -40,6 +40,8 @@ use crate::protocol::export::{EXPORT_DIRECTORY, ExportMode};
 use crate::protocol::root::RootUpper;
 
 pub(crate) use self::lifecycle::ProvisionConfig;
+#[cfg(windows)]
+pub(super) use self::lifecycle::remove_abandoned_vm_directories;
 pub(super) use self::lifecycle::{copy_openvmm_outcome, validate_outcome_destination};
 pub(super) use self::options::sandbox_network;
 pub(super) use self::options::{

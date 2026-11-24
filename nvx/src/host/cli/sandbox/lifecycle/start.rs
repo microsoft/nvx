@@ -646,7 +646,7 @@ pub(crate) fn run(
     artifacts.require()?;
     let (config, vm_config) = recorded?;
     let name = hex(&random_bytes::<16>()?);
-    let path = std::env::temp_dir().join(format!("nvx-sandbox-run-{name}"));
+    let path = std::env::temp_dir().join(format!("{RUN_DIRECTORY}{name}"));
     refuse_own_files(
         Some(("VM directory", &path)),
         config.distro().path(),
@@ -694,6 +694,10 @@ pub(crate) fn run(
             "the temporary VM directory already exists",
         ));
     }
+    #[cfg(windows)]
+    if !options.dry_run {
+        remove_abandoned_vm_directories(&std::env::temp_dir(), RUN_DIRECTORY);
+    }
     vm::create_private_dir(&path).map_err(error_with_cause)?;
     let dir = VmDir::open(&path).map_err(error_with_cause)?;
     let timeout = options.timeout;
@@ -724,6 +728,10 @@ pub(crate) fn run(
             #[cfg(windows)]
             prepared.inherit(scratch.claim().try_clone().map_err(Exit::from_os_error)?);
         }
+        // The run holds its log until it returns, before it removes the VM directory, as OpenVMM
+        // holds it until it exits, so that no other run takes the directory for an abandoned one.
+        #[cfg(windows)]
+        let _log = prepared.log().try_clone().map_err(Exit::from_os_error)?;
         let launched = vm::spawn(prepared).map_err(|error| {
             cleanup = error.kind() != ErrorKind::StillRunning;
             error_with_cause(error)
@@ -964,7 +972,8 @@ fn check_command_line(config: &Config, vm: &VmConfig) -> Result {
 
 /// Removes the temporary VM directory of a run, with what its VM left in it: OpenVMM's log and
 /// outcome report, its control socket on Linux, and the staging file of a report that OpenVMM
-/// did not finish writing, which [`StateFile::owns_temporary`] names.
+/// did not finish writing, which [`StateFile::owns_temporary`] names. A directory that is gone
+/// already, as another run on Windows removes one whose log nothing holds any longer, is removed.
 fn remove_vm_directory(dir: &VmDir) -> Result {
     let remove = |path: &Path| match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -975,7 +984,12 @@ fn remove_vm_directory(dir: &VmDir) -> Result {
         remove(&dir.path().join(file.name()))?;
     }
     let failed = |error: io::Error| io_error(ErrorCode::Io, &error, dir.path());
-    for entry in fs::read_dir(dir.path()).map_err(failed)? {
+    let entries = match fs::read_dir(dir.path()) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(failed(error)),
+    };
+    for entry in entries {
         let entry = entry.map_err(failed)?;
         if entry
             .file_name()
@@ -985,7 +999,67 @@ fn remove_vm_directory(dir: &VmDir) -> Result {
             remove(&entry.path())?;
         }
     }
-    fs::remove_dir(dir.path()).map_err(failed)
+    match fs::remove_dir(dir.path()) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        removed => removed.map_err(failed),
+    }
+}
+
+/// The name of a run's temporary VM directory, before 32 random lowercase hexadecimal digits.
+const RUN_DIRECTORY: &str = "nvx-sandbox-run-";
+
+/// Removes the temporary VM directories in `parent` that runs left when they ended without
+/// removing them, as a run that is terminated does, whose OpenVMM its job ends with it on Windows:
+/// each directory whose name is `prefix` and 32 lowercase hexadecimal digits, which is private to
+/// the user, as [`VmDir::open`] requires, which holds nothing but what [`remove_vm_directory`]
+/// removes, and whose log no process holds open any longer, as [`platform::log_released`] tells,
+/// neither the run, which holds its log until it returns, nor its OpenVMM, which holds it until it
+/// exits. It leaves any other directory as it is, such as one without a log, which a run creates
+/// before its log, or one that holds a file of another name.
+#[cfg(windows)]
+pub(crate) fn remove_abandoned_vm_directories(parent: &Path, prefix: &str) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(digits) = name.to_str().and_then(|name| name.strip_prefix(prefix)) else {
+            continue;
+        };
+        if digits.len() != 32
+            || !digits
+                .bytes()
+                .all(|digit| matches!(digit, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            continue;
+        }
+        // A link or another reparse point is no directory of a run, which `VmDir::open` refuses
+        // too.
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Ok(dir) = VmDir::open(&entry.path()) else {
+            continue;
+        };
+        let Ok(files) = fs::read_dir(dir.path()) else {
+            continue;
+        };
+        let nvx_files_only = files.into_iter().all(|file| {
+            file.is_ok_and(|file| {
+                file.file_name().to_str().is_some_and(|name| {
+                    [StateFile::Log, StateFile::Outcome, StateFile::Socket]
+                        .iter()
+                        .any(|owned| owned.name() == name)
+                        || StateFile::owns_temporary(name)
+                })
+            })
+        });
+        if nvx_files_only
+            && platform::log_released(&dir.path().join(StateFile::Log.name())).unwrap_or(false)
+        {
+            let _ = remove_vm_directory(&dir);
+        }
+    }
 }
 
 #[cfg(test)]

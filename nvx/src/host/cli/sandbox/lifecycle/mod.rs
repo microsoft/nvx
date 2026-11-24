@@ -50,6 +50,8 @@ pub(crate) use self::directory::{create_state_directory, prepare_state_directory
 pub(crate) use self::outcome::{
     copy_openvmm_outcome, validate_outcome_destination, write_exec_outcome,
 };
+#[cfg(windows)]
+pub(crate) use self::start::remove_abandoned_vm_directories;
 pub(crate) use self::start::{exec_workload, run, start};
 pub(crate) use self::stop::{deprovision, stop};
 

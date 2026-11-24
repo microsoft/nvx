@@ -1529,7 +1529,8 @@ streams, so that the guest's console and the terminal settings that OpenVMM
 restores behave as they do for OpenVMM itself, and exits with OpenVMM's
 status; a restore does none of these, as the second item says. On Windows, a
 cold boot's OpenVMM runs in a job object that only `nvx` holds, as that of a
-`sandbox run` does, which ends OpenVMM with `nvx`, whatever ends it.
+`sandbox run` does, which ends OpenVMM with `nvx`, whatever ends it, and the
+next cold boot removes the VM directory that one that was terminated left.
 
 - A cold boot runs the kernel and the initramfs of `--guest`, `alpine` by
   default, with `--memory-mib` or else the guest's default, 128 MiB for Alpine
@@ -1616,7 +1617,9 @@ before them.
   which says that OpenVMM is stuck exiting, if it has not. On Windows, OpenVMM
   runs in a job object that only the run holds, which ends OpenVMM once it
   closes, so that the VM never outlives the run, whatever ends the run, and in
-  the jobs of `nvx` that keep their processes' children.
+  the jobs of `nvx` that keep their processes' children; the next run removes
+  the VM directory that a run that was terminated left, once no process holds
+  its log, which a run holds until it returns and its OpenVMM until it exits.
 - `provision` records the sandbox in its state directory. `start` launches
   OpenVMM detached with the managed lifecycle, passes it a fresh capability
   through its standard input, and waits until the guest answers. `exec` runs a

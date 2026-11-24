@@ -1044,7 +1044,11 @@ nothing. On Windows, OpenVMM runs in a job object that only the run holds and
 that ends OpenVMM once it closes, so the VM ends with the run, whatever ends
 the run, as when a supervisor terminates `nvx.exe`. OpenVMM also stays in the
 jobs of `nvx.exe`, as its other child processes do, unless a job lets them
-leave it silently, so that such a job can end it too.
+leave it silently, so that such a job can end it too. A run that is terminated
+cannot remove its VM directory, `nvx-sandbox-run-` and 32 hexadecimal digits in
+the temporary directory: the next run of the user removes it, once no process
+holds its `openvmm.log` any longer, as no run or OpenVMM that still runs leaves
+it.
 
 CI runs `/sbin/nvx-sandbox-smoke`, with `--arg init`, as below, as the workload
 of `sandbox run` and `sandbox exec`, to verify the security profile of the

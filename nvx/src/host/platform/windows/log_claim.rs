@@ -386,6 +386,24 @@ pub(crate) fn log_claim_held(path: &Path, identity: (u64, u64)) -> io::Result<bo
     }
 }
 
+/// Returns whether no process holds the log at `path` open any longer: whether an open of the
+/// log that shares nothing succeeds, rather than failing with a sharing violation, as it does
+/// while a VMM, which holds its log as its standard output and error until it exits, or the
+/// caller of its launch, if it keeps a handle of the log, still runs. The open follows no link.
+#[cfg(feature = "cli")]
+pub(crate) fn log_released(path: &Path) -> io::Result<bool> {
+    let exclusive = OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path);
+    match exclusive {
+        Ok(_) => Ok(true),
+        Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Returns whether the live process `pid` that started at `start_time`, which serves the control
 /// endpoint of a launch whose log is the file `log`, is that launch's VMM.
 ///

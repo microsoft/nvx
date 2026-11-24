@@ -2409,7 +2409,7 @@ fn exits_within(handle: &std::os::windows::io::OwnedHandle, timeout: Duration) -
 
 #[cfg(windows)]
 #[test]
-fn a_run_whose_cli_is_killed_ends_its_openvmm() {
+fn a_killed_run_ends_its_openvmm_and_the_next_run_removes_its_vm_directory() {
     let root = Root::new();
     let temporary = root.path.join("tmp");
     fs::create_dir(&temporary).unwrap();
@@ -2429,8 +2429,37 @@ fn a_run_whose_cli_is_killed_ends_its_openvmm() {
             harness::kill(u64::from(pid));
         }
     }
+    let abandoned = harness::entries(&temporary);
+    // The next run removes the VM directory that the killed one left, and then its own.
+    let layer = format!(
+        "distro,{},11111111-1111-1111-1111-111111111111",
+        root.path.join("distro.erofs").display()
+    );
+    let scratch = root.path.join("scratch.ext4");
+    let next = root
+        .command(&[
+            "sandbox",
+            "run",
+            "--layer",
+            layer.as_str(),
+            "--scratch",
+            scratch.to_str().unwrap(),
+            "--entrypoint",
+            "/bin/echo",
+        ])
+        .env("TMP", &temporary)
+        .env("TEMP", &temporary)
+        .output()
+        .unwrap();
     assert_eq!(openvmm.len(), 1, "{openvmm:?}");
     assert_eq!(ended, [true], "OpenVMM outlived the run that was killed");
+    assert_eq!(abandoned.len(), 1, "{abandoned:?}");
+    assert!(
+        abandoned[0].starts_with("nvx-sandbox-run-"),
+        "{abandoned:?}"
+    );
+    assert!(next.status.success(), "{}", text(&next.stderr));
+    assert_eq!(harness::entries(&temporary), Vec::<String>::new());
 }
 
 /// A debugger, a thread of the test, of a running process, which holds the process's exit once

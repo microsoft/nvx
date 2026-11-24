@@ -294,3 +294,51 @@ fn a_run_removes_its_vm_directory_with_a_report_s_staging_file() {
         }
     }
 }
+
+/// A run removes the VM directories of runs that ended without removing them, whose logs no
+/// process holds any longer, and leaves every other directory as it is: one whose log a process
+/// holds, as a run that still runs or its OpenVMM does, one without a log, one that holds a file
+/// of another name, one that is not private, and one of another name.
+#[cfg(windows)]
+#[test]
+fn a_run_removes_only_the_vm_directories_that_runs_abandoned() {
+    let directory = tempfile::tempdir().unwrap();
+    let parent = directory.path();
+    let digits = |digit: char| digit.to_string().repeat(32);
+    let private = |name: &str, files: &[&str]| {
+        let path = parent.join(name);
+        vm::create_private_dir(&path).unwrap();
+        for file in files {
+            fs::write(path.join(file), "").unwrap();
+        }
+        path
+    };
+    let log = StateFile::Log.name();
+    let outcome = StateFile::Outcome.name();
+    let abandoned = private(
+        &format!("{RUN_DIRECTORY}{}", digits('a')),
+        &[log, outcome, ".tmpA1b2C3"],
+    );
+    let running = private(&format!("{RUN_DIRECTORY}{}", digits('b')), &[log]);
+    let held = fs::File::open(running.join(log)).unwrap();
+    let starting = private(&format!("{RUN_DIRECTORY}{}", digits('c')), &[]);
+    let foreign = private(&format!("{RUN_DIRECTORY}{}", digits('d')), &[log, "other"]);
+    let shared = parent.join(format!("{RUN_DIRECTORY}{}", digits('e')));
+    fs::create_dir(&shared).unwrap();
+    fs::write(shared.join(log), "").unwrap();
+    let uppercase = private(&format!("{RUN_DIRECTORY}{}", digits('F')), &[log]);
+    let short = private(&format!("{RUN_DIRECTORY}{}", "0".repeat(31)), &[log]);
+    let other = private(&format!("nvx-run-{}", digits('0')), &[log]);
+    remove_abandoned_vm_directories(parent, RUN_DIRECTORY);
+    drop(held);
+    assert!(!abandoned.exists(), "an abandoned directory was kept");
+    for kept in [
+        &running, &starting, &foreign, &shared, &uppercase, &short, &other,
+    ] {
+        assert!(kept.exists(), "{}", kept.display());
+    }
+    for kept in [&running, &foreign, &shared, &uppercase, &short, &other] {
+        assert!(kept.join(log).exists(), "{}", kept.display());
+    }
+    assert!(foreign.join("other").exists());
+}

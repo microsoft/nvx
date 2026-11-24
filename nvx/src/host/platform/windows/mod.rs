@@ -40,7 +40,7 @@ pub(crate) use self::identity::{
 pub(crate) use self::interrupt::{interrupted, watch_interrupts};
 pub(crate) use self::log_claim::create_log_job;
 #[cfg(feature = "cli")]
-pub(crate) use self::log_claim::{claim_log, log_claim_held, serves_launch};
+pub(crate) use self::log_claim::{claim_log, log_claim_held, log_released, serves_launch};
 pub(crate) use self::private::{
     check_snapshot_dir, check_vm_dir, create_vm_dir, make_sparse, private_file_problem,
 };
