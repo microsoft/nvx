@@ -280,15 +280,6 @@ def versioned_file(
     return rewrite_lockfile(data, path, name, declared, version)
 
 
-def git_blob_id(data: bytes, commit: str) -> str:
-    """Return the ID of a Git blob that holds `data`, in the object format
-    of `commit`."""
-    digest = hashlib.new("sha1" if len(commit) == 40 else "sha256")
-    digest.update(b"blob %d\0" % len(data))
-    digest.update(data)
-    return digest.hexdigest()
-
-
 class Repository:
     """The Git checkout that holds the crate."""
 
@@ -655,19 +646,16 @@ def check_package(
         if object_id is None:
             problems.append(f"{path} is not a file of {commit}")
             continue
+        expected = repository.blob(object_id)
         if path in VERSIONED_FILES:
-            original = repository.blob(object_id)
             try:
                 expected = versioned_file(
-                    original_path, original, name, declared, version
+                    original_path, expected, name, declared, version
                 )
             except ScriptError as error:
                 problems.append(str(error))
                 continue
-            matches = data == expected
-        else:
-            matches = git_blob_id(data, commit) == object_id
-        if not matches:
+        if data != expected:
             endings = ", and holds CR line endings" if b"\r" in data else ""
             problems.append(f"{path} differs from {original_path} in {commit}{endings}")
     manifest_data = files.get("Cargo.toml")
