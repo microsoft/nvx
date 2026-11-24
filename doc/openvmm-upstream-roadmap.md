@@ -9,8 +9,9 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126.
-- NVX's pinned OpenVMM revision: `2bb009b01fbe15b2132b615e9ce78e1277d1793d`, position 371, the head
-  of microsoft/openvmm#5262, whose commit follows position 370, `aa145aff9`, the head of
+- NVX's pinned OpenVMM revision: `6ace7336085175ffa758cd3b7e652d090e606938`, position 372, the head
+  of microsoft/openvmm#5263, whose commit follows position 371, `2bb009b01`, the head of
+  microsoft/openvmm#5262, whose commit follows position 370, `aa145aff9`, the head of
   microsoft/openvmm#5261, whose commit follows position 369, `8c1204c68`, the head of
   microsoft/openvmm#5260, whose commit follows position 368, `9805f8984`, the head of
   `feature/microvm/dev` since microsoft/openvmm#5254, microsoft/openvmm#5255, and
@@ -25,8 +26,8 @@
   commits that they fix, so each later commit's position is its v7.2 position less the number of
   those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
   `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
-  tests. The pin is 245 commits past the mapped tip on the same first-parent chain, and positions
-  127-371 are not yet assigned to PRs; see
+  tests. The pin is 246 commits past the mapped tip on the same first-parent chain, and positions
+  127-372 are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1775,7 +1776,8 @@ bf353460f
   -> reserved DFR models of the software APIC decoded by bit 31 [369]
   -> missing-device claims of full-width and empty ranges registered without overflow [370]
   -> microVM directory listings read to their end on Windows hosts [371]
-  -> 2bb009b01 (NVX pin)
+  -> debugger breaks into a paused VM kept out of its saved state [372]
+  -> 6ace73360 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1798,7 +1800,7 @@ reorganization folded the fixups of PR13 and PR18 and of the v7.1 and v7.2 rebas
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges, and its 245 later commits are not
+The NVX pin extends the chain past position 126 without merges, and its 246 later commits are not
 yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
@@ -1807,17 +1809,17 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356-371 followed the v8.0 reorganization, so they combine none, apart
+v7.2 rebase, and positions 356-372 followed the v8.0 reorganization, so they combine none, apart
 from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
 v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which through
 position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
-335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-371 lack.
+335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-372 lack.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-371 have no position before v7.0; see
+positions 297-372 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2077,6 +2079,7 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 369 | `8c1204c68` | - | - | - | - | - | - | - | virt_support_apic: select a reserved DFR model by bit 31 (microsoft/openvmm#5260) |
 | 370 | `aa145aff9` | - | - | - | - | - | - | - | missing_dev: claim a full-width or empty range without overflow (microsoft/openvmm#5261) |
 | 371 | `2bb009b01` | - | - | - | - | - | - | - | virtiofs: read microVM directory listings to the end on Windows (microsoft/openvmm#5262) |
+| 372 | `6ace73360` | - | - | - | - | - | - | - | vmm_core: keep a debugger break into a paused VM out of its saved state (microsoft/openvmm#5263) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2089,7 +2092,7 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-305, `c4419be15`
 for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork base of v7.2 and
 v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356,
 `5d6ab1cfa`, upstream main later that day, for positions 357-368, and `efe0b08df`, upstream main
-later still, for positions 369-371. They name the positions that the commits have now, but neither
+later still, for positions 369-372. They name the positions that the commits have now, but neither
 the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`, the v7.1 rebase on `9a875b563`,
 nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the
 earlier ones on `7d90c4104`.
@@ -5351,6 +5354,32 @@ the defect, since it lacks the microVM's directory listings, and its `READDIR` l
 the guest. Replaying the commit there conflicts in the microVM's `file.rs` and `fs_tests.rs`, which
 upstream main lacks, so it cannot go upstream on its own, although its documentation of
 `LxFile::read_dir` applies there.
+
+Position 372 keeps a debugger's break into a paused VM out of the VM's saved state
+(microsoft/nvx#1374). With the gdb stub attached, a `DebugRequest::Break` that reached a stopped
+partition unit, as when gdb attaches to a VM that runs with `--paused`, halted VPs that were already
+stopped, and the run loop recorded `HaltReason::DebugBreak` as the partition's halt reason, which
+the saved halt state of position 150 carries, so a save taken after the break differed from one
+taken before it although the VM never ran, and its restore started the VM halted on the break. The
+gdb stub attaches with a `Resume` and a `Break` and serves the debugger only once a stop report
+answers them, so a break into a stopped unit without a halt now reports the stop at once, and holds
+the VPs stopped for the debugger, without a halt reason, until the debugger resumes them or
+detaches; starting the unit does not start held VPs, and clearing the halt, as the REPL's
+`clear-halt` and OpenHCL's `resume` do, ends the hold, as it clears a recorded debugger break. A
+break into a running unit halts it and records the halt as before. The debug worker sends no
+`Detach` when GDB disconnects (microsoft/nvx#2094), so a hold, as a recorded debugger break before
+it, lasts until a debugger attaches and resumes the VM, or the halt is cleared. In
+`partition_unit.rs`, it changes upstream's `try_start`, `clear_halt`, and inspection of the power
+state, none of the lines that positions 027, 065, 091, 134, 150, and 246 add, and adds four tests
+to position 150's save and restore tests, after `restore_refuses_a_halted_destination`, which use
+its test runner; in `partition_unit/debug.rs`, it changes upstream's handling of `Break`, `Resume`,
+and `Detach`, not the halt reasons that position 054 maps to stop reasons. It also documents the
+break on `DebugRequest::Break` in `vmm_core_defs` and on the Guide's gdbstub page, which no chain
+commit changes, and it follows position 371, whose commit and those of positions 369 and 370 change
+none of its files. It is not a fixup: the break that halts stopped VPs is upstream's, and position
+150 is not yet assigned to a PR. Upstream main saves no halt state, so its saves do not change, and
+replaying the commit there conflicts in `partition_unit.rs`, whose save and restore tests of
+position 150 it lacks, so it cannot go upstream on its own.
 
 ## PR summary
 
