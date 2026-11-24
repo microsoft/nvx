@@ -537,6 +537,34 @@ class HostInventoryTests(unittest.TestCase):
                 self.assertEqual(selection["unreachable"], ["win"])
                 self.assertNotIn("wsl.exe", [call[0] for call in runner.calls])
 
+    def test_select_falls_back_to_this_linux_workstation_with_device_access(
+        self,
+    ) -> None:
+        for backend, device in (("kvm", "/dev/kvm"), ("mshv", "/dev/mshv")):
+            for allowed, execution, reason in (
+                (True, "local", "natively"),
+                (False, None, f"cannot read and write {device}"),
+            ):
+                with (
+                    self.subTest(backend=backend, allowed=allowed),
+                    patch.object(
+                        nvx_hosts.os, "access", return_value=allowed
+                    ) as access,
+                ):
+                    runner = SelectRunner(reachable=set())
+                    selection = nvx_hosts.select_execution(
+                        [], backend, None, runner, platform="linux"
+                    )
+                    access.assert_called_once_with(device, os.R_OK | os.W_OK)
+                    self.assertEqual(selection["execution"], execution)
+                    self.assertIn(reason, cast(str, selection["reason"]))
+                    self.assertIsNone(selection["host_type"])
+                    self.assertEqual(
+                        selection["checkout"],
+                        str(nvx_hosts.REPOSITORY_ROOT) if allowed else None,
+                    )
+                    self.assertEqual(runner.calls, [])
+
     def test_select_falls_back_to_wsl_for_kvm_on_windows(self) -> None:
         for wsl, execution, checkout in (
             (nvx_hosts.CommandResult(0, "/mnt/c/nvx\n"), "wsl", "/mnt/c/nvx"),

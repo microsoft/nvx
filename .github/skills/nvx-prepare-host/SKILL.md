@@ -73,12 +73,14 @@ of `git worktree list`, whose WSL path `wsl.exe --exec wslpath -a -u PATH`
 prints as `MAIN_WSL`:
 
 ```console
-wsl.exe --exec bash -lc 'git clone -q --shared --no-checkout MAIN_WSL ~/nvx-wsl-REV && cd ~/nvx-wsl-REV && git checkout -q --detach REV && git submodule update -q --init --checkout --reference MAIN_WSL/.git/modules/openvmm openvmm'
+wsl.exe --exec bash -lc 'git clone -q --shared --no-checkout MAIN_WSL ~/nvx-wsl-REV && cd ~/nvx-wsl-REV && git remote set-url origin https://github.com/microsoft/nvx.git && git checkout -q --detach REV && git submodule update -q --init --checkout --reference MAIN_WSL/.git/modules/openvmm openvmm'
 ```
 
 Drop `--reference` when the main checkout has no `.git/modules/openvmm`. The
-clone is `WSL_CHECKOUT`, whose Git commands run in WSL; it registers nothing in
-the Windows repository, and `rm -rf` removes it at the end.
+clone's `origin` would name `MAIN_WSL`, so the command points it at NVX, as
+[step 4](#4-revision)'s `host_worktree.py` requires. The clone is
+`WSL_CHECKOUT`, whose Git commands run in WSL; it registers nothing in the
+Windows repository, and `rm -rf` removes it at the end.
 
 The login shell puts `cargo` on `PATH`. Run every Linux command of the steps
 below, the probe and the Linux builds of `nvx` and OpenVMM included, this way,
