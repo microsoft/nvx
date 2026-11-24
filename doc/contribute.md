@@ -254,7 +254,7 @@ The build-tooling tests are grouped by build step:
 - [Ubuntu image builds](../scripts/test_nvx_ubuntu_build.py).
 - [Azure Linux image builds](../scripts/test_nvx_azurelinux_build.py).
 - [Shared guest files and scratch templates](../scripts/test_nvx_guest_build.py).
-- [Release source collection and Ubuntu source validation](../scripts/test_nvx_source_collection.py).
+- [Release, Alpine, and Ubuntu source collection and validation](../scripts/test_nvx_source_collection.py).
 - [Build CI and Docker wiring](../scripts/test_nvx_build_ci.py).
 
 Run a module independently with, for example,
