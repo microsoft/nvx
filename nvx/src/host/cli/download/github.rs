@@ -17,6 +17,7 @@ use serde_json::Value;
 
 use super::{Asset, Releases, remove_stale, system_program};
 use crate::ErrorCode;
+use crate::host::cli::percent;
 use crate::host::cli::sandbox::path_string;
 use crate::host::cli::{Exit, Result, check_interrupt, failure_detail, io_error};
 
@@ -105,8 +106,8 @@ impl GitHub {
             repository: repository.to_owned(),
             url: format!(
                 "{api}/repos/{}/{}",
-                percent_encoded(owner),
-                percent_encoded(name)
+                percent::encode(owner),
+                percent::encode(name)
             ),
             token,
             scratch: scratch.to_path_buf(),
@@ -242,7 +243,7 @@ impl Releases for GitHub {
 
     fn release(&self, tag: &str) -> std::result::Result<Option<Value>, Failure> {
         self.json(
-            &format!("{}/releases/tags/{}", self.url, percent_encoded(tag)),
+            &format!("{}/releases/tags/{}", self.url, percent::encode(tag)),
             true,
         )
     }
@@ -625,20 +626,6 @@ fn after_segment<'a>(path: &'a str, segment: &str) -> Option<&'a str> {
     } else {
         rest.starts_with('/').then_some(rest)
     }
-}
-
-/// Returns `text` percent-encoded for one segment of a URL path, as `urllib.parse.quote(text,
-/// safe="")` encodes it: every byte but ASCII letters, digits, and `-._~`.
-fn percent_encoded(text: &str) -> String {
-    let mut encoded = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
 }
 
 /// Returns the owner and the name of `repository`, if it is `OWNER/REPOSITORY`.

@@ -20,6 +20,8 @@
 
 use serde::Deserialize;
 
+use super::percent;
+
 /// The identities of the built-in CPU profiles, in the order in which [`guidance`] lists their
 /// generations.
 const CATALOG: &str = include_str!("cpu_generations.json");
@@ -234,12 +236,12 @@ impl HostCpu {
     fn request_url(&self) -> String {
         let mut url = format!(
             "{REQUEST_URL}&title={}&signature={}",
-            encode_query_value(&format!("CPU profile: {}", self.describe())),
-            encode_query_value(&self.signature())
+            percent::encode(&format!("CPU profile: {}", self.describe())),
+            percent::encode(&self.signature())
         );
         if !self.brand.is_empty() {
             url.push_str("&cpu=");
-            url.push_str(&encode_query_value(&self.brand));
+            url.push_str(&percent::encode(&self.brand));
         }
         url
     }
@@ -267,20 +269,6 @@ fn register_text(registers: &[u32]) -> String {
         .trim_end_matches('\0')
         .trim()
         .to_owned()
-}
-
-/// Percent-encodes `value` for a URL query, as OpenVMM's fallback warning does: every byte but
-/// ASCII letters, digits, `-`, `.`, `_`, and `~`.
-fn encode_query_value(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
 }
 
 /// Returns what to print after OpenVMM failed a cold boot with `--cpu-profile cpu_profile`, or
