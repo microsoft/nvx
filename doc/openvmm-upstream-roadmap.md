@@ -10,8 +10,9 @@
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR20 fixups at positions 375 and
   376, and the PR25 fixup at position 377.
-- NVX's pinned OpenVMM revision: `043083f4059c7dfda9d021a8cf983ac65017c91e`, position 385, the head
-  of microsoft/openvmm#5279, whose commit follows position 384, `44747bf1c`, the head of
+- NVX's pinned OpenVMM revision: `1633b3797af878bc9a7c42e4b9c57a2925799d5d`, position 388, the head
+  of microsoft/openvmm#5280, whose commits follow position 385, `043083f40`, the head of
+  microsoft/openvmm#5279, whose commit follows position 384, `44747bf1c`, the head of
   microsoft/openvmm#5278, whose commit follows position 383, `fa239c823`, the head of
   `feature/microvm/dev` since microsoft/openvmm#5277 landed it on position 382, `acfaa5199`, where
   microsoft/openvmm#5275 and microsoft/openvmm#5276 had landed positions 381 and 382 on position
@@ -32,8 +33,8 @@
   commits that they fix, so each later commit's position is its v7.2 position less the number of
   those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
   `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
-  tests. The pin is 259 commits past the mapped tip on the same first-parent chain. Positions
-  127-374 and 378-385 are not yet assigned to PRs, positions 375 and 376 are PR20 fixups, and
+  tests. The pin is 262 commits past the mapped tip on the same first-parent chain. Positions
+  127-374 and 378-388 are not yet assigned to PRs, positions 375 and 376 are PR20 fixups, and
   position 377 is a PR25 fixup; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1796,7 +1797,8 @@ bf353460f
   -> WHP user-mode APIC activity written without the internal activity state [383]
   -> failed io-uring set-ups reported with their error rather than as no support [384]
   -> microVM listing bounds that count only the entries that the policy shows [385]
-  -> 043083f40 (NVX pin)
+  -> gdb stub sessions that detach the debugger from the VM however they end [386-388]
+  -> 1633b3797 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1831,7 +1833,7 @@ corrects.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 259 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 262 later commits, positions
 375 and 376 are PR20 fixups, position 377 is a PR25 fixup, and the others are not yet classified or
 assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
@@ -1841,17 +1843,17 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356-385 followed the v8.0 reorganization, so they combine none, apart
+v7.2 rebase, and positions 356-388 followed the v8.0 reorganization, so they combine none, apart
 from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
 v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which through
 position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
-335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-385 lack.
+335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-388 lack.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-385 have no position before v7.0; see
+positions 297-388 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2125,6 +2127,9 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 383 | `fa239c823` | - | - | - | - | - | - | - | virt_whp: write no internal activity state with the user-mode APIC (microsoft/openvmm#5277) |
 | 384 | `44747bf1c` | - | - | - | - | - | - | - | pal_async: report why a driver cannot set up its io-uring (microsoft/openvmm#5278) |
 | 385 | `043083f40` | - | - | - | - | - | - | - | virtiofs: count only shown entries toward a microVM listing's bound (microsoft/openvmm#5279) |
+| 386 | `f06060dfe` | - | - | - | - | - | - | - | vmm_core: forget a debugger's halt reports when it detaches (microsoft/openvmm#5280) |
+| 387 | `320e09cf5` | - | - | - | - | - | - | - | vmm_core: clear VP debug state on detach only if the debugger set it (microsoft/openvmm#5280) |
+| 388 | `1633b3797` | - | - | - | - | - | - | - | debug_worker: detach the debugger when its session ends (microsoft/openvmm#5280) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2138,7 +2143,7 @@ for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork
 v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356,
 `5d6ab1cfa`, upstream main later that day, for positions 357-368, `efe0b08df`, upstream main later
 still, for positions 369-375, and `8d4e03132`, upstream main on 2026-11-24, for positions
-376-385. They name the positions that the commits have now, but neither
+376-388. They name the positions that the commits have now, but neither
 the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`, the v7.1 rebase on `9a875b563`,
 nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the
 earlier ones on `7d90c4104`.
@@ -5783,6 +5788,46 @@ and 335, so it is not a PR18 fixup, and it follows position 384; none of positio
 its files. Upstream main, `8d4e03132`, lacks the defect, since it lacks the microVM's directory
 listings, and replaying the commit there conflicts in the microVM's `file.rs` and `fs_tests.rs`,
 which upstream main lacks, so it cannot go upstream on its own.
+
+Positions 386-388 have the gdb stub detach the debugger from the VM when its session ends
+(microsoft/nvx#2094). Upstream's debug worker sent `DebugRequest::Attach` as a session started, but
+its `run_state_machine` returned without a `DebugRequest::Detach` however the session ended: by
+GDB's `D` or `k` packet or a target exit, by an error, such as the one with which a dropped
+connection ends it, or by the worker dropping the session as it stops or restarts. The partition
+unit thus went on treating a gone debugger as attached: the session's hardware breakpoints and
+single-stepping stayed set on the VPs, the halts that followed, a power-off, reset, or triple fault
+included, went to the debugger's stop channel instead of the client, and position 372's hold of a
+paused VM lasted until a new session or a `clear-halt`. Upstream's handling of `Detach`, which
+therefore never ran, had defects that sending it would expose, which positions 386 and 387 fix
+first. Position 386 has a detach clear `halt_reported`, which the next session's first resume took
+for the debugger continuing from a halt recorded after the detach, such as a power-off, and so ran
+the VM again, and report the recorded halt to the client only when the halt went to the debugger
+instead, as `record_halt` now records through `DebuggerState::route_halt`, rather than a second time
+when the client heard of it before the debugger attached. Position 387 has a detach clear the VPs'
+debug state only when the debugger set it, since the ARM64 backends of KVM and OpenHCL panic on any
+request to set it, which aborts the VMM. Position 388 has `run_state_machine` attach through a
+`Session` guard of the debug worker's VM proxy, which sends `Detach` when it is dropped, however the
+session ends, and forgets the session's hardware breakpoints, which the next session's first resume
+set again; it documents the detach on `DebugRequest::Detach`, after position 386's documentation,
+and in a paragraph of its own on the Guide's gdbstub page, in another section than position 372's,
+and adds four tests of the debug worker, which run the stub on a TCP connection. In
+`partition_unit.rs`, position 386 changes the line of position 150's `record_halt` that reports a
+halt to the debugger, and positions 386 and 387 add three tests to position 372's debugger tests,
+after `hold_ends_when_the_debugger_detaches_or_the_halt_is_cleared`, which use position 150's test
+runner, `halt`, and `test_topology`; positions 027, 065, 091, 134, and 246 change none of those
+lines. In `partition_unit/debug.rs`, they change upstream's handling of `Detach` and
+`SetDebugState`, beside the hold that position 372 adds, and upstream's `report_halt_to_debugger`,
+not the halt reasons that position 054 maps to stop reasons. No chain commit changes the debug
+worker, and none of the 43 that change `Cargo.lock` changes the entry of `debug_worker`, to which
+position 388 adds `test_with_tracing`. They are not fixups: the missing detach and the defects of
+its handling are upstream's, and positions 150 and 372, whose lines they change or extend, are not
+assigned to PRs. They follow position 385; none of positions 373-385 changes their files, apart from
+other packages' entries of `Cargo.lock`. Replaying them on upstream main, `8d4e03132`, conflicts in
+`partition_unit.rs`, which lacks position 150's `record_halt` and tests and position 372's debugger
+tests, in `partition_unit/debug.rs`, which lacks position 372's hold, and in `debug_rpc.rs`, which
+lacks position 372's documentation of `Break`; position 388's changes of the debug worker and the
+Guide apply there, but its documentation of `Detach` extends position 386's, so they cannot go
+upstream on their own.
 
 ## PR summary
 
