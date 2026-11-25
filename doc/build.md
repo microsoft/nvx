@@ -639,7 +639,8 @@ and their target's runtime: musl and LLVM's `libunwind` on Linux, and the
 Microsoft C runtime on Windows.
 [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) lists each of these with
 its license, and the crates at the versions that the lockfile pins. Unit tests
-in `scripts/test_nvx_tools.py` fail when the lockfile gains a crate that they
+in [test_nvx_build_constants.py](../scripts/test_nvx_build_constants.py)
+fail when the lockfile gains a crate that they
 do not classify as linked into `bin/nvx` or not, or when the notices lack a
 linked crate at its pinned version or a runtime that the binaries link. Release
 packages ship the notices, and

@@ -273,6 +273,18 @@ Each module retains the `BenchmarkTests` class name so that references inside
 the relocated tests stay unchanged. [Cleanup-after-kill tests](../scripts/test_nvx_cleanup.py)
 cover process teardown and preservation of errors when cleanup fails.
 
+The remaining tooling tests are grouped by responsibility:
+
+- [Running OpenVMM tests](../scripts/test_nvx_ci.py).
+- [Guest artifact reuse](../scripts/test_nvx_guest_artifact_reuse.py).
+- [Merge queue cancellation](../scripts/test_nvx_merge_queue.py).
+- [Checking OpenVMM's upstream CI](../scripts/test_nvx_openvmm_ci.py).
+- [Performance result persistence](../scripts/test_nvx_performance_persistence.py).
+- [Build constants, source inputs, and licensing](../scripts/test_nvx_build_constants.py).
+
+Workflow and action configuration tests remain in
+[test_nvx_tools.py](../scripts/test_nvx_tools.py).
+
 ## Test layout
 
 Tests live apart from the code that they test, so that a change to one never

@@ -8,9 +8,10 @@ import os
 import shutil
 import struct
 from collections.abc import Generator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest.mock import patch
 
+import yaml
 from nvx_tools import azurelinux, build, common, nvx_cli, ubuntu
 from nvx_tools.build_constants import (
     AlpineBuildConstants,
@@ -453,3 +454,29 @@ def expression_conjuncts(expression: str) -> list[str]:
             start = index + 2
     conjuncts.append(expression[start:].strip())
     return conjuncts
+
+
+# The components of each guest artifact job in ci.yml.
+REUSE_JOBS = (("kernel", "alpine"), ("ubuntu", "azurelinux"))
+
+
+def guest_uploads() -> dict[str, tuple[str, set[str]]]:
+    """Return the job that uploads each guest-* artifact of ci.yml, and the
+    names of the files in it, by artifact name."""
+    workflow = yaml.safe_load(
+        (BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    uploads: dict[str, tuple[str, set[str]]] = {}
+    for job_name, job in workflow["jobs"].items():
+        for step in job.get("steps", []):
+            arguments = step.get("with", {})
+            if str(step.get("uses", "")).startswith("actions/upload-artifact@") and str(
+                arguments.get("name", "")
+            ).startswith("guest-"):
+                uploads[arguments["name"]] = (
+                    job_name,
+                    {PurePosixPath(path).name for path in arguments["path"].split()},
+                )
+    return uploads
