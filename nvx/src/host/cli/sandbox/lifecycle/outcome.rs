@@ -79,9 +79,16 @@ pub(crate) fn copy_openvmm_outcome(source: &Path, path: &str) -> Result {
     })
 }
 
+/// The name that an outcome report's staging file extends, to `.outcome-report.UUID.tmp`, in
+/// place of the report's own name, which may be as long as its file system accepts and so leave
+/// no room for the staging file's affixes.
+const STAGING_NAME: &str = "outcome-report";
+
+/// Writes a new file at `path` with `write`: in a staging file of its directory, synced, then
+/// linked to its name, which must not exist.
 fn write_new_file(path: &str, write: impl FnOnce(&mut File) -> io::Result<()>) -> Result {
     let resolved = outcome_destination(path)?;
-    let temporary = temporary_path(&resolved)?;
+    let temporary = temporary_path(&resolved.with_file_name(STAGING_NAME))?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
