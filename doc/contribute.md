@@ -270,8 +270,8 @@ The benchmark-tooling tests are grouped by responsibility:
 - [Results, reporting, and suite orchestration](../scripts/test_nvx_benchmark_results.py).
 
 Each module retains the `BenchmarkTests` class name so that references inside
-the relocated tests stay unchanged. Cleanup-after-kill tests remain in
-`test_nvx_tools.py`.
+the relocated tests stay unchanged. [Cleanup-after-kill tests](../scripts/test_nvx_cleanup.py)
+cover process teardown and preservation of errors when cleanup fails.
 
 ## Test layout
 

@@ -576,5 +576,19 @@ class BenchmarkTests(unittest.TestCase):
         )
 
 
+class PositiveFloatTests(unittest.TestCase):
+    def test_accepts_positive_finite_float(self):
+        self.assertEqual(benchmark.positive_float("1.5"), 1.5)
+
+    def test_rejects_nonpositive_and_nonfinite_values(self):
+        for value in ("0", "-1", "nan", "inf"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    argparse.ArgumentTypeError,
+                    "^must be finite and greater than 0$",
+                ):
+                    benchmark.positive_float(value)
+
+
 if __name__ == "__main__":
     unittest.main()
