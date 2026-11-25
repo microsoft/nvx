@@ -1074,9 +1074,13 @@ about as long as the guest and sandbox jobs beside them, which took 3.7 to
 4.1, 2.9 to 4.1, and 5.2 to 6.4 minutes in the runs since
 [#695](https://github.com/microsoft/nvx/issues/695) split them off. A third
 shard would take about 3.2, 3.0, and 4.0 minutes. On WHP it would end before
-the guest and sandbox job, so it would not shorten the backend's tests, and on
-KVM and MSHV, whose four general runners the two shards, the guest and sandbox
-job, and the debug-kernel job fill, it would mostly wait for a runner.
+the guest and sandbox job, so it would not shorten the backend's tests. KVM and
+MSHV each have seven general runners, so three shards, the guest and sandbox
+job, and the debug-kernel job, five jobs, fit in one run at once. With the four
+general runners that those pools had before, the two shards and those two jobs
+filled them, and a third shard would mostly have waited for a runner. Now
+it waits only when other runs hold the pool's general runners, so it is worth
+adding where the shards, rather than the guest and sandbox job, end last.
 
 A sharded run fails before it runs a scenario unless the file puts every
 default scenario in exactly one shard of every backend, with its duration,
