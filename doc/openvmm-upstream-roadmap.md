@@ -3324,7 +3324,7 @@ injects one at once and the other once the guest's handler for the first returns
 and one otherwise, from Linux 6.4 on; by the sources of Linux 5.16, 6.1, and 6.3, an earlier kernel
 reports only whether an NMI is pending. `Activity` held that Boolean alone and `set_activity` wrote
 one pending NMI, so a restored guest took one NMI where the captured guest would have taken two,
-which a guest-free test on nvx-kvm-test (Linux 6.18.57) observed as two pending NMIs at the source
+which a guest-free test on azure-intel-kvm-7 (Linux 6.18.57) observed as two pending NMIs at the source
 and one at the destination. `Activity` gains `nmi_pending_count`, an optional field under mesh
 number 7 that is `Some(2)` for two pending NMIs and `None` for every other state, so a state with at
 most one pending NMI encodes as it always did and no version changes: a saved state of an earlier

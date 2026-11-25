@@ -1,6 +1,6 @@
 {
   "platform": "linux-mshv-virtual-machine",
-  "runner_name": "azure-mshv-4",
+  "runner_name": "azure-intel-mshv-4",
   "machine_name": "esaurez-nvx-ci-linux-vmss000005",
   "cpu": {
     "vendor": "GenuineIntel",
