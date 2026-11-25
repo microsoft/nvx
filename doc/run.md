@@ -1042,7 +1042,13 @@ so until the host restarted
 nvx-init is ready, as when the guest
 refuses the workload identity, fails the run as it fails a `start`, with the
 category and status of the outcome report that OpenVMM published, such as
-`guest-exit status 125`. `--outcome-report` forwards that report, of the VM's
+`guest-exit status 125`. When OpenVMM failed on its own, as when its VM worker
+cannot set up the io-uring of a disk, the error ends with the end of OpenVMM's
+log, which the run removes with its VM directory, from OpenVMM's fatal error,
+such as `vmm-failure status 1; OpenVMM's log ends with: fatal error: failed to
+launch vm worker\n\nCaused by:\n ...\n    4: failed to set up io-uring\n    5:
+Cannot allocate memory (os error 12)`. `--outcome-report` forwards that report,
+of the VM's
 stop, with the permissions that OpenVMM gave it. Ctrl-C ends the VM, and the
 run then exits with status 130. `--dry-run` prints the command and launches
 nothing. On Windows, OpenVMM runs in a job object that only the run holds and
@@ -1865,8 +1871,16 @@ as `guest-exit status 125`. It terminates OpenVMM only if OpenVMM outlives that
 wait. An OpenVMM that exits before it serves the control endpoint, as one that
 refuses its configuration does, ends the start at once rather than after
 `--timeout`: the start fails with the report's category and status if OpenVMM
-published one, and otherwise with OpenVMM's exit status, as in
-`OpenVMM exited during startup with status 2`.
+published one, and otherwise says that it published none, as in
+`OpenVMM exited during startup without an outcome report`. Unless the report
+says that the guest ended the VM, with `guest-exit` or `success`, OpenVMM failed
+on its own, as when its VM worker cannot set up the io-uring of a disk, and the
+error ends with the end of OpenVMM's log, which says why: at most 12 of the
+lines that begin in its last 4 KiB, from its last line that begins with
+`fatal error: `, or else its last lines, as in `OpenVMM exited during startup:
+vmm-failure status 1; OpenVMM's log ends with: fatal error: failed to launch vm
+worker\n\nCaused by:\n ...`, with its line breaks and other control characters
+escaped, so that the error stays one line.
 OpenVMM writes the report to a file of its own in the state directory,
 `.tmp` and six ASCII letters or digits, before it publishes it: NVX removes
 such a file, which an OpenVMM that is terminated while it writes the report

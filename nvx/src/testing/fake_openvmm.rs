@@ -59,6 +59,8 @@
 //! working directory as `PWD`, replacing entries with these names.
 //!
 //! Kernel command-line tokens adjust the emulation: `fake_exit_on_start=CODE` fails the launch,
+//! `fake_vmm_failure=1` fails it as OpenVMM does once its VM worker cannot set up the io-uring of
+//! a disk, with a `vmm-failure` report, status 1, and OpenVMM's fatal error at the end of its log,
 //! `fake_boot_delay_ms=MS` delays the control endpoint, `fake_crash_after_ms=MS` makes the VM
 //! die, `fake_ignore_stop=1` ignores stop requests, `fake_drop_stop=1` closes the control
 //! connection on a stop request without acknowledging it, and then exits as after an
@@ -226,6 +228,21 @@ const DEFAULT_WORKLOAD_UID: u32 = 65534;
 
 /// The guest directory at which the host mounts the aggregate export.
 const GUEST_EXPORT: &str = "/run/nvx/hostfs/root";
+
+/// What OpenVMM writes to its log once its VM worker cannot set up the io-uring of a disk, as
+/// when `io_uring_setup` fails with `ENOMEM`: a line of its trace, then its fatal error.
+const IO_URING_SETUP_FAILURE: &str = "   0.005104861s  INFO worker_new{ name=\"VmWorker\" \
+                                      action=\"new\"}: time ABI rates declared
+fatal error: failed to launch vm worker
+
+Caused by:
+    0: failed to launch worker
+    1: failed to resolve resource of type virtio:virtio-blk
+    2: failed to resolve resource of type disk_handle:block
+    3: failed to create new device
+    4: failed to set up io-uring
+    5: Cannot allocate memory (os error 12)
+";
 
 /// Bytes in a MiB.
 const MIB: u64 = 1024 * 1024;
@@ -408,6 +425,9 @@ struct Options {
     sessions_log: PathBuf,
     /// Status with which to stop immediately after launch, when requested.
     exit_on_start: Option<u8>,
+    /// Whether the launch fails as OpenVMM's does once its VM worker cannot set up the io-uring
+    /// of a disk.
+    vmm_failure: bool,
     /// Status published after closing a waiting attachment, when requested.
     exit_during_attach: Option<u8>,
     /// Status with which a one-shot workload ends instead of its own, when requested.
@@ -541,6 +561,11 @@ pub fn main() -> ExitCode {
     if let Some(code) = options.exit_on_start {
         eprintln!("{program}: failing the launch as requested");
         return ExitCode::from(code);
+    }
+    if options.vmm_failure {
+        write_report(&options, options.managed_operation(), "vmm-failure", 1);
+        eprint!("{IO_URING_SETUP_FAILURE}");
+        return ExitCode::from(1);
     }
     thread::sleep(options.block_delay);
     // OpenVMM opens its disks as it builds the VM, and holds them until it exits.
@@ -1900,6 +1925,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         report,
         hypervisor: hypervisor.to_owned(),
         exit_on_start: knob("fake_exit_on_start").and_then(|value| value.parse().ok()),
+        vmm_failure: knob("fake_vmm_failure") == Some("1"),
         exit_during_attach: knob("fake_exit_during_attach").and_then(|value| value.parse().ok()),
         exit_status: knob("fake_exit_status").and_then(|value| value.parse().ok()),
         boot_delay: millis("fake_boot_delay_ms").unwrap_or_default(),

@@ -464,6 +464,41 @@ fn a_run_whose_guest_exits_during_startup_fails_as_a_start_does() {
     );
 }
 
+/// A run whose OpenVMM fails on its own during startup, as one whose VM worker cannot set up the
+/// io-uring of a disk does, fails with the end of OpenVMM's log, from its fatal error, which says
+/// why, since the run removes the log with its VM directory.
+#[test]
+fn a_run_whose_openvmm_fails_during_startup_quotes_the_end_of_its_log() {
+    let root = Root::new();
+    let before = root.snapshot();
+    let outcome = root.nvx(&sandbox_run(&[
+        "--entrypoint",
+        "/bin/pwd",
+        "--cmdline",
+        "fake_vmm_failure=1",
+        "--outcome-report",
+        "{root/reports/run.json}",
+    ]));
+    assert_launched(&root, &before, &outcome, 1, "");
+    assert_eq!(
+        outcome.stderr(),
+        format!(
+            "error[exited]: OpenVMM exited during startup: vmm-failure status 1; OpenVMM's log \
+             ends with: fatal error: failed to launch vm worker\\n\\nCaused by:\\n    0: failed \
+             to launch worker\\n    1: failed to resolve resource of type virtio:virtio-blk\\n    \
+             2: failed to resolve resource of type disk_handle:block\\n    3: failed to create \
+             new device\\n    4: failed to set up io-uring\\n    5: Cannot allocate memory (os \
+             error 12){LINE_END}"
+        )
+    );
+    assert_outcome_report(
+        &root.json("reports/run.json"),
+        HYPERVISOR,
+        ("run", "vmm-failure", 1),
+        NO_NETWORK,
+    );
+}
+
 /// A run streams its workload's standard input, which the command's ends, and its output.
 #[test]
 fn a_run_streams_its_standard_input_and_output() {

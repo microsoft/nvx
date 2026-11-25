@@ -2022,7 +2022,7 @@ has.
 | --- | --- | --- |
 | `unavailable` | `Unavailable` | A dependency is missing or unusable, other than as a finer code says: install metadata, the hypervisor, a release, a distro layer or scratch image that the request names, or a host that NVX does not support |
 | `unsupported` | `Unsupported` | NVX refuses the request: options that it cannot combine, a value that it does not accept, or a policy that it cannot represent or enforce. The message names the option or field |
-| `exited` | `Exited` | OpenVMM exited, as when a start fails, whose message names the category and status of OpenVMM's outcome report when it has one |
+| `exited` | `Exited` | OpenVMM exited, as when a start fails, whose message names the category and status of OpenVMM's outcome report when it has one, and, for an OpenVMM that failed on its own, ends with the end of OpenVMM's log |
 | `still-running` | `StillRunning` | The exit of a VM's process could not be confirmed, as by a stop or after a start whose launch failed, so the VM may still run; the message says that a process that the stop's termination reached is stuck exiting |
 | `io` | `Io` | A host I/O operation failed, or state that NVX recorded on the host is unreadable or malformed |
 | `not-found` | `NotFound` | Other state that the operation names does not exist on the host |
