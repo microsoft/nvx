@@ -10,8 +10,9 @@
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR20 fixups at positions 375 and
   376, the PR25 fixup at position 377, and the PR18 fixups at positions 389 and 393.
-- NVX's pinned OpenVMM revision: `5af753b17035f548039cab531027a3cc635ac4fa`, position 393, the head
-  of microsoft/openvmm#5285, whose commit follows position 392, `e61fa5326`, the head of
+- NVX's pinned OpenVMM revision: `9822f732ae72c1e0dce91590842c0c395624a745`, position 394, the head
+  of microsoft/openvmm#5286, whose commit follows position 393, `5af753b17`, the head of
+  microsoft/openvmm#5285, whose commit follows position 392, `e61fa5326`, the head of
   microsoft/openvmm#5284, whose commit follows position 391, `c7f6a04fd`, the head of
   microsoft/openvmm#5283, whose commit follows position 390, `770bc61e7`, the head of
   microsoft/openvmm#5282, whose commit follows position 389, `350018ce4`, the head of
@@ -38,8 +39,8 @@
   commits that they fix, so each later commit's position is its v7.2 position less the number of
   those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
   `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
-  tests. The pin is 267 commits past the mapped tip on the same first-parent chain. Positions
-  127-374, 378-388, and 390-392 are not yet assigned to PRs, positions 375 and 376 are PR20
+  tests. The pin is 268 commits past the mapped tip on the same first-parent chain. Positions
+  127-374, 378-388, 390-392, and 394 are not yet assigned to PRs, positions 375 and 376 are PR20
   fixups, position 377 is a PR25 fixup, and positions 389 and 393 are PR18 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
@@ -1809,7 +1810,8 @@ bf353460f
   -> Windows virtio-fs xattr names longer than an NTFS EA name holds refused [391]
   -> Windows symbolic links to an empty target refused with ENOENT [392]
   -> PR18 fixup [393]
-  -> 5af753b17 (NVX pin)
+  -> Windows hard links to names of one UTF-16 unit [394]
+  -> 9822f732a (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1849,7 +1851,7 @@ its test into position 335, whose `get_file` takes a handle's node, before posit
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 267 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 268 later commits, positions
 375 and 376 are PR20 fixups, position 377 is a PR25 fixup, positions 389 and 393 are PR18 fixups,
 and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
@@ -1859,17 +1861,17 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356-393 followed the v8.0 reorganization, so they combine none, apart
+v7.2 rebase, and positions 356-394 followed the v8.0 reorganization, so they combine none, apart
 from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
 v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which through
 position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
-335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-393 lack.
+335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-394 lack.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-393 have no position before v7.0; see
+positions 297-394 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2151,6 +2153,7 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 391 | `c7f6a04fd` | - | - | - | - | - | - | - | lxutil: reject xattr names longer than an NTFS EA name allows (microsoft/openvmm#5283) |
 | 392 | `e61fa5326` | - | - | - | - | - | - | - | lxutil: fail an empty symlink target with ENOENT on Windows (microsoft/openvmm#5284) |
 | 393 | `5af753b17` | - | - | - | - | - | - | - | virtiofs: reopen a microVM handle with O_DIRECT on restore (microsoft/openvmm#5285); fold into 083, its test into 335 |
+| 394 | `9822f732a` | - | - | - | - | - | - | - | lxutil: hard-link to one-character names on Windows (microsoft/openvmm#5286) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2164,7 +2167,7 @@ for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork
 v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356,
 `5d6ab1cfa`, upstream main later that day, for positions 357-368, `efe0b08df`, upstream main later
 still, for positions 369-375, and `8d4e03132`, upstream main on 2026-11-24, for positions
-376-393. They name the positions that the commits have now, but neither
+376-394. They name the positions that the commits have now, but neither
 the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`, the v7.1 rebase on `9a875b563`,
 nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the
 earlier ones on `7d90c4104`.
@@ -6000,6 +6003,29 @@ that it imports, and position 390 also removes position 083's check of the acces
 lacks the defect, since it lacks the microVM's saved state, and replaying the commit there conflicts
 in the microVM's `state.rs`, `fs_tests.rs`, and `policy_tests.rs`, which upstream main lacks, so it
 cannot go upstream on its own.
+
+Position 394 has lxutil's Windows volume create a hard link whose name is one UTF-16 unit long, such
+as `x`, which failed with `EOVERFLOW` (microsoft/nvx#2136). Upstream's `create_link`, through which
+`LxVolume::link` and `LxVolume::link_stat` link on Windows, last changed by `9ae5d6821`
+(microsoft/openvmm#2269), passed `NtSetInformationFile` a `FILE_LINK_INFORMATION` built from a local
+header that mirrors the structure up to `FileName`, 20 bytes with an alignment of 1, followed by the
+name and nothing more. Windows refuses a buffer shorter than the structure, 24 bytes on 64-bit
+Windows, with `STATUS_INFO_LENGTH_MISMATCH`, which lxutil maps to `EOVERFLOW`, so the 22-byte buffer
+of a one-unit name failed, while longer names reached 24 bytes. A guest's `ln file x` on a virtio-fs
+share of a Windows directory thus failed, as would a link on a virtio-9p share, which links through
+the same `LxVolume::link`. `create_link` now pads the name with NULs that `FileNameLength` leaves
+out until the buffer is as long as the structure, as upstream's `hard_link_relative` in `pal`
+already sizes its own. In lxutil's Windows `util.rs`, which positions 344, 351, and 392 also change,
+it changes upstream's `create_link`, which no chain commit changes. In lxutil's `lib.rs`, which
+PR27's position 125 and positions 158, 344, 351, 371, 391, and 392 also change, it adds a test after
+upstream's `link` test, which no chain commit changes either. It fixes a defect that upstream has
+rather than one of a chain commit, so it is no fixup, and it follows position 393; of positions
+372-393, only 391 and 392 change its files, position 391 the documentation and tests of the xattr
+methods in lxutil's `lib.rs`, and position 392 a test after upstream's `symlink` test there and
+upstream's `create_nt_link_reparse_buffer` in `util.rs`. Upstream main, `8d4e03132`, has the defect:
+there, the commit's test fails without its fix with `EOVERFLOW` on Windows. The commit applies there
+as it is, and on the merged tree `cargo check --all-targets -p lxutil` and lxutil's link tests pass
+on Windows, so it can go upstream on its own.
 
 ## PR summary
 
