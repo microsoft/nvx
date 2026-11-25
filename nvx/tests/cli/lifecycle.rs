@@ -1223,6 +1223,49 @@ fn managed_execs_stream_their_standard_input_and_output() {
         .assert_silent_success();
 }
 
+/// On Windows, `NAME:STREAM` names a stream of the file `NAME`, to which no report can be linked,
+/// so `exec` refuses it before its workload runs, which would have printed `ran`.
+#[cfg(windows)]
+#[test]
+fn managed_execs_refuse_a_colon_in_a_report_name_before_the_workload_runs() {
+    let root = Root::new();
+    root.nvx(&provision("{root/state}", &[]))
+        .assert_silent_success();
+    root.nvx(&sandbox::<&str>("start", "{root/state}", &[]))
+        .assert_silent_success();
+    root.write("reports/keep.txt", "keep\n");
+    let report = "{root/reports/exec-06:30.json}";
+    let outcome = root.nvx(&sandbox(
+        "exec",
+        "{root/state}",
+        &[
+            "--entrypoint",
+            "/bin/sh",
+            "--arg=-c",
+            "--arg",
+            "echo ran; exit 3",
+            "--outcome-report",
+            report,
+        ],
+    ));
+    outcome.assert_error(
+        "unsupported",
+        &[
+            "outcome report file name holds a colon",
+            &root.expand(report),
+        ],
+    );
+    let names: Vec<String> = std::fs::read_dir(root.below("reports"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, ["keep.txt"]);
+    root.nvx(&sandbox::<&str>("stop", "{root/state}", &[]))
+        .assert_silent_success();
+    root.nvx(&sandbox::<&str>("deprovision", "{root/state}", &[]))
+        .assert_silent_success();
+}
+
 /// Runs the lifecycle operation `operation` of the sandbox in `{root/STATE}` with `options`, and
 /// returns how it ended.
 fn operate(root: &Root, operation: &str, state: &str, options: &[&str]) -> Outcome {

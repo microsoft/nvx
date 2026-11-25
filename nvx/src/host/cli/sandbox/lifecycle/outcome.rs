@@ -17,7 +17,9 @@ use crate::host::cli::{Exit, Result};
 use crate::host::paths;
 
 /// Returns the destination of an outcome report, as `_outcome_destination` does: in a plain
-/// directory, with a file name, and new.
+/// directory, with a file name, and new. On Windows, the file name holds no colon, with which
+/// NTFS names a stream of another file rather than a new file, and to which no report can be
+/// linked.
 fn outcome_destination(path: &str) -> Result<PathBuf> {
     let candidate =
         paths::normalized(&paths::absolute(Path::new(path)).map_err(Exit::from_os_error)?);
@@ -37,6 +39,16 @@ fn outcome_destination(path: &str) -> Result<PathBuf> {
             "outcome report path has no filename",
         ));
     };
+    if cfg!(windows) && name.to_string_lossy().contains(':') {
+        return Err(Exit::error(
+            ErrorCode::Unsupported,
+            format!(
+                "outcome report file name holds a colon, which names a stream of another file \
+                 on Windows rather than a new file: {}",
+                candidate.display()
+            ),
+        ));
+    }
     let resolved = paths::resolve(parent)
         .map_err(Exit::from_os_error)?
         .join(name);
