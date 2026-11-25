@@ -10,15 +10,16 @@
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR20 fixups at positions 375 and
   376, the PR25 fixup at position 377, and the PR18 fixups at positions 389, 393, and 396.
-- NVX's pinned OpenVMM revision: `1495ac815748e39afbf980adb45f7f32f91b3be5`, position 396, the head
-  of microsoft/openvmm#5288, whose commit follows position 395, `4aeb405d9`, the head of
+- NVX's pinned OpenVMM revision: `a79b4bb40da0662a873798a094209cc9be59eb32`, position 397, the head
+  of microsoft/openvmm#5289, whose commit follows position 396, `1495ac815`, the head of
+  microsoft/openvmm#5288, whose commit follows position 395, `4aeb405d9`, the head of
   microsoft/openvmm#5287, whose commit follows position 394, `9822f732a`, the head of
   microsoft/openvmm#5286, whose commit follows position 393, `5af753b17`, the head of
   microsoft/openvmm#5285, whose commit follows position 392, `e61fa5326`, the head of
   microsoft/openvmm#5284, whose commit follows position 391, `c7f6a04fd`, the head of
   microsoft/openvmm#5283, whose commit follows position 390, `770bc61e7`, the head of
-  microsoft/openvmm#5282, whose commit follows position 389, `350018ce4`, the head of
-  `feature/microvm/dev` since microsoft/openvmm#5281 landed position 389 on position 388,
+  `feature/microvm/dev` since microsoft/openvmm#5282 landed position 390 on position 389,
+  `350018ce4`, where microsoft/openvmm#5281 had landed position 389 on position 388,
   `1633b3797`, where microsoft/openvmm#5280 had landed positions 386-388 on position 385,
   `043083f40`, where microsoft/openvmm#5279 had landed position 385 on position 384, `44747bf1c`,
   where microsoft/openvmm#5278 had landed position 384 on position 383, `fa239c823`, where
@@ -41,10 +42,10 @@
   commits that they fix, so each later commit's position is its v7.2 position less the number of
   those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
   `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
-  tests. The pin is 270 commits past the mapped tip on the same first-parent chain. Positions
-  127-374, 378-388, 390-392, 394, and 395 are not yet assigned to PRs, positions 375 and 376 are
-  PR20 fixups, position 377 is a PR25 fixup, and positions 389, 393, and 396 are PR18 fixups; see
-  [Commits after the mapped tip](#commits-after-the-mapped-tip).
+  tests. The pin is 271 commits past the mapped tip on the same first-parent chain. Positions
+  127-374, 378-388, 390-392, 394, 395, and 397 are not yet assigned to PRs, positions 375 and 376
+  are PR20 fixups, position 377 is a PR25 fixup, and positions 389, 393, and 396 are PR18 fixups;
+  see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -1815,7 +1816,8 @@ bf353460f
   -> Windows hard links to names of one UTF-16 unit [394]
   -> Windows directory reads and writes at negative offsets refused with EINVAL [395]
   -> PR18 fixup [396]
-  -> 1495ac815 (NVX pin)
+  -> microVM listings that leave out the entries that lookups refuse [397]
+  -> a79b4bb40 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1857,7 +1859,7 @@ position 393's fold shares `create_with_flags`, after position 083's test of `re
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 270 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 271 later commits, positions
 375 and 376 are PR20 fixups, position 377 is a PR25 fixup, positions 389, 393, and 396 are PR18
 fixups, and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
@@ -1867,17 +1869,17 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356-396 followed the v8.0 reorganization, so they combine none, apart
+v7.2 rebase, and positions 356-397 followed the v8.0 reorganization, so they combine none, apart
 from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
 v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which through
 position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
-335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-396 lack.
+335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-397 lack.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-396 have no position before v7.0; see
+positions 297-397 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2162,6 +2164,7 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 394 | `9822f732a` | - | - | - | - | - | - | - | lxutil: hard-link to one-character names on Windows (microsoft/openvmm#5286) |
 | 395 | `4aeb405d9` | - | - | - | - | - | - | - | lxutil: refuse negative read_dir and pwrite offsets on Windows (microsoft/openvmm#5287) |
 | 396 | `1495ac815` | - | - | - | - | - | - | - | virtiofs: record the host open flags of a microVM create handle (microsoft/openvmm#5288); fold into 083, its test into 335 |
+| 397 | `a79b4bb40` | - | - | - | - | - | - | - | virtiofs: leave entries that lookups refuse out of microVM listings (microsoft/openvmm#5289) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2175,7 +2178,7 @@ for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork
 v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356,
 `5d6ab1cfa`, upstream main later that day, for positions 357-368, `efe0b08df`, upstream main later
 still, for positions 369-375, and `8d4e03132`, upstream main on 2026-11-24, for positions
-376-396. They name the positions that the commits have now, but neither
+376-397. They name the positions that the commits have now, but neither
 the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`, the v7.1 rebase on `9a875b563`,
 nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the
 earlier ones on `7d90c4104`.
@@ -6106,6 +6109,46 @@ access mode after the list of `reopen_flags`, and position 393 that list. Upstre
 saved state, and replaying the commit there conflicts in `file.rs` and `lib.rs`, which lack
 position 083's open flags, and in the microVM's `state.rs` and `fs_tests.rs`, which upstream main
 lacks, so it cannot go upstream on its own.
+
+Position 397 leaves out of a microVM directory listing the entries whose names or paths every lookup
+refuses, so that one such entry no longer keeps the guest from listing its directory
+(microsoft/nvx#2133). PR18's position 083's `build_microvm_directory_snapshot`, which lists a
+directory at the first read of its handle, failed the listing with `EINVAL` for a name longer than
+255 bytes, which upstream's `fuse::check_name` (microsoft/openvmm#3821) refuses in every request,
+and of the entries whose `child_path` fails, it left out only those that fail with `EACCES`, which
+the access policy hides, and failed for the others: with `EINVAL` for a name that PR18's position
+081's `child_name_disallowed` refuses, one that holds `:` or `\`, which a Windows host also lists
+for the private-use characters that stand for them, and with `E2BIG` for a path that position 081's
+`validate_child_path` finds longer than `MAX_PATH_BYTES`, as the guest's rename of an ancestor can
+make the paths of a directory's entries. Every later read of the handle then failed too, so a
+guest's busybox `ls -a` of such a directory printed no name. The listing now leaves those entries
+out, and they count toward neither of its bounds, which position 385 checks only for the entries
+that it holds; it no longer checks the length of its names itself, since `check_name` bounds them by
+the 255 bytes that position 083's `validate_directory_entries` still checks. Position 083's
+`write_microvm_entry_plus`, through which `READDIRPLUS` looks up each entry of a listing and skips
+those whose lookups fail with `ENOENT` or `EACCES`, failed at an entry whose path a rename made
+longer than `MAX_PATH_BYTES` after the listing, and every later read with it; it now skips that
+entry too, while the `E2BIG` of position 081's bound on the names that the nodes hold still fails
+the read. The saved state keeps its format. In the microVM's `file.rs`, which PR18's position 083
+adds and positions 160, 330, 346, 349, 354, 355, 371, and 385 also change, it changes the closure
+that position 371's loop calls, after position 160's `entry_listable` and around position 385's
+check of the bounds, and the lookup of `write_microvm_entry_plus`, before position 354's
+`check_still_listed`. It adds four tests to the microVM's persistence tests in `fs_tests.rs`, which
+PR18's position 081 adds and PR18's position 083 and its fixups at positions 389, 393, and 396,
+PR22's position 102, and positions 164, 329-331, 335, 350, 354, 355, 362, 363, 367, 371, 385, and
+390 also change, after position 385's
+`microvm_listings_count_only_the_entries_that_the_policy_shows`; they call PR18's position 083's
+`microvm_with_an_open_root` and `restore_directory_snapshot`, position 164's `open_root` and the
+lookups that it shares from the policy tests, position 335's `get_file`, position 354's `offset_of`,
+and PR13's position 048's `add_alias`. It fixes defects of PR18's positions 081 and 083, but its
+code changes the closure that position 371's loop calls, around position 160's `entry_listable` and
+position 385's check of the bounds, which position 083 lacks, and its tests follow position 385's,
+so it is not a PR18 fixup. It follows position 396; of positions 372-396, only 385, 389, 390, 393,
+and 396 change its files: position 385 the closure of `file.rs` that it changes, and all five other
+tests of `fs_tests.rs`. Upstream main, `8d4e03132`, lacks the defects, since it lacks the microVM's
+directory listings and the share's refusal of such names and paths, and replaying the commit there
+conflicts in the microVM's `file.rs` and `fs_tests.rs`, which upstream main lacks, so it cannot go
+upstream on its own.
 
 ## PR summary
 
