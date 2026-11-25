@@ -1150,6 +1150,8 @@ beyond the range of a double, and unpaired surrogate escapes are refused even in
 unused fields, no object may repeat a field, and arrays and objects nest at most
 32 deep, whatever features of `serde_json` other crates of a build enable. The
 artifact name, SHA-256 digest, and package metadata still bind it to the layer.
+On Windows, whose file names ignore case, the artifact name matches the layer's
+in any ASCII case, so a `--layer` path may spell the name in another case.
 
 A run is the cold-filesystem bootstrap described in
 [the sandbox design](design/4.1-guest-filesystem-and-image-model.md#411-layered-sandbox-root), which nvx-init
