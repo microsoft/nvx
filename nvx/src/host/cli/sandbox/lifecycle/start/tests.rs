@@ -51,6 +51,7 @@ fn run_checks_again_that_its_shares_do_not_overlap() {
     let distro = RecordedDistro::new(&layer, binding).unwrap();
     let config = ProvisionConfig {
         hypervisor: "kvm",
+        cpu_profile: None,
         memory_mib: 256,
         cmdline: "",
         ram_upper_percent: None,
@@ -119,6 +120,7 @@ fn starts_check_the_kernel_command_line_that_they_launch() {
     let configure = |cmdline: &str, scratch: Option<&Path>, export: Option<&PlannedExport>| {
         let config = ProvisionConfig {
             hypervisor: "kvm",
+            cpu_profile: None,
             memory_mib: 256,
             cmdline,
             ram_upper_percent: None,

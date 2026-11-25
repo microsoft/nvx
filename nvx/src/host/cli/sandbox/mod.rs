@@ -219,6 +219,17 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
             "--layer-format and --ram-upper-percent are only valid for sandbox run or provision",
         ));
     }
+    // A provisioned sandbox starts on the CPU profile that its provision recorded.
+    if !matches!(
+        operation,
+        SandboxOperation::Run | SandboxOperation::Provision
+    ) && options.cpu_profile.is_some()
+    {
+        return Err(Exit::error(
+            ErrorCode::Unsupported,
+            "--cpu-profile is only valid for sandbox run or provision",
+        ));
+    }
     if options.ram_upper_percent.is_some() && options.upper != Some(RootUpper::Ram) {
         return Err(Exit::error(
             ErrorCode::Unsupported,
@@ -437,6 +448,7 @@ fn recorded<'a>(
 ) -> ProvisionConfig<'a> {
     ProvisionConfig {
         hypervisor: hypervisor(options.hypervisor),
+        cpu_profile: options.cpu_profile.as_deref(),
         memory_mib: options.memory_mib,
         cmdline: &options.cmdline,
         ram_upper_percent: options.ram_upper_percent,

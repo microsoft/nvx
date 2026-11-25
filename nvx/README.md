@@ -1646,7 +1646,7 @@ provision it again:
 
 | File | Contents |
 | --- | --- |
-| `config.json` | The provisioned sandbox, in format 10 only: `image` holds its format, path and identity; `upper` is tagged as scratch with its path or RAM with `max_memory_percent`. `distro_binding` binds the image, and `scratch_binding` binds scratch or is `null` for RAM. The export is typed, `null` when absent, and holds paths only; `export_pins`, `null` without an export, holds the identities of the export's denied and mapped objects that a workload could move, which each start checks before it launches the export, and a configuration without it is refused with the advice to deprovision the sandbox and provision it again. `network`, `null` without `--net`, holds `--net`, `--network-egress`, `--network-ingress`, `--host-loopback`, `--network-proxy`, each `null` when not given, and the `--host-loopback-forward` options, as given, with the egress rules in OpenVMM's form, from a policy file's compile if one was given. A sandbox that `snapshot restore` provisioned also records its snapshot's name under `source_snapshot`, the absolute path of the snapshot's store under `source_store`, and the program and arguments of the workload that each restore runs under `workload`; one that boots cold records none of them. An atomic pretty-JSON write uses mode 0600, and start reads the same strict typed fields without a legacy reader. |
+| `config.json` | The provisioned sandbox, in format 10 only: `image` holds its format, path and identity; `upper` is tagged as scratch with its path or RAM with `max_memory_percent`. `distro_binding` binds the image, and `scratch_binding` binds scratch or is `null` for RAM. The export is typed, `null` when absent, and holds paths only; `export_pins`, `null` without an export, holds the identities of the export's denied and mapped objects that a workload could move, which each start checks before it launches the export, and a configuration without it is refused with the advice to deprovision the sandbox and provision it again. `network`, `null` without `--net`, holds `--net`, `--network-egress`, `--network-ingress`, `--host-loopback`, `--network-proxy`, each `null` when not given, and the `--host-loopback-forward` options, as given, with the egress rules in OpenVMM's form, from a policy file's compile if one was given. A sandbox provisioned with `--cpu-profile` records that CPU profile under `cpu_profile`, which each start requests of OpenVMM; one provisioned without it records none, and its cold starts take OpenVMM's default, `auto`, while the starts of a restored sandbox take its snapshot's profile. A sandbox that `snapshot restore` provisioned also records its snapshot's name under `source_snapshot`, the absolute path of the snapshot's store under `source_store`, and the program and arguments of the workload that each restore runs under `workload`; one that boots cold records none of them. An atomic pretty-JSON write uses mode 0600, and start reads the same strict typed fields without a legacy reader. |
 | `sandbox.lock` | The store's lock, which serializes the lifecycle transitions |
 | `exec.lock` | The exec lock, which an `exec` holds from before it finds the running VM until its workload ends, so that one `exec` at a time runs in the sandbox; it stays from the first `exec` until `deprovision` |
 | `launch.json` | The store's journal of a start in progress, or of one that was interrupted |
@@ -1881,6 +1881,14 @@ intended changes of behavior.
   capture, and refuses `--memory-capacity` without `--snapshot-destination`,
   so every cold boot with it failed. `snapshot capture --memory-capacity-mib`
   reserves a snapshot's capacity.
+- `sandbox run` and `provision` take `--cpu-profile`, which `nvx.py sandbox`
+  lacked, with a value that OpenVMM's `--cpu-profile` takes: `auto`, `host`, or
+  a profile ID, `VENDOR.GENERATION.vREVISION`; any other is a usage error.
+  `provision` records it, and each `start` requests it of OpenVMM, so that a
+  host whose hypervisor does not support its CPU's built-in profile can run a
+  managed sandbox on a host profile, where `nvx.py` always took OpenVMM's
+  default, `auto`. The other operations, and `snapshot restore`, whose
+  snapshot fixes the profile, refuse it.
 
 ### Test hooks
 

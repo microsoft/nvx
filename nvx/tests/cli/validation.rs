@@ -429,6 +429,20 @@ fn sandbox_refusals() -> Vec<Refusal> {
             ["sandbox", "start", "--upper", "ram"],
             &["--upper", "run or provision"],
         ),
+        // A provisioned sandbox starts on the CPU profile that its provision recorded.
+        refusal(
+            "CPU profile outside run",
+            "unsupported",
+            [
+                "sandbox",
+                "start",
+                "--state-dir",
+                "{root/state}",
+                "--cpu-profile",
+                "host",
+            ],
+            &["--cpu-profile", "run or provision"],
+        ),
         refusal(
             "policy file with rules",
             "unsupported",

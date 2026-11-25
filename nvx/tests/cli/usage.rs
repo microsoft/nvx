@@ -182,6 +182,37 @@ const USAGE_ERRORS: &[UsageError] = &[
         code: "argument-invalid",
         fragments: &["--hypervisor", "\"hyperv\""],
     },
+    // `--cpu-profile` takes what OpenVMM's `--cpu-profile` takes, so that provision records no
+    // profile that every start would fail on.
+    UsageError {
+        name: "invalid CPU profile",
+        arguments: &["sandbox", "--cpu-profile", "Intel.AlderLake.v1"],
+        code: "argument-invalid",
+        fragments: &[
+            "--cpu-profile",
+            "\"Intel.AlderLake.v1\"",
+            "\"auto\"",
+            "\"host\"",
+            "VENDOR.GENERATION.vREVISION",
+        ],
+    },
+    UsageError {
+        name: "provision: invalid CPU profile",
+        arguments: &[
+            "sandbox",
+            "provision",
+            "--state-dir",
+            "{root/state}",
+            "--layer",
+            LAYER,
+            "--scratch",
+            SCRATCH,
+            "--cpu-profile",
+            "alderlake",
+        ],
+        code: "argument-invalid",
+        fragments: &["--cpu-profile", "\"alderlake\""],
+    },
     // The RAM upper's option names it `ram`, whatever the guest mounts for it.
     UsageError {
         name: "invalid upper",

@@ -39,6 +39,7 @@ fn records_keep_the_export_with_its_pins_and_starts_refuse_changed_pins() {
     let distro = RecordedDistro::new(&layer, DistroBinding::verify(&layer).unwrap()).unwrap();
     let options = ProvisionConfig {
         hypervisor: "whp",
+        cpu_profile: None,
         memory_mib: 128,
         cmdline: "",
         ram_upper_percent: None,
@@ -108,6 +109,7 @@ fn restored_sandbox_records_round_trip_only_their_own_source() {
     let distro = RecordedDistro::new(&layer, binding).unwrap();
     let options = ProvisionConfig {
         hypervisor: "whp",
+        cpu_profile: None,
         memory_mib: 128,
         cmdline: "",
         ram_upper_percent: None,
@@ -157,4 +159,64 @@ fn restored_sandbox_records_round_trip_only_their_own_source() {
             );
         }
     }
+}
+
+/// A configuration records the CPU profile of `--cpu-profile` under `cpu_profile`, which each
+/// start requests of OpenVMM, and none without it, so that a start then takes OpenVMM's default,
+/// `auto`. Each start refuses a recorded profile that `--cpu-profile` refuses as malformed.
+#[test]
+fn records_keep_the_cpu_profile_that_their_starts_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("distro.erofs");
+    std::fs::write(&image, b"distro layer\n").unwrap();
+    let layer = SandboxLayer::new(
+        LayerRole::Distro,
+        image.to_str().unwrap(),
+        "11111111-1111-1111-1111-111111111111",
+    );
+    let distro = RecordedDistro::new(&layer, DistroBinding::verify(&layer).unwrap()).unwrap();
+    let options = |cpu_profile| ProvisionConfig {
+        hypervisor: "whp",
+        cpu_profile,
+        memory_mib: 128,
+        cmdline: "",
+        ram_upper_percent: None,
+        hostname: DEFAULT_HOSTNAME,
+        workload_identity: DEFAULT_WORKLOAD_IDENTITY,
+        export: None,
+        network: None,
+    };
+    for profile in [None, Some("auto"), Some("host"), Some("intel.alderlake.v1")] {
+        let text = serialize_launch(&distro, None, &options(profile), None).unwrap();
+        let object: Object = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            object.get("cpu_profile").and_then(Value::as_str),
+            profile,
+            "{text}"
+        );
+        assert_eq!(object.contains_key("cpu_profile"), profile.is_some());
+        let config = Config::new(object).unwrap();
+        config.check().unwrap();
+        assert_eq!(config.cpu_profile(), profile);
+    }
+    let text = serialize_launch(&distro, None, &options(Some("host")), None).unwrap();
+    let object: Object = serde_json::from_str(&text).unwrap();
+    for value in [json!(""), json!("Host"), json!("intel.alderlake")] {
+        let mut recorded = object.clone();
+        recorded.insert("cpu_profile".to_owned(), value.clone());
+        let error = Config::new(recorded).unwrap().check().unwrap_err();
+        assert_eq!(
+            error.message(),
+            Some("sandbox configuration is malformed"),
+            "{value}"
+        );
+    }
+    let mut recorded = object;
+    recorded.insert("cpu_profile".to_owned(), json!(1));
+    assert_eq!(
+        Config::new(recorded)
+            .err()
+            .and_then(|error| error.message().map(str::to_owned)),
+        Some("sandbox configuration is malformed".to_owned())
+    );
 }

@@ -560,6 +560,18 @@ fn configurations() -> Vec<Configuration> {
             },
             |options| options.with("--memory", ["17592186044415M"]),
         ),
+        // Each start requests of OpenVMM the CPU profile that the provision recorded, such as the
+        // development profile of a host whose hypervisor does not support its CPU's built-in one.
+        configuration(
+            "CPU profile",
+            vec!["--cpu-profile", "host"],
+            {
+                let mut config = minimal_config();
+                config["cpu_profile"] = json!("host");
+                config
+            },
+            |options| options.with("--cpu-profile", ["host"]),
+        ),
         one_share,
         caller,
         several,
