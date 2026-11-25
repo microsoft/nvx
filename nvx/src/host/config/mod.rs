@@ -747,6 +747,36 @@ impl VmConfig {
         Ok(command_line)
     }
 
+    /// Refuses the block paths of a layered root that OpenVMM's `--microvm-sandbox-block` cannot
+    /// take as the root's raw images, as a cold boot and a restore render them alike: a path that
+    /// is not Unicode, that OpenVMM's disk syntax cannot hold literally, or whose extension selects
+    /// a non-raw backend. A blockless root has none.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
+    pub(crate) fn check_block_paths(&self) -> Result<()> {
+        let RootConfig::Layered(root) = &self.root else {
+            return Ok(());
+        };
+        let scratch = match &root.upper {
+            UpperConfig::Scratch { path, .. } => Some(path),
+            UpperConfig::Ram { .. } => None,
+        };
+        for (path, writable) in [(Some(&root.image), false), (scratch, true)]
+            .into_iter()
+            .filter_map(|(path, writable)| path.map(|path| (path, writable)))
+        {
+            if path.to_str().is_none() {
+                return Err(Error::unsupported(
+                    "block paths must be Unicode for OpenVMM's string arguments",
+                ));
+            }
+            let shown = path.display().to_string();
+            reject_disk_path(path, &shown)?;
+            reject_container_backend(path, &shown, writable, true)?;
+        }
+        Ok(())
+    }
+
     /// Renders only the configuration's devices; no runtime or output name is needed.
     fn device_arguments(&self) -> Result<Vec<OsString>> {
         let capture = self.boot.as_ref().and_then(|boot| boot.capture.as_ref());
@@ -761,24 +791,8 @@ impl VmConfig {
                 .to_string()
                 .into(),
         ];
+        self.check_block_paths()?;
         if let RootConfig::Layered(root) = &self.root {
-            let scratch = match &root.upper {
-                UpperConfig::Scratch { path, .. } => Some(path),
-                UpperConfig::Ram { .. } => None,
-            };
-            for (path, writable) in [(Some(&root.image), false), (scratch, true)]
-                .into_iter()
-                .filter_map(|(path, writable)| path.map(|path| (path, writable)))
-            {
-                if path.to_str().is_none() {
-                    return Err(Error::unsupported(
-                        "block paths must be Unicode for OpenVMM's string arguments",
-                    ));
-                }
-                let shown = path.display().to_string();
-                reject_disk_path(path, &shown)?;
-                reject_container_backend(path, &shown, writable, true)?;
-            }
             let mut image = OsString::from("distro:file:");
             image.push(&root.image);
             image.push(",ro");
