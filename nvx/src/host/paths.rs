@@ -1,5 +1,5 @@
 //! Host paths, which `std::path` holds: how the sandbox launch profile and the CLI spell them, make
-//! them absolute, and resolve their links.
+//! them absolute, resolve their links, and compare the names of their files.
 //!
 //! - [`normalized`] spells a path with its components alone, as [`Path::components`] reads them:
 //!   without repeated separators, without `.` components but a leading one, and without a trailing
@@ -19,10 +19,15 @@
 //!   path. On Windows, it drops the
 //!   verbatim prefix `\\?\` that `canonicalize` gives, and turns `\\?\UNC\` into `\\`, unless only
 //!   the verbatim path names the object, as for a name that ends in a period or a space.
+//! - [`is_named`] compares a file name with the name that the CLI expects, as the host's file
+//!   systems compare names: in any ASCII case on Windows, whose file names ignore case, and
+//!   exactly elsewhere.
 //!
 //! Host paths that are not valid Unicode are refused, as [`text`] refuses them, since the CLI
 //! records them as JSON strings and messages name them.
 
+#[cfg(feature = "cli")]
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Component, MAIN_SEPARATOR_STR, Path, PathBuf, Prefix};
@@ -209,6 +214,17 @@ fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
 #[cfg(all(feature = "cli", not(windows)))]
 fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
     path
+}
+
+/// Returns whether the file name `name` is `expected`, as the host's file systems compare names:
+/// in any ASCII case on Windows, whose file names ignore case, and exactly elsewhere.
+#[cfg(feature = "cli")]
+pub(crate) fn is_named(name: &OsStr, expected: &str) -> bool {
+    if cfg!(windows) {
+        name.eq_ignore_ascii_case(expected)
+    } else {
+        name == expected
+    }
 }
 
 #[cfg(test)]
