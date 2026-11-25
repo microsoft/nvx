@@ -197,7 +197,7 @@ fn plain_dir_problem(
         .access_mode(READ_CONTROL)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
-    let attributes = handle_information(directory.as_raw_handle() as HANDLE)?.dwFileAttributes;
+    let attributes = handle_information(raw(&directory))?.dwFileAttributes;
     if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
     {
         return Ok(Some("is not a plain directory".to_owned()));
@@ -232,7 +232,7 @@ pub(crate) fn check_vm_dir(path: &Path) -> io::Result<Option<String>> {
         .access_mode(READ_CONTROL)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
-    let handle = directory.as_raw_handle() as HANDLE;
+    let handle = raw(&directory);
     let attributes = handle_information(handle)?.dwFileAttributes;
     if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
     {
@@ -374,7 +374,7 @@ pub(super) fn privacy_problem(
     user: &CurrentUser,
     required: Required,
 ) -> io::Result<Option<String>> {
-    let handle = object.as_raw_handle() as HANDLE;
+    let handle = raw(object);
     let descriptor = SecurityDescriptor::of(handle)?;
     let mut owner = ptr::null_mut();
     let mut present = 0;
@@ -489,7 +489,7 @@ pub(crate) fn make_sparse(file: &fs::File) -> io::Result<()> {
     // output buffer, and the count's pointer is valid.
     let set = unsafe {
         DeviceIoControl(
-            file.as_raw_handle() as HANDLE,
+            raw(file),
             FSCTL_SET_SPARSE,
             ptr::null(),
             0,
