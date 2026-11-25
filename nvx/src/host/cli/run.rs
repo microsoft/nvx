@@ -67,6 +67,7 @@ use super::snapshots::{self, Name};
 use super::store::StateFile;
 use super::{Exit, Result, check_interrupt, output};
 use crate::ErrorCode;
+use crate::hex::hex;
 use crate::host::artifacts::compatibility::compatibility;
 use crate::host::artifacts::{ArtifactDir, Guest, require_artifact};
 use crate::host::config::{
@@ -452,14 +453,17 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
 /// Returns the random name of a cold run's private VM directory, and its path in the host's
 /// temporary directory, which the run creates only once it has checked its shares.
 fn vm_directory() -> Result<(String, std::path::PathBuf)> {
-    let mut random = [0; 16];
+    /// The random bytes of the name, the 32 hexadecimal digits after `RUN_DIRECTORY`, whose 128
+    /// bits keep the VM directories of concurrent cold runs apart.
+    const VM_NAME_RANDOM_BYTES: usize = 16;
+    let mut random = [0; VM_NAME_RANDOM_BYTES];
     getrandom::fill(&mut random).map_err(|error| {
         Exit::error(
             ErrorCode::Io,
             format!("cannot name the temporary VM: {error}"),
         )
     })?;
-    let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let name = hex(&random);
     let path = std::env::temp_dir().join(format!("{RUN_DIRECTORY}{name}"));
     Ok((name, path))
 }
