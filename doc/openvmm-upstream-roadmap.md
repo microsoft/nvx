@@ -9,12 +9,13 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR20 fixups at positions 375 and
-  376, and the PR25 fixup at position 377.
-- NVX's pinned OpenVMM revision: `1633b3797af878bc9a7c42e4b9c57a2925799d5d`, position 388, the head
-  of microsoft/openvmm#5280, whose commits follow position 385, `043083f40`, the head of
-  microsoft/openvmm#5279, whose commit follows position 384, `44747bf1c`, the head of
-  microsoft/openvmm#5278, whose commit follows position 383, `fa239c823`, the head of
-  `feature/microvm/dev` since microsoft/openvmm#5277 landed it on position 382, `acfaa5199`, where
+  376, the PR25 fixup at position 377, and the PR18 fixup at position 389.
+- NVX's pinned OpenVMM revision: `350018ce4335ba60ad722852f4004f90674f69e9`, position 389, the head
+  of microsoft/openvmm#5281, whose commit follows position 388, `1633b3797`, the head of
+  `feature/microvm/dev` since microsoft/openvmm#5280 landed positions 386-388 on position 385,
+  `043083f40`, where microsoft/openvmm#5279 had landed position 385 on position 384, `44747bf1c`,
+  where microsoft/openvmm#5278 had landed position 384 on position 383, `fa239c823`, where
+  microsoft/openvmm#5277 had landed position 383 on position 382, `acfaa5199`, where
   microsoft/openvmm#5275 and microsoft/openvmm#5276 had landed positions 381 and 382 on position
   380, `32e824728`, where microsoft/openvmm#5271, microsoft/openvmm#5272, and
   microsoft/openvmm#5273 had landed positions 378-380 on position 377, `3f5506f9d`, where
@@ -33,9 +34,10 @@
   commits that they fix, so each later commit's position is its v7.2 position less the number of
   those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
   `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
-  tests. The pin is 262 commits past the mapped tip on the same first-parent chain. Positions
-  127-374 and 378-388 are not yet assigned to PRs, positions 375 and 376 are PR20 fixups, and
-  position 377 is a PR25 fixup; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
+  tests. The pin is 263 commits past the mapped tip on the same first-parent chain. Positions
+  127-374 and 378-388 are not yet assigned to PRs, positions 375 and 376 are PR20 fixups, position
+  377 is a PR25 fixup, and position 389 is a PR18 fixup; see
+  [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -1544,7 +1546,7 @@ flowchart TB
         P15["PR15<br/>Machine profile<br/>P - 11 commits"]
         P16["PR16<br/>Fixed virtio-MMIO ABI<br/>P - 4 commits"]
         P17["PR17<br/>Capture + authoritative restore<br/>P - 11 commits"]
-        P18["PR18<br/>Host attachments<br/>P - 10 commits"]
+        P18["PR18<br/>Host attachments<br/>P - 10 commits + 1 fixup"]
         P19["PR19<br/>Block roles + tiers<br/>N/P - 3 commits"]
         P20["PR20<br/>Restore activation<br/>P - 7 commits + 2 fixups"]
         P21["PR21<br/>Network egress policy<br/>P/N - 6 commits"]
@@ -1798,7 +1800,8 @@ bf353460f
   -> failed io-uring set-ups reported with their error rather than as no support [384]
   -> microVM listing bounds that count only the entries that the policy shows [385]
   -> gdb stub sessions that detach the debugger from the VM however they end [386-388]
-  -> 1633b3797 (NVX pin)
+  -> PR18 fixup [389]
+  -> 350018ce4 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1829,13 +1832,15 @@ the restore readiness event of a gated restore that it corrects and the document
 sentence that calls that option no hotplug API into position 142, which rewraps the sentence that
 position 092 adds. Fold position 377 into PR25's position 119, which adds the management RPC
 reference's passage on the readiness event and the comment of `restore_processor_count` that it
-corrects.
+corrects. Fold position 389 into PR18's position 081, whose `InodeReservation::insert` check of a
+reserved node's insert required another free node ID, and its test into position 350, whose node
+table never hands out `u64::MAX`, after that position's test of the largest next node ID.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 262 later commits, positions
-375 and 376 are PR20 fixups, position 377 is a PR25 fixup, and the others are not yet classified or
-assigned to PRs.
+The NVX pin extends the chain past position 126 without merges. Of its 263 later commits, positions
+375 and 376 are PR20 fixups, position 377 is a PR25 fixup, position 389 is a PR18 fixup, and the
+others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 are the ABI restart
@@ -1843,17 +1848,17 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356-388 followed the v8.0 reorganization, so they combine none, apart
+v7.2 rebase, and positions 356-389 followed the v8.0 reorganization, so they combine none, apart
 from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
 v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which through
 position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
-335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-388 lack.
+335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-389 lack.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-388 have no position before v7.0; see
+positions 297-389 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2130,6 +2135,7 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 386 | `f06060dfe` | - | - | - | - | - | - | - | vmm_core: forget a debugger's halt reports when it detaches (microsoft/openvmm#5280) |
 | 387 | `320e09cf5` | - | - | - | - | - | - | - | vmm_core: clear VP debug state on detach only if the debugger set it (microsoft/openvmm#5280) |
 | 388 | `1633b3797` | - | - | - | - | - | - | - | debug_worker: detach the debugger when its session ends (microsoft/openvmm#5280) |
+| 389 | `350018ce4` | - | - | - | - | - | - | - | virtiofs: let a new microVM object take the last node ID (microsoft/openvmm#5281); fold into 081, its test into 350 |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2143,7 +2149,7 @@ for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork
 v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356,
 `5d6ab1cfa`, upstream main later that day, for positions 357-368, `efe0b08df`, upstream main later
 still, for positions 369-375, and `8d4e03132`, upstream main on 2026-11-24, for positions
-376-388. They name the positions that the commits have now, but neither
+376-389. They name the positions that the commits have now, but neither
 the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`, the v7.1 rebase on `9a875b563`,
 nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the
 earlier ones on `7d90c4104`.
@@ -5829,6 +5835,43 @@ lacks position 372's documentation of `Break`; position 388's changes of the deb
 Guide apply there, but its documentation of `Detach` extends position 386's, so they cannot go
 upstream on their own.
 
+Position 389 lets the object that a microVM `FUSE_MKDIR`, `FUSE_MKNOD`, `FUSE_SYMLINK`, or
+`FUSE_CREATE` makes take the last node ID that the node table hands out, `u64::MAX - 1`
+(microsoft/nvx#2135). Such a request reserves its object's node ID before it makes the object, so
+that a full table refuses it before the host changes, and PR18's position 081 has upstream's
+`InodeReservation::insert` check the insert of the object's node against the microVM's limits with
+`preflight_microvm_insert`, which, for a node of its own, also requires that the table can hand out
+its next node ID, although the reservation has already taken that ID. After a reservation of the
+last node ID, the insert thus failed with `ENOSPC` once the object was on the host, which left the
+object there without a node, and each retry under another name left another. Position 083's
+restore, which accepts any next node ID above the saved ones, reaches that state, and position 350,
+whose `can_insert` never hands out `u64::MAX`, moved it from a reservation of `u64::MAX` to one of
+`u64::MAX - 1`. A reserved insert now uses the new `preflight_microvm_reserved_insert`, which skips
+only that check and keeps the inode and alias limits; the checks that run before the host changes,
+and the inserts without a reservation, still make it. In `lib.rs`, it changes the call that
+position 081 adds to `InodeReservation::insert`, which `389e4e57a` (microsoft/openvmm#4594) adds;
+PR06's position 010, PR13's position 048, PR18's positions 081 and 083, PR27's position 126, and
+positions 158, 160, 164, 320, 329, 330, 334, 335, 342, 343, 350, 352, 358, and 361 also change the
+file. In the microVM's `limits.rs`, which PR18's position 081 adds and PR27's position 126 and
+positions 160 and 334 also change, it splits position 081's `preflight_microvm_insert` and
+`preflight_microvm_new_inode` around that check, keeping position 334's use of `InodeMap::reused`.
+It adds a test to the microVM's persistence tests, after position 350's
+`largest_restored_next_node_id_is_never_handed_out`, which PR18's positions 081 and 083, PR22's
+position 102, and positions 164, 329-331, 335, 350, 354, 355, 362, 363, 367, 371, and 385 also
+change; it restores a state with position 083's restore and makes its objects with the helpers that
+position 164 shares from the policy tests. It follows position 388; of positions 372-388, only 385
+changes one of its files, `fs_tests.rs`, where it adds another test. It fixes a defect of PR18's
+position 081 and needs nothing that a later position adds but, for its test, position 350's table,
+whose last node ID is `u64::MAX - 1`, and position 164's helpers, so it is a PR18 fixup: fold it
+into position 081, where its changes of `lib.rs` and `limits.rs` apply as they are, since position
+334 changes only a line of their context, and its test into position 350, after that position's
+test of the largest next node ID, with the imports of `lookup` and `release` that position 362 then
+no longer adds. At position 350 with the fix and the test so placed, the package's tests pass on
+Windows, and without the fix the test fails as it does at position 388. Upstream main, `8d4e03132`,
+lacks the defect, since it lacks the microVM's limits, and replaying the commit there conflicts in
+`lib.rs`, whose `InodeReservation::insert` lacks position 081's check, and in the microVM's
+`limits.rs` and `fs_tests.rs`, which upstream main lacks, so it follows PR18 upstream.
+
 ## PR summary
 
 Each count is of v8.0 commits, which include the fixups that the v3.0, v4.0, v5.0, v6.0, v7.0, and
@@ -5858,7 +5901,7 @@ v8.0 reorganizations folded into them; see [The v8.0 reorganization](#the-v80-re
 | PR15 | P | microVM machine profile and minimal chipset | 050-060 | `abeabf34d..2dd8e1e92` | 11 | Foundation fan-in |
 | PR16 | P | Fixed virtio-MMIO ABI and shared interrupt status | 061-064 | `f5753d818..e8369480d` | 4 | PR15 |
 | PR17 | P | microVM snapshot capture and authoritative restore | 065-075 | `548bf2ec2..464aa9d27` | 11 | PR16 |
-| PR18 | P | microVM host attachments and device persistence | 076-085 | `d3d2a088f..77eebd10f` | 10 | PR17 |
+| PR18 | P | microVM host attachments and device persistence | 076-085; 389 (fixup) | `d3d2a088f..77eebd10f`; `350018ce4` | 11 | PR17 |
 | PR19 | N/P | Sandbox block roles and snapshot tiers | 086-088 | `6830760b7..ce4ead69a` | 3 | PR18 |
 | PR20 | P | Restore-time processor and memory activation | 089-095; 375-376 (fixups) | `16b103720..e960c809b`; `d44a113be..c440ce3cc` | 9 | PR19 |
 | PR21 | P/N | Network egress policy | 096-101 | `8db534880..de90ec83b` | 6 | PR20; core can start after PR13 |
@@ -5876,7 +5919,7 @@ Each entry, at the position that the commit had in v7.0, v7.1, and v7.2 too, nam
 position of the commit, its v6.0 position, which it had in v5.0 and v5.1 too, the v4.0 position,
 the v3.0 and v2.4 positions that v4.0 recorded, and the v2.4, v5.1, v6.1, and v7.2 fixups that it
 folds; "(part)" marks a fixup that split across commits. Positions 016 and 017, which followed
-the v6.0 reorganization and the v6.1 rebase, and positions 375-377, which followed the v8.0
+the v6.0 reorganization and the v6.1 rebase, and positions 375-377 and 389, which followed the v8.0
 reorganization, name their OpenVMM pull request instead of earlier positions. A v7.2 position
 counts in `feature/microvm/dev` at `09524b79c`, whose first 339
 commits are those of `feature/microvm/release/v7.2`. A v6.1
@@ -6190,7 +6233,7 @@ Landed upstream and dropped from the chain:
 </details>
 
 <details>
-<summary><strong>PR18 - microVM host attachments and device persistence (P)</strong> - 10 commits</summary>
+<summary><strong>PR18 - microVM host attachments and device persistence (P)</strong> - 11 commits</summary>
 
 - 076 `d3d2a088f` - openvmm_entry: add connect= serial backends with bounded timeouts (v6.1 074, v6.0 081, v4.0 085, v3.0 094, v2.4 094; folds v2.4 144)
 - 077 `429d01c0f` - openvmm: persist the microVM boot console and rebuild its attachment on restore (v6.1 075, v6.0 082, v4.0 086, v3.0 095, v2.4 095)
@@ -6202,6 +6245,7 @@ Landed upstream and dropped from the chain:
 - 083 `6315c16c5` - virtiofs: persist microVM FUSE namespaces, handles, and directory cookies (v6.1 081, v6.0 088, v4.0 092, v3.0 101, v2.4 101; folds v2.4 335 (part), v6.1 240 (part), and v7.2 333 (part), 342 (part), 345, 351 (part), and 365 (part))
 - 084 `e6ce5a654` - openvmm: snapshot the microVM filesystem and revalidate it on restore (v6.1 082, v6.0 089, v4.0 093, v3.0 102, v2.4 102)
 - 085 `77eebd10f` - openvmm: reserve a dormant microVM filesystem slot (v6.1 083, v6.0 090, v4.0 094, v3.0 103, v2.4 103; folds v2.4 335 (part), and v7.2 335 (part) and 347 (part))
+- 389 `350018ce4` - virtiofs: let a new microVM object take the last node ID (microsoft/openvmm#5281; **fold into 081**, its test into 350)
 
 </details>
 
