@@ -916,6 +916,48 @@ class CliTests(unittest.TestCase):
         args = nvx.parse_args(["record-openvmm-provenance"])
         self.assertIs(args.handler, nvx.command_record_openvmm_provenance)
 
+    def test_package_command_forwards_parsed_options(self):
+        args = nvx.parse_args(
+            [
+                "package",
+                "--version",
+                "2.0.0",
+                "--destination",
+                "dist/custom",
+                "--binary-only",
+                "--force",
+            ]
+        )
+
+        with patch.object(nvx, "package_release") as package_release:
+            args.handler(args)
+
+        package_release.assert_called_once_with(
+            version="2.0.0",
+            destination=Path("dist/custom"),
+            include_source=False,
+            force=True,
+        )
+
+    def test_archive_release_command_forwards_paths(self):
+        args = nvx.parse_args(
+            [
+                "archive-release",
+                "--source",
+                "dist/package",
+                "--destination",
+                "dist/package.zip",
+            ]
+        )
+
+        with patch.object(nvx, "create_release_archive") as create_archive:
+            args.handler(args)
+
+        create_archive.assert_called_once_with(
+            Path("dist/package"),
+            Path("dist/package.zip"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

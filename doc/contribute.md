@@ -262,6 +262,17 @@ Run a module independently with, for example,
 live in [nvx_tools_testing.py](../scripts/nvx_tools_testing.py), not in another
 test module.
 
+The benchmark-tooling tests are grouped by responsibility:
+
+- [Process handling and measurement](../scripts/test_nvx_benchmark_process.py).
+- [Snapshot capture, profiling, and restore](../scripts/test_nvx_benchmark_snapshot.py).
+- [Workload commands and configuration](../scripts/test_nvx_benchmark_workloads.py).
+- [Results, reporting, and suite orchestration](../scripts/test_nvx_benchmark_results.py).
+
+Each module retains the `BenchmarkTests` class name so that references inside
+the relocated tests stay unchanged. Cleanup-after-kill tests remain in
+`test_nvx_tools.py`.
+
 ## Test layout
 
 Tests live apart from the code that they test, so that a change to one never
