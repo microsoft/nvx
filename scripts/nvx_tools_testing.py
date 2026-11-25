@@ -24,6 +24,13 @@ from nvx_tools.build_constants import (
     UbuntuBuildConstants,
 )
 
+# The directory, under a platform's runs, of the benchmarks of the microVM ABI
+# series that this checkout's benchmarks record, which the benchmark actions
+# name.
+MICROVM_RUN_DIRECTORY = (
+    f"microvm-v{OpenVMMBuildConstants.MICROVM_PERFORMANCE_ABI_VERSION}"
+)
+
 
 @contextlib.contextmanager
 def without_nvx_variable() -> Generator[None]:
