@@ -129,6 +129,30 @@ fn host_loopback_access_needs_room_for_host_peers() {
 }
 
 #[test]
+fn host_loopback_access_reads_the_prefix_as_openvmm_does() {
+    let mut policy = NetworkPolicy::new(Access::Deny);
+    policy.host_loopback = HostLoopback::Allow;
+    // OpenVMM reads a prefix with `u8::from_str`, so these are /30 networks to it.
+    for guest_network in ["10.0.0.2/030", "10.0.0.2/+30"] {
+        let error = openvmm_arguments(Some(&policy), guest_network).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{guest_network}");
+        assert!(error.message().contains("/29 or shorter"), "{error}");
+    }
+    // A network without a prefix that OpenVMM reads leaves no room that the check can count.
+    let error = openvmm_arguments(Some(&policy), "10.0.0.2").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    assert!(error.message().contains("\"10.0.0.2\""), "{error}");
+    // And these are /24 networks, which leave room for host peers.
+    for guest_network in ["10.0.0.2/024", "10.0.0.2/+24"] {
+        let arguments = openvmm_arguments(Some(&policy), guest_network).unwrap();
+        assert!(
+            has_pair(&arguments, "--host-loopback", "allow"),
+            "{guest_network}"
+        );
+    }
+}
+
+#[test]
 fn host_loopback_forwards_follow_openvmm_rules() {
     let forward = |protocol, host_port, guest_port| LoopbackForward {
         protocol,
