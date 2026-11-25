@@ -1622,7 +1622,11 @@ before them.
   the jobs of `nvx` that keep their processes' children; the next run removes
   the VM directory that a run that was terminated left, once no process holds
   its log, which a run holds until it returns and its OpenVMM until it exits.
-- `provision` records the sandbox in its state directory. `start` launches
+- `provision` records the sandbox in its state directory. On Linux, it first
+  refuses a state directory in which OpenVMM could not take the sockets of the
+  sandbox's starts, which each `start` would refuse: one whose resolved path
+  gives `control.sock`, or the `restore-ready.sock` of a sandbox of
+  `snapshot restore`, 108 bytes or more, or holds `,` or `=`. `start` launches
   OpenVMM detached with the managed lifecycle, passes it a fresh capability
   through its standard input, and waits until the guest answers. `exec` runs a
   workload, streams its own standard input to it, until that ends, and the

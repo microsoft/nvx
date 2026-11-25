@@ -46,7 +46,8 @@ use crate::host::sandbox::layer::SandboxLayer;
 use crate::host::sandbox::require_file;
 use crate::host::vm::SavedVm;
 
-pub(crate) use self::directory::{create_state_directory, prepare_state_directory};
+pub(crate) use self::directory::create_state_directory;
+use self::directory::provision_state_directory;
 pub(crate) use self::outcome::{
     copy_openvmm_outcome, validate_outcome_destination, write_exec_outcome,
 };
@@ -91,6 +92,10 @@ pub(crate) struct ProvisionConfig<'a> {
 /// image at the path that it records for it, and `source`, the named snapshot that each start of
 /// a sandbox of `snapshot restore` restores, or `None`. `layer` is the distro layer as given,
 /// whose images it checks again, with the export plan, as [`check_images`] does.
+///
+/// Before it creates the state directory, it refuses one in which OpenVMM could not take the
+/// sockets of the sandbox's starts, as [`provision_state_directory`] checks them, since every
+/// start would refuse it.
 pub(crate) fn provision(
     state_path: &str,
     layer: &SandboxLayer,
@@ -100,7 +105,7 @@ pub(crate) fn provision(
     source: Option<&Source>,
     timeout: f64,
 ) -> Result {
-    let state_dir = prepare_state_directory(state_path, true)?;
+    let state_dir = provision_state_directory(state_path, source.is_some())?;
     let config_path = state_dir.join(CONFIG_NAME);
     let runtime_path = state_dir.join(StateFile::Runtime.name());
     let _lock = LifecycleLock::acquire(&state_dir, timeout, true)?;

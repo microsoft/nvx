@@ -1771,6 +1771,17 @@ semicolons, and square brackets must nest properly. Balanced brackets, as in
 OpenVMM or `provision` records the sandbox. `start` applies the same checks to
 recorded paths.
 
+On Linux, each `start` gives OpenVMM sockets in the state directory: its
+control socket, `control.sock`, and, for a sandbox that
+[`snapshot restore`](usage.md#snapshot-restore) provisioned, the
+`restore-ready.sock` of its restore. OpenVMM takes a socket whose path is
+shorter than 108 bytes, which a Unix socket address holds with its terminating
+NUL, and holds no comma or equals sign, which its listener options take for
+delimiters. `start` refuses any other with `error[unsupported]`, and so
+`provision` refuses, before it creates the state directory or records the
+sandbox, a state directory whose resolved path holds a comma or an equals sign,
+or is longer than 94 bytes, or than 88 for a sandbox of `snapshot restore`.
+
 `provision` also binds the scratch image: its identity, kind, and length,
 which the VM's writes leave unchanged. `start` checks the binding from
 metadata alone, refuses a scratch image that was replaced or resized since

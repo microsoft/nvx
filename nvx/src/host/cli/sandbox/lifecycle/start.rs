@@ -67,7 +67,7 @@ pub(crate) fn start(
     timeout: f64,
     forward_status: bool,
 ) -> Result {
-    let state_dir = prepare_state_directory(state_path, false)?;
+    let state_dir = prepare_state_directory(state_path)?;
     let mut lock = LifecycleLock::acquire(&state_dir, timeout, false)?;
     start_locked(&state_dir, &mut lock, artifacts, timeout, forward_status)
 }
@@ -657,7 +657,7 @@ pub(crate) fn exec_workload(
             "another exec in the sandbox is still in progress",
         )
     };
-    let state_dir = prepare_state_directory(state_path, false)?;
+    let state_dir = prepare_state_directory(state_path)?;
     let deadline = Deadline::after(wait);
     let mut retry = false;
     let (_exec, running) = loop {

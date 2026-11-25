@@ -43,7 +43,9 @@ use crate::host::snapshot::{CaptureContext, HostTime, Snapshot};
 use crate::host::spawn;
 #[cfg(feature = "cli")]
 use crate::host::transport::{self, HostConnection};
-use crate::host::vm_directory::{CONSOLE, CONTROL, RESTORE_READY, io_error};
+use crate::host::vm_directory::{
+    CONSOLE, CONTROL, RESTORE_READY, SOCKET_PATH_SIZE, check_sockets, io_error,
+};
 pub use crate::host::vm_directory::{VmDir, VmOutputs, create_private_dir};
 use crate::host::{
     platform::inherit::Inherited,
@@ -685,16 +687,11 @@ pub fn create(
         None
     };
     if !cfg!(windows) {
-        for endpoint in std::iter::once(&outputs.endpoint)
-            .chain(outputs.console.as_ref())
-            .chain(ready_endpoint.as_ref())
-        {
-            if endpoint.len() >= 108 || endpoint.contains([',', '=']) {
-                return Err(Error::unsupported(format!(
-                    "the VM socket {endpoint} must be shorter than 108 bytes and hold no ',' or '='",
-                )));
-            }
-        }
+        check_sockets(
+            dir.path(),
+            outputs.console.is_some(),
+            ready_endpoint.is_some(),
+        )?;
         let canonical = filesystem::canonicalize(dir.path())
             .map_err(|error| io_error("resolve", dir.path(), error))?;
         for name in std::iter::once(CONTROL)
@@ -702,9 +699,10 @@ pub fn create(
             .chain(ready_endpoint.as_ref().map(|_| RESTORE_READY))
         {
             let endpoint = canonical.join(name);
-            if endpoint.to_str().is_none() || endpoint.as_os_str().len() >= 108 {
+            if endpoint.to_str().is_none() || endpoint.as_os_str().len() >= SOCKET_PATH_SIZE {
                 return Err(Error::unsupported(format!(
-                    "the canonical VM socket {} must be valid Unicode and shorter than 108 bytes",
+                    "the canonical VM socket {} must be valid Unicode and shorter than \
+                     {SOCKET_PATH_SIZE} bytes",
                     endpoint.display(),
                 )));
             }
