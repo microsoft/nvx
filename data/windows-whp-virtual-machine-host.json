@@ -1,6 +1,6 @@
 {
   "platform": "windows-whp-virtual-machine",
-  "runner_name": "azure-windows-5",
+  "runner_name": "azure-intel-whp-5",
   "machine_name": "vmssvaoan000004",
   "cpu": {
     "vendor": "GenuineIntel",

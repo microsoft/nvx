@@ -83,7 +83,7 @@ then stream it to the target without placing it in shell history. On Linux:
 scp scripts/setup/setup-linux.sh scripts/setup/tool-versions.conf HOST:/tmp/
 gh api --method POST repos/microsoft/nvx/actions/runners/registration-token \
   --jq .token |
-  ssh HOST 'sh /tmp/setup-linux.sh --runner-only --backend kvm --runner-name azure-kvm-1 --runner-token-stdin'
+  ssh HOST 'sh /tmp/setup-linux.sh --runner-only --backend kvm --runner-name azure-intel-kvm-1 --runner-token-stdin'
 ```
 
 For Windows/WHP, stage `setup-windows-whp.ps1` and `tool-versions.conf` in one
@@ -213,7 +213,7 @@ Validate an installed runner without changing the host:
 
 ```bash
 sh scripts/setup/setup-linux.sh \
-  --runner-only --backend kvm --runner-name azure-kvm-1 --check-only
+  --runner-only --backend kvm --runner-name azure-intel-kvm-1 --check-only
 ```
 
 ```powershell
@@ -237,7 +237,7 @@ that pass and validate the runner:
 ```bash
 scp scripts/setup/setup-linux.sh scripts/setup/tool-versions.conf HOST:/tmp/
 ssh HOST 'sh /tmp/setup-linux.sh --runner-only --backend kvm'
-ssh HOST 'sh /tmp/setup-linux.sh --runner-only --backend kvm --runner-name azure-kvm-1 --check-only'
+ssh HOST 'sh /tmp/setup-linux.sh --runner-only --backend kvm --runner-name azure-intel-kvm-1 --check-only'
 ```
 
 ```powershell

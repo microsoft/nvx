@@ -1,6 +1,6 @@
 {
   "platform": "linux-kvm-virtual-machine",
-  "runner_name": "azure-kvm-3",
+  "runner_name": "azure-intel-kvm-3",
   "machine_name": "esaurez-nvx-ci-linux-kvm-vmss000003",
   "cpu": {
     "vendor": "GenuineIntel",

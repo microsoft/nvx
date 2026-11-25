@@ -910,16 +910,17 @@ minutes of the KVM platform job, 2.0 of the MSHV one's 5.8, and 0.5 of the WHP
 one's 8.9, on the benchmark runners, for which the platform jobs of
 overlapping runs queue.
 
-The KVM and MSHV pools have five runners each, and the WHP pool has seven. In
-each pool, one runner carries `benchmark` and runs only the platform job, and
-the others carry `general` and run all non-benchmark backend jobs. Platform
+The KVM, MSHV, and WHP pools have eight runners each. The pools mix Intel and
+AMD virtual machines; the AMD runners also carry `amd`, which no job requires.
+In each pool, one runner carries `benchmark` and runs only the platform job,
+and the others carry `general` and run all non-benchmark backend jobs. Platform
 jobs from overlapping workflow runs still measure one after another on their
 backend's single benchmark runner, but they never wait behind an unrelated
 build or test.
 
 The role split follows an October 15-20, 2026 scheduling audit, when each pool
 had five runners. Before the split, the benchmark runners spent about one third
-of their assignments on non-platform work; `azure-windows-5`, for example, ran
+of their assignments on non-platform work; `azure-intel-whp-5`, for example, ran
 102 platform jobs and 62 build or test jobs. Platform jobs queued for p50 6.3,
 p90 22.2, and at most 34.1 minutes on WHP, for p90 15.7 and at most 21.1
 minutes on KVM, and for p90 11.2 and at most 18.7 minutes on MSHV. The WHP
@@ -936,7 +937,7 @@ out of its pool's general capacity. In the replay, which left four general WHP
 runners,
 the WHP non-benchmark p90 wait rose from about three to five minutes, while the
 KVM and MSHV non-benchmark waits stayed near zero. The WHP pool has since grown
-to six general runners, more than the five that served these jobs before the
+to seven general runners, more than the five that served these jobs before the
 split. A change that adds a job or a shard needs general runners to run it in
 parallel; otherwise it only queues.
 
@@ -952,15 +953,16 @@ general runner per backend for about three to five minutes. The default suite
 waits only for `artifacts`, so a cold build of the Ubuntu or Azure Linux
 images, about 4 minutes, delays only the guest and sandbox job, which takes
 about as long as a shard of the default suite. A push, full run, or
-merge group then fills KVM's four general runners with the two shards, the
-guest and sandbox job, and the debug-kernel job, and a pull request, which
-runs the debug kernel on MSHV, needs three of them. MSHV's four hold the two
-shards, the guest and sandbox job, and, for a pull request, push, or
-full run, the debug-kernel job. On WHP, a run needs at most four of the six
-general runners at once, for the microVM jobs. When a pool has fewer
-free general runners than a backend's microVM jobs, the jobs that start last
-wait for the first to end, so the backend's microVM tests take up to about
-twice as long as one of its jobs, still less than the unsharded suite.
+merge group then fills four of KVM's seven general runners with the two
+shards, the guest and sandbox job, and the debug-kernel job, and a pull
+request, which runs the debug kernel on MSHV, needs three of them. Four of
+MSHV's seven hold the two shards, the guest and sandbox job, and, for a pull
+request, push, or full run, the debug-kernel job. On WHP, a run needs at most
+four of the seven general runners at once, for the microVM jobs. When a pool
+has fewer free general runners than a backend's microVM jobs, the jobs that
+start last wait for the first to end, so the backend's microVM tests take up
+to about twice as long as one of its jobs, still less than the unsharded
+suite.
 
 KVM's general runners queue the most (#982). Of the 286 runs that used them
 from October 23 to 28, 2026, leaving out an outage on October 28, 195 waited
@@ -974,7 +976,7 @@ with a p90 of 6.0 to 8.8 minutes, while the OpenVMM and VMM-test builds and the
 VMM-test leg, which start first, did in 41 to 59 runs, with a p90 of 3.3 to
 4.5. Replaying the observed jobs of those runs through first-in, first-out
 pools of those sizes reproduces the KVM waits, 196 runs, a median of 3.1, and
-a p90 of 8.4 minutes; with the six general WHP runners of today, it makes 101
+a p90 of 8.4 minutes; with six general WHP runners, it makes 101
 runs wait 2 minutes or more on WHP, at a p90 of 9.1 minutes. The earlier
 `nvx` handoff and the package jobs alone leave KVM's waits at 192 runs,
 2.9, and 7.6 minutes, and MSHV's and WHP's at 97 and 108 runs, and moving the
@@ -986,13 +988,14 @@ would have raised that pool's waits to 131 runs, at a p90 of 10.5 minutes
 instead of 8.8, and the median of the runs that build the VMM tests and run
 the unit tests to 24.4 minutes, against 23.7 with the jobs on MSHV. A fifth
 general KVM runner would then lower KVM's waits to 79 runs and a p90 of 3.9
-minutes, so it is the next step if KVM queueing still bounds the runs. Since
+minutes, so it is the next step if KVM queueing still bounds the runs; the
+KVM pool has since grown to seven general runners. Since
 CI stopped running OpenVMM's tests (see [OpenVMM CI](#openvmm-ci)), the Linux
 VMM-test build and the KVM and MSHV VMM-test legs no longer take those pools'
 general runners either.
 
 With the `nvx` handoff, the package jobs, and the pull requests' debug
-kernel on MSHV, the replay, with the six general WHP runners of today,
+kernel on MSHV, the replay, with six general WHP runners,
 estimates that the runs of that window that skipped both OpenVMM suites and
 ran the benchmarks would have taken a median of 12.3 minutes, or 11.0 without
 queueing, against the 17.4 and 15.5 that they took, and those that ran no
@@ -1071,9 +1074,13 @@ about as long as the guest and sandbox jobs beside them, which took 3.7 to
 4.1, 2.9 to 4.1, and 5.2 to 6.4 minutes in the runs since
 [#695](https://github.com/microsoft/nvx/issues/695) split them off. A third
 shard would take about 3.2, 3.0, and 4.0 minutes. On WHP it would end before
-the guest and sandbox job, so it would not shorten the backend's tests, and on
-KVM and MSHV, whose four general runners the two shards, the guest and sandbox
-job, and the debug-kernel job fill, it would mostly wait for a runner.
+the guest and sandbox job, so it would not shorten the backend's tests. KVM and
+MSHV each have seven general runners, so three shards, the guest and sandbox
+job, and the debug-kernel job, five jobs, fit in one run at once. With the four
+general runners that those pools had before, the two shards and those two jobs
+filled them, and a third shard would mostly have waited for a runner. Now
+it waits only when other runs hold the pool's general runners, so it is worth
+adding where the shards, rather than the guest and sandbox job, end last.
 
 A sharded run fails before it runs a scenario unless the file puts every
 default scenario in exactly one shard of every backend, with its duration,
@@ -2478,7 +2485,7 @@ fields, such as the microcode and the invariant-TSC flags, may read `unknown`.
 | H1 | `/dev/kvm` or `/dev/mshv` is readable and writable, and a KVM host has no `/dev/mshv`; on Windows, `WHvGetCapability` reports a hypervisor |
 | H2 | Vendor, family, model, stepping, microcode, and OS build from `/proc/cpuinfo` or the Windows registry. Then `openvmm --hypervisor <backend> --cpu-fingerprint <path>` writes the host's CPU fingerprint (by default `nvx-cpu-fingerprint-<backend>.json` in the probe directory; `--cpu-fingerprint` overrides it), checks it against the pinned profile that `auto` selects from OpenVMM's catalog, the latest revision of the generation's profile, which every backend shares, and prints one `NVX-CPU-PROFILE:` line. The check never falls back to a host profile, so a CPU on which `auto` falls back fails H2. H2 reports the generation and the profile from that line, so a profile that an OpenVMM pin adds qualifies its hosts without an NVX change. H2 requires exit status 0, `status=pass`, the same backend, and a catalog profile of the reported generation, reports the profile and surface digests, and otherwise fails with OpenVMM's code, for example `[E_PROFILE_HOST_UNKNOWN]` on a CPU that no profile serves or `[E_PROFILE_UNSUPPORTED]` naming every unsupported CPUID bit. On MSHV and WHP, OpenVMM checks the entries outside the profile on a probe partition configured from the profile, as a cold boot does. With `--no-openvmm`, H2 maps the host with NVX's copy of the catalog instead: `skylake-sp` (6/85, steppings 0 to 4, `intel.skylake-sp.v1`), `icelake-sp` (6/106, `intel.icelake-sp.v1`), `emeraldrapids` (6/207, `intel.emeraldrapids.v1`), `graniterapids` (6/173, `intel.graniterapids.v1`), `alderlake` (6/151 and 6/154, `intel.alderlake.v1`), `milan` (AMD 25/1, `amd.milan.v1`), `genoa` (AMD 25/17, `amd.genoa.v2`), or `turin` (AMD 26/2, `amd.turin.v2`). Any other CPU, including Cascade Lake and Cooper Lake, fails with `E_PROFILE_HOST_UNKNOWN`. A unit test keeps the copy, which records the latest revision of each generation's profile, equal to the profiles of the OpenVMM submodule's pinned revision, which it reads from the gitlink's commit, so the NVX CLI jobs validate the CLI after they check out OpenVMM. The host OS's invariant-TSC flags (`constant_tsc nonstop_tsc`, or the CPUID bit on Windows) are recorded as evidence and never fail the check, because they don't decide what a guest observes: Azure WHP hosts show the CPUID bit but cannot offer invariant TSC to partitions, and their guests measure tens of nanoseconds of skew |
 | H3 | `openvmm --x-time-abi-verify` builds the partition and runs the time ABI preflight without running the guest. Its `NVX-TIME-ABI-VERIFY:` line must report `status=ok` for the backend, plausible declared and native TSC rates, the backend's LAPIC rate, and a `cpu_profile` that is a catalog profile, `<vendor>.<generation>.v<revision>` of any generation but a host profile's `host`, which rejects the host profile that `auto` falls back to on a CPU that no built-in profile serves, and, when H2 runs too, a revision of the profile H2 names. A failed preflight reports OpenVMM's code, for example `[E_TSC_SYNC_UNSUPPORTED]` |
-| H4 | Samples of the TSC against the host's monotonic clocks, with sleeps between them so the host's CPUs idle: 13 samples 10 s apart, or 3 samples 1 s apart with `--ci-schedule`. Each sample reads the TSC between two reads of a clock, keeping the tightest of 64 brackets; its uncertainty is half the bracket plus half the clock's resolution. A clock that returns the same value to consecutive reads is coarser than one read, so the probe takes its smallest step as its resolution: Hyper-V's reference TSC page advances the Linux clocks in 100 ns steps although `clock_getres` reports 1 ns. The interval stability is judged against a clock that time synchronization never steers, `CLOCK_MONOTONIC_RAW` on Linux and `QueryPerformanceCounter` on Windows: every interval between consecutive samples must be conclusive within 0.25 ppm, and the interval rates must agree within 1 ppm. chrony's frequency updates move `CLOCK_MONOTONIC`'s rate by up to several ppm between seconds on the Azure runners, which says nothing about the TSC. The rate over the whole window must lie within 250 ppm of the rate H3 reports when H3 runs in the same invocation, and H4 reports their deviation to 0.001 ppm. The limit is the guest's budget for the host's clock correction: the guest's [wall-clock discipline](design/3.2-clock-and-time.md#3210-guest-obligations) follows host UTC, so it applies the host's correction on top of a restore's rate deviation, which the time ABI's restore tolerance bounds at 250 ppm, within Linux's frequency limit of ±500 ppm. Beyond the budget the guest doesn't fail: its offset grows to 128 ms, and the discipline steps its clock and counts a discontinuity. A unit test keeps the limit equal to the difference of nvx's frequency limit and its restore deviation limit, and the latter equal to the restore tolerance of the OpenVMM gitlink's commit. The limit doesn't bound the TSC's error alone, as the time ABI v1's 100 ppm did, because no run can tell that error from the wander of the host's reference clock: on `azure-mshv-1`, chronyd's estimate ranged from +2.5 to +189.3 ppm within a day while the TSC held its rate (#1008). Above that old bound, H4 passes with a warning that says how much of the budget the host's correction uses, and that one run can't tell the TSC's error from the reference's wander. H4 also requires the host to publish a synchronized clock correction, read as OpenVMM reads it for every [time sample](design/3.2-clock-and-time.md#329-time-samples): on Linux, `adjtimex` reports neither `STA_UNSYNC` nor `STA_CLOCKERR`; on Windows, `GetSystemTimeAdjustmentPrecise` reports that a time service adjusts the clock. H4 records the status, correction, and host UTC's maximum error; the correction's direct reading is evidence, while the independent rate-budget gate above qualifies the combined rate that the guest must follow. On Linux with a synchronized chronyd, that rate is the rate against `CLOCK_MONOTONIC_RAW` corrected by the frequency that chronyd estimates from its whole sample history, as `chronyc -c tracking` reports it, and every rate within chronyd's skew of that estimate must lie within the limit. The reference's wander can move the estimate and its skew within seconds, so when that range straddles the limit, H4 re-reads the estimate every 2 s for up to 60 s and uses the first whose range lies wholly within or wholly beyond the limit, with the same samples, since only the estimate changes; a range that straddles the limit throughout fails as inconclusive. The rate against `CLOCK_MONOTONIC` is evidence only, because it also carries the slew with which chronyd removes its current offset, which reaches hundreds of ppm for seconds after the host's clock jumps (#768). Without chronyd's estimate, on a Linux host whose kernel PLL another time service drives, such as systemd-timesyncd or ntpd, and which `adjtimex` reports synchronized, the rate is the rate against `CLOCK_MONOTONIC_RAW` corrected by the PLL's frequency, `adjtimex`'s frequency with its tick's, which the PLL keeps apart from the offsets that it slews; H4 never reads it with chronyd, which keeps the PLL off and slews through that frequency. Otherwise the rate is measured against `CLOCK_MONOTONIC` on Linux, and the detail says why neither estimate is available, or against `QueryPerformanceCounter` on Windows. On Linux, H4 also reports as evidence the average correction since boot, the rate of `CLOCK_MONOTONIC_RAW` against `CLOCK_MONOTONIC` over the uptime, and the deviation from the backend's rate that it gives: both clocks exclude suspend, and after a small offset at boot only the time service's gradual adjustments separate them, so the average smooths the reference's wander out without saved state, but slews just after boot or a live migration bias it, so H4 doesn't gate on it. A Linux host's clocksource is recorded as evidence |
+| H4 | Samples of the TSC against the host's monotonic clocks, with sleeps between them so the host's CPUs idle: 13 samples 10 s apart, or 3 samples 1 s apart with `--ci-schedule`. Each sample reads the TSC between two reads of a clock, keeping the tightest of 64 brackets; its uncertainty is half the bracket plus half the clock's resolution. A clock that returns the same value to consecutive reads is coarser than one read, so the probe takes its smallest step as its resolution: Hyper-V's reference TSC page advances the Linux clocks in 100 ns steps although `clock_getres` reports 1 ns. The interval stability is judged against a clock that time synchronization never steers, `CLOCK_MONOTONIC_RAW` on Linux and `QueryPerformanceCounter` on Windows: every interval between consecutive samples must be conclusive within 0.25 ppm, and the interval rates must agree within 1 ppm. chrony's frequency updates move `CLOCK_MONOTONIC`'s rate by up to several ppm between seconds on the Azure runners, which says nothing about the TSC. The rate over the whole window must lie within 250 ppm of the rate H3 reports when H3 runs in the same invocation, and H4 reports their deviation to 0.001 ppm. The limit is the guest's budget for the host's clock correction: the guest's [wall-clock discipline](design/3.2-clock-and-time.md#3210-guest-obligations) follows host UTC, so it applies the host's correction on top of a restore's rate deviation, which the time ABI's restore tolerance bounds at 250 ppm, within Linux's frequency limit of ±500 ppm. Beyond the budget the guest doesn't fail: its offset grows to 128 ms, and the discipline steps its clock and counts a discontinuity. A unit test keeps the limit equal to the difference of nvx's frequency limit and its restore deviation limit, and the latter equal to the restore tolerance of the OpenVMM gitlink's commit. The limit doesn't bound the TSC's error alone, as the time ABI v1's 100 ppm did, because no run can tell that error from the wander of the host's reference clock: on `azure-intel-mshv-1`, chronyd's estimate ranged from +2.5 to +189.3 ppm within a day while the TSC held its rate (#1008). Above that old bound, H4 passes with a warning that says how much of the budget the host's correction uses, and that one run can't tell the TSC's error from the reference's wander. H4 also requires the host to publish a synchronized clock correction, read as OpenVMM reads it for every [time sample](design/3.2-clock-and-time.md#329-time-samples): on Linux, `adjtimex` reports neither `STA_UNSYNC` nor `STA_CLOCKERR`; on Windows, `GetSystemTimeAdjustmentPrecise` reports that a time service adjusts the clock. H4 records the status, correction, and host UTC's maximum error; the correction's direct reading is evidence, while the independent rate-budget gate above qualifies the combined rate that the guest must follow. On Linux with a synchronized chronyd, that rate is the rate against `CLOCK_MONOTONIC_RAW` corrected by the frequency that chronyd estimates from its whole sample history, as `chronyc -c tracking` reports it, and every rate within chronyd's skew of that estimate must lie within the limit. The reference's wander can move the estimate and its skew within seconds, so when that range straddles the limit, H4 re-reads the estimate every 2 s for up to 60 s and uses the first whose range lies wholly within or wholly beyond the limit, with the same samples, since only the estimate changes; a range that straddles the limit throughout fails as inconclusive. The rate against `CLOCK_MONOTONIC` is evidence only, because it also carries the slew with which chronyd removes its current offset, which reaches hundreds of ppm for seconds after the host's clock jumps (#768). Without chronyd's estimate, on a Linux host whose kernel PLL another time service drives, such as systemd-timesyncd or ntpd, and which `adjtimex` reports synchronized, the rate is the rate against `CLOCK_MONOTONIC_RAW` corrected by the PLL's frequency, `adjtimex`'s frequency with its tick's, which the PLL keeps apart from the offsets that it slews; H4 never reads it with chronyd, which keeps the PLL off and slews through that frequency. Otherwise the rate is measured against `CLOCK_MONOTONIC` on Linux, and the detail says why neither estimate is available, or against `QueryPerformanceCounter` on Windows. On Linux, H4 also reports as evidence the average correction since boot, the rate of `CLOCK_MONOTONIC_RAW` against `CLOCK_MONOTONIC` over the uptime, and the deviation from the backend's rate that it gives: both clocks exclude suspend, and after a small offset at boot only the time service's gradual adjustments separate them, so the average smooths the reference's wander out without saved state, but slews just after boot or a live migration bias it, so H4 doesn't gate on it. A Linux host's clocksource is recorded as evidence |
 | H5 | Pinned-thread ping-pong rounds over every pair of host CPUs; `max_abs_offset_ns` is at most 1,000, the measurement is conclusive, and no pair stalls |
 | H6 | A microVM with the largest supported vCPU count up to 8 reports a valid `NVX-TIME-ABI` boot line through `nvx-time status` and runs `nvx-time-probe warp` over every CPU pair five times, with all vCPUs halted for 0.1, 1, 5, and 1 s between the runs, so that a host without an invariant TSC corrects the guest TSC as idle host CPUs wake (#265); then a 1-vCPU microVM runs it once. Every run stays within 1,000 ns. `--ci-schedule` runs CI's schedule instead: two runs 1 s apart |
 | H7 | `adjtimex` reports no `STA_UNSYNC` and no `TIME_ERROR` on Linux; `w32tm /query /status` names a synchronized source on Windows. When H7 can't read either, its detail starts with `cannot verify host UTC synchronization`: `adjtimex` fails or reports a clock state Linux doesn't define, or `w32tm` fails or prints no English `Source` and `Leap Indicator` lines, as in a Windows display language other than English |
