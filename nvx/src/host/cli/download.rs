@@ -51,7 +51,7 @@ use self::lock::DownloadLock;
 use super::args::{Parser, Receiver, Spec, Syntax, choice};
 use super::artifacts::{Located, locate};
 use super::sandbox::HYPERVISORS;
-use super::{Exit, Result, check_interrupt, io_error, output};
+use super::{Exit, Result, check_interrupt, io_error, output, random_bytes};
 use crate::ErrorCode;
 use crate::hex::hex;
 use crate::host::artifacts::{ArtifactDir, Guest, Layout, MANIFEST_NAME, REPO_BUILD_DIR};
@@ -508,12 +508,12 @@ struct Staging {
 impl Staging {
     /// Creates a staging directory in `parent`, and `parent` if it does not exist.
     fn new(parent: &Path) -> Result<Self> {
+        /// Random bytes in the token: 64 bits, so that the name almost never matches a
+        /// directory that an interrupted download left behind, which would fail its creation.
+        const TOKEN_BYTES: usize = 8;
+
         fs::create_dir_all(parent).map_err(|error| io_error(ErrorCode::Io, &error, parent))?;
-        let mut bytes = [0u8; 8];
-        getrandom::fill(&mut bytes).map_err(|error| {
-            Exit::error(ErrorCode::Io, format!("cannot read random bytes: {error}"))
-        })?;
-        let token = hex(&bytes);
+        let token = hex(&random_bytes::<TOKEN_BYTES>()?);
         let path = parent.join(format!(".nvx-download-{token}"));
         #[cfg(unix)]
         let builder = {
