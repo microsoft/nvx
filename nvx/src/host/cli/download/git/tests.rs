@@ -83,6 +83,43 @@ fn a_checkout_that_is_no_repository_reads_none_above_it_however_named() {
 }
 
 #[test]
+fn a_checkout_reads_none_above_a_parent_named_with_the_path_list_separator() {
+    let _spawns = hold_spawns();
+    let directory = tempfile::tempdir().unwrap();
+    // `GIT_CEILING_DIRECTORIES` separates its directories with `;` on Windows and `:` elsewhere.
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    let outer = directory.path().join(format!("outer{separator}repository"));
+    repository(&outer, "9.9.9");
+    let checkout = outer.join("checkout");
+    fs::create_dir_all(checkout.join(".git")).unwrap();
+    let history = Git::new(&checkout).unwrap();
+    assert!(
+        history.first_parent_commits(5).is_err(),
+        "{} read the history of the repository above it",
+        checkout.display()
+    );
+    assert_eq!(history.version_at("HEAD").unwrap(), None);
+}
+
+#[test]
+fn a_checkout_below_a_parent_named_with_the_path_list_separator_reads_its_own_history() {
+    let _spawns = hold_spawns();
+    let directory = tempfile::tempdir().unwrap();
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    let outer = directory.path().join(format!("outer{separator}repository"));
+    repository(&outer, "9.9.9");
+    let checkout = outer.join("checkout");
+    repository(&checkout, "1.2.3");
+    let history = Git::new(&checkout).unwrap();
+    let commits = history.first_parent_commits(5).unwrap();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(
+        history.version_at(&commits[0]).unwrap().as_deref(),
+        Some("1.2.3")
+    );
+}
+
+#[test]
 fn a_checkout_named_through_a_link_reads_its_own_history() {
     let _spawns = hold_spawns();
     let directory = tempfile::tempdir().unwrap();
