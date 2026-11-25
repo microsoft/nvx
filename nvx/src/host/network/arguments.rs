@@ -26,7 +26,7 @@ use crate::net::{self, cidr};
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when a rule is invalid,
 /// when the rules of one action need more than [`MAX_RULES`] OpenVMM rules, when host-loopback
-/// access is allowed for a guest network whose prefix is longer than
+/// access is allowed for a guest network whose prefix OpenVMM cannot read or reads as longer than
 /// [`MAX_HOST_LOOPBACK_PREFIX`], when the host-loopback forwards break the rules of
 /// [`NetworkPolicy::host_loopback_forwards`], or when a policy with a proxy is not proxy-only
 /// ([`NetworkPolicy::proxy`]), its proxy's port is one that [`NetworkProxy::port`] excludes, or
@@ -50,17 +50,25 @@ pub fn openvmm_arguments(
         ));
     }
     // OpenVMM presents a host peer to the guest at an address of the guest network, which a /30
-    // network, holding only the gateway and the guest, cannot spare.
-    if policy.host_loopback == HostLoopback::Allow
-        && guest_network
+    // network, holding only the gateway and the guest, cannot spare. The prefix is read as
+    // OpenVMM's `--net` reads it, with `u8::from_str`, which also takes `030` and `+30` for 30,
+    // and a network whose prefix does not read is refused rather than taken for a shorter one.
+    if policy.host_loopback == HostLoopback::Allow {
+        let Some(prefix) = guest_network
             .split_once('/')
-            .and_then(|(_, prefix)| cidr::parse_prefix_length(prefix))
-            .is_some_and(|prefix| prefix > MAX_HOST_LOOPBACK_PREFIX)
-    {
-        return Err(Error::unsupported(format!(
-            "host-loopback access needs a guest network prefix of /{MAX_HOST_LOOPBACK_PREFIX} or \
-             shorter, which leaves an address at which OpenVMM presents host peers to the guest"
-        )));
+            .and_then(|(_, prefix)| prefix.parse::<u8>().ok())
+        else {
+            return Err(Error::unsupported(format!(
+                "guest network {guest_network:?} is not valid"
+            )));
+        };
+        if prefix > MAX_HOST_LOOPBACK_PREFIX {
+            return Err(Error::unsupported(format!(
+                "host-loopback access needs a guest network prefix of \
+                 /{MAX_HOST_LOOPBACK_PREFIX} or shorter, which leaves an address at which OpenVMM \
+                 presents host peers to the guest"
+            )));
+        }
     }
     // As in an egress policy file, the allow rules are checked and lowered before the deny rules,
     // and so are those of a policy that attaches no device.
