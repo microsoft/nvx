@@ -1304,6 +1304,34 @@ fn cold_runs_publish_an_outcome_report_of_the_longest_file_name() {
 }
 
 #[test]
+fn cold_runs_refuse_a_colon_in_a_report_name_before_launch_only_on_windows() {
+    // On Windows, `NAME:STREAM` names a stream of the file `NAME`, to which no report can be
+    // linked; elsewhere, a colon is a character of the name.
+    let root = Root::new();
+    root.write("reports/keep.txt", "keep\n");
+    let before = root.snapshot();
+    let report = "{root/reports/outcome-06:30.json}";
+    let outcome = root.nvx(&["run", "--outcome-report", report]);
+    if cfg!(windows) {
+        outcome.assert_error(
+            "unsupported",
+            &[
+                "outcome report file name holds a colon",
+                &root.expand(report),
+            ],
+        );
+        assert_eq!(root.snapshot(), before);
+    } else {
+        assert_eq!(outcome.status, Some(0), "{}", outcome.describe());
+        assert!(
+            root.below("reports/outcome-06:30.json").is_file(),
+            "{}",
+            outcome.describe()
+        );
+    }
+}
+
+#[test]
 fn missing_cold_reports_do_not_replace_the_owned_child_status() {
     for line in [
         "fake_exit_on_start=3",
