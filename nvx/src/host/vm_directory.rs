@@ -21,6 +21,9 @@ pub(super) const CONTROL: &str = "control.sock";
 pub(super) const CONSOLE: &str = "console.sock";
 /// The restore-ready socket on Linux.
 pub(super) const RESTORE_READY: &str = "restore-ready.sock";
+/// The size in bytes of the path of a Unix socket's address, `sun_path`, which ends with a NUL:
+/// OpenVMM takes a socket whose path is shorter.
+pub(super) const SOCKET_PATH_SIZE: usize = 108;
 /// The prefix OpenVMM requires of its Windows console pipes.
 const OPENVMM_PIPE: &str = "openvmm-microvm";
 /// The prefix of a Windows restore-ready pipe.
@@ -84,17 +87,46 @@ impl VmDir {
             let suffix = hex(&bytes);
             return Ok(format!("//./pipe/{pipe}-{suffix}"));
         }
-        self.path
-            .join(name)
-            .into_os_string()
-            .into_string()
-            .map_err(|_| {
-                Error::unsupported(format!(
-                    "the VM directory {} is not valid Unicode, which OpenVMM's endpoints must be",
-                    self.path.display()
-                ))
-            })
+        socket(&self.path, name)
     }
+}
+
+/// Returns the path of the socket `name` in the VM directory `dir`, as text, which OpenVMM's
+/// endpoints must be.
+fn socket(dir: &Path, name: &str) -> Result<String> {
+    dir.join(name).into_os_string().into_string().map_err(|_| {
+        Error::unsupported(format!(
+            "the VM directory {} is not valid Unicode, which OpenVMM's endpoints must be",
+            dir.display()
+        ))
+    })
+}
+
+/// Refuses, on hosts other than Windows, the VM directory `dir` if OpenVMM could not take a socket
+/// that a launch in it listens on: `control.sock`, `console.sock` if the launch listens on its
+/// boot console, and `restore-ready.sock` if it restores. A socket's path must be shorter than
+/// [`SOCKET_PATH_SIZE`] bytes and hold no `,` or `=`, which OpenVMM's listener options take for
+/// delimiters. The directory need not exist yet. Windows, whose endpoints are named pipes, takes
+/// any.
+///
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
+pub(super) fn check_sockets(dir: &Path, console: bool, restore: bool) -> Result<()> {
+    if cfg!(windows) {
+        return Ok(());
+    }
+    let names = std::iter::once(CONTROL)
+        .chain(console.then_some(CONSOLE))
+        .chain(restore.then_some(RESTORE_READY));
+    for name in names {
+        let endpoint = socket(dir, name)?;
+        if endpoint.len() >= SOCKET_PATH_SIZE || endpoint.contains([',', '=']) {
+            return Err(Error::unsupported(format!(
+                "the VM socket {endpoint} must be shorter than {SOCKET_PATH_SIZE} bytes and hold \
+                 no ',' or '='",
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Creates a VM directory private to the current user, or checks an existing one without
