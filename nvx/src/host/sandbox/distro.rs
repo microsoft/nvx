@@ -9,12 +9,12 @@
 //!   entrypoints of systemd, which the sandbox security profile does not run. It reads nothing,
 //!   and every launch applies it, whether or not the layer has a manifest.
 //! - Explicit verification, [`DistroBinding::verify`], reads the layer's manifest,
-//!   `LAYER.manifest.json` beside the layer, if there is one. The manifest must name the layer and
-//!   its SHA-256 digest, which verification compares with a hash of the whole layer, and list the
-//!   layer's packages, of which the distro policy refuses `systemd`. Verification runs where
-//!   hashing belongs: where a layer is built, installed, or staged, in diagnostics, and in the
-//!   preflight of `nvx sandbox run` and `provision`. A layer without a manifest passes, and
-//!   is not read.
+//!   `LAYER.manifest.json` beside the layer, if there is one. The manifest must name the layer,
+//!   as the host compares file names, in any ASCII case on Windows, and its SHA-256 digest, which
+//!   verification compares with a hash of the whole layer, and list the layer's packages, of which
+//!   the distro policy refuses `systemd`. Verification runs where hashing belongs: where a layer
+//!   is built, installed, or staged, in diagnostics, and in the preflight of `nvx sandbox run` and
+//!   `provision`. A layer without a manifest passes, and is not read.
 //! - The staged check, [`DistroBinding::check`], opens the layer and its manifest, compares them
 //!   with the binding from their metadata alone, and returns the layer, open, for the launch. It
 //!   never reads, maps, or hashes either file. A missing or stale binding fails: no launch
@@ -48,6 +48,7 @@ use crate::hex::hex;
 use crate::host::artifacts::DISTRO_MANIFEST_SUFFIX;
 use crate::host::network::policy::MAX_JSON_DEPTH;
 use crate::host::network::policy::json::{self, ReadError};
+use crate::host::paths;
 use crate::host::seal::{self, FileKind, FileSeal};
 
 /// The revision of NVX's distro policy, which refuses a distro layer whose manifest lists the
@@ -191,11 +192,12 @@ impl DistroBinding {
     /// records the manifest's absence. A manifest is beside the layer as `Path.exists` finds it,
     /// for `nvx.py`'s outcomes, so a path whose lookup fails counts as none; the check of the
     /// binding then refuses that path, as [`check`](Self::check) says. With a manifest, it must
-    /// be a JSON object of format 1 that names the layer and its SHA-256 digest, with a list of
-    /// packages that each have a name, of which none is `systemd`. Verification reads the
-    /// manifest and hashes the whole layer through the files that it opened, and fails if the
-    /// metadata of either changed while it read them. The binding holds the seals that the files
-    /// had, and [`PolicyVerdict::ACCEPTED`].
+    /// be a JSON object of format 1 that names the layer, as the host compares file names, in any
+    /// ASCII case on Windows, and its SHA-256 digest, with a list of packages that each have a
+    /// name, of which none is `systemd`. Verification reads the manifest and hashes the whole
+    /// layer through the files that it opened, and fails if the metadata of either changed while
+    /// it read them. The binding holds the seals that the files had, and
+    /// [`PolicyVerdict::ACCEPTED`].
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a path without a
     /// name and a manifest that it refuses, which a digest that does not match fails before the
@@ -385,8 +387,13 @@ fn verify_with(layer: &SandboxLayer, access: Access<'_>) -> Result<DistroBinding
     if document.get("format").and_then(Value::as_u64) != Some(1) {
         return Err(mismatch());
     }
-    if document.get("artifact").and_then(Value::as_str)
-        != path.file_name().and_then(|name| name.to_str())
+    // The path given may spell the layer's name in another case than the manifest, as Windows
+    // finds the layer and its manifest in any case.
+    let artifact = document.get("artifact").and_then(Value::as_str);
+    if !path
+        .file_name()
+        .zip(artifact)
+        .is_some_and(|(name, artifact)| paths::is_named(name, artifact))
     {
         return Err(mismatch());
     }

@@ -177,6 +177,20 @@ fn verification_binds_the_layer_its_manifest_and_the_policy() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn verification_takes_the_manifest_of_a_layer_whose_path_spells_its_name_in_another_case() {
+    let staged = Staged::new(true);
+    // Windows file names ignore case, so this spelling names the layer and the manifest beside
+    // it, whose artifact is `distro.erofs`.
+    let spelled = staged.other("DISTRO.erofs");
+    let layer = SandboxLayer::new(LayerRole::Distro, spelled.to_str().unwrap(), UUID);
+    let binding = DistroBinding::verify(&layer).unwrap();
+    assert_eq!(binding.image, seal_of(&staged.image()));
+    assert_eq!(binding.manifest, Some(seal_of(&staged.manifest())));
+    binding.check(&layer, DISTRO_POLICY_REVISION).unwrap();
+}
+
 #[test]
 fn bindings_round_trip_through_their_serde_form() {
     let staged = Staged::new(false);

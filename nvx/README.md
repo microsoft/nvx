@@ -1082,9 +1082,11 @@ to the crate, for the CLI:
   `LAYER.manifest.json`, beside the layer, it reads the manifest, hashes the
   whole layer, compares the digest with the manifest's `artifact_sha256`, and
   then refuses a `systemd` package, in the order and with the messages of
-  `nvx.py`. A layer without a manifest passes unread. It reads each file
-  through the file that it opened, and fails if the file's metadata changed
-  meanwhile.
+  `nvx.py`. The manifest's `artifact` must name the layer as the host compares
+  file names: in any ASCII case on Windows, whose file names ignore case, and
+  exactly elsewhere. A layer without a manifest passes unread. It reads each
+  file through the file that it opened, and fails if the file's metadata
+  changed meanwhile.
 - `DistroBinding::check` compares the layer and its manifest with a binding
   from their metadata alone, and returns the layer, open, as a
   `CheckedDistro`. It never reads, maps, or hashes either file.

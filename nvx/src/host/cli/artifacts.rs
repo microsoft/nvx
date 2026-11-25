@@ -8,7 +8,6 @@
 //! case, those directory names match in any case. The `NVX_OPENVMM` environment variable names
 //! an OpenVMM executable to run instead of the root's, such as a test double.
 
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use super::args::{Parser, Syntax};
@@ -16,6 +15,7 @@ use super::json::pretty_serde;
 use super::{Exit, Result, output};
 use crate::ErrorCode;
 use crate::host::artifacts::{ArtifactDir, ArtifactPaths, MANIFEST_NAME, absolute};
+use crate::host::paths::is_named;
 
 /// The environment variable that names the OpenVMM executable to run instead of the root's.
 pub(super) const OPENVMM_VARIABLE: &str = "NVX_OPENVMM";
@@ -122,16 +122,6 @@ fn default_dir(executable: &Path) -> Option<crate::Result<ArtifactDir>> {
     })?;
     let root = target.parent()?.parent()?;
     has_manifest(root).then(|| ArtifactDir::repository(root))
-}
-
-/// Returns whether the path component `name` is `expected`: in any ASCII case on Windows, whose
-/// paths ignore case, and exactly elsewhere.
-fn is_named(name: &OsStr, expected: &str) -> bool {
-    if cfg!(windows) {
-        name.eq_ignore_ascii_case(expected)
-    } else {
-        name == expected
-    }
 }
 
 #[cfg(test)]
