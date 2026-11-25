@@ -1,6 +1,7 @@
 //! Persistent sandboxes on the CLI's store and caller-owned [`crate::host::vm`] interface.
 //!
-//! Provision records the typed image and upper, image bindings, network, and export with its pins.
+//! Provision refuses a configuration that every start would refuse, as a run of the same options
+//! does, then records the typed image and upper, image bindings, network, and export with its pins.
 //! Start journals the prepared capability and outputs before spawn, records the verified process,
 //! and commits the matching saved VM only after authenticated readiness and mappings. Every
 //! lifecycle command takes the CLI store's recoverable lock; indeterminate launches retain their
@@ -51,6 +52,7 @@ use self::directory::provision_state_directory;
 pub(crate) use self::outcome::{
     copy_openvmm_outcome, validate_outcome_destination, write_exec_outcome,
 };
+use self::start::check_record;
 #[cfg(windows)]
 pub(crate) use self::start::remove_abandoned_vm_directories;
 pub(crate) use self::start::{exec_workload, run, start};
@@ -93,9 +95,12 @@ pub(crate) struct ProvisionConfig<'a> {
 /// a sandbox of `snapshot restore` restores, or `None`. `layer` is the distro layer as given,
 /// whose images it checks again, with the export plan, as [`check_images`] does.
 ///
-/// Before it creates the state directory, it refuses one in which OpenVMM could not take the
-/// sockets of the sandbox's starts, as [`provision_state_directory`] checks them, since every
-/// start would refuse it.
+/// Before it creates the state directory, it refuses the configuration if every start of the
+/// sandbox would refuse it, as [`check_record`] checks it, as a run of the same options refuses
+/// it before it launches anything. It also refuses a directory in which OpenVMM could not take
+/// the sockets of the sandbox's starts, as [`provision_state_directory`] checks them. Once it
+/// holds the sandbox's lock, it binds the scratch image again, and checks and records the
+/// configuration with that binding.
 pub(crate) fn provision(
     state_path: &str,
     layer: &SandboxLayer,
@@ -105,6 +110,13 @@ pub(crate) fn provision(
     source: Option<&Source>,
     timeout: f64,
 ) -> Result {
+    let record = || -> Result<String> {
+        let scratch = RecordedScratch::new(scratch)?;
+        let record = serialize_launch(distro, scratch.as_ref(), config, source)?;
+        check_record(&record)?;
+        Ok(record)
+    };
+    record()?;
     let state_dir = provision_state_directory(state_path, source.is_some())?;
     let config_path = state_dir.join(CONFIG_NAME);
     let runtime_path = state_dir.join(StateFile::Runtime.name());
@@ -116,11 +128,7 @@ pub(crate) fn provision(
         ));
     }
     check_images(layer, scratch, config.export)?;
-    let scratch = RecordedScratch::new(scratch)?;
-    write_json(
-        &config_path,
-        &serialize_launch(distro, scratch.as_ref(), config, source)?,
-    )
+    write_json(&config_path, &record()?)
 }
 
 enum Found {

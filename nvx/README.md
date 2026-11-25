@@ -1158,7 +1158,10 @@ resolved paths that `provision` records. Balanced brackets, as in
 `layer[1].erofs` or `layer[[1][2]].erofs`, are supported; an unclosed `[`, an
 unmatched `]`, or reversed `][` is not. `run` and `provision` apply these checks
 before launching OpenVMM or recording a sandbox, and `start` checks recorded
-paths again.
+paths again. They also reject an image path whose lowercase extension would
+make OpenVMM attach the image in a container format, such as `.vhd` or `.vmdk`,
+rather than raw: `run` and `provision` before launching OpenVMM or recording a
+sandbox, and `start` before it launches OpenVMM.
 
 A sandbox's scratch image is a file of its own: `nvx sandbox` rejects a scratch
 image that is the distro layer, by path or through a hard or symbolic link,
@@ -1255,13 +1258,15 @@ formatting and retain native JSON/I/O error details rather than Python's
 Entrypoints, workload arguments, and guest mount targets must each remain one
 unquoted kernel token: no whitespace, control characters, double quotes, or
 UTF-8 byte that Linux treats as whitespace (including `0xa0`). `nvx sandbox
-start` and `run` check the kernel command line that they launch: the caller's
-`--cmdline` uses Linux's parameter splitting, including quoted values and
-hyphen/underscore name equivalence, and is checked as the launched line holds
-it, untrimmed, and through the guest bootstrap's whitespace-only token view
-too. Reserved `nvx_*` and `virtfs_*` names cannot be hidden inside quoted
-values or behind leading Unicode whitespace; a `--` or unclosed quote that
-hides the tokens that OpenVMM appends is refused.
+start` and `run` check the kernel command line that they launch, and
+`provision`, before it records a sandbox, the one that every start of the
+sandbox would launch: the caller's `--cmdline` uses Linux's parameter
+splitting, including quoted values and hyphen/underscore name equivalence, and
+is checked as the launched line holds it, untrimmed, and through the guest
+bootstrap's whitespace-only token view too. Reserved `nvx_*` and `virtfs_*`
+names cannot be hidden inside quoted values or behind leading Unicode
+whitespace; a `--` or unclosed quote that hides the tokens that OpenVMM appends
+is refused.
 
 Host paths are the host's own, which `std::path` holds: spelled with their
 components alone, as `Path::components` reads them, with backslashes on

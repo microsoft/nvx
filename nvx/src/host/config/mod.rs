@@ -701,6 +701,29 @@ impl VmConfig {
     /// extension selects a non-raw backend, kernel text with double quotes or the standalone `--`
     /// delimiter, as Linux splits the text at whitespace, or insufficient room for the reserve.
     pub fn check_command_line(&self) -> Result<()> {
+        fit_arguments(&self.cold_arguments()?, OPENVMM_COMMAND_LINE_RESERVE)
+    }
+
+    /// Checks the configuration's part of a cold boot's OpenVMM command line as
+    /// [`check_command_line`](Self::check_command_line) does, but with nothing reserved for the
+    /// runtime's files, launch options, and the VM's output paths: it refuses only what every cold
+    /// boot of the configuration refuses, whatever their names, since the complete command line of
+    /// one holds these arguments, or longer ones, and more.
+    ///
+    /// Fails as [`check_command_line`](Self::check_command_line) does, but for the room of the
+    /// reserve.
+    #[cfg_attr(
+        not(feature = "cli"),
+        allow(dead_code, reason = "only the CLI provisions sandboxes")
+    )]
+    pub(crate) fn check_command_line_unreserved(&self) -> Result<()> {
+        fit_arguments(&self.cold_arguments()?, 0)
+    }
+
+    /// Returns the configuration's part of a cold boot's OpenVMM command line, which
+    /// [`check_command_line`](Self::check_command_line) measures, once it has refused what that
+    /// refuses but for the room that the arguments take.
+    fn cold_arguments(&self) -> Result<Vec<OsString>> {
         let command_line = self.control_kernel_command_line()?;
         let mut arguments = self.device_arguments()?;
         let capture = self.boot.as_ref().and_then(|boot| boot.capture.as_ref());
@@ -724,7 +747,7 @@ impl VmConfig {
             arguments.extend(capture.openvmm_arguments());
         }
         check_argument_nuls(&arguments)?;
-        fit_arguments(&arguments, OPENVMM_COMMAND_LINE_RESERVE)
+        Ok(arguments)
     }
 
     /// Renders a boot's kernel text that OpenVMM's control console accepts: without double quotes
@@ -1349,7 +1372,11 @@ pub fn fit_process_command_line(
 /// `arguments`, which a plan renders, without the program and the rest of the launch, leave
 /// `reserve` code units of [`PROCESS_COMMAND_LINE_LIMIT`] to that rest.
 fn fit_arguments(arguments: &[OsString], reserve: usize) -> Result<()> {
-    let held = format!(", with {reserve} held in reserve for the rest of the launch");
+    let held = if reserve == 0 {
+        String::new()
+    } else {
+        format!(", with {reserve} held in reserve for the rest of the launch")
+    };
     fit(
         "OpenVMM's arguments",
         arguments_units(arguments),

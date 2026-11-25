@@ -3,7 +3,7 @@
 //! was, with no state directory, and launches no OpenVMM.
 
 use crate::harness::{Content, Hosts, LAYER, Outcome, Root, SCRATCH, UUID, in_parallel};
-use crate::lifecycle::provision;
+use crate::lifecycle::{provision, sandbox};
 
 /// An environment file of one entry.
 const ENVIRONMENT: Content = Content::Text(r#"["A=1"]"#);
@@ -138,6 +138,10 @@ fn sandbox_refusals() -> Vec<Refusal> {
     let network_outside =
         &["network policy options are only valid for sandbox run or provision"][..];
     let exec_options = &["managed execution options", "sandbox run or exec"][..];
+    // A user part that alone overflows the 1024 bytes of the sandbox's kernel command line.
+    let over_budget = format!("k={}", "v".repeat(1100));
+    // A distro layer whose extension makes OpenVMM open it with its VMDK backend, not raw.
+    let vmdk_layer = format!("distro,{{root/distro.vmdk}},{UUID}");
     vec![
         refusal(
             "dry run outside run",
@@ -701,6 +705,66 @@ fn sandbox_refusals() -> Vec<Refusal> {
             sandbox_run(&["--cmdline", "nvx_sandbox=0"]),
             &["nvx_sandbox"],
         ),
+        // A provision refuses what every start of the sandbox that it would record refuses, as a
+        // run of the same options refuses it, before it creates the state directory.
+        refusal(
+            "reserved command-line token at provision",
+            "unsupported",
+            provision("{root/state}", &["--cmdline", "nvx_sandbox=0"]),
+            &["nvx_sandbox", "sandbox profile"],
+        ),
+        refusal(
+            "mount command-line token at provision",
+            "unsupported",
+            provision("{root/state}", &["--cmdline", "virtfs_tag=microvm"]),
+            &["virtfs_tag"],
+        ),
+        refusal(
+            "standalone -- at provision",
+            "unsupported",
+            provision("{root/state}", &["--cmdline", "quiet -- debug"]),
+            &["hides the tokens that OpenVMM appends"],
+        ),
+        refusal(
+            "unclosed quote at provision",
+            "unsupported",
+            provision("{root/state}", &["--cmdline", "quiet \"debug"]),
+            &["hides the tokens that OpenVMM appends"],
+        ),
+        refusal(
+            "double quotes at provision",
+            "unsupported",
+            provision("{root/state}", &["--cmdline", "a=\"b c\""]),
+            &["double quotes"],
+        ),
+        refusal(
+            "command line over budget at provision",
+            "unsupported",
+            provision("{root/state}", &["--cmdline", &over_budget]),
+            &["kernel command line", "1024-byte"],
+        ),
+        refusal(
+            "VMDK distro layer at provision",
+            "unsupported",
+            sandbox(
+                "provision",
+                "{root/state}",
+                &["--layer", vmdk_layer.as_str(), "--scratch", SCRATCH],
+            ),
+            &[".vmdk", "raw images", "{root/distro.vmdk}"],
+        )
+        .with_file("distro.vmdk", Content::Text("distro\n")),
+        refusal(
+            "VMDK scratch image at provision",
+            "unsupported",
+            sandbox(
+                "provision",
+                "{root/state}",
+                &["--layer", LAYER, "--scratch", "{root/scratch.vmdk}"],
+            ),
+            &[".vmdk", "raw images", "{root/scratch.vmdk}"],
+        )
+        .with_file("scratch.vmdk", Content::Text("scratch\n")),
         refusal(
             "systemd distro image",
             "unsupported",

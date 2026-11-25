@@ -984,13 +984,37 @@ fn record(
     config: &ProvisionConfig<'_>,
 ) -> Result<Config> {
     let scratch = RecordedScratch::new(scratch)?;
-    let record = serialize_launch(distro, scratch.as_ref(), config, None)?;
+    read_record(&serialize_launch(distro, scratch.as_ref(), config, None)?)
+}
+
+/// Returns the configuration that `record`, a configuration that `provision` records, holds, as
+/// `start` reads it back and checks it.
+fn read_record(record: &str) -> Result<Config> {
     let config = Config::new(
-        serde_json::from_str(&record)
+        serde_json::from_str(record)
             .map_err(|error| Exit::error(ErrorCode::Other, error.to_string()))?,
     )?;
     config.check()?;
     Ok(config)
+}
+
+/// Refuses `record`, the configuration that `provision` is to record, if every start of its
+/// sandbox would refuse it before it launches anything: its kernel command line, as
+/// [`check_command_line`] refuses it, and the configuration's part of OpenVMM's command line.
+/// A cold start renders that part as [`VmConfig::check_command_line_unreserved`] checks it,
+/// whatever the names of its runtime and output files. The restore that starts a restored sandbox
+/// renders no kernel command line, and the NIC of its snapshot rather than the configuration's, so
+/// only the block paths of its root, which it renders as a cold start does, are checked, as
+/// [`VmConfig::check_block_paths`] checks them.
+pub(super) fn check_record(record: &str) -> Result {
+    let config = read_record(record)?;
+    let vm_config = config.vm_config()?;
+    check_command_line(&config, &vm_config)?;
+    match config.source()? {
+        Some(_) => vm_config.check_block_paths(),
+        None => vm_config.check_command_line_unreserved(),
+    }
+    .map_err(error_with_cause)
 }
 
 /// Refuses the kernel command line that a start or a run of the sandbox of `config` launches, as
