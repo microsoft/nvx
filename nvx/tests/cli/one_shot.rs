@@ -1282,6 +1282,27 @@ fn cold_runs_refuse_existing_and_missing_parent_reports_before_launch() {
     }
 }
 
+/// A cold run publishes an outcome report under the longest file name that a host accepts, which
+/// leaves no room for the report's name in that of its staging file, and leaves only the report.
+#[test]
+fn cold_runs_publish_an_outcome_report_of_the_longest_file_name() {
+    use crate::harness::{HYPERVISOR, entries, longest_file_name};
+
+    let root = Root::new();
+    let name = longest_file_name(".json");
+    let destination = format!("{{root/reports/{name}}}");
+    let outcome = root.nvx(&run(&["--outcome-report", destination.as_str()]));
+    assert_eq!(outcome.status, Some(0), "{}", outcome.describe());
+    assert_eq!(outcome.stderr(), "", "{}", outcome.describe());
+    assert_eq!(entries(&root.below("reports")), [name.as_str()]);
+    assert_outcome_report(
+        &root.json(&format!("reports/{name}")),
+        HYPERVISOR,
+        ("run", "success", 0),
+        NO_NETWORK,
+    );
+}
+
 #[test]
 fn missing_cold_reports_do_not_replace_the_owned_child_status() {
     for line in [

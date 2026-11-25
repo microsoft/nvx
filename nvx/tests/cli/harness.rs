@@ -607,6 +607,12 @@ pub(crate) fn is_hex(text: &str, length: usize) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// Returns a file name of 255 bytes that ends with `suffix`: the longest that Linux and Windows
+/// accept in a directory, of 255 bytes on Linux and of 255 UTF-16 units on Windows.
+pub(crate) fn longest_file_name(suffix: &str) -> String {
+    format!("{}{suffix}", "n".repeat(255 - suffix.len()))
+}
+
 /// Returns the relative path `path`, with `/` separators, with the separators of this host.
 pub(crate) fn native(path: &str) -> String {
     path.replace('/', std::path::MAIN_SEPARATOR_STR)

@@ -1178,6 +1178,43 @@ fn managed_execs_exit_with_the_workload_status() {
         .assert_silent_success();
 }
 
+/// An `exec` writes its outcome report under the longest file name that a host accepts, which
+/// leaves no room for the report's name in that of its staging file, exits with the workload's
+/// status, and leaves only the report.
+#[test]
+fn managed_execs_write_an_outcome_report_of_the_longest_file_name() {
+    use crate::harness::longest_file_name;
+
+    let root = Root::new();
+    root.nvx(&provision("{root/state}", &[]))
+        .assert_silent_success();
+    root.nvx(&sandbox::<&str>("start", "{root/state}", &[]))
+        .assert_silent_success();
+    let name = longest_file_name(".json");
+    let destination = format!("{{root/reports/{name}}}");
+    let outcome = root.nvx(&sandbox(
+        "exec",
+        "{root/state}",
+        &[
+            "--entrypoint",
+            "/bin/sh",
+            "--arg=-c",
+            "--arg",
+            "exit 3",
+            "--outcome-report",
+            destination.as_str(),
+        ],
+    ));
+    assert_eq!(outcome.status, Some(3), "{}", outcome.describe());
+    assert_eq!(outcome.stderr(), "", "{}", outcome.describe());
+    assert_eq!(entries(&root.below("reports")), [name.as_str()]);
+    assert_exec_report(&root.below(&format!("reports/{name}")), "exit", 3);
+    root.nvx(&sandbox::<&str>("stop", "{root/state}", &[]))
+        .assert_silent_success();
+    root.nvx(&sandbox::<&str>("deprovision", "{root/state}", &[]))
+        .assert_silent_success();
+}
+
 #[test]
 fn managed_execs_stream_their_standard_input_and_output() {
     let root = Root::new();
