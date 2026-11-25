@@ -3,9 +3,11 @@
 use std::path::{Path, PathBuf};
 
 use crate::ErrorCode;
+use crate::host::cli::sandbox::error_with_cause;
 use crate::host::cli::store::StateDir;
 use crate::host::cli::{Exit, Result, io_error};
 use crate::host::paths;
+use crate::host::vm_directory::check_sockets;
 
 /// Returns the error for an I/O error that an operation on `path` met.
 pub(super) fn os_error(error: &std::io::Error, path: &Path) -> Exit {
@@ -88,13 +90,28 @@ fn already_exists() -> std::io::Error {
     error
 }
 
-/// Resolves the state directory at `path`, and creates it with `create`, as
-/// `_prepare_state_directory` does. It must be a directory and not a symbolic link.
-pub(crate) fn prepare_state_directory(path: &str, create: bool) -> Result<PathBuf> {
+/// Resolves the state directory at `path`, as `_prepare_state_directory` does. It must be a
+/// directory and not a symbolic link.
+pub(crate) fn prepare_state_directory(path: &str) -> Result<PathBuf> {
+    plain_directory(paths::resolve(Path::new(path)).map_err(Exit::from_os_error)?)
+}
+
+/// Resolves the state directory at `path` and creates it, as provision does, once it has checked
+/// that OpenVMM can take the sockets that each start of its sandbox gives it there, as `start`
+/// checks them: the control socket, and the restore-ready socket of a sandbox that `restores` its
+/// snapshot, as one that `snapshot restore` provisions does. The check and the creation take one
+/// resolution of `path`, so that the directory that it creates is the one that it checked. It
+/// must then be a directory and not a symbolic link.
+pub(crate) fn provision_state_directory(path: &str, restores: bool) -> Result<PathBuf> {
     let resolved = paths::resolve(Path::new(path)).map_err(Exit::from_os_error)?;
-    if create {
-        create_state_directory(&resolved)?;
-    }
+    check_sockets(&resolved, false, restores).map_err(error_with_cause)?;
+    create_state_directory(&resolved)?;
+    plain_directory(resolved)
+}
+
+/// Returns `resolved`, the resolved path of a state directory, if it names a directory and not a
+/// symbolic link.
+fn plain_directory(resolved: PathBuf) -> Result<PathBuf> {
     if resolved.is_symlink() || !resolved.is_dir() {
         return Err(Exit::error(
             ErrorCode::SandboxNotProvisioned,

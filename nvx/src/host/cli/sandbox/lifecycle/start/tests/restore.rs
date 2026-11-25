@@ -928,6 +928,57 @@ fn snapshot_restore_records_its_source_and_starts_a_restore_of_it() {
     assert!(!state.exists());
 }
 
+/// On Linux, each start of a sandbox of `snapshot restore` also gives OpenVMM the restore-ready
+/// socket in its state directory, six bytes longer than the control socket: `snapshot restore`
+/// refuses a state directory in which OpenVMM could not take it, as every start would, before it
+/// provisions anything, though a sandbox that boots cold could start there.
+#[cfg(unix)]
+#[test]
+fn snapshot_restore_refuses_a_state_directory_whose_restore_ready_socket_openvmm_cannot_take() {
+    let fixture = Fixture::new(false);
+    let root = artifact_root(&fixture.state("checkout"));
+    let layer = fixture.state("distro.erofs");
+    fs::write(&layer, "distro").unwrap();
+    let store = fixture.root.path().join("store");
+    // `STATE/restore-ready.sock` is 108 bytes long, and `STATE/control.sock` 102.
+    let parent = resolve(fixture.root.path()).unwrap();
+    let name_bytes = 108usize
+        .checked_sub(parent.as_os_str().len() + "/".len() + "/restore-ready.sock".len())
+        .expect("a short temporary directory is needed for the socket boundary");
+    let state = parent.join("s".repeat(name_bytes));
+    let arguments = [
+        "restore",
+        "source",
+        "--store-dir",
+        store.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
+        "--layer",
+        &format!(
+            "distro,{},11111111-1111-1111-1111-111111111111",
+            layer.display()
+        ),
+        "--upper",
+        "ram",
+        "--hypervisor",
+        "kvm",
+        "--timeout",
+        "10",
+    ]
+    .map(str::to_owned);
+    let (command, unrecognized) = snapshots::parse(&arguments).unwrap();
+    assert!(unrecognized.is_empty(), "{unrecognized:?}");
+    let error = snapshots::run(Some(&root), command).unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
+    let expected = format!(
+        "the VM socket {}/restore-ready.sock must be shorter than 108 bytes and hold no ',' or '='",
+        state.display()
+    );
+    assert_eq!(error.message(), Some(expected.as_str()));
+    assert!(!state.exists());
+    assert!(fixture.snapshot_free());
+}
+
 /// `run --restore-snapshot` takes the workloads that `snapshot restore` takes, exec requests that
 /// may hold whitespace and quotes, which no boot token can: its one-off provisions the sandbox and
 /// starts a restore of the snapshot, which memory that the snapshot refuses ends before it

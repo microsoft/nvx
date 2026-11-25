@@ -1919,6 +1919,48 @@ fn provision_refuses_a_share_of_the_roots_openvmm_whatever_the_variable_names() 
     assert_eq!(root.snapshot(), before);
 }
 
+/// On Linux, each start gives OpenVMM the control socket in the state directory, which it takes
+/// only if its path is shorter than 108 bytes and holds no `,` or `=`: `provision` refuses a state
+/// directory that would give it another, which every start would refuse, before it creates
+/// anything, and provisions a sandbox in the longest one that OpenVMM takes, which starts.
+#[cfg(unix)]
+#[test]
+fn provision_refuses_a_state_directory_whose_control_socket_openvmm_cannot_take() {
+    let root = Root::new();
+    // The state directory below the root whose `control.sock` is `bytes` long.
+    let state = |bytes: usize| {
+        let name = bytes
+            .checked_sub(root.text().len() + "/".len() + "/control.sock".len())
+            .expect("a short temporary directory is needed for the socket boundary");
+        format!("{}/{}", root.text(), "s".repeat(name))
+    };
+    for state in [
+        state(108),
+        format!("{}/with,comma", root.text()),
+        format!("{}/with=equals", root.text()),
+    ] {
+        let before = root.snapshot();
+        let message = root
+            .nvx(&provision(&state, &[]))
+            .assert_error("unsupported", &[]);
+        assert_eq!(
+            message,
+            format!(
+                "the VM socket {state}/control.sock must be shorter than 108 bytes and hold no \
+                 ',' or '='"
+            )
+        );
+        assert_eq!(root.snapshot(), before, "{state}");
+    }
+    let state = state(107);
+    root.nvx(&provision(&state, &[])).assert_silent_success();
+    for operation in ["start", "stop", "deprovision"] {
+        root.nvx(&sandbox::<&str>(operation, &state, &[]))
+            .assert_silent_success();
+    }
+    assert!(!Path::new(&state).exists());
+}
+
 #[test]
 fn start_refuses_recorded_shares_of_its_own_files() {
     in_parallel(&OWN_FILES, |(host, name)| {

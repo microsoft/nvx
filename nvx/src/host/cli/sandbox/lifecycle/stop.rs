@@ -40,7 +40,7 @@ pub(super) enum StopOutcome {
 /// A VM of another runtime identity may speak other contracts, so the stop asks it nothing: it
 /// ends the VM as [`terminate_mismatched`] does.
 pub(crate) fn stop(state_path: &str, artifacts: &Artifacts<'_>, timeout: f64) -> Result {
-    let state_dir = prepare_state_directory(state_path, false)?;
+    let state_dir = prepare_state_directory(state_path)?;
     let mut lock = LifecycleLock::acquire(&state_dir, timeout, false)?;
     let Running { saved, process } = match found_vm(&mut lock, artifacts)? {
         Found::Mismatched(saved, process, differences) => {
@@ -220,7 +220,7 @@ pub(super) fn wait_for_exit(process: &Process, deadline: Deadline) -> Result<boo
 /// A restored sandbox's view of its snapshot goes first, under the snapshot's lock, since its
 /// removal changes the links of the snapshot's files.
 pub(crate) fn deprovision(state_path: &str, artifacts: &Artifacts<'_>, timeout: f64) -> Result {
-    let state_dir = prepare_state_directory(state_path, false)?;
+    let state_dir = prepare_state_directory(state_path)?;
     let mut lock = LifecycleLock::acquire(&state_dir, timeout, false)?;
     match found_vm(&mut lock, artifacts)? {
         Found::Nothing | Found::Exited => {}
