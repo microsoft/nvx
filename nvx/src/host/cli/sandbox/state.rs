@@ -107,7 +107,10 @@ fn set_private(path: &Path) -> Result {
     {
         use std::os::unix::fs::PermissionsExt;
 
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(error)
+        use crate::host::platform::PRIVATE_FILE_MODE;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+            .map_err(error)
     }
     #[cfg(not(unix))]
     {

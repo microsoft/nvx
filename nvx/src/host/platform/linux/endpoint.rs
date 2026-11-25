@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::socket::{MsgFlags, getsockopt, recv, sockopt::PeerPidfd};
 
-use crate::host::platform::{Transport, TransportHandle, time_left};
+use crate::host::platform::{PRIVATE_FILE_MODE, Transport, TransportHandle, time_left};
 use crate::host::sys;
 
 /// The listener at which a restore awaits the restore-ready event of its VMM: a Unix
@@ -234,7 +234,7 @@ fn set_ready_socket_mode(socket_path: &Path) -> io::Result<()> {
     // /proc names exactly the socket that it opened.
     fs::set_permissions(
         Path::new("/proc/self/fd").join(socket.as_raw_fd().to_string()),
-        Permissions::from_mode(0o600),
+        Permissions::from_mode(PRIVATE_FILE_MODE),
     )
 }
 

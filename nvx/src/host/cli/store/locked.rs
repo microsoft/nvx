@@ -9,11 +9,9 @@ use super::{StateDir, StateFile, failed};
 use crate::ErrorCode;
 use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
 use crate::host::cli::{Exit, Result};
-use crate::host::{filesystem, platform};
-
-/// Mode of the lock file on Unix: readable and writable by the current user only.
 #[cfg(unix)]
-const PRIVATE_FILE_MODE: u32 = 0o600;
+use crate::host::platform::PRIVATE_FILE_MODE;
+use crate::host::{filesystem, platform};
 
 /// A state directory whose lock this holds, through which a lifecycle transition of its sandbox
 /// changes its files. Dropping it releases the lock.
