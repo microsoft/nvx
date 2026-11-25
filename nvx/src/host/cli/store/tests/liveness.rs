@@ -5,6 +5,7 @@ use std::process::{Child, Command, Stdio};
 
 use super::launch::prepared;
 use super::*;
+use crate::ErrorKind;
 use crate::host::cli::store::liveness::hold_endpoint_server;
 use crate::host::config::ConsoleAttachment;
 use crate::host::process::{BootId, Opened, Process, ProcessRef};
@@ -73,6 +74,28 @@ fn a_claim_identifies_the_opened_log_and_last_close_proves_exit() {
     assert!(released(|| !locked.claim_held(&journal).unwrap()));
     assert!(locked.journal().unwrap().is_some());
     assert!(locked.capability().unwrap().is_some());
+}
+
+#[test]
+fn a_journal_of_another_directory_or_log_is_refused() {
+    let (_directory, state) = state();
+    let (prepared, runtime) = prepared(&state, ConsoleAttachment::Disconnected);
+    let mut locked = state.lock(Deadline::after(10.0)).unwrap();
+    drop(locked.begin_launch(&prepared, &runtime).unwrap());
+    let journal = locked.journal().unwrap().unwrap();
+    locked.check_journal(&journal).unwrap();
+    let mut foreign_dir = journal.clone();
+    foreign_dir.vm_dir = state.dir().join("another-vm");
+    let mut foreign_log = journal.clone();
+    foreign_log.log = state.dir().join("another-log");
+    for foreign in [foreign_dir, foreign_log] {
+        let error = locked.check_journal(&foreign).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Io);
+        assert_eq!(
+            error.message(),
+            "the launch journal belongs to another sandbox directory"
+        );
+    }
 }
 
 #[test]

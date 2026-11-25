@@ -11,15 +11,21 @@ use crate::host::process::{BootId, Opened, Process, ProcessRef};
 use crate::{Error, Result};
 
 impl LockedState {
-    /// Returns whether a launch process may still run. Only a released claim proves exit;
-    /// failure to examine it proves neither, and preserves the original error.
-    pub(super) fn claim_held(&self, journal: &LaunchJournal) -> Result<bool> {
-        let path = self.path(StateFile::Log);
-        if journal.vm_dir != self.dir() || journal.log != path {
+    /// Refuses a journal whose VM directory or log is not this sandbox's.
+    pub(super) fn check_journal(&self, journal: &LaunchJournal) -> Result<()> {
+        if journal.vm_dir != self.dir() || journal.log != self.path(StateFile::Log) {
             return Err(Error::io(
                 "the launch journal belongs to another sandbox directory",
             ));
         }
+        Ok(())
+    }
+
+    /// Returns whether a launch process may still run. Only a released claim proves exit;
+    /// failure to examine it proves neither, and preserves the original error.
+    pub(super) fn claim_held(&self, journal: &LaunchJournal) -> Result<bool> {
+        self.check_journal(journal)?;
+        let path = self.path(StateFile::Log);
         platform::log_claim_held(&path, journal.log_identity)
             .map_err(|error| Error::io("cannot check the launch log claim").with_source(error))
     }

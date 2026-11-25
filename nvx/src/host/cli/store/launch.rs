@@ -29,11 +29,7 @@ impl LockedState {
         let Some(journal) = self.journal()? else {
             return Ok(());
         };
-        if journal.vm_dir != self.dir() || journal.log != self.path(StateFile::Log) {
-            return Err(Error::io(
-                "the launch journal belongs to another sandbox directory",
-            ));
-        }
+        self.check_journal(&journal)?;
         match journal.process() {
             Some(reference) => self.end_recorded(&journal, reference, deadline)?,
             None if !self.released_claim(&journal, deadline)? => {
