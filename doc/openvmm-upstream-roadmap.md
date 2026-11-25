@@ -10,8 +10,9 @@
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR20 fixups at positions 375 and
   376, and the PR25 fixup at position 377.
-- NVX's pinned OpenVMM revision: `2d222dcdc978026422a93269567783733b300960`, position 378, the head
-  of microsoft/openvmm#5271, whose commit follows position 377, `3f5506f9d`, the head of
+- NVX's pinned OpenVMM revision: `a8aeeb65ec4c1d2c7bc9acc040b7fe4aedb3e8d7`, position 379, the head
+  of microsoft/openvmm#5272, whose commit follows position 378, `2d222dcdc`, the head of
+  microsoft/openvmm#5271, whose commit follows position 377, `3f5506f9d`, the head of
   `feature/microvm/dev` since microsoft/openvmm#5270 landed positions 376 and 377 on position 375,
   `d44a113be`, where microsoft/openvmm#5262, microsoft/openvmm#5263, microsoft/openvmm#5264, and
   microsoft/openvmm#5265 had landed positions 371-375 on position 370,
@@ -27,9 +28,9 @@
   commits that they fix, so each later commit's position is its v7.2 position less the number of
   those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
   `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
-  tests. The pin is 252 commits past the mapped tip on the same first-parent chain. Positions
-  127-374 and 378 are not yet assigned to PRs, positions 375 and 376 are PR20 fixups, and position
-  377 is a PR25 fixup; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
+  tests. The pin is 253 commits past the mapped tip on the same first-parent chain. Positions
+  127-374, 378, and 379 are not yet assigned to PRs, positions 375 and 376 are PR20 fixups, and
+  position 377 is a PR25 fixup; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -1784,7 +1785,8 @@ bf353460f
   -> PR20 fixup [376]
   -> PR25 fixup [377]
   -> host VPs per socket outside the topology builder's range refused [378]
-  -> 2d222dcdc (NVX pin)
+  -> idle VPs refused by restores with WHP's user-mode APIC [379]
+  -> a8aeeb65e (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1819,7 +1821,7 @@ corrects.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 252 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 253 later commits, positions
 375 and 376 are PR20 fixups, position 377 is a PR25 fixup, and the others are not yet classified or
 assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
@@ -1829,17 +1831,17 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356-378 followed the v8.0 reorganization, so they combine none, apart
+v7.2 rebase, and positions 356-379 followed the v8.0 reorganization, so they combine none, apart
 from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
 v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which through
 position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
-335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-378 lack.
+335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-379 lack.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-378 have no position before v7.0; see
+positions 297-379 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2106,6 +2108,7 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 376 | `c440ce3cc` | - | - | - | - | - | - | - | openvmm: say that the restore readiness event precedes guest repair (microsoft/openvmm#5270); fold into 090, its `--restore-processors` changes into 092, its hotplug sentence into 142 |
 | 377 | `3f5506f9d` | - | - | - | - | - | - | - | vmservice: say that the restore readiness event precedes guest repair (microsoft/openvmm#5270); fold into 119 |
 | 378 | `2d222dcdc` | - | - | - | - | - | - | - | vm_topology: refuse host VPs per socket outside the builder's range (microsoft/openvmm#5271) |
+| 379 | `a8aeeb65e` | - | - | - | - | - | - | - | virt_whp: refuse to restore an idle VP with the user-mode APIC (microsoft/openvmm#5272) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2119,7 +2122,7 @@ for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork
 v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356,
 `5d6ab1cfa`, upstream main later that day, for positions 357-368, `efe0b08df`, upstream main later
 still, for positions 369-375, and `8d4e03132`, upstream main on 2026-11-24, for positions
-376-378. They name the positions that the commits have now, but neither
+376-379. They name the positions that the commits have now, but neither
 the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`, the v7.1 rebase on `9a875b563`,
 nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the
 earlier ones on `7d90c4104`.
@@ -5573,6 +5576,30 @@ follows position 377; of positions 369-377, only position 370 changes one of its
 package's entry of `Cargo.lock`. It is not a fixup: the unchecked count is upstream's, and upstream
 main panics the same way. Replaying the commit on upstream main applies without conflicts, and
 `vm_topology` type-checks there with its tests, which pass, so it can go upstream on its own.
+
+Position 379 has the WHP backend's `restore_activity` refuse the Hyper-V idle MP state for a
+partition with the user-mode APIC, rather than abort the VMM (microsoft/nvx#1475). Only the
+hypervisor's APIC suspends a VP that reads `HV_X64_MSR_GUEST_IDLE`, and the user-mode APIC's
+`save_activity` saves a VP only as running, halted, or waiting for a SIPI, but a snapshot does not
+record which APIC captured it, so a restore with `whp:user_mode_apic`, or with `no_enlightenments`
+and `--hv`, can be given the idle state, and `restore_activity` reached upstream's
+`vp::MpState::Idle => unimplemented!()`. The user-mode APIC cannot hold the state, since an
+interrupt wakes an idle VP even with its interrupts disabled, so the commit refuses it before it
+changes any state, with the `UnsupportedState` error that positions 288 and 293 return at the start
+of the function for a pending NMI count and an interrupt shadow kind. In `apic.rs`, which positions
+138, 143, 287, 288, 291, 293, 297, 299, 300, and 305 also change, it replaces only upstream's arm.
+Its WHP contract test follows the cases of position 297 at the end of `suspend.rs`, which position
+297 adds and positions 299 and 300 change, and it adds a sentence to the module's comment, after
+the last, which position 299 rewrote. The Guide's VMM-test page names the test after position 297's
+paragraph on `suspend.rs`, before position 301's on SMM; PR01's position 002, PR05's position 007,
+and positions 260, 263, 273, 279, 296, 299, 301-304, and 373 also change the page, none of the lines
+that it changes. It follows position 378; of positions 369-378, only position 373 changes one of its
+files, other lines of the Guide's VMM-test page. It is not a fixup: the `unimplemented!()` is
+upstream's, it changes no line that a mapped PR adds, and positions 297 and 299, whose test module
+and comment it extends, belong to no PR yet. Upstream main has the same arm, and the commit's change
+of `apic.rs` merges there, but replaying the commit conflicts in `suspend.rs`, which upstream main
+lacks, and in the Guide's VMM-test page, which lacks position 297's paragraph, so it cannot go
+upstream on its own.
 
 ## PR summary
 
