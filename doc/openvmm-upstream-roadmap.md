@@ -10,8 +10,9 @@
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR20 fixups at positions 375 and
   376, the PR25 fixup at position 377, and the PR18 fixup at position 389.
-- NVX's pinned OpenVMM revision: `c7f6a04fd7515441959b9b7a303bafd407179e85`, position 391, the head
-  of microsoft/openvmm#5283, whose commit follows position 390, `770bc61e7`, the head of
+- NVX's pinned OpenVMM revision: `e61fa53264090bd63f3cc2baeb80145c63488819`, position 392, the head
+  of microsoft/openvmm#5284, whose commit follows position 391, `c7f6a04fd`, the head of
+  microsoft/openvmm#5283, whose commit follows position 390, `770bc61e7`, the head of
   microsoft/openvmm#5282, whose commit follows position 389, `350018ce4`, the head of
   microsoft/openvmm#5281, whose commit follows position 388, `1633b3797`, the head of
   `feature/microvm/dev` since microsoft/openvmm#5280 landed positions 386-388 on position 385,
@@ -36,8 +37,8 @@
   commits that they fix, so each later commit's position is its v7.2 position less the number of
   those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
   `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
-  tests. The pin is 265 commits past the mapped tip on the same first-parent chain. Positions
-  127-374, 378-388, 390, and 391 are not yet assigned to PRs, positions 375 and 376 are PR20
+  tests. The pin is 266 commits past the mapped tip on the same first-parent chain. Positions
+  127-374, 378-388, and 390-392 are not yet assigned to PRs, positions 375 and 376 are PR20
   fixups, position 377 is a PR25 fixup, and position 389 is a PR18 fixup; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
@@ -1805,7 +1806,8 @@ bf353460f
   -> PR18 fixup [389]
   -> microVM restores of handles opened with access mode 3 [390]
   -> Windows virtio-fs xattr names longer than an NTFS EA name holds refused [391]
-  -> c7f6a04fd (NVX pin)
+  -> Windows symbolic links to an empty target refused with ENOENT [392]
+  -> e61fa5326 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1842,7 +1844,7 @@ table never hands out `u64::MAX`, after that position's test of the largest next
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 265 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 266 later commits, positions
 375 and 376 are PR20 fixups, position 377 is a PR25 fixup, position 389 is a PR18 fixup, and the
 others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
@@ -1852,17 +1854,17 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356-391 followed the v8.0 reorganization, so they combine none, apart
+v7.2 rebase, and positions 356-392 followed the v8.0 reorganization, so they combine none, apart
 from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
 v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which through
 position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
-335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-391 lack.
+335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-392 lack.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-391 have no position before v7.0; see
+positions 297-392 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2142,6 +2144,7 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 389 | `350018ce4` | - | - | - | - | - | - | - | virtiofs: let a new microVM object take the last node ID (microsoft/openvmm#5281); fold into 081, its test into 350 |
 | 390 | `770bc61e7` | - | - | - | - | - | - | - | virtiofs: restore microVM handles opened with access mode 3 (microsoft/openvmm#5282) |
 | 391 | `c7f6a04fd` | - | - | - | - | - | - | - | lxutil: reject xattr names longer than an NTFS EA name allows (microsoft/openvmm#5283) |
+| 392 | `e61fa5326` | - | - | - | - | - | - | - | lxutil: fail an empty symlink target with ENOENT on Windows (microsoft/openvmm#5284) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2155,7 +2158,7 @@ for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork
 v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356,
 `5d6ab1cfa`, upstream main later that day, for positions 357-368, `efe0b08df`, upstream main later
 still, for positions 369-375, and `8d4e03132`, upstream main on 2026-11-24, for positions
-376-391. They name the positions that the commits have now, but neither
+376-392. They name the positions that the commits have now, but neither
 the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`, the v7.1 rebase on `9a875b563`,
 nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the
 earlier ones on `7d90c4104`.
@@ -5922,6 +5925,41 @@ test. It fixes a defect that upstream has rather than one of a chain commit, so 
 none of positions 372-390 changes its files. It applies to upstream main, `8d4e03132`, as it is,
 and on the merged tree `cargo check -p lxutil` and the lxutil tests pass on Windows, so it can go
 upstream on its own.
+
+Position 392 has lxutil's Windows volume fail a symbolic link to an empty target with `ENOENT`, as
+Linux's `symlink(2)` does, before it creates anything (microsoft/nvx#2126). Upstream's
+`symlink_helper` accepted the empty target. On a volume that does not confine paths, the target
+names the link's own directory, so `symlink_helper` chose an NT directory link and called upstream's
+`create_nt_link_reparse_buffer`, which sizes its buffer as the `REPARSE_DATA_BUFFER` up to the
+`PathBuffer` of its symbolic link part, 20 bytes, plus the target twice, but writes the whole
+24-byte struct at its start, 4 bytes past the end of the heap allocation for an empty target. Where
+the process may not create NT links, the volume then fell back to a WSL-style link to the empty
+target, which a volume that PR27's position 125's `confine_paths` confines makes directly. A guest
+that builds its own `FUSE_SYMLINK` on a direct virtio-fs share, or its own `Tsymlink` on a virtio-9p
+share, could thus overflow the host's heap and get a link to nothing, while PR27's position 126's
+`validate_symlink_target` already refused an empty target on a microVM share. `symlink_helper` now
+fails an empty target with `ENOENT` before it checks the link's path, and
+`create_nt_link_reparse_buffer` refuses one too, so that its write stays within its buffer. In
+lxutil's Windows `mod.rs`, which PR27's position 125 and positions 344 and 351 also change, it adds
+the check at the top of upstream's `symlink_helper`, before the choice of link type that position
+125 changes, and a test after upstream's `no_follow_symlink_stat_without_read_ea`; in `util.rs`,
+which positions 344 and 351 also change, it changes upstream's `create_nt_link_reparse_buffer`,
+which no chain commit changes. In lxutil's `lib.rs`, which PR27's position 125 and positions 158,
+344, 351, 371, and 391 also change, it adds a test after upstream's `symlink` test, which also
+builds a confined volume with position 125's `confine_paths`. In virtiofs's `lib.rs`, which PR06's
+position 010, PR13's position 048, PR18's positions 081 and 083 and its fixup at position 389,
+PR27's position 126, and positions 158, 160, 164, 320, 329, 330, 334, 335, 342, 343, 350, 352, 358,
+and 361 also change, it adds a test of a direct share after upstream's
+`direct_root_ignores_forget_across_destroy`, before position 361's `fs_with_a_looked_up_file`. It
+fixes a defect that upstream has rather than one of a chain commit, since position 125 left the
+empty target to the WSL-style link as upstream did, so it is no fixup, and it follows position 391;
+of positions 372-391, only 389 and 391 change its files, position 389 a line of
+`InodeReservation::insert` in virtiofs's `lib.rs`, far from its test, so folding position 389
+leaves it as it is, and position 391 the documentation and tests of the xattr methods in lxutil's
+`lib.rs`. Upstream main, `8d4e03132`, has the defect, and replaying the commit there merges its
+lxutil changes but conflicts in virtiofs's `lib.rs`, around position 361's
+`fs_with_a_looked_up_file`, and its lxutil test needs position 125's `confine_paths`, which upstream
+main lacks, so it cannot go upstream on its own as it is.
 
 ## PR summary
 
