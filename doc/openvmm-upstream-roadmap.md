@@ -10,8 +10,9 @@
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR20 fixups at positions 375 and
   376, the PR25 fixup at position 377, and the PR18 fixups at positions 389, 393, and 396.
-- NVX's pinned OpenVMM revision: `a79b4bb40da0662a873798a094209cc9be59eb32`, position 397, the head
-  of microsoft/openvmm#5289, whose commit follows position 396, `1495ac815`, the head of
+- NVX's pinned OpenVMM revision: `5f4a47b83591ccbcc4f9a2563b5322603def625b`, position 398, the head
+  of microsoft/openvmm#5290, whose commit follows position 397, `a79b4bb40`, the head of
+  microsoft/openvmm#5289, whose commit follows position 396, `1495ac815`, the head of
   microsoft/openvmm#5288, whose commit follows position 395, `4aeb405d9`, the head of
   microsoft/openvmm#5287, whose commit follows position 394, `9822f732a`, the head of
   microsoft/openvmm#5286, whose commit follows position 393, `5af753b17`, the head of
@@ -42,10 +43,10 @@
   commits that they fix, so each later commit's position is its v7.2 position less the number of
   those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
   `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
-  tests. The pin is 271 commits past the mapped tip on the same first-parent chain. Positions
-  127-374, 378-388, 390-392, 394, 395, and 397 are not yet assigned to PRs, positions 375 and 376
-  are PR20 fixups, position 377 is a PR25 fixup, and positions 389, 393, and 396 are PR18 fixups;
-  see [Commits after the mapped tip](#commits-after-the-mapped-tip).
+  tests. The pin is 272 commits past the mapped tip on the same first-parent chain. Positions
+  127-374, 378-388, 390-392, 394, 395, 397, and 398 are not yet assigned to PRs, positions 375 and
+  376 are PR20 fixups, position 377 is a PR25 fixup, and positions 389, 393, and 396 are PR18
+  fixups; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -1817,7 +1818,8 @@ bf353460f
   -> Windows directory reads and writes at negative offsets refused with EINVAL [395]
   -> PR18 fixup [396]
   -> microVM listings that leave out the entries that lookups refuse [397]
-  -> a79b4bb40 (NVX pin)
+  -> microVM aggregate restores that refuse the synthetic root's node as the next node [398]
+  -> 5f4a47b83 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1859,7 +1861,7 @@ position 393's fold shares `create_with_flags`, after position 083's test of `re
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 271 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 272 later commits, positions
 375 and 376 are PR20 fixups, position 377 is a PR25 fixup, positions 389, 393, and 396 are PR18
 fixups, and the others are not yet classified or assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
@@ -1869,17 +1871,17 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356-397 followed the v8.0 reorganization, so they combine none, apart
+v7.2 rebase, and positions 356-398 followed the v8.0 reorganization, so they combine none, apart
 from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
 v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which through
 position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
-335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-397 lack.
+335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-398 lack.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-397 have no position before v7.0; see
+positions 297-398 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2165,6 +2167,7 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 395 | `4aeb405d9` | - | - | - | - | - | - | - | lxutil: refuse negative read_dir and pwrite offsets on Windows (microsoft/openvmm#5287) |
 | 396 | `1495ac815` | - | - | - | - | - | - | - | virtiofs: record the host open flags of a microVM create handle (microsoft/openvmm#5288); fold into 083, its test into 335 |
 | 397 | `a79b4bb40` | - | - | - | - | - | - | - | virtiofs: leave entries that lookups refuse out of microVM listings (microsoft/openvmm#5289) |
+| 398 | `5f4a47b83` | - | - | - | - | - | - | - | virtiofs: refuse a microVM aggregate state whose next node ID is 1 (microsoft/openvmm#5290) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2178,7 +2181,7 @@ for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork
 v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356,
 `5d6ab1cfa`, upstream main later that day, for positions 357-368, `efe0b08df`, upstream main later
 still, for positions 369-375, and `8d4e03132`, upstream main on 2026-11-24, for positions
-376-397. They name the positions that the commits have now, but neither
+376-398. They name the positions that the commits have now, but neither
 the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`, the v7.1 rebase on `9a875b563`,
 nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the
 earlier ones on `7d90c4104`.
@@ -6149,6 +6152,35 @@ tests of `fs_tests.rs`. Upstream main, `8d4e03132`, lacks the defects, since it 
 directory listings and the share's refusal of such names and paths, and replaying the commit there
 conflicts in the microVM's `file.rs` and `fs_tests.rs`, which upstream main lacks, so it cannot go
 upstream on its own.
+
+Position 398 has a microVM restore refuse an aggregate's saved state whose next node ID is 1, the
+synthetic root's, so that the restored node table never gives that node to a child
+(microsoft/nvx#2134). PR18's position 083's `validate_microvm_state` requires the next node ID to
+exceed every saved node ID, which covers node 1 for a single share, whose saved root it is, but
+position 164's aggregates save no node for their synthetic root, node 1, so an aggregate state
+without nodes passed with a next node ID of 1, which position 083's `restore_microvm_state` then
+made the node table's next ID. The guest's next lookup of a child gave the child's root node 1,
+upstream's aggregate (microsoft/openvmm#3821) routed every request for that node to the synthetic
+root, and the device's next save recorded the child's root as node 1, which position 164's check of
+an aggregate's saved nodes refuses. Upstream's aggregate node table numbers nodes from 2, so only a
+corrupt or crafted state reaches this. The next node ID must now exceed node 1 as well as every
+saved node ID, which changes nothing for a single share; the saved state keeps its format. In the
+microVM's `state.rs`, which PR18's position 081 adds and PR18's positions 083 and 085 and its fixups
+at positions 393 and 396, PR22's position 102, PR27's position 126, and positions 158, 160, 164,
+165, 194, 362, and 390 also change, it changes position 083's check of the next node ID, after
+position 164's check of the synthetic root. It adds a test to the microVM's aggregate tests in
+`aggregate_fs_tests.rs`, which position 164 adds and positions 165, 194, 332, 333, 339, 340, 347,
+and 350 also change, after position 350's `children_never_get_the_synthetic_root_handle`; it builds
+its aggregate with position 164's helpers and looks a child up with the lookup that position 164
+shares from the policy tests. It fixes a defect of position 164, which no PR maps: position 083's
+check held as long as every state saved its root as node 1, which position 164's aggregates do not,
+so it is not a PR18 fixup, unlike positions 389, 393, and 396, which fix defects that PR18's
+positions 081 and 083 have themselves. It follows position 397; of positions 372-397, only 390, 393,
+and 396 change its files, all three `state.rs`'s `reopen_flags`, and position 390 also the check of
+writable handles in `validate_microvm_state`, after the check that it changes. Upstream main,
+`8d4e03132`, lacks the defect, since it lacks the microVM's saved state, and replaying the commit
+there conflicts in the microVM's `state.rs` and `aggregate_fs_tests.rs`, which upstream main lacks,
+so it cannot go upstream on its own.
 
 ## PR summary
 
