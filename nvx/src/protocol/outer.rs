@@ -14,6 +14,8 @@
 //! [`OUTER_CREDIT`] for the payload byte count. ACK, CREDIT, and guest DATA share the ordered
 //! guest sequence; a later RESET starts a new epoch and abandons work from the old one.
 
+use std::ops::Range;
+
 use super::{ProtocolError, array, violation};
 
 /// Magic of every outer record.
@@ -54,6 +56,54 @@ pub(crate) const OUTER_CREDIT: u8 = 9;
 
 /// Length of the launch capability that authenticates the host client.
 pub(crate) const CAPABILITY_LEN: usize = 32;
+
+/// Positions of the fields of an outer record header, which the format lays out in this order,
+/// with no padding, and which [`encode_header`] and [`decode_header`] share.
+mod field {
+    use super::{OUTER_HEADER_LEN, Range};
+
+    /// Bytes of the magic, [`OUTER_MAGIC`](super::OUTER_MAGIC).
+    pub(super) const MAGIC: Range<usize> = 0..4;
+    /// Bytes of the version, a little-endian `u16`.
+    pub(super) const VERSION: Range<usize> = 4..6;
+    /// Byte of the record type.
+    pub(super) const RECORD_TYPE: usize = 6;
+    /// Byte of the flags, zero in a valid record.
+    pub(super) const FLAGS: usize = 7;
+    /// Bytes of the session's 16-byte instance ID.
+    pub(super) const INSTANCE_ID: Range<usize> = 8..24;
+    /// Bytes of the session's epoch, a little-endian `u64`.
+    pub(super) const EPOCH: Range<usize> = 24..32;
+    /// Bytes of the record's sequence number, a little-endian `u64`.
+    pub(super) const SEQUENCE: Range<usize> = 32..40;
+    /// Bytes of the payload length, a little-endian `u32`, which end the header.
+    pub(super) const LENGTH: Range<usize> = 40..OUTER_HEADER_LEN;
+}
+
+/// Returns the number of bytes of `range`.
+const fn width(range: Range<usize>) -> usize {
+    range.end - range.start
+}
+
+// The fields tile the header in order, and each range holds exactly the bytes of its field's
+// type, so that the header's slices and `array`'s copies always fit.
+const _: () = {
+    assert!(field::MAGIC.start == 0);
+    assert!(field::MAGIC.end == field::VERSION.start);
+    assert!(field::VERSION.end == field::RECORD_TYPE);
+    assert!(field::RECORD_TYPE + 1 == field::FLAGS);
+    assert!(field::FLAGS + 1 == field::INSTANCE_ID.start);
+    assert!(field::INSTANCE_ID.end == field::EPOCH.start);
+    assert!(field::EPOCH.end == field::SEQUENCE.start);
+    assert!(field::SEQUENCE.end == field::LENGTH.start);
+    assert!(field::LENGTH.end == OUTER_HEADER_LEN);
+    assert!(width(field::MAGIC) == size_of::<[u8; 4]>());
+    assert!(width(field::VERSION) == size_of::<u16>());
+    assert!(width(field::INSTANCE_ID) == size_of::<[u8; 16]>());
+    assert!(width(field::EPOCH) == size_of::<u64>());
+    assert!(width(field::SEQUENCE) == size_of::<u64>());
+    assert!(width(field::LENGTH) == size_of::<u32>());
+};
 
 /// Decoded outer record header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,14 +151,14 @@ pub(super) fn encode_header(
     length: u32,
 ) -> [u8; OUTER_HEADER_LEN] {
     let mut header = [0; OUTER_HEADER_LEN];
-    header[..4].copy_from_slice(&OUTER_MAGIC);
-    header[4..6].copy_from_slice(&OUTER_VERSION.to_le_bytes());
-    header[6] = record_type;
-    // The flags byte, header[7], stays zero.
-    header[8..24].copy_from_slice(instance_id);
-    header[24..32].copy_from_slice(&epoch.to_le_bytes());
-    header[32..40].copy_from_slice(&sequence.to_le_bytes());
-    header[40..].copy_from_slice(&length.to_le_bytes());
+    header[field::MAGIC].copy_from_slice(&OUTER_MAGIC);
+    header[field::VERSION].copy_from_slice(&OUTER_VERSION.to_le_bytes());
+    header[field::RECORD_TYPE] = record_type;
+    // The flags byte, header[field::FLAGS], stays zero.
+    header[field::INSTANCE_ID].copy_from_slice(instance_id);
+    header[field::EPOCH].copy_from_slice(&epoch.to_le_bytes());
+    header[field::SEQUENCE].copy_from_slice(&sequence.to_le_bytes());
+    header[field::LENGTH].copy_from_slice(&length.to_le_bytes());
     header
 }
 
@@ -137,14 +187,14 @@ pub(super) struct HeaderFields {
 /// checks nothing: [`decode_outer_header`] and the NVXS record parser each validate the fields.
 pub(super) fn decode_header(header: &[u8; OUTER_HEADER_LEN]) -> HeaderFields {
     HeaderFields {
-        magic: array(&header[..4]),
-        version: u16::from_le_bytes(array(&header[4..6])),
-        record_type: header[6],
-        flags: header[7],
-        instance_id: array(&header[8..24]),
-        epoch: u64::from_le_bytes(array(&header[24..32])),
-        sequence: u64::from_le_bytes(array(&header[32..40])),
-        length: u32::from_le_bytes(array(&header[40..])),
+        magic: array(&header[field::MAGIC]),
+        version: u16::from_le_bytes(array(&header[field::VERSION])),
+        record_type: header[field::RECORD_TYPE],
+        flags: header[field::FLAGS],
+        instance_id: array(&header[field::INSTANCE_ID]),
+        epoch: u64::from_le_bytes(array(&header[field::EPOCH])),
+        sequence: u64::from_le_bytes(array(&header[field::SEQUENCE])),
+        length: u32::from_le_bytes(array(&header[field::LENGTH])),
     }
 }
 
