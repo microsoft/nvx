@@ -10,8 +10,9 @@
 - Mapped fork tip: `c6e62f286b2879ca87da42e46de2fee887231d08`, position 126. The graph, PR
   summary, and commit mapping below cover positions 001-126, the PR20 fixups at positions 375 and
   376, and the PR25 fixup at position 377.
-- NVX's pinned OpenVMM revision: `a8aeeb65ec4c1d2c7bc9acc040b7fe4aedb3e8d7`, position 379, the head
-  of microsoft/openvmm#5272, whose commit follows position 378, `2d222dcdc`, the head of
+- NVX's pinned OpenVMM revision: `32e82472800eea411813a83d7d284ab5bde3f278`, position 380, the head
+  of microsoft/openvmm#5273, whose commit follows position 379, `a8aeeb65e`, the head of
+  microsoft/openvmm#5272, whose commit follows position 378, `2d222dcdc`, the head of
   microsoft/openvmm#5271, whose commit follows position 377, `3f5506f9d`, the head of
   `feature/microvm/dev` since microsoft/openvmm#5270 landed positions 376 and 377 on position 375,
   `d44a113be`, where microsoft/openvmm#5262, microsoft/openvmm#5263, microsoft/openvmm#5264, and
@@ -28,8 +29,8 @@
   commits that they fix, so each later commit's position is its v7.2 position less the number of
   those fixups before it; see [The v8.0 reorganization](#the-v80-reorganization). The tree of
   `899dcd63f` differs from the tree of `09524b79c` only in rustfmt's layout of two `virt_kvm`
-  tests. The pin is 253 commits past the mapped tip on the same first-parent chain. Positions
-  127-374, 378, and 379 are not yet assigned to PRs, positions 375 and 376 are PR20 fixups, and
+  tests. The pin is 254 commits past the mapped tip on the same first-parent chain. Positions
+  127-374 and 378-380 are not yet assigned to PRs, positions 375 and 376 are PR20 fixups, and
   position 377 is a PR25 fixup; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `bf353460ff70e4a65627bb7003bed2cad1ce121f` (2026-11-21), the fork base; see
   [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -1786,7 +1787,8 @@ bf353460f
   -> PR25 fixup [377]
   -> host VPs per socket outside the topology builder's range refused [378]
   -> idle VPs refused by restores with WHP's user-mode APIC [379]
-  -> a8aeeb65e (NVX pin)
+  -> KVM partitions refused more enlightened VPs than they have SynIC routes for [380]
+  -> 32e824728 (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1821,7 +1823,7 @@ corrects.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 253 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 254 later commits, positions
 375 and 376 are PR20 fixups, position 377 is a PR25 fixup, and the others are not yet classified or
 assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
@@ -1831,17 +1833,17 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356-379 followed the v8.0 reorganization, so they combine none, apart
+v7.2 rebase, and positions 356-380 followed the v8.0 reorganization, so they combine none, apart
 from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
 v8.0 reorganizations folded into them. The table gives each commit's v7.2 position, which through
 position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
-335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-379 lack.
+335-340, 342, 345, 347, 349, 351, and 365, and which positions 356-380 lack.
 Each commit through v7.2 position 316 has the position that it had in v7.0 and v7.1, and each of
 v7.2 positions 317-334 is its v7.1 position less one, since the v7.2 rebase dropped v7.1 position
 317, upstream's microsoft/openvmm#5160, which v7.1 had backported. Each commit's v6.1 position is
 its v6.0 position less seven, the number of commits that the v6.1 rebase dropped before it, and
 its v6.0 position is its v5.1 position through 147 and one less from v5.1 position 149 on, and
-positions 297-379 have no position before v7.0; see
+positions 297-380 have no position before v7.0; see
 [The v8.0 reorganization](#the-v80-reorganization),
 [Conflicts of the v7.2 rebase](#conflicts-of-the-v72-rebase),
 [The v7.0 reorganization](#the-v70-reorganization),
@@ -2109,6 +2111,7 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 377 | `3f5506f9d` | - | - | - | - | - | - | - | vmservice: say that the restore readiness event precedes guest repair (microsoft/openvmm#5270); fold into 119 |
 | 378 | `2d222dcdc` | - | - | - | - | - | - | - | vm_topology: refuse host VPs per socket outside the builder's range (microsoft/openvmm#5271) |
 | 379 | `a8aeeb65e` | - | - | - | - | - | - | - | virt_whp: refuse to restore an idle VP with the user-mode APIC (microsoft/openvmm#5272) |
+| 380 | `32e824728` | - | - | - | - | - | - | - | virt_kvm: refuse more enlightened VPs than the GSI routing table holds (microsoft/openvmm#5273) |
 
 The remarks that say whether commits apply to upstream main record what was found on upstream main
 when each commit was mapped: the v3.0 reorganization's base, `b2676222b`, for the commits that it
@@ -2122,7 +2125,7 @@ for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork
 v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356,
 `5d6ab1cfa`, upstream main later that day, for positions 357-368, `efe0b08df`, upstream main later
 still, for positions 369-375, and `8d4e03132`, upstream main on 2026-11-24, for positions
-376-379. They name the positions that the commits have now, but neither
+376-380. They name the positions that the commits have now, but neither
 the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`, the v7.1 rebase on `9a875b563`,
 nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the
 earlier ones on `7d90c4104`.
@@ -5600,6 +5603,37 @@ and comment it extends, belong to no PR yet. Upstream main has the same arm, and
 of `apic.rs` merges there, but replaying the commit conflicts in `suspend.rs`, which upstream main
 lacks, and in the Guide's VMM-test page, which lacks position 297's paragraph, so it cannot go
 upstream on its own.
+
+Position 380 has the KVM backend refuse a partition with Hyper-V enlightenments of more VPs than
+its GSI routing table has SynIC routes for, rather than panic (microsoft/nvx#1377). Such a partition
+routes the SynIC of each VP through a GSI of its own, upstream's `VMBUS_BASE_GSI`, after the 24
+lines of the I/O APIC, plus the VP's index, which upstream's `KvmProtoPartition::build` claims in
+the table of `NUM_GSIS`, 2048, GSIs without checking the number of VPs, so on a host whose KVM
+allows that many vCPUs, `build` created every vCPU of a partition of more than 2024 enlightened VPs
+and then panicked in `GsiRouting::claim` with an index out of bounds. `new_partition` now refuses
+such a configuration before it creates the VM, with a new `KvmError::TooManyVps`; a partition
+without enlightenments, as the microVM's, routes nothing for its VPs and is not limited. In
+`x86_64/mod.rs`, which PR10's positions 021 and 024, PR17's position 072, and 22 positions that no
+PR has yet also change, it adds the check to upstream's block of `new_partition` that configures
+the enlightenments, after its refusal of VTL2, a constant `MAX_SYNIC_VPS` after upstream's
+`VMBUS_BASE_GSI`, and a sentence to upstream's comment on the SynIC routes in `build`; in `gsi.rs`,
+which no chain commit changes, it makes upstream's `NUM_GSIS` visible to the crate; and in
+`lib.rs`, which PR10's position 024 and positions 128, 142, 248, 259, 265, 283, 285, 301, and 373
+also change, it adds its variant after position 128's `TimeAbiUnsupported`. Its KVM-only contract
+test, in a new `vp_count.rs` that it declares among the modules of `virt_backend_tests` between
+position 296's `unsupported_state` and position 283's `xsave`, creates partitions without building
+them, and registers by hand with upstream's helpers, as position 301's test of an SMI does, and the
+Guide's VMM-test page describes it after position 373's paragraph; PR05's position 008 and 16
+positions that no PR has yet also change the module list, and PR01's position 002, PR05's position
+007, and 13 positions that no PR has yet the Guide's page, none of the lines that it changes. It
+follows position 379; of positions 369-379, position 373 changes other lines of three of its files,
+`lib.rs`, the module list, and the Guide's VMM-test page, and position 379 another paragraph of
+that page, and the others change none. It is not a fixup: the SynIC routes and their unchecked
+claim are upstream's, and it changes no line that a mapped PR adds. Upstream main claims the routes
+the same way, but replaying the commit there conflicts in `lib.rs`, which lacks position 128's
+variant, in the module list of `virt_backend_tests`, which lacks the modules of positions 283 and
+296, and in the Guide's VMM-test page, which lacks position 373's paragraph, and its test sets the
+`time_abi` of `ProtoPartitionConfig`, which position 127 adds, so it cannot go upstream on its own.
 
 ## PR summary
 
