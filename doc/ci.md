@@ -910,9 +910,10 @@ minutes of the KVM platform job, 2.0 of the MSHV one's 5.8, and 0.5 of the WHP
 one's 8.9, on the benchmark runners, for which the platform jobs of
 overlapping runs queue.
 
-The KVM and MSHV pools have five runners each, and the WHP pool has seven. In
-each pool, one runner carries `benchmark` and runs only the platform job, and
-the others carry `general` and run all non-benchmark backend jobs. Platform
+The KVM, MSHV, and WHP pools have eight runners each. The pools mix Intel and
+AMD virtual machines; the AMD runners also carry `amd`, which no job requires.
+In each pool, one runner carries `benchmark` and runs only the platform job,
+and the others carry `general` and run all non-benchmark backend jobs. Platform
 jobs from overlapping workflow runs still measure one after another on their
 backend's single benchmark runner, but they never wait behind an unrelated
 build or test.
@@ -936,7 +937,7 @@ out of its pool's general capacity. In the replay, which left four general WHP
 runners,
 the WHP non-benchmark p90 wait rose from about three to five minutes, while the
 KVM and MSHV non-benchmark waits stayed near zero. The WHP pool has since grown
-to six general runners, more than the five that served these jobs before the
+to seven general runners, more than the five that served these jobs before the
 split. A change that adds a job or a shard needs general runners to run it in
 parallel; otherwise it only queues.
 
@@ -952,15 +953,16 @@ general runner per backend for about three to five minutes. The default suite
 waits only for `artifacts`, so a cold build of the Ubuntu or Azure Linux
 images, about 4 minutes, delays only the guest and sandbox job, which takes
 about as long as a shard of the default suite. A push, full run, or
-merge group then fills KVM's four general runners with the two shards, the
-guest and sandbox job, and the debug-kernel job, and a pull request, which
-runs the debug kernel on MSHV, needs three of them. MSHV's four hold the two
-shards, the guest and sandbox job, and, for a pull request, push, or
-full run, the debug-kernel job. On WHP, a run needs at most four of the six
-general runners at once, for the microVM jobs. When a pool has fewer
-free general runners than a backend's microVM jobs, the jobs that start last
-wait for the first to end, so the backend's microVM tests take up to about
-twice as long as one of its jobs, still less than the unsharded suite.
+merge group then fills four of KVM's seven general runners with the two
+shards, the guest and sandbox job, and the debug-kernel job, and a pull
+request, which runs the debug kernel on MSHV, needs three of them. Four of
+MSHV's seven hold the two shards, the guest and sandbox job, and, for a pull
+request, push, or full run, the debug-kernel job. On WHP, a run needs at most
+four of the seven general runners at once, for the microVM jobs. When a pool
+has fewer free general runners than a backend's microVM jobs, the jobs that
+start last wait for the first to end, so the backend's microVM tests take up
+to about twice as long as one of its jobs, still less than the unsharded
+suite.
 
 KVM's general runners queue the most (#982). Of the 286 runs that used them
 from October 23 to 28, 2026, leaving out an outage on October 28, 195 waited
@@ -974,7 +976,7 @@ with a p90 of 6.0 to 8.8 minutes, while the OpenVMM and VMM-test builds and the
 VMM-test leg, which start first, did in 41 to 59 runs, with a p90 of 3.3 to
 4.5. Replaying the observed jobs of those runs through first-in, first-out
 pools of those sizes reproduces the KVM waits, 196 runs, a median of 3.1, and
-a p90 of 8.4 minutes; with the six general WHP runners of today, it makes 101
+a p90 of 8.4 minutes; with six general WHP runners, it makes 101
 runs wait 2 minutes or more on WHP, at a p90 of 9.1 minutes. The earlier
 `nvx` handoff and the package jobs alone leave KVM's waits at 192 runs,
 2.9, and 7.6 minutes, and MSHV's and WHP's at 97 and 108 runs, and moving the
@@ -986,13 +988,14 @@ would have raised that pool's waits to 131 runs, at a p90 of 10.5 minutes
 instead of 8.8, and the median of the runs that build the VMM tests and run
 the unit tests to 24.4 minutes, against 23.7 with the jobs on MSHV. A fifth
 general KVM runner would then lower KVM's waits to 79 runs and a p90 of 3.9
-minutes, so it is the next step if KVM queueing still bounds the runs. Since
+minutes, so it is the next step if KVM queueing still bounds the runs; the
+KVM pool has since grown to seven general runners. Since
 CI stopped running OpenVMM's tests (see [OpenVMM CI](#openvmm-ci)), the Linux
 VMM-test build and the KVM and MSHV VMM-test legs no longer take those pools'
 general runners either.
 
 With the `nvx` handoff, the package jobs, and the pull requests' debug
-kernel on MSHV, the replay, with the six general WHP runners of today,
+kernel on MSHV, the replay, with six general WHP runners,
 estimates that the runs of that window that skipped both OpenVMM suites and
 ran the benchmarks would have taken a median of 12.3 minutes, or 11.0 without
 queueing, against the 17.4 and 15.5 that they took, and those that ran no
