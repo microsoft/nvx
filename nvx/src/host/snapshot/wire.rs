@@ -24,6 +24,26 @@ const MAX_FIELD_NUMBER: u64 = (1 << 29) - 1;
 /// The longest varint, in bytes: ten, for 64 bits.
 const MAX_VARINT_LEN: usize = 10;
 
+/// The low bits of a key that hold the field's wire type: the wire format encodes a key as
+/// `(number << 3) | wire_type`.
+const WIRE_TYPE_BITS: u32 = 3;
+
+/// The bits of a key that hold the field's wire type.
+const WIRE_TYPE_MASK: u64 = (1 << WIRE_TYPE_BITS) - 1;
+
+/// The wire type `VARINT`: a varint.
+const WIRE_TYPE_VARINT: u64 = 0;
+
+/// The wire type `I64`: eight little-endian bytes.
+const WIRE_TYPE_I64: u64 = 1;
+
+/// The wire type `LEN`: a varint length and that many bytes.
+const WIRE_TYPE_LEN: u64 = 2;
+
+/// The wire type `I32`: four little-endian bytes. Wire types 3 and 4 are the deprecated group
+/// delimiters, which the reader refuses.
+const WIRE_TYPE_I32: u64 = 5;
+
 /// Why bytes are not a message, or a field is not of its type.
 ///
 /// Its `Display` text is a predicate, whose subject, such as "the manifest", the caller supplies:
@@ -215,21 +235,21 @@ fn take<'a>(data: &mut &'a [u8], count: u64) -> Result<&'a [u8], WireError> {
 /// Reads one field from the front of `data`, and advances `data` past it.
 fn read_field<'a>(data: &mut &'a [u8]) -> Result<Field<'a>, WireError> {
     let key = read_varint(data)?;
-    let number = key >> 3;
+    let number = key >> WIRE_TYPE_BITS;
     if number == 0 || number > MAX_FIELD_NUMBER {
         return Err(WireError::FieldNumber(number));
     }
     let number = number as u32;
-    let value = match key & 7 {
-        0 => Value::Varint(read_varint(data)?),
-        1 => Value::Fixed64(u64::from_le_bytes(
+    let value = match key & WIRE_TYPE_MASK {
+        WIRE_TYPE_VARINT => Value::Varint(read_varint(data)?),
+        WIRE_TYPE_I64 => Value::Fixed64(u64::from_le_bytes(
             take(data, 8)?.try_into().expect("eight bytes were taken"),
         )),
-        2 => {
+        WIRE_TYPE_LEN => {
             let len = read_varint(data)?;
             Value::Bytes(take(data, len)?)
         }
-        5 => Value::Fixed32(u32::from_le_bytes(
+        WIRE_TYPE_I32 => Value::Fixed32(u32::from_le_bytes(
             take(data, 4)?.try_into().expect("four bytes were taken"),
         )),
         wire_type => return Err(WireError::WireType(wire_type as u8)),
