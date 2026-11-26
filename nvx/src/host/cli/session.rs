@@ -98,7 +98,7 @@ impl AttachmentCancellation {
                     "attachment I/O cannot be cancelled",
                 )
             })?;
-            *self.transport.lock().expect("attachment lock poisoned") = Some(handle);
+            *self.locked_transport() = Some(handle);
         }
         #[cfg(not(any(target_os = "linux", windows)))]
         let _ = transport;
@@ -108,20 +108,27 @@ impl AttachmentCancellation {
     /// Releases the cancellation duplicate once attachment no longer has pending I/O.
     fn attached(&self) {
         #[cfg(any(target_os = "linux", windows))]
-        self.transport
-            .lock()
-            .expect("attachment lock poisoned")
-            .take();
+        self.locked_transport().take();
     }
 
     /// Ends pending I/O; repeated calls also cover cancellation racing with an I/O submission.
     pub(super) fn cancel(&self) -> io::Result<()> {
         self.cancelled.store(true, Ordering::SeqCst);
         #[cfg(any(target_os = "linux", windows))]
-        if let Some(handle) = &*self.transport.lock().expect("attachment lock poisoned") {
+        if let Some(handle) = &*self.locked_transport() {
             platform::interrupt_transfers(handle)?;
         }
         Ok(())
+    }
+
+    /// Locks the connection's duplicate, also once a thread panicked while it held the lock:
+    /// each holder only stores, takes, or borrows the `Option`, so it stays valid, and the
+    /// foreground's cancellation must still end the other thread's pending I/O.
+    #[cfg(any(target_os = "linux", windows))]
+    fn locked_transport(&self) -> std::sync::MutexGuard<'_, Option<platform::TransportHandle>> {
+        self.transport
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
