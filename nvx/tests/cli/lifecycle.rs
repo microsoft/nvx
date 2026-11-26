@@ -1633,43 +1633,42 @@ fn unusable_guest_ram(root: &Root) {
 /// A start refuses a configuration whose kernel command line holds a token of the sandbox profile,
 /// `nvx_*`, or of `--mount`, `virtfs_*`, as Linux or the guest's init reads the line, or a `--`,
 /// which would hide from Linux the tokens that OpenVMM appends, before it launches OpenVMM.
-/// `provision` records the profile's tokens that the configuration of the VM leaves to the caller,
-/// such as `nvx_entrypoint`, and the start refuses those too.
+/// `provision` refuses such a line before it records anything, so these configurations hold it
+/// as one that another build recorded would, including a token of the profile that the
+/// configuration of the VM leaves to the caller, such as `nvx_entrypoint`.
 #[test]
 fn starts_refuse_the_kernel_tokens_of_the_sandbox_profile_and_of_its_mounts() {
     let root = Root::new();
-    root.nvx(&provision(
-        "{root/state}",
-        &["--cmdline", "quiet nvx_entrypoint=/bin/true"],
-    ))
-    .assert_silent_success();
+    root.nvx(&provision("{root/state}", &["--cmdline", "quiet"]))
+        .assert_silent_success();
     let config = json(&root.below("state/config.json"));
     for (cmdline, fragment) in [
-        (None, "nvx_entrypoint is owned by the sandbox profile"),
+        (
+            "quiet nvx_entrypoint=/bin/true",
+            "nvx_entrypoint is owned by the sandbox profile",
+        ),
         // Linux reads dashes in a parameter's name as underscores.
         (
-            Some("nvx-sandbox=0"),
+            "nvx-sandbox=0",
             "nvx-sandbox is owned by the sandbox profile",
         ),
         // The guest's init splits the line at whitespace alone, whatever its quotes.
         (
-            Some("\"a nvx_mode=one-shot\""),
+            "\"a nvx_mode=one-shot\"",
             "nvx_mode is owned by the sandbox profile",
         ),
         (
-            Some("virtfs_tag=microvm"),
+            "virtfs_tag=microvm",
             "virtfs_tag is owned by the sandbox --mount option",
         ),
         (
-            Some("quiet -- debug"),
+            "quiet -- debug",
             "sandbox kernel command line hides the tokens that OpenVMM appends to it",
         ),
     ] {
-        if let Some(cmdline) = cmdline {
-            let mut config = config.clone();
-            config["cmdline"] = json!(cmdline);
-            root.write("state/config.json", config.to_string());
-        }
+        let mut config = config.clone();
+        config["cmdline"] = json!(cmdline);
+        root.write("state/config.json", config.to_string());
         let before = root.snapshot();
         let outcome = operate(&root, "start", "state", &[]);
         assert_refused(&root, &outcome, "unsupported", &[fragment]);

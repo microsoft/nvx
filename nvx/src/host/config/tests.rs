@@ -2233,6 +2233,52 @@ fn configuration_command_lines_keep_the_same_reserve_on_every_host() {
     );
 }
 
+/// Without the reserve, the check refuses only the arguments that no launch fits, whatever its
+/// runtime and output names, and takes those that leave less room than the reserve but fit a
+/// launch with short names.
+#[test]
+fn unreserved_command_line_checks_refuse_only_what_no_launch_takes() {
+    let hidden = |padding| {
+        let mut plan = export("/work");
+        let root = if cfg!(windows) {
+            r"D:\host\work"
+        } else {
+            "/host/work"
+        };
+        plan.children[0].root = PathBuf::from(root).join("r".repeat(padding));
+        plan.children[0].denied = (0..128)
+            .map(|index| {
+                plan.children[0]
+                    .root
+                    .join(format!("{index:03}-{}", "x".repeat(120)))
+            })
+            .collect();
+        cold(VmConfig {
+            filesystem: Some(plan),
+            ..blockless()
+        })
+    };
+    let reserved = hidden(95);
+    reserved.check_command_line().unwrap_err();
+    reserved.check_command_line_unreserved().unwrap();
+    reserved
+        .openvmm_arguments(
+            &runtime(),
+            "/missing/control",
+            Path::new("/missing/report"),
+            Some("/missing/console"),
+        )
+        .unwrap();
+    let error = hidden(150).check_command_line_unreserved().unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    let message = error.to_string();
+    assert!(
+        message.contains("OpenVMM's arguments would take"),
+        "{message}"
+    );
+    assert!(!message.contains("held in reserve"), "{message}");
+}
+
 #[test]
 fn process_command_lines_are_measured_as_windows_quotes_them() {
     let cases: [(&str, &[&str], &str); 8] = [

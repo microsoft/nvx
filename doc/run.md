@@ -1782,6 +1782,17 @@ delimiters. `start` refuses any other with `error[unsupported]`, and so
 sandbox, a state directory whose resolved path holds a comma or an equals sign,
 or is longer than 94 bytes, or than 88 for a sandbox of `snapshot restore`.
 
+`provision` refuses, with `error[unsupported]` and before it creates the state
+directory, a configuration that every `start` of the sandbox would refuse, as
+`run` refuses it before it launches OpenVMM: a `--cmdline` that holds a
+reserved token or double quotes, that hides the tokens that OpenVMM appends,
+or that overflows the kernel command line's 1024-byte budget; an image path
+whose lowercase extension would make OpenVMM attach the image in a container
+format, such as `.vhd` or `.vmdk`, rather than raw; and, for a sandbox that
+boots cold, shares and network rules whose OpenVMM arguments alone exceed the
+32,767 characters of a Windows command line, a limit that NVX applies on every
+host.
+
 `provision` also binds the scratch image: its identity, kind, and length,
 which the VM's writes leave unchanged. `start` checks the binding from
 metadata alone, refuses a scratch image that was replaced or resized since
