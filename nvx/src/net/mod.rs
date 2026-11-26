@@ -34,10 +34,7 @@ pub fn is_valid_guest_network(value: &str) -> bool {
 /// first address of its network, at which OpenVMM presents the guest's gateway. Returns `None`
 /// for any other value.
 pub fn guest_gateway(value: &str) -> Option<Ipv4Addr> {
-    let guest = Ipv4Cidr::parse(value).ok()?;
-    Some(Ipv4Addr::from(
-        (u32::from(guest.address) & guest.mask()) + 1,
-    ))
+    Ipv4Cidr::parse(value).ok().map(Ipv4Cidr::gateway)
 }
 
 /// A static guest address that OpenVMM accepts, checked when it is built: an IPv4 address with a
@@ -96,6 +93,12 @@ impl Ipv4Cidr {
     /// Returns the prefix length: 1 to 30.
     pub fn prefix_len(self) -> u8 {
         self.prefix_len
+    }
+
+    /// Returns the gateway of the guest's network: its first address, at which OpenVMM presents
+    /// the guest's gateway.
+    pub(crate) fn gateway(self) -> Ipv4Addr {
+        Ipv4Addr::from((u32::from(self.address) & self.mask()) + 1)
     }
 
     /// Returns the network mask of the prefix.
