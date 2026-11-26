@@ -10,6 +10,7 @@
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::ops::RangeInclusive;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -138,6 +139,18 @@ const HOST_IDENTITY_LEN: usize = 16;
 /// Bytes of a snapshot ID, a GUID.
 const SNAPSHOT_ID_LEN: usize = 16;
 
+/// Bytes of an Ethernet MAC address, an IEEE 802 EUI-48.
+const MAC_LEN: usize = 6;
+
+/// IPv4 prefix lengths of a NIC: those that OpenVMM's microVM network identity accepts
+/// (`MICROVM_NETWORK_PREFIX_LENGTHS`), since a /31 or /32 network has no address for both the
+/// guest and the gateway beside its network and broadcast addresses.
+const IPV4_PREFIX_LENGTHS: RangeInclusive<u8> = 1..=30;
+
+/// Longest vendor or generation of a CPU profile ID, in bytes. OpenVMM bounds neither; NVX
+/// bounds the words that a manifest and a key carry, well above those of any built-in profile.
+const MAX_PROFILE_WORD_LEN: usize = 32;
+
 /// Nanoseconds in a second.
 const NANOS_PER_SECOND: i32 = 1_000_000_000;
 
@@ -228,10 +241,10 @@ impl CpuProfile {
     }
 }
 
-/// Returns whether `text` is one word of a CPU profile ID: 1 to 32 lowercase ASCII letters,
-/// digits, or hyphens.
+/// Returns whether `text` is one word of a CPU profile ID: 1 to [`MAX_PROFILE_WORD_LEN`]
+/// lowercase ASCII letters, digits, or hyphens.
 fn is_profile_word(text: &str) -> bool {
-    (1..=32).contains(&text.len())
+    (1..=MAX_PROFILE_WORD_LEN).contains(&text.len())
         && text
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
@@ -490,9 +503,9 @@ pub(super) struct Nic {
     /// Its network profile, such as `portable`.
     pub(super) profile: String,
     /// The guest's MAC address.
-    pub(super) guest_mac: [u8; 6],
+    pub(super) guest_mac: [u8; MAC_LEN],
     /// The gateway's MAC address.
-    pub(super) gateway_mac: [u8; 6],
+    pub(super) gateway_mac: [u8; MAC_LEN],
     /// The guest's IPv4 address.
     pub(super) ipv4: Ipv4Addr,
     /// The prefix length of the guest's IPv4 network.
@@ -514,7 +527,7 @@ impl Nic {
         {
             return Some("has a NIC without a network profile or a policy mode".to_owned());
         }
-        if !(1..=30).contains(&self.prefix_length)
+        if !IPV4_PREFIX_LENGTHS.contains(&self.prefix_length)
             || self
                 .ipv6
                 .is_some_and(|ipv6| !(1..=128).contains(&ipv6.prefix_length))
@@ -1751,7 +1764,7 @@ fn check_blocks(raw: Vec<RawBlock>) -> Result<(BlockGeometry, BlockGeometry), Pr
 /// Checks the decoded network `raw`, and returns the fixed NIC, which [`Machine::problem`]
 /// checks.
 fn check_network(raw: RawNetwork) -> Result<Nic, Problem> {
-    let mac = |bytes: &[u8]| <[u8; 6]>::try_from(bytes).ok();
+    let mac = |bytes: &[u8]| <[u8; MAC_LEN]>::try_from(bytes).ok();
     let (Some(guest_mac), Some(gateway_mac)) = (mac(&raw.guest_mac), mac(&raw.gateway_mac)) else {
         return Err(invalid("has a NIC whose MAC addresses are not 6 bytes"));
     };
