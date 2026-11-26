@@ -203,6 +203,40 @@ pub(crate) struct GuestExecPayload {
     pub(crate) inherit_default_env: bool,
 }
 
+/// The layout of an `EXEC` payload's fixed header, which the module comment describes: the offsets
+/// of its little-endian fields, and the lengths of its legacy and extended forms.
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+mod header {
+    /// The timeout in milliseconds, a `u32`.
+    pub(super) const TIMEOUT_MS: usize = 0;
+    /// The number of arguments, a `u16`.
+    pub(super) const ARGUMENT_COUNT: usize = TIMEOUT_MS + size_of::<u32>();
+    /// The extension field, a `u16`: zero for a legacy payload, or
+    /// [`EXEC_EXTENDED`](super::EXEC_EXTENDED).
+    pub(super) const EXTENSION: usize = ARGUMENT_COUNT + size_of::<u16>();
+    /// The length of a legacy header, which ends with the extension field; its arguments follow.
+    pub(super) const LEGACY_LEN: usize = EXTENSION + size_of::<u16>();
+    /// The flags of an extended payload, a `u16`.
+    pub(super) const FLAGS: usize = LEGACY_LEN;
+    /// The number of environment entries of an extended payload, a `u16`.
+    pub(super) const ENVIRONMENT_COUNT: usize = FLAGS + size_of::<u16>();
+    /// The length of an extended payload's working directory, a `u32`.
+    pub(super) const CWD_LEN: usize = ENVIRONMENT_COUNT + size_of::<u16>();
+    /// The length of an extended header, which ends with the working directory's length; its
+    /// arguments follow.
+    pub(super) const EXTENDED_LEN: usize = CWD_LEN + size_of::<u32>();
+}
+
+/// The size of the little-endian `u32` length that precedes each argument and environment entry.
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+const LENGTH_PREFIX_LEN: usize = size_of::<u32>();
+
 /// The fixed fields of an `EXEC` payload, which both decoders read and check alike.
 #[cfg(any(
     feature = "testing",
@@ -236,23 +270,24 @@ struct ExecHeader {
 ))]
 fn decode_exec_header(payload: &[u8], max_cwd: usize) -> Result<ExecHeader, ProtocolError> {
     let truncated = || violation("the exec request is truncated");
-    if payload.len() < 8 {
+    if payload.len() < header::LEGACY_LEN {
         return Err(truncated());
     }
-    let timeout_ms = u32_at(payload, 0).ok_or_else(truncated)?;
-    let count = usize::from(u16_at(payload, 4).ok_or_else(truncated)?);
-    let extension = u16_at(payload, 6).ok_or_else(truncated)?;
+    let timeout_ms = u32_at(payload, header::TIMEOUT_MS).ok_or_else(truncated)?;
+    let count = usize::from(u16_at(payload, header::ARGUMENT_COUNT).ok_or_else(truncated)?);
+    let extension = u16_at(payload, header::EXTENSION).ok_or_else(truncated)?;
     if count == 0 || count > MAX_ARGUMENTS {
         return Err(violation(format!(
             "exec requires 1 to {MAX_ARGUMENTS} arguments"
         )));
     }
     let (flags, environment_count, cwd_len, offset) = match extension {
-        0 => (0, 0, 0, 8),
-        EXEC_EXTENDED if payload.len() >= 16 => {
-            let flags = u16_at(payload, 8).ok_or_else(truncated)?;
-            let environment_count = usize::from(u16_at(payload, 10).ok_or_else(truncated)?);
-            let cwd_len = u32_at(payload, 12).ok_or_else(truncated)? as usize;
+        0 => (0, 0, 0, header::LEGACY_LEN),
+        EXEC_EXTENDED if payload.len() >= header::EXTENDED_LEN => {
+            let flags = u16_at(payload, header::FLAGS).ok_or_else(truncated)?;
+            let environment_count =
+                usize::from(u16_at(payload, header::ENVIRONMENT_COUNT).ok_or_else(truncated)?);
+            let cwd_len = u32_at(payload, header::CWD_LEN).ok_or_else(truncated)? as usize;
             let known = EXEC_CWD_PRESENT | EXEC_ENVIRONMENT_PRESENT | EXEC_INHERIT_DEFAULT_ENV;
             let cwd_valid = if flags & EXEC_CWD_PRESENT == 0 {
                 cwd_len == 0
@@ -270,7 +305,7 @@ fn decode_exec_header(payload: &[u8], max_cwd: usize) -> Result<ExecHeader, Prot
                     "the exec request has unknown flags or inconsistent fields",
                 ));
             }
-            (flags, environment_count, cwd_len, 16)
+            (flags, environment_count, cwd_len, header::EXTENDED_LEN)
         }
         EXEC_EXTENDED => return Err(truncated()),
         _ => return Err(violation("the exec request has an unknown extension")),
@@ -505,7 +540,7 @@ fn prefixed_string<S: ExecString>(
     let length = u32_at(payload, *offset)
         .ok_or_else(|| violation("the exec request is truncated"))? as usize;
     *offset = offset
-        .checked_add(4)
+        .checked_add(LENGTH_PREFIX_LEN)
         .ok_or_else(|| violation("the exec request is truncated"))?;
     if length == 0 || length > MAX_ARGUMENT_BYTES {
         return Err(violation(format!(
