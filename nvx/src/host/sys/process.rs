@@ -261,11 +261,24 @@ fn mark_listed_descriptors_close_on_exec() -> io::Result<()> {
 
 /// Marks the descriptors enumerated by the open `/proc/self/fd` `directory` close-on-exec.
 fn mark_directory_entries(directory: &OwnedFd) -> io::Result<()> {
+    /// Bytes of the buffer that each getdents64 call fills. The hook may not allocate, so the
+    /// buffer is a fixed stack array; getdents64 fills it with whole records, and the loop calls
+    /// it again until it returns 0, so the length bounds only how many records a call returns.
+    /// 4096 bytes keep the array small on the hook's stack and hold at least 128 `/proc/self/fd`
+    /// records, each 24 or 32 bytes.
+    const BUFFER_LEN: usize = 4096;
+    /// Offset of `d_reclen` in a `struct linux_dirent64`, after its 8-byte `d_ino` and 8-byte
+    /// `d_off`.
+    const RECORD_LENGTH_OFFSET: usize = 16;
+    /// Offset of the NUL-terminated `d_name` in a `struct linux_dirent64`, after its 2-byte
+    /// `d_reclen` and 1-byte `d_type`.
+    const NAME_OFFSET: usize = 19;
+
     #[repr(C, align(8))]
-    struct Records([u8; 4096]);
+    struct Records([u8; BUFFER_LEN]);
 
     let malformed = || io::Error::from(Errno::EIO);
-    let mut buffer = Records([0; 4096]);
+    let mut buffer = Records([0; BUFFER_LEN]);
     loop {
         // SAFETY: the kernel writes at most the buffer's length into it.
         let read = unsafe {
@@ -284,14 +297,13 @@ fn mark_directory_entries(directory: &OwnedFd) -> io::Result<()> {
         }
         let mut records = buffer.0.get(..read).ok_or_else(malformed)?;
         while !records.is_empty() {
-            // A linux_dirent64 holds d_ino (8 bytes), d_off (8), d_reclen (2), d_type (1), and
-            // the NUL-terminated name.
-            let length = match records.get(16..18) {
-                Some(&[low, high]) => usize::from(u16::from_ne_bytes([low, high])),
-                _ => return Err(malformed()),
-            };
+            let length =
+                match records.get(RECORD_LENGTH_OFFSET..RECORD_LENGTH_OFFSET + size_of::<u16>()) {
+                    Some(&[low, high]) => usize::from(u16::from_ne_bytes([low, high])),
+                    _ => return Err(malformed()),
+                };
             let (record, rest) = records.split_at_checked(length).ok_or_else(malformed)?;
-            let name = record.get(19..).ok_or_else(malformed)?;
+            let name = record.get(NAME_OFFSET..).ok_or_else(malformed)?;
             if let Some(descriptor) = descriptor_number(name)
                 && descriptor > LAST_STANDARD_STREAM
                 && descriptor != directory.as_raw_fd()
