@@ -137,10 +137,15 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// Returns the error of a value, which `what` names, that runs past the end of the bytes.
+    fn truncated(what: &str) -> CanonicalError {
+        CanonicalError::new(format!("{what} is truncated"))
+    }
+
     /// Reads `count` bytes, which `what` names.
     fn take(&mut self, count: usize, what: &str) -> Result<&'a [u8], CanonicalError> {
         if count > self.bytes.len() {
-            return Err(CanonicalError::new(format!("{what} is truncated")));
+            return Err(Self::truncated(what));
         }
         let (taken, rest) = self.bytes.split_at(count);
         self.bytes = rest;
@@ -149,7 +154,12 @@ impl<'a> Reader<'a> {
 
     /// Reads `N` bytes, which `what` names.
     pub(super) fn fixed<const N: usize>(&mut self, what: &str) -> Result<[u8; N], CanonicalError> {
-        Ok(self.take(N, what)?.try_into().expect("N bytes were taken"))
+        let (taken, rest) = self
+            .bytes
+            .split_first_chunk::<N>()
+            .ok_or_else(|| Self::truncated(what))?;
+        self.bytes = rest;
+        Ok(*taken)
     }
 
     /// Reads a `u8`, which `what` names.
@@ -232,7 +242,7 @@ impl<'a> Reader<'a> {
         let count = self.len(max, "items", what)?;
         // Each item takes at least one byte, so a count beyond the bytes left is truncated.
         if count > self.bytes.len() {
-            return Err(CanonicalError::new(format!("{what} is truncated")));
+            return Err(Self::truncated(what));
         }
         (0..count).map(|_| read(self)).collect()
     }

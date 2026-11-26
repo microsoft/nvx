@@ -201,3 +201,20 @@ fn every_field_reads_any_number_until_the_first_error() {
     );
     assert_eq!(every_field(&[]).count(), 0);
 }
+
+#[test]
+fn fixed_values_take_exactly_their_width() {
+    // Exactly the width reads, and leaves the bytes after it.
+    let mut data = &[1, 2, 3, 4, 5][..];
+    assert_eq!(take_array::<4>(&mut data), Ok([1, 2, 3, 4]));
+    assert_eq!(data, [5]);
+    // Fewer bytes than the width fail, and leave the bytes unread.
+    let mut data = &[1, 2, 3][..];
+    assert_eq!(take_array::<4>(&mut data), Err(WireError::Truncated));
+    assert_eq!(data, [1, 2, 3]);
+    // A fixed32 field cut short is truncated, as a fixed64 one is.
+    assert_eq!(
+        fields(&[0x0d, 1, 2, 3], &[1], &[]),
+        Err(WireError::Truncated)
+    );
+}
