@@ -153,6 +153,56 @@ fn host_loopback_access_reads_the_prefix_as_openvmm_does() {
 }
 
 #[test]
+fn host_loopback_access_refuses_a_guest_network_that_openvmm_cannot_read() {
+    let mut policy = NetworkPolicy::new(Access::Deny);
+    policy.host_loopback = HostLoopback::Allow;
+    // OpenVMM's `--net` reads neither address, whatever their prefixes.
+    for guest_network in ["10.0.0.256/24", "fd00::2/64"] {
+        let error = openvmm_arguments(Some(&policy), guest_network).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            error.message(),
+            format!("guest network {guest_network:?} is not valid")
+        );
+    }
+}
+
+#[test]
+fn udp_forwards_read_the_guest_network_as_openvmm_does() {
+    let mut policy = NetworkPolicy::new(Access::Allow);
+    policy.host_loopback = HostLoopback::Allow;
+    policy.host_loopback_forwards.push(LoopbackForward {
+        protocol: ForwardProtocol::Udp,
+        host_port: 18081,
+        guest_port: 8081,
+    });
+    // OpenVMM reads these as 10.0.0.2/24, as the host-loopback check does.
+    for guest_network in ["10.0.0.2/024", "10.0.0.2/+24"] {
+        let arguments = openvmm_arguments(Some(&policy), guest_network).unwrap();
+        assert!(
+            has_pair(&arguments, "--net", guest_network),
+            "{guest_network}"
+        );
+        assert_eq!(
+            rules(&arguments, "--host-loopback-forward"),
+            ["udp:18081:8081"]
+        );
+    }
+    // The deny rules are checked against the network that OpenVMM reads: a /16 holds
+    // 10.0.1.0/24, and a /24 does not.
+    let policy = policy.with_deny(EgressRule::to("10.0.1.0/24"));
+    openvmm_arguments(Some(&policy), "10.0.0.2/024").unwrap();
+    let error = openvmm_arguments(Some(&policy), "10.0.0.2/016").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    assert!(
+        error
+            .message()
+            .contains("egress.deny[0] cannot cover the guest network"),
+        "{error}"
+    );
+}
+
+#[test]
 fn host_loopback_forwards_follow_openvmm_rules() {
     let forward = |protocol, host_port, guest_port| LoopbackForward {
         protocol,
@@ -734,6 +784,35 @@ fn proxies_refuse_every_other_way_out() {
         "10.0.0.2",
         "fd00::2/64",
     ] {
+        let error = openvmm_arguments(Some(&proxy_only()), guest_network).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            error.message(),
+            format!("guest network {guest_network:?} is not valid")
+        );
+    }
+}
+
+#[test]
+fn proxies_read_the_guest_network_as_openvmm_does() {
+    // OpenVMM reads a prefix with `u8::from_str`, and presents the gateway at the first address
+    // of the network that it reads.
+    for (guest_network, endpoint) in [
+        ("10.0.0.2/024", "10.0.0.1:3128"),
+        ("172.16.40.9/+16", "172.16.0.1:3128"),
+    ] {
+        let arguments = openvmm_arguments(Some(&proxy_only()), guest_network).unwrap();
+        assert!(
+            has_pair(&arguments, "--net", guest_network),
+            "{guest_network}"
+        );
+        assert!(
+            has_pair(&arguments, "--network-proxy", endpoint),
+            "{guest_network}"
+        );
+    }
+    // A guest network that OpenVMM refuses stays refused, however its prefix is written.
+    for guest_network in ["10.0.0.1/024", "10.0.0.0/+24", "10.0.0.2/031"] {
         let error = openvmm_arguments(Some(&proxy_only()), guest_network).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
         assert_eq!(

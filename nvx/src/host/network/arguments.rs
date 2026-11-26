@@ -10,7 +10,7 @@ use super::{
     Access, DNS_PORT, HostLoopback, MAX_HOST_LOOPBACK_PREFIX, NetworkPolicy, NetworkProxy,
 };
 use crate::error::{Error, Result};
-use crate::net::{self, cidr};
+use crate::net::Ipv4Cidr;
 
 /// Returns the OpenVMM options that enforce `policy` for a guest at `guest_network`.
 ///
@@ -24,13 +24,18 @@ use crate::net::{self, cidr};
 /// attaches no network device, and fail with their messages, which name the rules after
 /// [`EgressRules::name`].
 ///
+/// `guest_network` goes to OpenVMM's `--net` as it is given, and wherever the lowering reads it,
+/// it reads it as `--net` does, so that it lowers a guest network the same way in every posture:
+/// `10.0.0.2/024` and `10.0.0.2/+24` as `10.0.0.2/24`.
+///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when a rule is invalid,
 /// when the rules of one action need more than [`MAX_RULES`] OpenVMM rules, when host-loopback
-/// access is allowed for a guest network whose prefix OpenVMM cannot read or reads as longer than
-/// [`MAX_HOST_LOOPBACK_PREFIX`], when the host-loopback forwards break the rules of
+/// access is allowed for a guest network that OpenVMM cannot read or whose prefix it reads as
+/// longer than [`MAX_HOST_LOOPBACK_PREFIX`], when the host-loopback forwards break the rules of
 /// [`NetworkPolicy::host_loopback_forwards`], or when a policy with a proxy is not proxy-only
 /// ([`NetworkPolicy::proxy`]), its proxy's port is one that [`NetworkProxy::port`] excludes, or
-/// its guest network has no gateway.
+/// its guest network is not one that OpenVMM accepts, at whose gateway the guest reaches the
+/// proxy.
 ///
 /// [`EgressRules::name`]: crate::host::network::EgressRules::name
 /// [`MAX_RULES`]: crate::host::network::MAX_RULES
@@ -50,14 +55,11 @@ pub fn openvmm_arguments(
         ));
     }
     // OpenVMM presents a host peer to the guest at an address of the guest network, which a /30
-    // network, holding only the gateway and the guest, cannot spare. The prefix is read as
-    // OpenVMM's `--net` reads it, with `u8::from_str`, which also takes `030` and `+30` for 30,
-    // and a network whose prefix does not read is refused rather than taken for a shorter one.
+    // network, holding only the gateway and the guest, cannot spare. The network is read as
+    // OpenVMM's `--net` reads it, whose `u8::from_str` also takes `030` and `+30` for 30, and a
+    // network that does not read is refused rather than taken for a shorter one.
     if policy.host_loopback == HostLoopback::Allow {
-        let Some(prefix) = guest_network
-            .split_once('/')
-            .and_then(|(_, prefix)| prefix.parse::<u8>().ok())
-        else {
+        let Some((_, prefix)) = read_guest_network(guest_network) else {
             return Err(Error::unsupported(format!(
                 "guest network {guest_network:?} is not valid"
             )));
@@ -215,7 +217,9 @@ fn proxy_arguments(
     guest_network: &str,
 ) -> Result<Vec<String>> {
     check_proxy_only(policy, proxy)?;
-    let Some(gateway) = net::guest_gateway(guest_network) else {
+    let Some(guest) = read_guest_network(guest_network)
+        .and_then(|(address, prefix)| Ipv4Cidr::new(address, prefix).ok())
+    else {
         return Err(Error::unsupported(format!(
             "guest network {guest_network:?} is not valid"
         )));
@@ -223,7 +227,7 @@ fn proxy_arguments(
     let mut arguments = template_arguments(guest_network);
     arguments.extend([
         "--network-proxy".to_owned(),
-        format!("{gateway}:{}", proxy.port),
+        format!("{}:{}", guest.gateway(), proxy.port),
     ]);
     Ok(arguments)
 }
@@ -272,12 +276,23 @@ fn check_proxy_only(policy: &NetworkPolicy, proxy: &NetworkProxy) -> Result<()> 
 }
 
 /// Returns the addresses of the IPv4 network of `guest_network`, a static guest address in
-/// `ADDRESS/PREFIX` form.
+/// `ADDRESS/PREFIX` form, which it reads as [`read_guest_network`] does.
 pub(super) fn guest_subnet(guest_network: &str) -> Option<Interval> {
-    let (address, prefix) = guest_network.split_once('/')?;
-    let address: Ipv4Addr = address.parse().ok()?;
-    let prefix = cidr::parse_prefix_length(prefix).filter(|prefix| (1..=32).contains(prefix))?;
+    let (address, prefix) = read_guest_network(guest_network)?;
+    if !(1..=32).contains(&prefix) {
+        return None;
+    }
     let mask = u32::MAX << (32 - u32::from(prefix));
     let network = u32::from(address) & mask;
     Some((u128::from(network), u128::from(network | !mask)))
+}
+
+/// Returns the address and the prefix length of `guest_network`, `ADDRESS/PREFIX`, as OpenVMM's
+/// `--net` reads them: the address with `Ipv4Addr::from_str`, and the prefix with `u8::from_str`,
+/// which also takes `024` and `+24` for 24. Every part of the lowering that reads the guest
+/// network reads it with this function. Returns `None` for text that `--net` cannot read, such as
+/// an address without a prefix.
+fn read_guest_network(guest_network: &str) -> Option<(Ipv4Addr, u8)> {
+    let (address, prefix) = guest_network.split_once('/')?;
+    Some((address.parse().ok()?, prefix.parse().ok()?))
 }
