@@ -14,26 +14,15 @@ pub(super) fn os_error(error: &std::io::Error, path: &Path) -> Exit {
     io_error(ErrorCode::Io, error, path)
 }
 
-/// Returns a builder of directories of `mode`, which Windows ignores.
-fn dir_builder(mode: u32) -> std::fs::DirBuilder {
-    #[cfg_attr(not(unix), allow(unused_mut))]
-    let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, mode);
-    #[cfg(not(unix))]
-    let _ = mode;
-    builder
-}
-
-/// Creates `path` and its missing parents: parents with the default mode, `path` with `mode`, and
-/// no error if `path` is a directory already.
-fn make_directories(path: &Path, mode: u32) -> Result {
-    match dir_builder(mode).create(path) {
+/// Creates `path` and its missing parents, with the default mode that the umask restricts, and no
+/// error if `path` is a directory already.
+fn make_directories(path: &Path) -> Result {
+    match std::fs::create_dir(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => match parent(path) {
             Some(parent) => {
-                make_directories(parent, 0o777)?;
-                make_directories_once(path, mode)
+                make_directories(parent)?;
+                make_directories_once(path)
             }
             None => Err(os_error(&error, path)),
         },
@@ -43,8 +32,8 @@ fn make_directories(path: &Path, mode: u32) -> Result {
 }
 
 /// Creates `path` once its parent exists, with no error if it is a directory already.
-fn make_directories_once(path: &Path, mode: u32) -> Result {
-    match dir_builder(mode).create(path) {
+fn make_directories_once(path: &Path) -> Result {
+    match std::fs::create_dir(path) {
         Ok(()) => Ok(()),
         Err(_) if path.is_dir() => Ok(()),
         Err(error) => Err(os_error(&error, path)),
@@ -71,7 +60,7 @@ pub(crate) fn create_state_directory(path: &Path) -> Result {
         return Err(os_error(&already_exists(), path));
     }
     if let Some(parent) = parent(path) {
-        make_directories(parent, 0o777)?;
+        make_directories(parent)?;
     }
     StateDir::create(path).map(drop)
 }
