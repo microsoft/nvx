@@ -42,8 +42,6 @@ mod guest_tokens;
 mod terminal;
 
 use std::fs::{self, File};
-#[cfg(windows)]
-use std::io::IsTerminal;
 use std::io::{self, Read};
 use std::path::Path;
 use std::sync::mpsc;
@@ -56,6 +54,7 @@ use super::artifacts::{Located, locate};
 use super::cpu_profile::{self, HostCpu};
 use super::download::{self, Hold};
 use super::network::{NativeRules, NetworkOptions};
+use super::output::ConsoleOutput;
 use super::sandbox::{
     self, HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, copy_openvmm_outcome, error_with_cause,
     export_tokens, hypervisor, path_string, path_text, sandbox_network,
@@ -878,78 +877,6 @@ fn console_input(console: Box<dyn Transport>) -> Result<(Box<dyn Transport>, Inp
             ErrorCode::Unsupported,
             "foreground console I/O requires a supported NVX host",
         ))
-    }
-}
-
-struct ConsoleOutput {
-    write: fn(&[u8]) -> io::Result<()>,
-    #[cfg(windows)]
-    console: bool,
-    #[cfg(windows)]
-    pending: [u8; 3],
-    #[cfg(windows)]
-    pending_len: usize,
-}
-
-impl ConsoleOutput {
-    fn new() -> Self {
-        Self {
-            write: output::write_stdout,
-            #[cfg(windows)]
-            console: io::stdout().is_terminal(),
-            #[cfg(windows)]
-            pending: [0; 3],
-            #[cfg(windows)]
-            pending_len: 0,
-        }
-    }
-
-    fn stderr() -> Self {
-        Self {
-            write: output::write_stderr,
-            #[cfg(windows)]
-            console: io::stderr().is_terminal(),
-            #[cfg(windows)]
-            pending: [0; 3],
-            #[cfg(windows)]
-            pending_len: 0,
-        }
-    }
-
-    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        #[cfg(windows)]
-        if self.console {
-            let combined;
-            let bytes = if self.pending_len == 0 {
-                data
-            } else {
-                combined = [&self.pending[..self.pending_len], data].concat();
-                combined.as_slice()
-            };
-            // Only a final incomplete sequence crosses reads; other invalid bytes render now.
-            let incomplete =
-                bytes.utf8_chunks().last().map_or(0, |chunk| {
-                    match std::str::from_utf8(chunk.invalid()) {
-                        Err(error) if error.error_len().is_none() => chunk.invalid().len(),
-                        _ => 0,
-                    }
-                });
-            let ready = bytes.len() - incomplete;
-            (self.write)(String::from_utf8_lossy(&bytes[..ready]).as_bytes())?;
-            self.pending[..incomplete].copy_from_slice(&bytes[ready..]);
-            self.pending_len = incomplete;
-            return Ok(());
-        }
-        (self.write)(data)
-    }
-
-    fn finish(&mut self) -> io::Result<()> {
-        #[cfg(windows)]
-        if self.pending_len != 0 {
-            (self.write)("\u{fffd}".as_bytes())?;
-            self.pending_len = 0;
-        }
-        Ok(())
     }
 }
 

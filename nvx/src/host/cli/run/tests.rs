@@ -401,7 +401,7 @@ fn windows_console_output_handles_non_utf8_code_pages() {
 #[ignore]
 #[allow(unsafe_code)]
 fn windows_console_output_helper() {
-    use std::io::{Read, Seek, Write};
+    use std::io::{IsTerminal, Read, Seek, Write};
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use windows_sys::Win32::Foundation::{
         GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
