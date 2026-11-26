@@ -123,3 +123,104 @@ fn egress_compile_prints_the_library_lowering() {
         }
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn egress_compile_reads_a_fifo_once_its_writer_comes() {
+    // A policy file may be a FIFO, such as `/dev/stdin` fed by a pipe, whose writer may open it
+    // only after the compilation does: the compilation waits for the writer, and reads what it
+    // writes up to its end.
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::time::{Duration, Instant};
+
+    let root = Root::new();
+    let fifo = root.below("policy.json");
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    let writer = std::thread::spawn(move || {
+        // Late, so that the compilation waits for it.
+        std::thread::sleep(Duration::from_millis(500));
+        // An open that does not wait fails until a reader has the FIFO open.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut file = loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
+                .open(&fifo)
+            {
+                Ok(file) => break file,
+                Err(error) if Instant::now() < deadline => {
+                    assert_eq!(error.raw_os_error(), Some(nix::libc::ENXIO), "{error}");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("no reader opened the FIFO: {error}"),
+            }
+        };
+        std::io::Write::write_all(&mut file, br#"{"allow": [{"cidr": "192.0.2.0/24"}]}"#).unwrap();
+    });
+    let outcome = root.nvx(&["egress", "compile", "{root/policy.json}"]);
+    writer.join().unwrap();
+    outcome.assert_success();
+    let printed: Value = serde_json::from_slice(&outcome.stdout).unwrap();
+    assert_eq!(printed, json!({"allow": ["192.0.2.0/24"], "deny": []}));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[allow(unsafe_code)]
+fn egress_compile_reads_a_leased_policy_file_once_its_lease_ends() {
+    // A policy file may be a regular file that another process holds a lease of, as Samba does of
+    // the files that it shares: opening it breaks the lease, and waits until the holder gives it
+    // up, and the compilation then reads the file.
+    use std::os::fd::AsRawFd;
+    use std::time::{Duration, Instant};
+
+    use nix::libc::{EAGAIN, F_GETLEASE, F_SETLEASE, F_SETOWN, F_WRLCK, fcntl};
+
+    let root = Root::new();
+    let path = root.below("policy.json");
+    std::fs::write(&path, br#"{"allow": [{"cidr": "192.0.2.0/24"}]}"#).unwrap();
+    let holder = std::fs::File::open(&path).unwrap();
+    let descriptor = holder.as_raw_fd();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let leased = loop {
+        // SAFETY: `holder` keeps the descriptor open, and these commands take integers.
+        if unsafe { fcntl(descriptor, F_SETLEASE, F_WRLCK) } == 0 {
+            break true;
+        }
+        // A process that another test started holds copies of this one's files until it runs its
+        // program, such as the file that wrote the policy, which no write lease admits.
+        if std::io::Error::last_os_error().raw_os_error() != Some(EAGAIN)
+            || Instant::now() >= deadline
+        {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    // SAFETY: as above. Taking the lease made this process the owner of the file, which the break
+    // of the lease would signal with SIGIO, ending it; without an owner, the break signals none.
+    if !leased || unsafe { fcntl(descriptor, F_SETOWN, 0) } != 0 {
+        // The file system grants no lease, or the file stays open elsewhere.
+        return;
+    }
+    let releaser = std::thread::spawn(move || {
+        // Once the compilation's open breaks the lease, F_GETLEASE reports the read lease to which
+        // the holder must give it up, no longer the write lease.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        // SAFETY: as above.
+        while unsafe { fcntl(holder.as_raw_fd(), F_GETLEASE) } == F_WRLCK {
+            assert!(
+                Instant::now() < deadline,
+                "the compilation never opened the policy file"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Late, so that the compilation waits for the lease to end, as closing the file ends it.
+        std::thread::sleep(Duration::from_millis(500));
+        drop(holder);
+    });
+    let outcome = root.nvx(&["egress", "compile", "{root/policy.json}"]);
+    releaser.join().unwrap();
+    outcome.assert_success();
+    let printed: Value = serde_json::from_slice(&outcome.stdout).unwrap();
+    assert_eq!(printed, json!({"allow": ["192.0.2.0/24"], "deny": []}));
+}

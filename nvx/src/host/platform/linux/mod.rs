@@ -14,7 +14,9 @@ use nix::sys::stat::Mode;
 use super::hypervisor::Hypervisor;
 
 #[cfg(feature = "cli")]
-pub(crate) use crate::host::sys::{interrupted, watch_interrupts, write_interruptibly};
+pub(crate) use crate::host::sys::{
+    interrupted, read_interruptibly, watch_interrupts, write_interruptibly,
+};
 
 pub(crate) use self::endpoint::{ReadyListener, connect_endpoint, listen_ready};
 #[cfg(feature = "cli")]

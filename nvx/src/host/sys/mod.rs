@@ -24,6 +24,8 @@ pub(crate) use nix::errno::Errno;
 
 #[cfg(all(feature = "cli", target_os = "linux"))]
 pub(crate) use fs::rename_no_replace;
+#[cfg(all(feature = "cli", target_os = "linux"))]
+pub(crate) use interrupt::read_interruptibly;
 #[cfg(feature = "cli")]
 pub(crate) use interrupt::{interrupted, watch_interrupts, write_interruptibly};
 #[cfg(all(feature = "cli", target_os = "linux"))]

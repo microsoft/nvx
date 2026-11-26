@@ -3680,4 +3680,94 @@ mod interrupts {
         assert_eq!(status.code(), Some(130));
         assert_eq!(errors, "Interrupted\n");
     }
+
+    /// Runs `nvx` with `arguments`, which name a FIFO that no writer opens as the file of an
+    /// option, sends it SIGINT once it handles the signal and waits for the FIFO's writer, and
+    /// returns how it ended and what it wrote to standard error.
+    #[cfg(target_os = "linux")]
+    fn interrupt_fifo_wait(arguments: &[&std::ffi::OsStr]) -> (std::process::ExitStatus, String) {
+        use std::io::Read;
+
+        use nix::sys::signal::Signal;
+
+        let mut child = Command::new(NVX)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        let errors = thread::spawn(move || {
+            let mut errors = Vec::new();
+            stderr.read_to_end(&mut errors).map(|_| errors)
+        });
+        // The CLI catches SIGINT before it parses its arguments; a SIGINT that comes before it
+        // reads the FIFO ends the read as soon as it starts.
+        let caught = 1_u64 << (Signal::SIGINT as u32 - 1);
+        let status = format!("/proc/{}/status", child.id());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !fs::read_to_string(&status).is_ok_and(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("SigCgt:"))
+                .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+                .is_some_and(|mask| mask & caught != 0)
+        }) {
+            assert!(Instant::now() < deadline, "the CLI never caught SIGINT");
+            thread::sleep(Duration::from_millis(20));
+        }
+        thread::sleep(Duration::from_millis(200));
+        let interrupted = Instant::now();
+        let pid = nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap());
+        nix::sys::signal::kill(pid, Signal::SIGINT).unwrap();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if interrupted.elapsed() > Duration::from_secs(10) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("Ctrl-C did not end the wait for the FIFO's writer");
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        (status, text(&errors.join().unwrap().unwrap()))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupting_egress_compile_ends_its_wait_for_a_policy_file() {
+        // A policy file may be a FIFO or a terminal, such as `/dev/stdin`, which waits for its
+        // writer or for input. As `KeyboardInterrupt` ends Python's read, Ctrl-C ends the wait.
+        let root = Root::new();
+        let fifo = root.below("policy.json");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let (status, errors) =
+            interrupt_fifo_wait(&["egress".as_ref(), "compile".as_ref(), fifo.as_os_str()]);
+        assert_eq!(status.code(), Some(130));
+        assert_eq!(errors, "Interrupted\n");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupting_a_sandbox_exec_ends_its_wait_for_its_environment_file() {
+        // So does the wait for an execution's environment file, which the CLI reads before it
+        // looks for the sandbox.
+        let root = Root::new();
+        let fifo = root.below("environment.json");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let state = root.below("state");
+        let (status, errors) = interrupt_fifo_wait(&[
+            "sandbox".as_ref(),
+            "exec".as_ref(),
+            "--state-dir".as_ref(),
+            state.as_os_str(),
+            "--environment-file".as_ref(),
+            fifo.as_os_str(),
+        ]);
+        assert_eq!(status.code(), Some(130));
+        assert_eq!(errors, "Interrupted\n");
+        assert!(!state.exists());
+    }
 }

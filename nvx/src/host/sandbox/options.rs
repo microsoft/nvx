@@ -11,8 +11,6 @@
 //!   managed exec.
 
 use std::fmt;
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 
 use super::mount::{
@@ -21,6 +19,7 @@ use super::mount::{
 };
 use super::refused;
 use crate::error::Result;
+use crate::host::platform;
 use crate::protocol::exec::{MAX_ARGUMENT_BYTES, MAX_ENVIRONMENT};
 use crate::protocol::root::RootUpper;
 
@@ -383,21 +382,19 @@ pub(crate) fn validate_exec_environment(entries: &[String]) -> Result<()> {
 /// [`validate_exec_environment`].
 ///
 /// The file must be strict UTF-8 JSON; non-finite numbers and unpaired surrogate escapes are
-/// refused. Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), naming the
-/// file and the native I/O or JSON error when it cannot be read or decoded.
+/// refused. It may also be a FIFO or a terminal, such as `/dev/stdin`, which this reads as
+/// [`platform::read_input_file`] does: on Linux, Ctrl-C ends its wait for a writer or for input.
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), naming the file and the
+/// native I/O or JSON error when it cannot be read or decoded.
 fn exec_environment_from_file(path: &str) -> Result<Vec<String>> {
     let path = Path::new(path);
-    let mut data = Vec::new();
-    File::open(path)
-        .and_then(|file| {
-            file.take(MAX_ENVIRONMENT_FILE_BYTES as u64 + 1)
-                .read_to_end(&mut data)
-        })
-        .map_err(|error| {
+    let data = platform::read_input_file(path, MAX_ENVIRONMENT_FILE_BYTES as u64 + 1).map_err(
+        |error| {
             refused(format!(
                 "failed to read managed execution environment {path:?}: {error}"
             ))
-        })?;
+        },
+    )?;
     if data.len() > MAX_ENVIRONMENT_FILE_BYTES {
         return Err(refused(format!(
             "managed execution environment file exceeds {MAX_ENVIRONMENT_FILE_BYTES}-byte limit"

@@ -1330,14 +1330,17 @@ such as the names of options, fields, and files, since the wording may change.
 Ctrl-C prints `Interrupted` and exits with status 130, without a code, since it
 reports no error; a `sandbox run` reports first the error of a workload that
 failed before Ctrl-C, and the `still-running` error of an OpenVMM whose exit it
-cannot confirm. `run`, `sandbox run`, and `sandbox exec` exit with the status
-of OpenVMM or of the workload, which is no error of `nvx` either. Text ends
-its lines as Python's `print` ends them, with `\r\n` on Windows and `\n`
-elsewhere, while workload output passes through unchanged; an error that
-`sandbox exec` reports after the workload's output still starts a line of its
-own, even when the workload left its standard error without a line end. Each
-error is one line: a line break in a value that its message names, such as a
-path, prints as `\n` or `\r`.
+cannot confirm. On Linux, Ctrl-C also ends the wait of an egress policy file or
+an environment file that is a FIFO or a terminal, such as `/dev/stdin`, for its
+writer or its input, as it ended `nvx.py`'s reads of them. `run`,
+`sandbox run`, and `sandbox exec` exit with the status of OpenVMM or of the
+workload, which is no error of `nvx` either. Text ends its lines as Python's
+`print` ends them, with `\r\n` on Windows and `\n` elsewhere, while workload
+output passes through unchanged; an error that `sandbox exec` reports after
+the workload's output still starts a line of its own, even when the workload
+left its standard error without a line end. Each error is one line: a line
+break in a value that its message names, such as a path, prints as `\n` or
+`\r`.
 
 Usage errors and help start with the usage of the parser, on one line, such as
 `usage: nvx egress compile [-h] PATH`. The usages of `run` and `sandbox`,
