@@ -37,6 +37,28 @@ impl Uuid {
         Self(bytes)
     }
 
+    /// Returns the version-4 UUID of `random`, 16 random bytes, as RFC 9562 §5.4 defines it: the
+    /// bytes with their version and variant bits set, which leaves 122 of them random.
+    #[cfg(any(feature = "cli", all(feature = "guest", target_os = "linux")))]
+    pub(crate) const fn v4(random: [u8; 16]) -> Self {
+        /// The byte whose high four bits hold the version, as RFC 9562 §4.2 places it.
+        const VERSION_BYTE: usize = 6;
+        /// The version bits of `VERSION_BYTE`: its high four.
+        const VERSION_MASK: u8 = 0xf0;
+        /// The version bits of a version-4 UUID: 4 in the high four bits.
+        const VERSION_4: u8 = 0x40;
+        /// The byte whose high bits hold the variant, as RFC 9562 §4.1 places it.
+        const VARIANT_BYTE: usize = 8;
+        /// The variant bits of `VARIANT_BYTE`: its high two.
+        const VARIANT_MASK: u8 = 0xc0;
+        /// The variant bits of an RFC 9562 UUID: `0b10` in the high two bits.
+        const VARIANT_RFC_9562: u8 = 0x80;
+        let mut bytes = random;
+        bytes[VERSION_BYTE] = (bytes[VERSION_BYTE] & !VERSION_MASK) | VERSION_4;
+        bytes[VARIANT_BYTE] = (bytes[VARIANT_BYTE] & !VARIANT_MASK) | VARIANT_RFC_9562;
+        Self(bytes)
+    }
+
     /// Returns the UUID's bytes, in the order of its text.
     pub const fn as_bytes(&self) -> &[u8; 16] {
         &self.0
