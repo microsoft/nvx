@@ -122,10 +122,11 @@ impl fmt::Display for Network {
 /// `::ffff:` and its IPv4 address in dotted form, and any other address as lowercase hexadecimal
 /// groups whose first longest run of two or more zero groups becomes `::`.
 fn write_ipv6(formatter: &mut fmt::Formatter<'_>, address: u128) -> fmt::Result {
-    if address >> 32 == 0xFFFF {
-        return write!(formatter, "::ffff:{}", Ipv4Addr::from(address as u32));
+    let address = Ipv6Addr::from(address);
+    if let Some(ipv4) = address.to_ipv4_mapped() {
+        return write!(formatter, "::ffff:{ipv4}");
     }
-    let groups = Ipv6Addr::from(address).segments();
+    let groups = address.segments();
     // The first of the longest runs of zero groups, if a run has at least two groups.
     let mut best: Option<(usize, usize)> = None;
     let mut index = 0;
@@ -199,10 +200,11 @@ fn split_netmask(text: &[u8]) -> Option<(&[u8], Option<&[u8]>)> {
 fn parse_ipv4_interface(text: &[u8]) -> Option<Network> {
     let (address, netmask) = split_netmask(text)?;
     let address = parse_ipv4(address)?;
+    let bits = Family::V4.bits();
     let prefix = match netmask {
-        None => 32,
+        None => bits,
         Some(netmask) => {
-            prefix_from_prefix_string(netmask, 32).or_else(|| prefix_from_ipv4_mask(netmask))?
+            prefix_from_prefix_string(netmask, bits).or_else(|| prefix_from_ipv4_mask(netmask))?
         }
     };
     Some(Network::new(Family::V4, u128::from(address), prefix))
@@ -223,9 +225,10 @@ fn parse_ipv6_interface(text: &[u8]) -> Option<(Network, bool)> {
         }
     };
     let address = parse_ipv6(address)?;
+    let bits = Family::V6.bits();
     let prefix = match netmask {
-        None => 128,
-        Some(netmask) => prefix_from_prefix_string(netmask, 128)?,
+        None => bits,
+        Some(netmask) => prefix_from_prefix_string(netmask, bits)?,
     };
     Some((Network::new(Family::V6, address, prefix), scoped))
 }
