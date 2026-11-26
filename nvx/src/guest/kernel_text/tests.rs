@@ -83,6 +83,23 @@ fn syslog_lines_strip_only_well_formed_timestamps() {
 }
 
 #[test]
+fn syslog_brackets_without_seconds_or_fraction_digits_stay_in_the_message() {
+    for line in [
+        &b"<6>[.] message"[..],
+        b"<6>[5.] message",
+        b"<6>[ .5] message",
+    ] {
+        let parsed = SyslogLine::parse(line);
+        assert_eq!(
+            (parsed.timestamp_us, parsed.message),
+            (None, &line[b"<6>".len()..]),
+            "{}",
+            line.escape_ascii()
+        );
+    }
+}
+
+#[test]
 fn cpu_lists_are_plain_ranges() {
     assert_eq!(parse_cpu_list(b"0-3,6"), Some(vec![0..=3, 6..=6]));
     assert_eq!(parse_cpu_list(b""), Some(Vec::new()));

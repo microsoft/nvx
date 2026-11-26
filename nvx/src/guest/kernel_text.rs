@@ -65,8 +65,9 @@ pub(crate) struct SyslogLine<'a> {
 }
 
 impl<'a> SyslogLine<'a> {
-    /// Parses one line. A timestamp is spaces, then decimal seconds with a decimal fraction,
-    /// between brackets. A line whose brackets hold anything else keeps them in its message.
+    /// Parses one line. A timestamp is spaces, then decimal seconds with a decimal fraction, each
+    /// of one or more digits, between brackets, such as the kernel's `[%5lu.%06lu]`. A line whose
+    /// brackets hold anything else, such as `[.]` or `[5.]`, keeps them in its message.
     pub(crate) fn parse(line: &'a [u8]) -> Self {
         let line = line
             .strip_prefix(b"<")
@@ -91,7 +92,8 @@ impl<'a> SyslogLine<'a> {
     }
 }
 
-/// Parses a log timestamp, spaces then `seconds.fraction` in decimal, into microseconds.
+/// Parses a log timestamp, spaces then `seconds.fraction`, each of one or more decimal digits,
+/// into microseconds.
 fn microseconds(stamp: &[u8]) -> Option<u64> {
     /// Microseconds in a second.
     const PER_SECOND: u64 = 1_000_000;
@@ -99,14 +101,10 @@ fn microseconds(stamp: &[u8]) -> Option<u64> {
     const DIGITS: usize = 6;
     let stamp = std::str::from_utf8(stamp).ok()?.trim_start_matches(' ');
     let (seconds, fraction) = stamp.split_once('.')?;
-    if !(seconds.bytes().chain(fraction.bytes())).all(|byte| byte.is_ascii_digit()) {
+    let whole = parse_decimal(seconds.as_bytes())?;
+    if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    let whole = if seconds.is_empty() {
-        0
-    } else {
-        seconds.parse::<u64>().ok()?
-    };
     let micros = fraction
         .bytes()
         .chain(std::iter::repeat(b'0'))
