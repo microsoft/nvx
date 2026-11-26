@@ -181,10 +181,7 @@ pub(super) fn terminate_within(
 ) -> Result<StopOutcome> {
     check_interrupt()?;
     // A termination's bound is positive, though the deadline may have passed.
-    let bound = deadline
-        .remaining()
-        .map_or(RETRY_INTERVAL, |left| left.min(RETRY_INTERVAL))
-        .max(Duration::from_nanos(1));
+    let bound = deadline.slice(RETRY_INTERVAL).max(Duration::from_nanos(1));
     match terminate(bound)? {
         StopOutcome::TimedOut if wait(deadline)? => match terminate(bound)? {
             StopOutcome::TimedOut => Ok(StopOutcome::TimedOut),
@@ -199,9 +196,7 @@ pub(super) fn terminate_within(
 pub(super) fn wait_for_exit(process: &Process, deadline: Deadline) -> Result<bool> {
     loop {
         check_interrupt()?;
-        let slice = deadline
-            .remaining()
-            .map_or(RETRY_INTERVAL, |left| left.min(RETRY_INTERVAL));
+        let slice = deadline.slice(RETRY_INTERVAL);
         if process
             .wait(Instant::now() + slice)
             .map_err(Exit::from_os_error)?

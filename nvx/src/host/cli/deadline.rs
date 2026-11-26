@@ -30,6 +30,12 @@ impl Deadline {
             .map(|instant| instant.saturating_duration_since(Instant::now()))
     }
 
+    /// Returns how long one step of a wait that the deadline bounds may take: the time left, at
+    /// most `interval`, or `interval` if the deadline never passes.
+    pub(crate) fn slice(self, interval: Duration) -> Duration {
+        slice_of(self.remaining(), interval)
+    }
+
     /// Returns whether the deadline has passed: `time.monotonic() >= deadline`.
     pub(crate) fn passed(self) -> bool {
         self.0.is_some_and(|instant| Instant::now() >= instant)
@@ -54,9 +60,15 @@ impl Deadline {
         if remaining.is_some_and(|remaining| remaining.is_zero()) {
             return Ok(false);
         }
-        sleep(remaining.map_or(interval, |remaining| remaining.min(interval)))?;
+        sleep(slice_of(remaining, interval))?;
         Ok(!self.passed())
     }
+}
+
+/// Returns [`Deadline::slice`] for the time `remaining`, as [`Deadline::remaining`] read it, so
+/// that a caller that has read it already measures the slice from the same instant.
+fn slice_of(remaining: Option<Duration>, interval: Duration) -> Duration {
+    remaining.map_or(interval, |remaining| remaining.min(interval))
 }
 
 /// Sleeps for `duration`, as `time.sleep` does, failing if Ctrl-C arrives meanwhile.
