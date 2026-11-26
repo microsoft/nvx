@@ -17,9 +17,32 @@ pub const MAX_HOST_MAPPINGS: usize = 4096;
 /// Largest source or target of one host mapping: Linux's `PATH_MAX` without the terminating NUL.
 pub const MAX_MAP_PATH_BYTES: usize = 4095;
 /// Length of the header of a `MAPS` payload.
-pub const MAPS_HEADER_LEN: usize = 8;
+pub const MAPS_HEADER_LEN: usize = header::LEN;
 /// Length of the header of one entry of a `MAPS` payload.
-pub const MAP_ENTRY_HEADER_LEN: usize = 6;
+pub const MAP_ENTRY_HEADER_LEN: usize = entry_header::LEN;
+
+/// The offsets of the fields of a `MAPS` payload's header, which the module describes.
+mod header {
+    /// The index in the table of the payload's first entry, a `u32`.
+    pub(super) const FIRST: usize = 0;
+    /// The number of entries in the payload, a `u32`.
+    pub(super) const COUNT: usize = FIRST + size_of::<u32>();
+    /// The length of the header, which ends with the count; the entries follow.
+    pub(super) const LEN: usize = COUNT + size_of::<u32>();
+}
+
+/// The offsets of the fields of an entry's header, from the start of the entry.
+mod entry_header {
+    /// The entry's flags, a `u16`.
+    pub(super) const FLAGS: usize = 0;
+    /// The length of the entry's source, a `u16`.
+    pub(super) const SOURCE_LEN: usize = FLAGS + size_of::<u16>();
+    /// The length of the entry's target, a `u16`.
+    pub(super) const TARGET_LEN: usize = SOURCE_LEN + size_of::<u16>();
+    /// The length of the entry's header, which ends with the target's length; the source and
+    /// the target follow.
+    pub(super) const LEN: usize = TARGET_LEN + size_of::<u16>();
+}
 /// Flag of an entry that the guest agent mounts read-only.
 pub const MAP_READ_ONLY: u16 = 1 << 0;
 
@@ -70,7 +93,7 @@ pub fn encode_maps_payloads(maps: &[HostMap], limit: usize) -> Result<Vec<Vec<u8
             ));
         }
         if count > 0 && payload.len() + entry_len > limit {
-            payload[4..8].copy_from_slice(&count.to_le_bytes());
+            payload[header::COUNT..header::LEN].copy_from_slice(&count.to_le_bytes());
             payloads.push(std::mem::take(&mut payload));
             count = 0;
         }
@@ -88,7 +111,7 @@ pub fn encode_maps_payloads(maps: &[HostMap], limit: usize) -> Result<Vec<Vec<u8
         payload.extend_from_slice(target);
         count += 1;
     }
-    payload[4..8].copy_from_slice(&count.to_le_bytes());
+    payload[header::COUNT..header::LEN].copy_from_slice(&count.to_le_bytes());
     payloads.push(payload);
     Ok(payloads)
 }
@@ -130,8 +153,7 @@ pub struct GuestMapsPayload {
 /// table and fit the number that the kernel command line announced is for the guest agent to
 /// check.
 pub fn decode_maps_payload(payload: &[u8]) -> Result<MapsPayload, ProtocolError> {
-    let first = u32_at(payload, 0).ok_or_else(truncated)?;
-    let count = u32_at(payload, 4).ok_or_else(truncated)?;
+    let (first, count) = decode_header(payload)?;
     let mut maps = Vec::new();
     decode_maps_entries(
         payload,
@@ -155,8 +177,7 @@ pub fn decode_maps_payload(payload: &[u8]) -> Result<MapsPayload, ProtocolError>
 /// [`decode_maps_payload`] remains UTF-8 for host and fake-OpenVMM callers. This decoder accepts
 /// every non-NUL Linux path byte that the guest can mount.
 pub fn decode_guest_maps_payload(payload: &[u8]) -> Result<GuestMapsPayload, ProtocolError> {
-    let first = u32_at(payload, 0).ok_or_else(truncated)?;
-    let count = u32_at(payload, 4).ok_or_else(truncated)?;
+    let (first, count) = decode_header(payload)?;
     let capacity = usize::try_from(count)
         .ok()
         .filter(|count| *count <= MAX_HOST_MAPPINGS)
@@ -176,6 +197,14 @@ pub fn decode_guest_maps_payload(payload: &[u8]) -> Result<GuestMapsPayload, Pro
     Ok(GuestMapsPayload { first, maps })
 }
 
+/// Reads the header of a `MAPS` payload, as both decoders do: the index of its first entry and
+/// its number of entries. It refuses a payload that ends before the header does.
+fn decode_header(payload: &[u8]) -> Result<(u32, u32), ProtocolError> {
+    let first = u32_at(payload, header::FIRST).ok_or_else(truncated)?;
+    let count = u32_at(payload, header::COUNT).ok_or_else(truncated)?;
+    Ok((first, count))
+}
+
 /// Decodes the `count` entries that follow the header of a `MAPS` payload into `maps`, as both
 /// decoders read them: `path` converts each source and target as soon as it is read, and `entry`
 /// builds an entry from its source, its target, and whether it is read-only.
@@ -192,9 +221,9 @@ fn decode_maps_entries<P: AsRef<[u8]>, M>(
     let mut offset = MAPS_HEADER_LEN;
     for _ in 0..count {
         let (Some(flags), Some(source_len), Some(target_len)) = (
-            u16_at(payload, offset),
-            u16_at(payload, offset.saturating_add(2)),
-            u16_at(payload, offset.saturating_add(4)),
+            u16_at(payload, offset.saturating_add(entry_header::FLAGS)),
+            u16_at(payload, offset.saturating_add(entry_header::SOURCE_LEN)),
+            u16_at(payload, offset.saturating_add(entry_header::TARGET_LEN)),
         ) else {
             return Err(truncated());
         };
