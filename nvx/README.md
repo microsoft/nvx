@@ -1395,7 +1395,10 @@ extracted release, with them in `guest/` and `bin/`.
   as for a release's `bin/nvx[.exe]`, or the checkout whose `nvx/target/`
   holds it at any depth, as after `cargo build`. On Windows, whose paths ignore
   case, `bin`, `nvx`, and `target` match in any case, as in a `PATH` entry
-  that ends in `Bin`. Either must have its `SOURCE-MANIFEST.json`; otherwise
+  that ends in `Bin`. When the path through which `nvx` started lies in
+  neither, as that of a link on `PATH` may, the root is that of the executable
+  to which the path's links lead, as on Linux, which resolves them before
+  `nvx` reads the path. Either must have its `SOURCE-MANIFEST.json`; otherwise
   the command fails and asks for `--root`.
 - The `NVX_OPENVMM` environment variable names an OpenVMM executable to run
   instead of the root's, such as `nvx-fake-openvmm` in tests. A relative path is

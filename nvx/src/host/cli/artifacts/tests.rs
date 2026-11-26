@@ -1,7 +1,18 @@
 use std::fs;
+use std::path::Path;
 
 use super::*;
 use crate::host::artifacts::Layout;
+use crate::host::paths;
+
+/// Makes `link` a link to the directory `target`: a symbolic link on Unix, and on Windows a
+/// junction, which any user may create.
+fn link_directory(link: &Path, target: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    crate::host::tests::junction(link, target);
+}
 
 #[test]
 fn executables_find_the_release_or_checkout_that_holds_them() {
@@ -54,4 +65,48 @@ fn executables_find_their_root_in_any_case_only_on_windows() {
             );
         }
     }
+}
+
+#[test]
+fn executables_started_through_links_find_the_root_that_holds_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let release = directory.path().join("release");
+    let bin = release.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(release.join(MANIFEST_NAME), "{}").unwrap();
+    fs::write(bin.join("nvx"), "").unwrap();
+    let held = paths::resolve(&release).unwrap();
+    // A link to the directory that holds the executable, under another name than `bin`.
+    let tools = directory.path().join("tools");
+    link_directory(&tools, &bin);
+    let found = default_dir(&tools.join("nvx")).unwrap().unwrap();
+    assert_eq!(found.layout(), Layout::Release);
+    assert_eq!(found.root(), held);
+    // A link to the executable itself, where the host lets this account create one.
+    let links = directory.path().join("links");
+    fs::create_dir(&links).unwrap();
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(bin.join("nvx"), links.join("nvx"));
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(bin.join("nvx"), links.join("nvx"));
+    if linked.is_ok() {
+        let found = default_dir(&links.join("nvx")).unwrap().unwrap();
+        assert_eq!(found.layout(), Layout::Release);
+        assert_eq!(found.root(), held);
+    }
+    // A link whose own path lies in a release keeps that release.
+    let other = directory.path().join("other");
+    fs::create_dir(&other).unwrap();
+    fs::write(other.join(MANIFEST_NAME), "{}").unwrap();
+    link_directory(&other.join("bin"), &bin);
+    let found = default_dir(&other.join("bin").join("nvx"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.root(), absolute(&other).unwrap());
+    // A link that leads to no release or checkout finds none.
+    let stray = directory.path().join("stray");
+    fs::create_dir(&stray).unwrap();
+    let elsewhere = directory.path().join("elsewhere");
+    link_directory(&elsewhere, &stray);
+    assert!(default_dir(&elsewhere.join("nvx")).is_none());
 }

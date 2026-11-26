@@ -5,8 +5,10 @@
 //! as [`ArtifactDir::from_dir`] tells a release from a repository checkout. Without `--root`, it
 //! is the release whose `bin/` holds the executable, or the repository checkout whose
 //! `nvx/target/` holds it, each with its `SOURCE-MANIFEST.json`. On Windows, whose paths ignore
-//! case, those directory names match in any case. The `NVX_OPENVMM` environment variable names
-//! an OpenVMM executable to run instead of the root's, such as a test double.
+//! case, those directory names match in any case. When the path through which the executable
+//! started lies in neither, as that of a link to it on `PATH` may, the root is that of the
+//! executable to which the path's links lead. The `NVX_OPENVMM` environment variable names an
+//! OpenVMM executable to run instead of the root's, such as a test double.
 
 use std::path::{Path, PathBuf};
 
@@ -15,7 +17,7 @@ use super::json::pretty_serde;
 use super::{Exit, Result, output};
 use crate::ErrorCode;
 use crate::host::artifacts::{ArtifactDir, ArtifactPaths, MANIFEST_NAME, absolute};
-use crate::host::paths::is_named;
+use crate::host::paths::{self, is_named};
 
 /// The environment variable that names the OpenVMM executable to run instead of the root's.
 pub(super) const OPENVMM_VARIABLE: &str = "NVX_OPENVMM";
@@ -100,7 +102,19 @@ pub(super) fn locate(root: Option<&str>) -> Result<Located> {
 /// for a build for another target. Either must have its `SOURCE-MANIFEST.json`. On Windows,
 /// `bin`, `nvx`, and `target` match in any case, since the path of the executable keeps the case
 /// in which its caller spelled it.
+///
+/// The path as given comes first, so a link whose own path lies in a release or checkout keeps
+/// that one. A path that lies in neither, such as a link to the executable, or one through a link
+/// to the directory that holds it, is then resolved, as [`paths::resolve`] resolves it, to the
+/// executable itself: Windows gives the path of the executable through the links by which its
+/// caller started it, which Linux resolves.
 fn default_dir(executable: &Path) -> Option<crate::Result<ArtifactDir>> {
+    holding_dir(executable).or_else(|| holding_dir(&paths::resolve(executable).ok()?))
+}
+
+/// Returns the artifact directory in whose layout the path `executable` lies as it is written,
+/// as [`default_dir`] describes, without resolving its links.
+fn holding_dir(executable: &Path) -> Option<crate::Result<ArtifactDir>> {
     let directory = executable.parent()?;
     let has_manifest = |root: &Path| root.join(MANIFEST_NAME).is_file();
     if directory
