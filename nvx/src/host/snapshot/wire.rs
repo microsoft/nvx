@@ -232,6 +232,13 @@ fn take<'a>(data: &mut &'a [u8], count: u64) -> Result<&'a [u8], WireError> {
     Ok(taken)
 }
 
+/// Splits `N` bytes from the front of `data`, as an array, and advances `data` past them.
+fn take_array<const N: usize>(data: &mut &[u8]) -> Result<[u8; N], WireError> {
+    let (taken, rest) = data.split_first_chunk::<N>().ok_or(WireError::Truncated)?;
+    *data = rest;
+    Ok(*taken)
+}
+
 /// Reads one field from the front of `data`, and advances `data` past it.
 fn read_field<'a>(data: &mut &'a [u8]) -> Result<Field<'a>, WireError> {
     let key = read_varint(data)?;
@@ -242,16 +249,12 @@ fn read_field<'a>(data: &mut &'a [u8]) -> Result<Field<'a>, WireError> {
     let number = number as u32;
     let value = match key & WIRE_TYPE_MASK {
         WIRE_TYPE_VARINT => Value::Varint(read_varint(data)?),
-        WIRE_TYPE_I64 => Value::Fixed64(u64::from_le_bytes(
-            take(data, 8)?.try_into().expect("eight bytes were taken"),
-        )),
+        WIRE_TYPE_I64 => Value::Fixed64(u64::from_le_bytes(take_array(data)?)),
         WIRE_TYPE_LEN => {
             let len = read_varint(data)?;
             Value::Bytes(take(data, len)?)
         }
-        WIRE_TYPE_I32 => Value::Fixed32(u32::from_le_bytes(
-            take(data, 4)?.try_into().expect("four bytes were taken"),
-        )),
+        WIRE_TYPE_I32 => Value::Fixed32(u32::from_le_bytes(take_array(data)?)),
         wire_type => return Err(WireError::WireType(wire_type as u8)),
     };
     Ok(Field { number, value })
