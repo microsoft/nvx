@@ -6266,10 +6266,18 @@ def _private_ingress_port() -> int:
 
     Private-network ingress listens on every host address, so the probes bind
     every address to check that the port is free there, but never listen or
-    read, and close before the port is returned.
+    read, and close before the port is returned. The scenario reaches the
+    published port at 127.0.0.1, which a socket on loopback alone would take
+    from OpenVMM's listener, and Windows lets a bind of every address share a
+    port with such a socket, so the draw probes IPv4 loopback first too.
     """
     last_error: OSError | None = None
     for port in _host_loopback_port_candidates():
+        try:
+            _probe_loopback(port, (socket.AF_INET,))
+        except OSError as error:
+            last_error = error
+            continue
         with ExitStack() as sockets:
             try:
                 for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
