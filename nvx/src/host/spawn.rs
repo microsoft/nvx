@@ -26,7 +26,8 @@ use crate::protocol::CAPABILITY_LEN;
 /// caller that it inherits besides its standard streams.
 #[derive(Debug, Clone)]
 pub(crate) struct VmmCommand<'a> {
-    /// The VMM's executable.
+    /// The VMM's executable, whose path, unlike the working directory's, may exceed Windows'
+    /// legacy `MAX_PATH`.
     pub(crate) program: PathBuf,
     /// The VMM's arguments, after the name of its executable.
     pub(crate) arguments: Vec<OsString>,

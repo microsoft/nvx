@@ -28,7 +28,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::process::{ProcessHandle, creation_time};
-use super::{owned, raw, wide};
+use super::{owned, raw, wide, wide_path};
 use crate::host::platform::check_working_dir;
 use crate::host::platform::inherit::{Inherited, lock_spawns};
 use crate::host::platform::unconfirmed_exit;
@@ -226,7 +226,8 @@ impl Drop for InheritableForSpawn {
 /// handle, which is never inheritable, the returned [`LaunchedProcess`] holds.
 ///
 /// Fails with [`io::ErrorKind::InvalidInput`] for a working directory beyond Windows' limit or
-/// for a batch file, as [`refuse_batch_file`] says.
+/// for a batch file, as [`refuse_batch_file`] says. The path of `program` may be longer than that
+/// limit, as [`spawn_listed`] says.
 ///
 /// [`create_log_job`]: crate::host::platform::windows::create_log_job
 /// [`SpawnLock`]: crate::host::platform::inherit::SpawnLock
@@ -322,6 +323,10 @@ fn owning_job() -> io::Result<OwnedHandle> {
 /// any, and, in the foreground, in its [`owning_job`] too, as [`spawn_with_stdio`] describes.
 /// Fails with [`io::ErrorKind::InvalidInput`] for a working directory beyond Windows' limit or
 /// for a batch file, as [`refuse_batch_file`] says.
+///
+/// The path of `program` may be of any length: unlike a working directory, `CreateProcessW` takes
+/// an application name of `MAX_PATH` or more UTF-16 code units in the extended-length form, in
+/// which [`wide_path`] encodes it from the legacy limit on. Its command line names it as it is.
 fn spawn_listed(
     program: &Path,
     arguments: &[OsString],
@@ -332,7 +337,7 @@ fn spawn_listed(
     job: Option<OwnedHandle>,
 ) -> io::Result<LaunchedProcess> {
     refuse_batch_file(program)?;
-    let application = wide(program);
+    let application = wide_path(program)?;
     let mut command_line = command_line(program.as_os_str(), arguments)?;
     let directory = working_dir
         .map(|path| -> io::Result<Vec<u16>> {
