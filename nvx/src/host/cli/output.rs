@@ -2,9 +2,10 @@
 //!
 //! Python's `print` ends lines with `os.linesep`, `\r\n` on Windows and `\n` elsewhere, and
 //! translates every `\n` of the text it writes, so [`print_stdout`] and [`print_stderr`] do too.
-//! Workload output passes through [`write_stdout`] and [`write_stderr`] unchanged, as
-//! `sys.stdout.buffer.write` passes it. The output of a guest's console passes through a
-//! [`ConsoleOutput`], which a Windows console shows as text.
+//! The output of a workload or of a guest's console passes through a [`ConsoleOutput`]
+//! unchanged, as `sys.stdout.buffer.write` passes it, except to a Windows console, which shows
+//! text: there each sequence of it that is not UTF-8 shows as U+FFFD, as CPython's console
+//! streams show it.
 //!
 //! Like Python's writes, which raise `KeyboardInterrupt`, Ctrl-C ends a write to standard output
 //! or to standard error, also one that waits for a pipe's reader, which may never read, except

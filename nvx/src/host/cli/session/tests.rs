@@ -418,6 +418,121 @@ fn exec_streams_output_past_the_old_cap() {
     assert!(stderr.is_empty());
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_console_exec_output_handles_non_utf8_code_pages() {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE;
+
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "host::cli::session::tests::windows_console_exec_output_helper",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("NVX_TEST_PRIVATE_CONSOLE", "cp437")
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+/// Runs only as the parent's isolated-console helper, never in the shared test process: a
+/// workload's output that is not UTF-8 reaches a console of code page 437, Windows' default, on
+/// both standard streams, which show it as text.
+#[cfg(windows)]
+#[test]
+#[ignore]
+#[allow(unsafe_code)]
+fn windows_console_exec_output_helper() {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+    use windows_sys::Win32::System::Console::{
+        CONSOLE_TEXTMODE_BUFFER, COORD, CreateConsoleScreenBuffer, GetConsoleProcessList,
+        GetStdHandle, ReadConsoleOutputCharacterW, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+        SetConsoleOutputCP, SetStdHandle,
+    };
+
+    assert_eq!(
+        std::env::var("NVX_TEST_PRIVATE_CONSOLE").as_deref(),
+        Ok("cp437")
+    );
+    let mut members = [0; 4];
+    // SAFETY: the array is writable, and only this helper may belong to its new console.
+    let count = unsafe { GetConsoleProcessList(members.as_mut_ptr(), members.len() as u32) };
+    assert_eq!((count, members[0]), (1, std::process::id()));
+    // SAFETY: a private, inactive screen buffer has no inherited security attributes.
+    let raw = unsafe {
+        CreateConsoleScreenBuffer(
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            CONSOLE_TEXTMODE_BUFFER,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(raw, INVALID_HANDLE_VALUE);
+    // SAFETY: CreateConsoleScreenBuffer returned this newly owned handle.
+    let buffer = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+    let (mut session, worker) = session_with(|guest| {
+        let (kind, request_id, _) = guest.request();
+        assert_eq!(kind, EXEC);
+        // The helper's standard input is the null device, so the workload's ends at once.
+        assert_eq!(guest.request(), (STDIN_END, request_id, Vec::new()));
+        // A character that two chunks split, bytes that are not UTF-8, on both streams, and a
+        // sequence that the output leaves incomplete.
+        guest.send(request_id, Frame::Stdout(b"caf\xc3"));
+        guest.send(request_id, Frame::Stdout(b"\xa9|\xff\x80|"));
+        guest.send(request_id, Frame::Stderr(b"err\xe2\x82"));
+        guest.send(request_id, Frame::Stderr(b"\xac|\xff"));
+        guest.send(request_id, Frame::Stdout(b"\xc3"));
+        guest.send(request_id, exit(0, Outcome::Exit));
+    });
+    // SAFETY: these getters return the helper's own redirected standard streams.
+    let redirected = unsafe {
+        [
+            GetStdHandle(STD_OUTPUT_HANDLE),
+            GetStdHandle(STD_ERROR_HANDLE),
+        ]
+    };
+    // SAFETY: only this helper is attached, and the owned buffer remains open until restoration.
+    unsafe {
+        assert_ne!(SetConsoleOutputCP(437), 0);
+        for stream in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            assert_ne!(SetStdHandle(stream, buffer.as_raw_handle().cast()), 0);
+        }
+    }
+    let result = session.exec(&request(&["/bin/sh"]), 5.0);
+    // SAFETY: restore the helper's pipes, so that a failed assertion reaches its parent.
+    unsafe {
+        assert_ne!(SetStdHandle(STD_OUTPUT_HANDLE, redirected[0]), 0);
+        assert_ne!(SetStdHandle(STD_ERROR_HANDLE, redirected[1]), 0);
+    }
+    worker.join().unwrap();
+    assert_eq!(result.unwrap().returncode, 0);
+    let expected = "caf\u{e9}|\u{fffd}\u{fffd}|err\u{20ac}|\u{fffd}\u{fffd}";
+    let mut actual = vec![0; expected.encode_utf16().count()];
+    let mut read = 0;
+    // SAFETY: the buffer is owned, and `actual` has room for the requested UTF-16 characters.
+    assert_ne!(
+        unsafe {
+            ReadConsoleOutputCharacterW(
+                buffer.as_raw_handle().cast(),
+                actual.as_mut_ptr(),
+                actual.len() as u32,
+                COORD { X: 0, Y: 0 },
+                &mut read,
+            )
+        },
+        0
+    );
+    assert_eq!(read as usize, actual.len());
+    assert_eq!(String::from_utf16(&actual).unwrap(), expected);
+}
+
 #[test]
 fn exec_streams_its_standard_input_under_the_window_until_its_end() {
     let input: Vec<u8> = (0..120 * 1024).map(|index| (index % 251) as u8).collect();

@@ -1344,10 +1344,12 @@ writer or its input, as it ended `nvx.py`'s reads of them. `run`,
 `sandbox run`, and `sandbox exec` exit with the status of OpenVMM or of the
 workload, which is no error of `nvx` either. Text ends its lines as Python's
 `print` ends them, with `\r\n` on Windows and `\n` elsewhere, while workload
-output passes through unchanged; an error that `sandbox exec` reports after
-the workload's output still starts a line of its own, even when the workload
-left its standard error without a line end. Each error is one line: a line
-break in a value that its message names, such as a path, prints as `\n` or
+output passes through unchanged, except to a Windows
+console, which shows text: there each sequence of it that is not UTF-8 shows as
+U+FFFD, as on Python's console streams. An error that `sandbox exec` reports
+after the workload's output still starts a line of its own, even when the
+workload left its standard error without a line end. Each error is one line: a
+line break in a value that its message names, such as a path, prints as `\n` or
 `\r`.
 
 Usage errors and help start with the usage of the parser, on one line, such as

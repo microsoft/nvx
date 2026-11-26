@@ -26,8 +26,9 @@
 //! OpenVMM that it launched, also stops waiting once that OpenVMM exits, where Python waited until
 //! its timeout. `exec` streams, where Python buffered the workload's output: the workload reads
 //! the command's standard input, until its end, and its output reaches the command's standard
-//! output and error as it comes, without a total cap; and Ctrl-C cancels it, which would
-//! otherwise outlive the session.
+//! output and error as it comes, without a total cap, through a [`ConsoleOutput`] each, which a
+//! Windows console shows as text; and Ctrl-C cancels it, which would otherwise outlive the
+//! session.
 //!
 //! The transports also wait in slices of at most 250 ms, as Python's do, so that Ctrl-C ends a
 //! wait within that time, except while a request is being sent, which its timeout bounds, and
@@ -41,7 +42,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::deadline::{Deadline, RETRY_INTERVAL, sleep};
-use super::{Exit, Result, check_interrupt, output};
+use super::output::{self, ConsoleOutput};
+use super::{Exit, Result, check_interrupt};
 use crate::host::platform::{self, Transport};
 use crate::host::process::Process;
 use crate::host::runtime::Runtime;
@@ -575,20 +577,21 @@ impl Session {
     /// Runs a workload and returns how it ended, as `ControlSession.exec` does: the request and
     /// every response must arrive within `response_timeout` seconds of its start. The workload
     /// reads this process's standard input until its end, and its standard output and error
-    /// reach this process's as they come. Ctrl-C cancels it. An error that follows its output
-    /// starts a line of its own, as callers find errors.
+    /// reach this process's as they come, through a [`ConsoleOutput`] each. Ctrl-C cancels it.
+    /// An error that follows its output starts a line of its own, as callers find errors.
     pub(crate) fn exec(
         &mut self,
         request: &ExecRequest,
         response_timeout: f64,
     ) -> Result<ExecResult> {
         let mut end = None;
-        let write = |stderr, data: &[u8]| {
-            if stderr {
+        let (mut stdout, mut stderr) = (ConsoleOutput::new(), ConsoleOutput::stderr());
+        let write = |to_stderr, data: &[u8]| {
+            if to_stderr {
                 end = data.last().copied();
-                output::write_stderr(data)
+                stderr.write_all(data)
             } else {
-                output::write_stdout(data)
+                stdout.write_all(data)
             }
         };
         let result = self.exec_with(
@@ -598,6 +601,11 @@ impl Session {
             platform::interrupted,
             write,
         );
+        let finished = stdout.finish().and_then(|()| stderr.finish());
+        let result = match (result, finished) {
+            (Ok(_), Err(error)) => Err(Exit::from_os_error(error)),
+            (result, _) => result,
+        };
         if result.is_err() {
             output::end_stderr_line(end.as_slice());
         }
