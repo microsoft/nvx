@@ -13,7 +13,9 @@
 //!
 //! Its crate-private reads of regular files open a file without following a link, or on Windows
 //! any other reparse point, refuse one that is not a regular file before reading anything from
-//! it, and read it within a bound.
+//! it, and read it within a bound. Its reads of a command's input files, which
+//! [`read_input_file`] makes, take a FIFO or a terminal too, within a bound, and on Linux let
+//! Ctrl-C end their wait.
 //!
 //! Its crate-private writes create files that only the current user may read, replace a file
 //! atomically, and make the changes to a directory's entries durable.
@@ -143,6 +145,28 @@ pub(crate) fn read_at_most(file: File, limit: u64, what: &str) -> io::Result<Vec
         ))));
     }
     Ok(bytes)
+}
+
+/// Reads at most `limit` bytes of the file at `path` that a command takes as its input, such as
+/// an egress policy file: a regular file, or a FIFO or a terminal, such as `/dev/stdin`, which can
+/// make the read wait for a writer or for input.
+///
+/// On Linux, Ctrl-C ends such a wait, as it ends a read of Python with `KeyboardInterrupt`: once the
+/// CLI's handler has recorded a `SIGINT`, the read fails with [`io::ErrorKind::Interrupted`], and
+/// the command ends as interrupted. Elsewhere, it reads the file as [`File::open`] and
+/// [`Read::take`] do.
+#[cfg(feature = "cli")]
+pub(crate) fn read_input_file(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    {
+        read_interruptibly(path, limit)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut data = Vec::new();
+        File::open(path)?.take(limit).read_to_end(&mut data)?;
+        Ok(data)
+    }
 }
 
 /// Mode of a private file on Unix: readable and writable by the current user only.

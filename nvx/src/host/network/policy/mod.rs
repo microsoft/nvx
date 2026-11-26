@@ -50,8 +50,6 @@ pub(crate) mod json;
 #[cfg(test)]
 mod tests;
 
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 
 use serde::Serialize;
@@ -60,6 +58,7 @@ use serde_json::{Map, Value};
 use self::json::ReadError;
 use super::{Access, Destination, EgressRule, EgressRules, NetworkPolicy, PortSelector, Protocol};
 use crate::error::{Error, Result};
+use crate::host::platform;
 
 /// Largest number of native rules that one action, allow or deny, compiles to: the number of
 /// rules of each action that OpenVMM accepts, [`MAX_RULES`](super::MAX_RULES).
@@ -88,12 +87,15 @@ pub(crate) struct CompiledEgressPolicy {
 /// Compiles the egress policy file at `path`, as `compile_policy_file` of the former
 /// `egress_policy.py` did for `nvx.py`.
 ///
+/// The file may also be a FIFO or a terminal, such as `/dev/stdin`, which the compiler reads as
+/// [`platform::read_input_file`] does: on Linux, Ctrl-C ends its wait for a writer or for input.
+///
 /// Messages name the file as [`Path::display`] shows `path`.
 ///
 /// # Errors
 ///
-/// [`ErrorKind::Io`](crate::ErrorKind::Io) when the file cannot be read; otherwise
-/// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when the file exceeds
+/// [`ErrorKind::Io`](crate::ErrorKind::Io) when the file cannot be read, or Ctrl-C ends its read;
+/// otherwise [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when the file exceeds
 /// [`MAX_POLICY_FILE_SIZE`], is not UTF-8 JSON of the format, or holds an invalid policy; see
 /// [`compile_policy_bytes`].
 pub(crate) fn compile_policy_file(path: &Path) -> Result<CompiledEgressPolicy> {
@@ -105,13 +107,8 @@ pub(crate) fn compile_policy_file(path: &Path) -> Result<CompiledEgressPolicy> {
         .with_source(error)
     };
     // Reading one byte more than the limit detects oversized files whatever their metadata say.
-    let mut data = Vec::new();
-    File::open(path)
-        .and_then(|file| {
-            file.take(MAX_POLICY_FILE_SIZE as u64 + 1)
-                .read_to_end(&mut data)
-        })
-        .map_err(unreadable)?;
+    let data =
+        platform::read_input_file(path, MAX_POLICY_FILE_SIZE as u64 + 1).map_err(unreadable)?;
     compile_policy_bytes(&data, path)
 }
 
