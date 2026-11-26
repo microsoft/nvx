@@ -545,12 +545,19 @@ at every write (#1400). The guest therefore writes to the boot console until a
 write interrupts, and has the control console interrupt with input instead,
 which nothing waits for: it sends the broker the bootstrap `GuestAttach`
 record, and the device writes the broker's answer, a `Reset` record, into a
-buffer of the console's input. Each device must interrupt on the IOAPIC
-input of its window, 16 through 23, edge-triggered and with no other handler,
-its interrupt must have fired, and `/proc/interrupts` must count no APIC error
-or spurious PIC interrupt (`ERR`), no level-triggered interrupt that the IOAPIC
-misrouted (`MIS`), and no spurious APIC interrupt (`SPU`). The guest also
-reports how many of each device's interrupts lately found no work for any
+buffer of the console's input. Each write to a terminal of the hvc layer also
+wakes the thread that polls every open one, which can take the answer from the
+used ring between the device's update of the used index and its read of the
+used event, so the device rightly skips that interrupt too (#1825). The broker
+answers once per device reset, so when an attach does not interrupt, the guest
+reports the console's word of the shared interrupt-status page and the answer
+that waits on its terminal, rebinds the console's driver, which resets the
+console, and attaches again, up to eight times. Each device must interrupt on
+the IOAPIC input of its window, 16 through 23, edge-triggered and with no other
+handler, its interrupt must have fired, and `/proc/interrupts` must count no
+APIC error or spurious PIC interrupt (`ERR`), no level-triggered interrupt that
+the IOAPIC misrouted (`MIS`), and no spurious APIC interrupt (`SPU`). The guest
+also reports how many of each device's interrupts lately found no work for any
 handler (`unhandled` in `/proc/irq/<n>/spurious`), which the scenario does not
 check: a console's driver polls for its output's completion, so nearly every
 interrupt of a console finds no work, and the NIC's polling can leave one such
