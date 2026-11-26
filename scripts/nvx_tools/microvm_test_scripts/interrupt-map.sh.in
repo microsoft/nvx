@@ -84,6 +84,23 @@ report() {
     done
 }
 
+# Reports, for the control console's attach $1 whose interrupt stayed quiet,
+# with its terminal still open on descriptor 3, the console's word of the
+# shared interrupt-status page that the microVM ABI keeps at 0x30000, which
+# the device sets as it interrupts and the driver's handler clears, and the
+# input that waits on the terminal. A clear word under the broker's answer
+# means that the driver took the answer by polling before the device read the
+# used event, so the device rightly skipped the interrupt; a set word, an
+# interrupt that no handler took; no answer, a broker that did not answer.
+control_quiet() {
+    status=$(dd if=/dev/mem bs=4 skip=$(((0x30000 + 0x1c) / 4)) count=1 2>/dev/null |
+        od -An -v -tx4 | tr -d ' \n')
+    stty min 0 time 2 <&3
+    answer=$(dd bs=4096 count=1 <&3 2>/dev/null | od -An -v -tx1 | tr -d ' \n')
+    echo "NVX-INTERRUPT-MAP-CONTROL-QUIET attach=$1 status=0x${status:-unknown}" \
+        "answer=${answer:-none}"
+}
+
 # Makes each virtio device interrupt, one device at a time: the NIC with an
 # echo of its gateway, the host filesystem with a read of its share, the boot
 # console with output, the control console with input that the guest asks its
@@ -130,17 +147,33 @@ traffic() {
                 # takes each buffer back as soon as the device returns it, so
                 # a write interrupts only if the device reads the used event
                 # before the driver moves it past the buffer, a race that the
-                # driver can win at every write (#1400). Nothing waits for
-                # the console's input, whose buffers the driver takes back
-                # from its interrupt, so attach to the control-session broker
-                # that the console runs: the device writes the broker's
-                # answer, a Reset record, into one of them. The terminal stays
+                # driver can win at every write (#1400). The guest therefore
+                # attaches to the control-session broker that the console
+                # runs: the device writes the broker's answer, a Reset record,
+                # into a buffer of the console's input. The terminal stays
                 # open, raw, and silent until the interrupt, so that it sends
                 # the record unchanged and echoes no answer to the broker,
                 # which would stop at the echo as at any malformed record and
-                # never complete the write.
-                { stty raw -echo <&3 && printf '@GUEST_ATTACH@' >&3 &&
-                    await_irq "$irq" "$fired"; } 3<>/dev/hvc2 || fail 35
+                # never complete the write. Yet every write to a terminal of
+                # the hvc layer wakes the thread that polls each open one, and
+                # when it takes the answer between the device's update of the
+                # used index and its read of the used event, the device rightly
+                # skips the interrupt too (#1825). The broker answers once per
+                # device reset, so reset the console by rebinding its driver,
+                # which gives the console's terminal the same index, and
+                # attach again until an attach interrupts. On AMD EPYC 9V74
+                # Windows/WHP hosts, 3% of single attaches did not interrupt.
+                driver=$(readlink -f "$device/driver")
+                while :; do
+                    writes=$((writes + 1))
+                    { stty raw -echo <&3 && printf '@GUEST_ATTACH@' >&3 &&
+                        await_irq "$irq" "$fired" &&
+                        { [ "$(irq_count "$irq")" -gt "$fired" ] ||
+                            control_quiet "$writes"; }; } 3<>/dev/hvc2 || fail 35
+                    [ "$(irq_count "$irq")" -le "$fired" ] && [ "$writes" -lt 8 ] || break
+                    { echo "$name" >"$driver/unbind" && echo "$name" >"$driver/bind"; } ||
+                        fail 38
+                done
                 ;;
             *) fail 36 ;;
         esac

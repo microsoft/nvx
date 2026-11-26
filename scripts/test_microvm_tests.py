@@ -29,7 +29,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import ExitStack, nullcontext, redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -81,6 +81,21 @@ def _posix_shell() -> str | None:
         if git_shell is not None and git_shell.is_file():
             shell = str(git_shell)
     return shell
+
+
+class _ControlConsoleRun(NamedTuple):
+    """What the interrupt-map script's traffic did with a control console."""
+
+    returncode: int
+    output: str
+    attaches: int
+    rebinds: int
+    unbound: str | None
+    bound: str | None
+
+
+def _read_optional(path: Path) -> str | None:
+    return path.read_text(encoding="ascii") if path.exists() else None
 
 
 def _probe_environment(probe_dir: Path) -> dict[str, str]:
@@ -13176,11 +13191,11 @@ class MicrovmTests(unittest.TestCase):
         ):
             script = microvm_tests._interrupt_map_script(devices, capture="")
             self.assertNotIn("@", script)
-            # The control console's step writes the record, once, to the
-            # console held open, raw, and silent until its interrupt.
+            # Each attach of the control console's step writes the record to
+            # the console held open, raw, and silent until its interrupt.
             steps = re.findall(
                 r"\{ stty raw -echo <&3 && printf '([^']*)' >&3 &&\n"
-                r' +await_irq "\$irq" "\$fired"; \} 3<>/dev/hvc2 \|\| fail 35\n',
+                r' +await_irq "\$irq" "\$fired" &&\n',
                 script,
             )
             self.assertEqual(len(steps), 1)
@@ -13190,6 +13205,109 @@ class MicrovmTests(unittest.TestCase):
             )
             self.assertEqual(written, guest_attach)
             self.assertEqual(script.count("/dev/hvc2"), 1)
+
+    def _run_control_console_traffic(
+        self, interrupting_attach: int | None
+    ) -> _ControlConsoleRun:
+        """Run the interrupt-map script's traffic through a control console
+        whose attach `interrupting_attach` is the first to interrupt, or none
+        if None, and return what the guest printed, how many times it
+        attached and rebound the console's driver, and its exit status."""
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        script = microvm_tests._interrupt_map_script(
+            len(microvm_tests.MICROVM_VIRTIO_DEVICES), capture=""
+        )
+        functions = script[: script.index("\ntries=0\n")]
+        functions = functions.replace(
+            "/sys/bus/virtio/devices/virtio*", '"$root"/devices/virtio*'
+        )
+        functions = functions.replace("/dev/hvc2", '"$root/hvc2"')
+        functions = functions.replace("nvx-exit", "nvx_exit")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            driver = root / "devices" / "virtio5" / "driver"
+            driver.mkdir(parents=True)
+            for name in ("count", "attaches", "rebinds"):
+                (root / name).write_text("0\n", encoding="ascii")
+            result = subprocess.run(
+                [shell, "-s", "--", temporary, str(interrupting_attach or 0)],
+                input=(
+                    "root=$1\nfire_at=$2\n"
+                    f"{functions}\n"
+                    "nvx_exit() { :; }\n"
+                    "device_base() { echo d0007000; }\n"
+                    "device_irq() { echo 23; }\n"
+                    'irq_count() { cat "$root/count"; }\n'
+                    # The attach `fire_at` interrupts; await_irq returns at
+                    # once.
+                    "await_irq() {\n"
+                    '    if [ "$fire_at" -gt 0 ] &&\n'
+                    '        [ "$(cat "$root/attaches")" -ge "$fire_at" ]; then\n'
+                    '        echo 1 >"$root/count"\n'
+                    "    fi\n"
+                    "}\n"
+                    "stty() {\n"
+                    '    [ "$*" = "raw -echo" ] || return 0\n'
+                    '    echo $(($(cat "$root/attaches") + 1)) >"$root/attaches"\n'
+                    "}\n"
+                    # Each rebind resets the console, which the bind records.
+                    'rebound() { echo $(($(cat "$root/rebinds") + 1)) >"$root/rebinds"; }\n'
+                    "traffic\n"
+                ).replace(
+                    'echo "$name" >"$driver/bind"',
+                    'echo "$name" >"$driver/bind" && rebound',
+                ),
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+            return _ControlConsoleRun(
+                returncode=result.returncode,
+                output=result.stdout + result.stderr,
+                attaches=int((root / "attaches").read_text(encoding="ascii")),
+                rebinds=int((root / "rebinds").read_text(encoding="ascii")),
+                unbound=_read_optional(driver / "unbind"),
+                bound=_read_optional(driver / "bind"),
+            )
+
+    def test_interrupt_map_reattaches_a_control_console_that_did_not_interrupt(self):
+        # The driver can take the broker's answer by polling before the
+        # device reads the used event, and the device then rightly skips the
+        # interrupt (#1825). The broker answers once per device reset, so the
+        # guest rebinds the console's driver and attaches again until an
+        # attach interrupts.
+        run = self._run_control_console_traffic(3)
+        self.assertEqual(run.returncode, 0, run.output)
+        self.assertEqual((run.attaches, run.rebinds), (3, 2), run.output)
+        self.assertEqual((run.unbound, run.bound), ("virtio5\n", "virtio5\n"))
+        quiet = re.findall(
+            r"^NVX-INTERRUPT-MAP-CONTROL-QUIET attach=(\d+) status=0x\S+ "
+            r"answer=\S+$",
+            run.output,
+            re.MULTILINE,
+        )
+        self.assertEqual(quiet, ["1", "2"], run.output)
+        self.assertNotIn("NVX-INTERRUPT-MAP-FAIL", run.output)
+
+        run = self._run_control_console_traffic(1)
+        self.assertEqual(run.returncode, 0, run.output)
+        self.assertEqual((run.attaches, run.rebinds), (1, 0), run.output)
+        self.assertNotIn("NVX-INTERRUPT-MAP-CONTROL-QUIET", run.output)
+
+    def test_interrupt_map_fails_a_control_console_that_never_interrupts(self):
+        # A control console whose interrupt reaches no handler of its own
+        # never interrupts, however many times the guest attaches.
+        run = self._run_control_console_traffic(None)
+        self.assertEqual(run.returncode, 37, run.output)
+        self.assertEqual((run.attaches, run.rebinds), (8, 7), run.output)
+        self.assertIn(
+            "NVX-INTERRUPT-MAP-QUIET base=0xd0007000 device=virtio5 irq=23 count=0\n",
+            run.output,
+        )
+        self.assertIn("NVX-INTERRUPT-MAP-FAIL code=37\n", run.output)
 
     def test_smp_snapshot_runs_the_warp_probe_after_each_restore(self):
         def measure(command: list[str], **kwargs: object) -> None:
