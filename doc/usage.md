@@ -345,12 +345,15 @@ errors and usage errors carry their [error codes](#error-codes), as
 and the workload of a `run`, stream the command's standard input to the
 workload until it ends, and the workload's standard output and error back as
 they arrive, without a limit on their size; a command whose input is the null
-device gives the workload none. The workload must end within `--timeout`, or
-the command fails with `timed-out`. An error of the command's own follows the
-workload's output on a new line. Ctrl-C asks the guest to end the workload,
-and the command exits with status 130 without waiting for it: an `exec` leaves
-its sandbox running, while a `run` ends its VM. Options take their values as
-those of [`run`](#run) do, and their names cannot be abbreviated either.
+device gives the workload none. Pipes and files receive the workload's output
+as it is, while a Windows console, which shows text, shows each sequence of it
+that is not UTF-8 as U+FFFD, as it does the output of a restored sandbox's
+workload. The workload must end within `--timeout`, or the command fails with
+`timed-out`. An error of the command's own follows the workload's output on a
+new line. Ctrl-C asks the guest to end the workload, and the command exits with
+status 130 without waiting for it: an `exec` leaves its sandbox running, while a
+`run` ends its VM. Options take their values as those of [`run`](#run) do, and
+their names cannot be abbreviated either.
 
 | Option | Default | Description |
 | --- | --- | --- |

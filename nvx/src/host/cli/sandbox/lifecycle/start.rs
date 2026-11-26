@@ -26,6 +26,7 @@ use crate::host::cli::artifacts::locate;
 use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
 use crate::host::cli::download::Hold;
 use crate::host::cli::exec_lock::ExecLock;
+use crate::host::cli::output::ConsoleOutput;
 use crate::host::cli::sandbox::lock::LifecycleLock;
 use crate::host::cli::sandbox::state::{
     Config, RecordedDistro, RecordedScratch, Source, read_config, serialize_launch,
@@ -569,43 +570,56 @@ fn restore_guest(
     // Closing the session at once can lose the workload's Start, so the start keeps the session
     // until the workload ends, reading its events in slices that let Ctrl-C through.
     let error = match restored {
-        Ok(mut session) => loop {
-            if platform::interrupted() {
-                return Err(Exit::Interrupted);
+        Ok(mut session) => {
+            let (mut stdout, mut stderr) = (ConsoleOutput::new(), ConsoleOutput::stderr());
+            let ended = loop {
+                if platform::interrupted() {
+                    return Err(Exit::Interrupted);
+                }
+                let slice = deadline.instant().min(Instant::now() + RETRY_INTERVAL);
+                match session.next_exec_event(workload.request_id, Some(slice)) {
+                    Ok(ExecEvent::Stdout(data)) => {
+                        stdout.write_all(&data).map_err(Exit::from_os_error)?;
+                    }
+                    Ok(ExecEvent::Stderr(data)) => {
+                        stderr.write_all(&data).map_err(Exit::from_os_error)?;
+                    }
+                    Ok(ExecEvent::Acknowledged(_)) => {}
+                    Ok(ExecEvent::Exit {
+                        category: Outcome::Exit,
+                        status: 0,
+                    }) => break Ok(Ok(())),
+                    Ok(ExecEvent::Exit { status, .. }) if restore.forward_status => {
+                        break Ok(Err(Exit::Status(status)));
+                    }
+                    Ok(ExecEvent::Exit { category, status }) => {
+                        break Ok(Err(Exit::error(
+                            ErrorCode::Other,
+                            format!(
+                                "the restored workload ended with {category:?} status {status}"
+                            ),
+                        )));
+                    }
+                    Ok(ExecEvent::Rejected { status, category }) => {
+                        break Ok(Err(Exit::error(
+                            ErrorCode::ExecRefused,
+                            format!(
+                                "the guest refused the restored workload: {category} ({status})"
+                            ),
+                        )));
+                    }
+                    Err(SessionError::TimedOut) if !deadline.passed() => {}
+                    Err(_) if platform::interrupted() => return Err(Exit::Interrupted),
+                    Err(error) => break Err(ControlRestoreError::Start(error)),
+                }
+            };
+            let finished = stdout.finish().and_then(|()| stderr.finish());
+            match ended {
+                Ok(Ok(())) => return finished.map_err(Exit::from_os_error),
+                Ok(Err(exit)) => return Err(exit),
+                Err(error) => error,
             }
-            let slice = deadline.instant().min(Instant::now() + RETRY_INTERVAL);
-            match session.next_exec_event(workload.request_id, Some(slice)) {
-                Ok(ExecEvent::Stdout(data)) => {
-                    output::write_stdout(&data).map_err(Exit::from_os_error)?;
-                }
-                Ok(ExecEvent::Stderr(data)) => {
-                    output::write_stderr(&data).map_err(Exit::from_os_error)?;
-                }
-                Ok(ExecEvent::Acknowledged(_)) => {}
-                Ok(ExecEvent::Exit {
-                    category: Outcome::Exit,
-                    status: 0,
-                }) => return Ok(()),
-                Ok(ExecEvent::Exit { status, .. }) if restore.forward_status => {
-                    return Err(Exit::Status(status));
-                }
-                Ok(ExecEvent::Exit { category, status }) => {
-                    return Err(Exit::error(
-                        ErrorCode::Other,
-                        format!("the restored workload ended with {category:?} status {status}"),
-                    ));
-                }
-                Ok(ExecEvent::Rejected { status, category }) => {
-                    return Err(Exit::error(
-                        ErrorCode::ExecRefused,
-                        format!("the guest refused the restored workload: {category} ({status})"),
-                    ));
-                }
-                Err(SessionError::TimedOut) if !deadline.passed() => {}
-                Err(_) if platform::interrupted() => return Err(Exit::Interrupted),
-                Err(error) => break ControlRestoreError::Start(error),
-            }
-        },
+        }
         Err(_) if platform::interrupted() => return Err(Exit::Interrupted),
         Err(error) => error,
     };
