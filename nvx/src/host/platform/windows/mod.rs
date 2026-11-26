@@ -135,8 +135,8 @@ fn owned(handle: HANDLE) -> Option<OwnedHandle> {
     }
 }
 
-/// Borrows an owned handle in the form expected by `windows-sys`.
-fn raw(handle: &OwnedHandle) -> HANDLE {
+/// Borrows a handle in the form expected by `windows-sys`.
+fn raw(handle: &(impl AsRawHandle + ?Sized)) -> HANDLE {
     handle.as_raw_handle() as HANDLE
 }
 

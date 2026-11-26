@@ -4,7 +4,7 @@
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::{AsHandle, AsRawHandle, OwnedHandle};
+use std::os::windows::io::{AsHandle, OwnedHandle};
 use std::path::Path;
 use std::time::Duration;
 use std::{mem, ptr};
@@ -375,7 +375,7 @@ fn spawn_listed(
     }
     let standard_handles = handles.len();
     for inherited in inherit {
-        let handle = inherited.as_handle().as_raw_handle() as HANDLE;
+        let handle = raw(&inherited.as_handle());
         // A handle that the list names twice fails the spawn.
         if !handles.contains(&handle) {
             handles.push(handle);

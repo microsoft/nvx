@@ -11,10 +11,10 @@ use std::io;
 use std::mem;
 #[cfg(feature = "cli")]
 use std::os::windows::ffi::OsStrExt;
+#[cfg(any(test, feature = "cli"))]
+use std::os::windows::fs::OpenOptionsExt;
 #[cfg(feature = "cli")]
 use std::os::windows::io::OwnedHandle;
-#[cfg(any(test, feature = "cli"))]
-use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
 #[cfg(any(test, feature = "cli"))]
 use std::path::Path;
 #[cfg(feature = "cli")]
@@ -49,7 +49,7 @@ fn open_for_metadata(path: &Path) -> io::Result<fs::File> {
 #[cfg(any(test, feature = "cli"))]
 pub(crate) fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
     let file = open_for_metadata(path)?;
-    handle_identity(file.as_raw_handle() as HANDLE)
+    handle_identity(super::raw(&file))
 }
 
 /// Returns the identity by which the stores tell a file or directory apart from every other,
@@ -186,7 +186,7 @@ impl Directory {
         };
         let attributes = OBJECT_ATTRIBUTES {
             Length: mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
-            RootDirectory: self.0.as_raw_handle() as HANDLE,
+            RootDirectory: raw(&self.0),
             ObjectName: &name,
             // As Win32 opens files.
             Attributes: OBJ_CASE_INSENSITIVE,
@@ -277,7 +277,7 @@ pub(super) fn status_error(status: windows_sys::Win32::Foundation::NTSTATUS) -> 
 /// which a file system such as ReFS does not keep unique: [`opened_file_id`] tells files apart.
 #[cfg(feature = "cli")]
 pub(crate) fn opened_file_identity(file: &fs::File) -> io::Result<(u64, u64)> {
-    handle_identity(file.as_raw_handle() as HANDLE)
+    handle_identity(raw(file))
 }
 
 /// Returns the identity by which the stores tell the file that `file` holds open apart from every
