@@ -5838,8 +5838,8 @@ def run_host_loopback_policy(
     allowed_general.listen(1)
     allowed_general.settimeout(timeout)
     allowed_general_port = int(allowed_general.getsockname()[1])
-    # Windows lets the publication probe bind every address at a port that a
-    # loopback listener holds, so a drawn port can equal the general service's.
+    # Two draws can return the same port, as can _available_tcp_address,
+    # which releases the ports that it returns, so draw until all five differ.
     while True:
         guest_port = _host_loopback_publication_port()
         # Busybox's UDP server answers only its first peer, so the guest
@@ -6001,12 +6001,22 @@ def run_host_loopback_policy(
 def _host_loopback_publication_port() -> int:
     """Draw a port that OpenVMM can publish on host loopback for TCP and UDP.
 
-    The port is free on every host address too, which Windows checks before
-    it binds a loopback address. The probes bind every address to check that,
-    but never listen or read, and close before the port is returned.
+    The port is free on the loopback address of each family, where OpenVMM
+    publishes it and the scenarios look for it, and on every host address,
+    which Windows checks before it binds a loopback address. Windows lets a
+    bind of every address share a port that a socket holds on loopback alone,
+    so the draw probes loopback too, with probes of its own, since Linux
+    refuses a loopback bind beside the same process's bind of every address at
+    the port. The probes never listen or read, and close before the port is
+    returned.
     """
     last_error: OSError | None = None
     for port in _host_loopback_port_candidates():
+        try:
+            _probe_loopback(port, (socket.AF_INET, socket.AF_INET6))
+        except OSError as error:
+            last_error = error
+            continue
         with ExitStack() as sockets:
             try:
                 for family, address in (
@@ -6026,6 +6036,19 @@ def _host_loopback_publication_port() -> int:
     raise RuntimeError(
         "failed to find a port free for TCP and UDP on every host address"
     ) from last_error
+
+
+def _probe_loopback(port: int, families: Sequence[socket.AddressFamily]) -> None:
+    """Bind ``port`` for TCP and UDP on the loopback address of each of
+    ``families``, raising the OSError of a bind that a host socket there
+    refuses. The probes never listen or read, and close before returning."""
+    with ExitStack() as sockets:
+        for family in families:
+            for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+                probe = sockets.enter_context(socket.socket(family, kind))
+                if family == socket.AF_INET6:
+                    probe.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                probe.bind(("::1" if family == socket.AF_INET6 else "127.0.0.1", port))
 
 
 def _holds_loopback(family: int, kind: socket.SocketKind, port: int) -> bool:
@@ -6243,10 +6266,18 @@ def _private_ingress_port() -> int:
 
     Private-network ingress listens on every host address, so the probes bind
     every address to check that the port is free there, but never listen or
-    read, and close before the port is returned.
+    read, and close before the port is returned. The scenario reaches the
+    published port at 127.0.0.1, which a socket on loopback alone would take
+    from OpenVMM's listener, and Windows lets a bind of every address share a
+    port with such a socket, so the draw probes IPv4 loopback first too.
     """
     last_error: OSError | None = None
     for port in _host_loopback_port_candidates():
+        try:
+            _probe_loopback(port, (socket.AF_INET,))
+        except OSError as error:
+            last_error = error
+            continue
         with ExitStack() as sockets:
             try:
                 for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):

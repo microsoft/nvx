@@ -6879,6 +6879,59 @@ class MicrovmTests(unittest.TestCase):
             microvm_tests._holds_loopback(socket.AF_INET, socket.SOCK_STREAM, port)
         )
 
+    def test_host_loopback_publication_port_skips_ports_held_on_loopback(self):
+        # Windows lets the probes of every address bind a port that a socket
+        # holds on loopback alone, which _holds_loopback then reports held.
+        # The draw probes ::1 at every candidate, so it needs IPv6 loopback.
+        try:
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+                probe.bind(("::1", 0))
+        except OSError:
+            self.skipTest("IPv6 loopback is unavailable")
+        for family, address in (
+            (socket.AF_INET, "127.0.0.1"),
+            (socket.AF_INET6, "::1"),
+        ):
+            for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+                with (
+                    self.subTest(address=address, kind=kind.name),
+                    socket.socket(family, kind) as held,
+                ):
+                    held.bind((address, 0))
+                    port = int(held.getsockname()[1])
+                    candidates = [port, *microvm_tests._host_loopback_port_candidates()]
+                    with patch.object(
+                        microvm_tests,
+                        "_host_loopback_port_candidates",
+                        return_value=candidates,
+                    ):
+                        drawn = microvm_tests._host_loopback_publication_port()
+                    self.assertNotEqual(drawn, port)
+                    self.assertFalse(
+                        microvm_tests._holds_loopback(
+                            socket.AF_INET, socket.SOCK_STREAM, drawn
+                        )
+                    )
+
+    def test_private_ingress_port_skips_ports_held_on_ipv4_loopback(self):
+        # The scenario reaches the published port at 127.0.0.1, where a socket
+        # on loopback alone would answer instead of OpenVMM's listener.
+        for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+            with (
+                self.subTest(kind=kind.name),
+                socket.socket(socket.AF_INET, kind) as held,
+            ):
+                held.bind(("127.0.0.1", 0))
+                port = int(held.getsockname()[1])
+                candidates = [port, *microvm_tests._host_loopback_port_candidates()]
+                with patch.object(
+                    microvm_tests,
+                    "_host_loopback_port_candidates",
+                    return_value=candidates,
+                ):
+                    drawn = microvm_tests._private_ingress_port()
+                self.assertNotEqual(drawn, port)
+
     def test_host_loopback_tcp_exchange_retries_until_the_guest_answers(self):
         listener = socket.create_server(("127.0.0.1", 0))
         port = int(listener.getsockname()[1])
