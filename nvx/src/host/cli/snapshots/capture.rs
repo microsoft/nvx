@@ -12,6 +12,7 @@ use super::{Name, Store};
 use crate::ErrorCode;
 use crate::host::cli::args::{Parser, Receiver, Spec, Syntax, choice, integer};
 use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
+use crate::host::cli::run::processors;
 use crate::host::cli::sandbox::{
     Artifacts, HYPERVISORS, MAX_MEMORY_MIB, error_with_cause, hypervisor,
 };
@@ -137,9 +138,7 @@ impl Receiver for Options {
             "--hypervisor" => self.hypervisor = choice(value, &HYPERVISORS)?,
             "--cpu-profile" => self.cpu_profile = Some(value.to_owned()),
             "--processors" | "--processor-capacity" => {
-                let count = choice(value, &["1", "2", "4", "8"])?
-                    .parse()
-                    .expect("processor choice");
+                let count = processors(value)?;
                 if name == "--processors" {
                     self.processors = count;
                 } else {

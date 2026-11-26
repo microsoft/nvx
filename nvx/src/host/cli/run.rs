@@ -332,7 +332,7 @@ impl Default for Options {
 }
 
 /// Returns the processor count that `value` names, one of the [`PROCESSORS`].
-fn processors(value: &str) -> std::result::Result<u32, String> {
+pub(in crate::host::cli) fn processors(value: &str) -> std::result::Result<u32, String> {
     let count = choice(value, &PROCESSORS)?;
     Ok(count.parse().expect("the processor counts are integers"))
 }
