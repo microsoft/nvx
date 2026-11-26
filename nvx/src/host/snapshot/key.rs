@@ -380,7 +380,7 @@ impl SnapshotKey {
             return Err(Error::unsupported(problem));
         }
         let bytes = |mib: u64| {
-            mib.checked_mul(1024 * 1024)
+            super::mib_bytes(mib)
                 .ok_or_else(|| Error::unsupported("capture memory in MiB overflows bytes"))
         };
         let DiskCapture::Fresh { image, scratch } = &context.capture.disks;
