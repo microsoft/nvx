@@ -220,3 +220,82 @@ fn records_keep_the_cpu_profile_that_their_starts_request() {
         Some("sandbox configuration is malformed".to_owned())
     );
 }
+
+/// A sandbox's scratch image is a file of its own: the check of the images, which `run` and
+/// `provision` make of their options and each start of its record, refuses a scratch image that
+/// is the distro layer, by its path or through a hard or symbolic link, which OpenVMM would attach
+/// as both the read-only layer and the writable scratch, and accepts a copy of the layer.
+#[test]
+fn images_refuse_a_scratch_image_that_is_the_distro_layer() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = paths::resolve(directory.path()).unwrap();
+    let image = root.join("distro.erofs");
+    std::fs::write(&image, b"distro layer\n").unwrap();
+    let copy = root.join("copy.ext4");
+    std::fs::copy(&image, &copy).unwrap();
+    let hard = root.join("hard.ext4");
+    std::fs::hard_link(&image, &hard).unwrap();
+    let mut scratches = vec![image.clone(), hard];
+    let symbolic = root.join("symbolic.ext4");
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&image, &symbolic);
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&image, &symbolic);
+    match linked {
+        Ok(()) => scratches.push(symbolic),
+        // Windows lets only Developer Mode or a privilege create a symbolic link.
+        Err(error) => eprintln!("skipped the symbolic link: {error}"),
+    }
+    let refusal = |scratch: &Path, description: &str| {
+        format!(
+            "ext4 scratch image {} is the same file as the {description} {}; a sandbox needs a \
+             scratch image of its own",
+            scratch.display(),
+            image.display()
+        )
+    };
+    let path = image.to_str().unwrap();
+    let uuid = "11111111-1111-1111-1111-111111111111";
+    let erofs = SandboxLayer::new(LayerRole::Distro, path, uuid);
+    let gpt = SandboxLayer::gpt(LayerRole::Distro, path, uuid);
+    for (layer, description) in [(&erofs, "distro EROFS layer"), (&gpt, "distro GPT image")] {
+        check_images(layer, Some(copy.as_path()), None).unwrap();
+        for scratch in scratches.iter().map(PathBuf::as_path) {
+            let error = check_images(layer, Some(scratch), None).unwrap_err();
+            assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
+            assert_eq!(
+                error.message(),
+                Some(refusal(scratch, description).as_str())
+            );
+        }
+    }
+    // A provision before the check recorded such a sandbox, with the layer's binding as its scratch
+    // image's, which each start now refuses before it claims or launches anything.
+    let distro = RecordedDistro::new(&erofs, DistroBinding::verify(&erofs).unwrap()).unwrap();
+    let scratch = RecordedScratch::new(Some(copy.as_path())).unwrap();
+    let options = ProvisionConfig {
+        hypervisor: "whp",
+        cpu_profile: None,
+        memory_mib: 128,
+        cmdline: "",
+        ram_upper_percent: None,
+        hostname: DEFAULT_HOSTNAME,
+        workload_identity: DEFAULT_WORKLOAD_IDENTITY,
+        export: None,
+        network: None,
+    };
+    let text = serialize_launch(&distro, scratch.as_ref(), &options, None).unwrap();
+    let mut object: Object = serde_json::from_str(&text).unwrap();
+    Config::new(object.clone()).unwrap().check().unwrap();
+    object["upper"]["path"] = json!(path);
+    object["scratch_binding"] =
+        serde_json::to_value(ScratchBinding::bind(&image).unwrap()).unwrap();
+    let config = Config::new(object).unwrap();
+    assert_eq!(config.scratch().as_deref(), Some(image.as_path()));
+    let error = config.check().unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
+    assert_eq!(
+        error.message(),
+        Some(refusal(image.as_path(), "distro EROFS layer").as_str())
+    );
+}

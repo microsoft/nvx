@@ -27,6 +27,10 @@ const MISMATCHED_MANIFEST: Content = Content::Text(
 const PACKAGELESS_MANIFEST: Content = Content::Text(
     r#"{"format": 1, "artifact": "distro.erofs", "artifact_sha256": "8a475efd5fd711d481a9a19de6d12b88dff0cd81cb8135ffcd5b65b062c7bf04"}"#,
 );
+/// The refusal of the root's distro layer as its own scratch image.
+const SAME_FILE: &str = "ext4 scratch image {root/distro.erofs} is the same file as the distro \
+                         EROFS layer {root/distro.erofs}; a sandbox needs a scratch image of its \
+                         own";
 
 /// A command line that fails a check before it changes anything.
 struct Refusal {
@@ -571,6 +575,35 @@ fn sandbox_refusals() -> Vec<Refusal> {
                 "{root/missing.ext4}",
             ],
             &["scratch", "{root/missing.ext4}"],
+        ),
+        // OpenVMM would attach the one file as both the read-only layer and the writable scratch.
+        refusal(
+            "scratch that is the distro layer",
+            "unsupported",
+            [
+                "sandbox",
+                "run",
+                "--layer",
+                LAYER,
+                "--scratch",
+                "{root/distro.erofs}",
+            ],
+            &[SAME_FILE],
+        ),
+        refusal(
+            "provision of a scratch that is the distro layer",
+            "unsupported",
+            [
+                "sandbox",
+                "provision",
+                "--state-dir",
+                "{root/state}",
+                "--layer",
+                LAYER,
+                "--scratch",
+                "{root/distro.erofs}",
+            ],
+            &[SAME_FILE],
         ),
         refusal(
             "relative entrypoint",
