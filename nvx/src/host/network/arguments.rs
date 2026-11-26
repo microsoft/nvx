@@ -2,7 +2,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use super::address::{Family, Interval};
+use super::address::{Family, Interval, Network};
 use super::loopback::check_loopback_forwards;
 use super::lowering::{self, NativeProtocol, Rule};
 use super::rule::parse_rules;
@@ -279,12 +279,10 @@ fn check_proxy_only(policy: &NetworkPolicy, proxy: &NetworkProxy) -> Result<()> 
 /// `ADDRESS/PREFIX` form, which it reads as [`read_guest_network`] does.
 pub(super) fn guest_subnet(guest_network: &str) -> Option<Interval> {
     let (address, prefix) = read_guest_network(guest_network)?;
-    if !(1..=32).contains(&prefix) {
-        return None;
-    }
-    let mask = u32::MAX << (32 - u32::from(prefix));
-    let network = u32::from(address) & mask;
-    Some((u128::from(network), u128::from(network | !mask)))
+    let prefix = u32::from(prefix);
+    (1..=Family::V4.bits())
+        .contains(&prefix)
+        .then(|| Network::new(Family::V4, u128::from(address.to_bits()), prefix).interval())
 }
 
 /// Returns the address and the prefix length of `guest_network`, `ADDRESS/PREFIX`, as OpenVMM's

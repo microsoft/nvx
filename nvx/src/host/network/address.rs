@@ -27,7 +27,7 @@ impl Family {
     pub(crate) const ALL: [Self; 2] = [Self::V4, Self::V6];
 
     /// Returns the number of bits of an address of this family.
-    const fn bits(self) -> u32 {
+    pub(super) const fn bits(self) -> u32 {
         match self {
             Self::V4 => 32,
             Self::V6 => 128,
@@ -68,7 +68,7 @@ pub(crate) struct Network {
 impl Network {
     /// Returns the network of `family` with `prefix` that holds `address`, clearing its host
     /// bits.
-    fn new(family: Family, address: u128, prefix: u32) -> Self {
+    pub(super) fn new(family: Family, address: u128, prefix: u32) -> Self {
         let network = Self {
             family,
             address,
@@ -441,9 +441,7 @@ impl Iterator for Summary {
         // The largest power of two that fits in the rest of the interval; the whole IPv6 address
         // space holds 2^128 addresses, one more than a `u128` holds.
         let span = self.last - first;
-        let fitting = span
-            .checked_add(1)
-            .map_or(128, |count| 127 - count.leading_zeros());
+        let fitting = span.checked_add(1).map_or(u128::BITS, u128::ilog2);
         let size_bits = alignment.min(fitting);
         let network = Network::new(self.family, first, bits - size_bits);
         // Python stops once the next address passes the family's last address.
