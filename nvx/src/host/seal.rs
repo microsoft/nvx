@@ -31,6 +31,9 @@ use std::path::Path;
 #[cfg(any(feature = "cli", windows))]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+#[cfg(any(feature = "cli", windows))]
+use crate::hex::{parse_hex, write_hex};
+
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows;
@@ -196,7 +199,7 @@ pub(super) struct FileId(pub(super) u128);
 #[cfg(any(feature = "cli", windows))]
 impl fmt::Display for FileId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{:032x}", self.0)
+        write_hex(formatter, &self.0.to_be_bytes())
     }
 }
 
@@ -211,14 +214,9 @@ impl Serialize for FileId {
 impl<'de> Deserialize<'de> for FileId {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let digits = String::deserialize(deserializer)?;
-        if digits.len() != 32 || !digits.bytes().all(|digit| digit.is_ascii_hexdigit()) {
-            return Err(serde::de::Error::custom(
-                "a file ID must be 32 hexadecimal digits",
-            ));
-        }
-        u128::from_str_radix(&digits, 16)
-            .map(Self)
-            .map_err(serde::de::Error::custom)
+        parse_hex::<{ size_of::<u128>() }>(digits)
+            .map(|bytes| Self(u128::from_be_bytes(bytes)))
+            .ok_or_else(|| serde::de::Error::custom("a file ID must be 32 hexadecimal digits"))
     }
 }
 
