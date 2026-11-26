@@ -369,6 +369,10 @@ fn check_length(record_type: RecordType, length: usize) -> Result<(), RecordErro
     }
 }
 
+/// The all-zero instance ID that NVXS reserves: bootstrap records carry it, and a READY or RESET
+/// that carries it has no identity.
+pub(super) const NO_INSTANCE_ID: [u8; 16] = [0; 16];
+
 /// Checks that a bootstrap record carries a zero instance ID, epoch, and sequence.
 fn check_bootstrap(
     record_type: RecordType,
@@ -376,7 +380,8 @@ fn check_bootstrap(
     epoch: u64,
     sequence: u64,
 ) -> Result<(), RecordError> {
-    if record_type.is_bootstrap() && (*instance_id != [0; 16] || epoch != 0 || sequence != 0) {
+    if record_type.is_bootstrap() && (*instance_id != NO_INSTANCE_ID || epoch != 0 || sequence != 0)
+    {
         Err(RecordError::BootstrapIdentity(record_type))
     } else {
         Ok(())

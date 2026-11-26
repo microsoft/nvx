@@ -79,6 +79,7 @@ pub(crate) mod tests;
 
 pub(crate) use guest::{GuestEvent, GuestSession, GuestState};
 pub(crate) use host::{HostEvent, HostSession};
+use record::NO_INSTANCE_ID;
 pub(crate) use record::{ErrorCode, Record, RecordError, RecordParser, RecordType, encode_record};
 
 /// Identity of an established session, which every record after the bootstrap repeats.
@@ -236,7 +237,7 @@ impl From<RecordError> for SessionError {
 /// Returns the identity that a READY or RESET record carries, or `None` if its instance ID or its
 /// epoch is zero.
 fn record_identity(record: &Record) -> Option<Identity> {
-    (record.instance_id() != [0; 16] && record.epoch() != 0).then(|| Identity {
+    (record.instance_id() != NO_INSTANCE_ID && record.epoch() != 0).then(|| Identity {
         instance_id: record.instance_id(),
         epoch: record.epoch(),
     })

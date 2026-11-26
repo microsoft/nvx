@@ -3,8 +3,8 @@
 use crate::protocol::CAPABILITY_LEN;
 
 use super::{
-    ErrorCode, Identity, Record, RecordParser, RecordType, SessionError, check_identity,
-    check_sequence, encode_data, encode_record, next_sequence, record_identity,
+    ErrorCode, Identity, NO_INSTANCE_ID, Record, RecordParser, RecordType, SessionError,
+    check_identity, check_sequence, encode_data, encode_record, next_sequence, record_identity,
 };
 
 /// State of a [`HostSession`].
@@ -87,7 +87,14 @@ impl HostSession {
         if self.state != HostState::Detached {
             return Err(SessionError::InvalidState);
         }
-        encode_record(RecordType::HostAttach, &[0; 16], 0, 0, capability, output)?;
+        encode_record(
+            RecordType::HostAttach,
+            &NO_INSTANCE_ID,
+            0,
+            0,
+            capability,
+            output,
+        )?;
         self.state = HostState::Attaching;
         Ok(())
     }
