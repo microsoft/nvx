@@ -66,6 +66,7 @@ use self::args::{Parser, Receiver, Spec, Stop, Syntax};
 use crate::ErrorCode;
 use crate::hex::hex;
 use crate::host::platform;
+use crate::uuid::Uuid;
 
 /// Returns the name of a temporary file next to `path`: `.NAME.UUID.tmp`, with a fresh UUID4 in
 /// hexadecimal.
@@ -85,10 +86,7 @@ pub(crate) fn temporary_path(path: &Path) -> Result<PathBuf> {
 /// Returns 32 lowercase hexadecimal digits of 122 random bits, with the version and variant bits
 /// of a version-4 UUID.
 fn uuid4_hex() -> Result<String> {
-    let mut bytes = random_bytes::<16>()?;
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Ok(hex(&bytes))
+    Ok(hex(Uuid::v4(random_bytes()?).as_bytes()))
 }
 
 /// Returns `N` random bytes from the operating system.

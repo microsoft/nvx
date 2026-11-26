@@ -14,6 +14,7 @@ use super::root::Root;
 use super::sys::{self, Mode, OpenFlags};
 use crate::protocol::cmdline::write_resolver;
 use crate::protocol::view::{MachineIdMode, View, is_hostname};
+use crate::uuid::Uuid;
 use crate::{Error, Result};
 
 /// The generated machine ID's file in the root's runtime directory.
@@ -162,13 +163,11 @@ pub(crate) fn apply_files(
 }
 
 /// Returns a random ID's version 4 UUID text: 32 lowercase hexadecimal digits and a newline.
-fn machine_id_text(mut id: [u8; 16]) -> [u8; 33] {
+fn machine_id_text(id: [u8; 16]) -> [u8; 33] {
     /// The lowercase hexadecimal digits.
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    id[6] = (id[6] & 0x0f) | 0x40;
-    id[8] = (id[8] & 0x3f) | 0x80;
     let mut text = [b'\n'; 33];
-    for (index, byte) in id.iter().enumerate() {
+    for (index, byte) in Uuid::v4(id).as_bytes().iter().enumerate() {
         text[2 * index] = DIGITS[usize::from(byte >> 4)];
         text[2 * index + 1] = DIGITS[usize::from(byte & 0x0f)];
     }

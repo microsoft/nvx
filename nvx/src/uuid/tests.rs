@@ -89,3 +89,22 @@ fn the_nil_uuid_has_only_zero_bits() {
     assert!(Uuid::from_bytes_le([0; 16]).is_nil());
     assert!(!Uuid::from_bytes(ESP).is_nil());
 }
+
+#[cfg(any(feature = "cli", all(feature = "guest", target_os = "linux")))]
+#[test]
+fn a_version_4_uuid_sets_only_its_version_and_variant_bits() {
+    // RFC 9562 §5.4: version 4 in the high four bits of byte 6, the variant `0b10` in the high
+    // two bits of byte 8, and every other bit as drawn.
+    assert_eq!(
+        Uuid::v4([0; 16]).to_string(),
+        "00000000-0000-4000-8000-000000000000"
+    );
+    assert_eq!(
+        Uuid::v4([0xff; 16]).to_string(),
+        "ffffffff-ffff-4fff-bfff-ffffffffffff"
+    );
+    assert_eq!(
+        Uuid::v4(ESP).to_string(),
+        "c12a7328-f81f-41d2-ba4b-00a0c93ec93b"
+    );
+}
