@@ -15,6 +15,8 @@ use crate::host::cli::sandbox::state::{random_bytes, temporary_path};
 use crate::host::cli::session::{EXIT_CATEGORIES, ExecResult};
 use crate::host::cli::{Exit, Result};
 use crate::host::paths;
+#[cfg(unix)]
+use crate::host::platform;
 
 /// Returns the destination of an outcome report, as `_outcome_destination` does: in a plain
 /// directory, with a file name, and new. On Windows, the file name holds no colon, with which
@@ -104,7 +106,7 @@ fn write_new_file(path: &str, write: impl FnOnce(&mut File) -> io::Result<()>) -
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, platform::PRIVATE_FILE_MODE);
     let mut file = match options.open(&temporary) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -159,6 +161,10 @@ pub(super) fn read_openvmm_outcome(path: &Path) -> Result<Object> {
     Ok(report)
 }
 
+/// The size of an outcome report's operation ID, in random bytes: 128 bits, written as 32
+/// hexadecimal digits, so that IDs drawn independently, without coordination, do not collide.
+const OPERATION_ID_BYTES: usize = 16;
+
 /// Writes the outcome report of a managed workload: its category and status, with a random
 /// operation ID, and nothing of its output.
 pub(crate) fn write_exec_outcome(path: &str, result: &ExecResult) -> Result {
@@ -168,7 +174,7 @@ pub(crate) fn write_exec_outcome(path: &str, result: &ExecResult) -> Result {
             "managed workload returned an unsupported outcome category",
         ));
     }
-    let operation_id = hex(&random_bytes::<16>()?);
+    let operation_id = hex(&random_bytes::<OPERATION_ID_BYTES>()?);
     let report = json!({
         "schema_version": OUTCOME_SCHEMA_VERSION,
         "operation_id": operation_id,
