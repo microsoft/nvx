@@ -1049,7 +1049,7 @@ fn the_command_line_is_checked_as_the_kernel_reads_it() {
     // The kernel applies these parameters however the command line separates, quotes, or
     // spells them: `à` is C3 A0 in UTF-8, and the kernel takes the byte 0xa0, as it does the
     // vertical tab, for whitespace (microsoft/nvx#723).
-    let cases: [(&[u8], &[u8]); 21] = [
+    let cases: [(&[u8], &[u8]); 25] = [
         (b"quiet \xc3\xa0tsc=unstable", b"tsc=unstable"),
         (b"quiet\xc3\xa0tsc=unstable", b"tsc=unstable"),
         (b"quiet\x0btsc_early_khz=2100000", b"tsc_early_khz=2100000"),
@@ -1070,6 +1070,12 @@ fn the_command_line_is_checked_as_the_kernel_reads_it() {
         (b"hpet=forced", b"hpet=forced"),
         (b"clocksource=tsc clocksource=hpet", b"clocksource=hpet"),
         (b"clocksource=", b"clocksource="),
+        // `clock=`, the deprecated alias of `clocksource=`, sets the same override, `pmtmr` as
+        // `acpi_pm`.
+        (b"clock=jiffies", b"clock=jiffies"),
+        (b"clock=pmtmr", b"clock=pmtmr"),
+        (b"clocksource=tsc clock=\"hpet\"", b"clock=hpet"),
+        (b"clock=", b"clock="),
         (b"nolapic_timer\n", b"nolapic_timer"),
         (b"hpet=force\0", b"hpet=force"),
         // The newline that procfs writes after the command line is not in a quote that the
@@ -1092,6 +1098,7 @@ fn the_command_line_is_checked_as_the_kernel_reads_it() {
         b"quiet\xa0--\xa0tsc=unstable",
         b"a=\"tsc=unstable notsc\" b",
         b"xnotsc tscx=unstable tsc=unstable2 hpet=disable,verbose clocksource nolapicx",
+        b"clock=tsc clock clocks=hpet clock_x=jiffies",
         b"quiet\xe2\x80\x83tsc=unstable",
         b"quiet\0 tsc=unstable",
         b"quiet clocksource=\"tsc\n",
@@ -1141,14 +1148,18 @@ fn applies_forbidden_clock(name: &[u8], value: Option<&[u8]>) -> bool {
                 .split(|&byte| byte == b',')
                 .any(|option| option.starts_with(b"force"))
         })
-        || setup("clocksource=").is_some_and(|argument| argument != b"tsc")
+        // `boot_override_clock`, the handler of `clock=`, hands `pmtmr` to the override of
+        // `clocksource=` as `acpi_pm`, and any other value as it is.
+        || ["clocksource=", "clock="]
+            .into_iter()
+            .any(|string| setup(string).is_some_and(|argument| argument != b"tsc"))
 }
 
 /// Returns a strategy for command lines of the clock parameters, others, their values,
 /// quotes, the `--` delimiter, and the kernel's whitespace.
 fn clock_command_line() -> impl Strategy<Value = Vec<u8>> {
     /// The pieces of the command lines.
-    const PIECES: [&[u8]; 29] = [
+    const PIECES: [&[u8]; 30] = [
         b"tsc",
         b"notsc",
         b"nolapic",
@@ -1160,6 +1171,7 @@ fn clock_command_line() -> impl Strategy<Value = Vec<u8>> {
         b"lapic_timer_hz",
         b"hpet",
         b"clocksource",
+        b"clock",
         b"x",
         b"=",
         b"unstable",

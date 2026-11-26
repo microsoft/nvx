@@ -1209,9 +1209,11 @@ pub(crate) fn check_cpuinfo(
 /// the kernel matches by their names, and `lapic_timer_hz`, the clock token that OpenVMM refuses
 /// with `tsc_early_khz`, by its name too; `notsc`, whose `__setup` handler the kernel matches with
 /// every parameter that starts with it; and `tsc=unstable`, an `hpet=` list with an option that
-/// starts with `force`, as `hpet_setup` reads it, and a `clocksource=` other than `tsc`, whose
-/// `__setup` handlers take the values. Names match whether they spell a dash or an underscore.
-/// The diagnostic quotes the parameter as the kernel reads it, `NAME=VALUE` without its quotes.
+/// starts with `force`, as `hpet_setup` reads it, and a clocksource override other than `tsc`, by
+/// `clocksource=` or by its deprecated alias `clock=`, which `boot_override_clock` hands to the
+/// same override, as `acpi_pm` for `pmtmr`, whose `__setup` handlers take the values. Names match
+/// whether they spell a dash or an underscore. The diagnostic quotes the parameter as the kernel
+/// reads it, `NAME=VALUE` without its quotes.
 ///
 /// `text` is what `/proc/cmdline` holds: the command line that the kernel read, and the newline
 /// that procfs writes after it, which the check drops, so that a quote that the command line
@@ -1224,6 +1226,8 @@ pub(crate) fn check_cmdline(text: &[u8]) -> Result<(), Vec<u8>> {
         "nolapic",
         "nolapic_timer",
     ];
+    /// The parameters whose `__setup` handlers set the clocksource override.
+    const CLOCKSOURCE_OVERRIDES: [&str; 2] = ["clocksource", "clock"];
     let forbidden = |parameter: &Parameter<'_>| {
         let value = |name: &str| parameter.value.filter(|_| parameter.is_named(name));
         NAMES.iter().any(|name| parameter.is_named(name))
@@ -1234,7 +1238,9 @@ pub(crate) fn check_cmdline(text: &[u8]) -> Result<(), Vec<u8>> {
                     .split(|&byte| byte == b',')
                     .any(|option| option.starts_with(b"force"))
             })
-            || value("clocksource").is_some_and(|source| source != b"tsc")
+            || CLOCKSOURCE_OVERRIDES
+                .iter()
+                .any(|name| value(name).is_some_and(|source| source != b"tsc"))
     };
     let command_line = text.strip_suffix(b"\n").unwrap_or(text);
     match cmdline::parameters(command_line).find(forbidden) {
