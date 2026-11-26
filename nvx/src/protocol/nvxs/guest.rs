@@ -1,8 +1,8 @@
 //! The guest's role in an NVXS session.
 
 use super::{
-    Identity, Record, RecordParser, RecordType, SessionError, check_identity, check_sequence,
-    encode_data, encode_next, encode_record, next_sequence, record_identity,
+    Identity, NO_INSTANCE_ID, Record, RecordParser, RecordType, SessionError, check_identity,
+    check_sequence, encode_data, encode_next, encode_record, next_sequence, record_identity,
 };
 
 /// State of a [`GuestSession`].
@@ -96,7 +96,7 @@ impl GuestSession {
         if self.state != GuestState::Detached {
             return Err(SessionError::InvalidState);
         }
-        encode_record(RecordType::GuestAttach, &[0; 16], 0, 0, &[], output)?;
+        encode_record(RecordType::GuestAttach, &NO_INSTANCE_ID, 0, 0, &[], output)?;
         self.state = GuestState::Attaching;
         Ok(())
     }
