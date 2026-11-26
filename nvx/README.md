@@ -1160,6 +1160,14 @@ unmatched `]`, or reversed `][` is not. `run` and `provision` apply these checks
 before launching OpenVMM or recording a sandbox, and `start` checks recorded
 paths again.
 
+A sandbox's scratch image is a file of its own: `nvx sandbox` rejects a scratch
+image that is the distro layer, by path or through a hard or symbolic link,
+which OpenVMM would attach as both the read-only layer and the writable
+scratch, with `ErrorKind::Unsupported` and `ext4 scratch image SCRATCH is the
+same file as the distro EROFS layer LAYER; a sandbox needs a scratch image of
+its own`. It compares the images' device or volume and file IDs, at the same
+points as the checks of their paths.
+
 The scratch image, which the VMM writes, has a binding of its own, a
 `ScratchBinding`: its platform scheme, its device or volume and file ID, its
 kind, a regular file, and its length, which fixes the guest's block device, in

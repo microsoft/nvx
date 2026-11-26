@@ -50,6 +50,7 @@ use crate::host::config::{
 };
 use crate::host::filesystem::{ExportPlan, Pins, PlannedExport, ReservedTargets};
 use crate::host::paths;
+use crate::host::platform;
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding, DistroFormat};
 use crate::host::sandbox::layer::{LayerRole, SandboxLayer};
 use crate::host::sandbox::mount::{HostQueries, check_distinct_export_roots, os_error};
@@ -165,14 +166,19 @@ pub(crate) fn check_workload(
     Ok(())
 }
 
-/// Refuses the images of a sandbox before its launch: `distro`, and `scratch`, the scratch image of an upper on scratch, must each be a
-/// regular file whose path, and the path to which it resolves, has no comma, semicolon, or
-/// unbalanced bracket, and does not end in an extension with which OpenVMM would not attach it as
-/// a raw image. It also refuses `export`, if any, once its directories and files overlap, by path
-/// or through a hard link or a bind mount, or once [`PlannedExport::verify`] refuses it.
+/// Refuses the images of a sandbox before its launch: `distro`, and `scratch`, the scratch image
+/// of an upper on scratch, must each be a regular file whose path, and the path to which it
+/// resolves, has no comma, semicolon, or unbalanced bracket, and does not end in an extension
+/// with which OpenVMM would not attach it as a raw image, and `scratch` must be a file other than
+/// `distro`, which OpenVMM would otherwise attach as both the read-only layer and the writable
+/// scratch. It also refuses `export`, if any, once its directories and files overlap, by path or
+/// through a hard link or a bind mount, or once [`PlannedExport::verify`] refuses it.
 ///
 /// A missing image fails with [`ErrorCode::Unavailable`], as `distro EROFS layer not found:
-/// PATH`, `distro GPT image not found: PATH`, or `ext4 scratch image not found: PATH`.
+/// PATH`, `distro GPT image not found: PATH`, or `ext4 scratch image not found: PATH`. A scratch
+/// image that is the distro layer, by path or through a hard or symbolic link, fails with
+/// [`ErrorCode::Unsupported`], as `ext4 scratch image SCRATCH is the same file as the distro
+/// EROFS layer LAYER; a sandbox needs a scratch image of its own`.
 pub(crate) fn check_images(
     distro: &SandboxLayer,
     scratch: Option<&Path>,
@@ -201,6 +207,21 @@ pub(crate) fn check_images(
             let shown = format!("{shown} resolves to {}", resolved.display());
             reject_disk_path(&resolved, &shown)?;
             reject_container_path(&resolved, &shown)?;
+        }
+    }
+    if let Some(scratch) = scratch {
+        let identity =
+            |path: &Path| platform::file_id(path).map_err(|error| os_error(&error, Some(path)));
+        if identity(scratch)? == identity(distro.path())? {
+            return Err(Exit::error(
+                ErrorCode::Unsupported,
+                format!(
+                    "ext4 scratch image {} is the same file as the {image} {}; a sandbox needs a \
+                     scratch image of its own",
+                    scratch.display(),
+                    distro.path().display()
+                ),
+            ));
         }
     }
     if let Some(export) = export {
