@@ -85,12 +85,12 @@ environment:
 pub(super) const OPTIONS: [Spec; 2] = [Spec::one("--repository"), Spec::one("--hypervisor")];
 
 /// The GitHub repository whose releases a download installs, unless `--repository` names another.
-pub(crate) const DEFAULT_REPOSITORY: &str = "microsoft/nvx";
+const DEFAULT_REPOSITORY: &str = "microsoft/nvx";
 /// How many commits of the first-parent history of `HEAD` the search for a release reads at most.
-pub(crate) const SEARCH_COMMITS: usize = 20;
+const SEARCH_COMMITS: usize = 20;
 /// The environment variable that keeps `run` and `sandbox` from downloading a release when it is
 /// `0`.
-pub(crate) const AUTO_DOWNLOAD_VARIABLE: &str = "NVX_AUTO_DOWNLOAD";
+const AUTO_DOWNLOAD_VARIABLE: &str = "NVX_AUTO_DOWNLOAD";
 /// The environment variables that name a GitHub token, in the order in which they are read.
 const TOKEN_VARIABLES: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
 /// The entry whose presence at the root of a checkout makes it a Git checkout: a directory, or a
