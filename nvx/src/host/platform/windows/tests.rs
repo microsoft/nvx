@@ -412,6 +412,44 @@ fn batch_files_are_refused_before_cmd_could_read_their_arguments() {
 }
 
 #[test]
+fn programs_whose_paths_pass_the_legacy_limit_start() {
+    // `CreateProcessW` takes an application name of `MAX_PATH` or more UTF-16 code units, with
+    // its NUL, only in the extended-length form.
+    let directory = tempfile::tempdir().unwrap();
+    let mut deep = directory.path().to_path_buf();
+    while deep.as_os_str().encode_wide().count() < MAX_PATH as usize {
+        deep.push("d".repeat(40));
+    }
+    fs::create_dir_all(&deep).unwrap();
+    let system = std::env::var_os("SystemRoot").unwrap();
+    let program = deep.join("cmd.exe");
+    fs::copy(
+        Path::new(&system).join("System32").join("cmd.exe"),
+        &program,
+    )
+    .unwrap();
+    let (stdin, _stdin_writer) = io::pipe().unwrap();
+    let (_stdout_reader, stdout) = io::pipe().unwrap();
+    let stderr = stdout.try_clone().unwrap();
+    let child = spawn_with_stdio(
+        &program,
+        &["/c", "exit 7"].map(OsString::from),
+        &std::env::temp_dir(),
+        [stdin.into(), stdout.into(), stderr.into()],
+        &[],
+        SpawnMode::Detached {
+            breakaway_from_job: false,
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        child.wait_timeout(Duration::from_secs(30)).unwrap(),
+        Some(7)
+    );
+}
+
+#[test]
 fn concurrent_spawns_that_allow_one_handle_all_inherit_it_and_restore_it() {
     /// Threads that spawn at once.
     const THREADS: usize = 4;

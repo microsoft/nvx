@@ -287,13 +287,14 @@ impl std::os::windows::io::AsHandle for InheritedHandle {
 ///
 /// Follow [`spawn`](fn@spawn)'s launch contract: detach on Linux, clear only the child's owner
 /// umask bits, and keep allowed descriptors close-on-exec in the caller; on Windows, use an
-/// explicit handle list, restore temporary inheritability, start without a console in the
-/// log-named job, refuse a taken or untrusted job name, and honor `breakaway_from_job`. Windows
-/// callers coordinate their other spawns with the inheritance window. If setup fails after
-/// spawning, terminate and reap only that child before returning an error. The caller journals
-/// recovery data and keeps the VM directory and runtime inputs stable; this value starts no
-/// process. A restore retains its already-bound ready listener in `ready`, outside the child
-/// inheritance allowlist.
+/// explicit handle list, restore temporary inheritability, give `CreateProcessW` the
+/// extended-length form, `\\?\`, of a `program` path that reaches the legacy `MAX_PATH`, start
+/// without a console in the log-named job, refuse a taken or untrusted job name, and honor
+/// `breakaway_from_job`. Windows callers coordinate their other spawns with the inheritance
+/// window. If setup fails after spawning, terminate and reap only that child before returning an
+/// error. The caller journals recovery data and keeps the VM directory and runtime inputs stable;
+/// this value starts no process. A restore retains its already-bound ready listener in `ready`,
+/// outside the child inheritance allowlist.
 #[derive(Debug)]
 pub struct VmmCommand {
     /// The checked OpenVMM executable.
