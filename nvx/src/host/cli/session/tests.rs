@@ -1201,6 +1201,26 @@ fn check_cancellable_session_closes_failed_io(
 }
 
 #[test]
+#[cfg(any(target_os = "linux", windows))]
+fn cancellation_outlives_a_panic_that_poisons_its_lock() {
+    let cancellation = AttachmentCancellation::default();
+    let holder = cancellation.clone();
+    let panicked = thread::spawn(move || {
+        let _held = holder.transport.lock().unwrap();
+        panic!("the attachment panics while it holds the lock");
+    })
+    .join();
+    assert!(panicked.is_err());
+    assert!(cancellation.transport.is_poisoned());
+    cancellation.cancel().unwrap();
+    cancellation.attached();
+    assert_eq!(
+        cancellation.check().unwrap_err().to_string(),
+        "foreground attachment cancelled"
+    );
+}
+
+#[test]
 fn response_that_does_not_arrive_times_out() {
     let (mut session, worker) = session_with(|guest| {
         let _ = guest.request();
