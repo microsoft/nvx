@@ -734,7 +734,7 @@ pub fn create(
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, platform::PRIVATE_FILE_MODE);
     let log = options.open(&outputs.log).map_err(|error| {
         Error::io(format!(
             "cannot create the VM log {}",
@@ -750,7 +750,7 @@ pub fn create(
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            log.set_permissions(fs::Permissions::from_mode(0o600))
+            log.set_permissions(fs::Permissions::from_mode(platform::PRIVATE_FILE_MODE))
                 .map_err(|error| {
                     Error::io("cannot make the new VM log private").with_source(error)
                 })?;
@@ -1253,14 +1253,14 @@ fn capture_disk(
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, platform::PRIVATE_FILE_MODE);
     let file = options.open(path).map_err(failed)?;
     created.push(path.to_owned());
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        file.set_permissions(fs::Permissions::from_mode(0o600))
+        file.set_permissions(fs::Permissions::from_mode(platform::PRIVATE_FILE_MODE))
             .map_err(failed)?;
     }
     if let Some(problem) = platform::private_file_problem(&file).map_err(failed)? {
