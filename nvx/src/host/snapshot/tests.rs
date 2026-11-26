@@ -1764,6 +1764,17 @@ fn snapshot_accepts_treats_zero_boot_processors_as_all_capacity_online() {
 }
 
 #[test]
+fn mib_bytes_converts_mebibytes_and_refuses_overflow() {
+    assert_eq!(super::mib_bytes(0), Some(0));
+    assert_eq!(super::mib_bytes(256), Some(256 * MIB));
+    assert_eq!(
+        super::mib_bytes(u64::MAX >> 20),
+        Some((u64::MAX >> 20) * MIB)
+    );
+    assert_eq!(super::mib_bytes((u64::MAX >> 20) + 1), None);
+}
+
+#[test]
 fn snapshot_accepts_refuses_each_memory_mismatch_without_rounding_or_overflow() {
     for memory_mib in [384, 2176, 513] {
         let mut fixture = RestoreFixture::new(false);

@@ -256,7 +256,7 @@ impl Snapshot {
                 config.processors
             )));
         }
-        let memory = config.memory_mib.checked_mul(1024 * 1024).ok_or_else(|| {
+        let memory = mib_bytes(config.memory_mib).ok_or_else(|| {
             Error::unsupported("snapshot memory in MiB overflows its byte length")
         })?;
         if memory < self.key.memory() || memory > self.key.memory_capacity() {
@@ -360,6 +360,14 @@ impl Snapshot {
         }
         Ok(())
     }
+}
+
+/// The bytes in a mebibyte, the unit in which a VM's configuration and a capture give memory.
+const MIB: u64 = 1024 * 1024;
+
+/// Returns `mib` mebibytes in bytes, or `None` when that overflows a `u64`.
+fn mib_bytes(mib: u64) -> Option<u64> {
+    mib.checked_mul(MIB)
 }
 
 /// Reads a requested regular disk's geometry without waiting for a Linux FIFO writer.
