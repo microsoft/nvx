@@ -44,6 +44,12 @@ const OUTPUT_SIZE: usize = 384;
 const PAYLOAD_SIZE: usize = 64;
 /// Milliseconds for which each round trip waits for its echo.
 const ECHO_TIMEOUT_MS: u16 = 100;
+/// Nanoseconds in a millisecond, which scale a benchmark's `DURATION` to the monotonic clock's
+/// nanoseconds.
+const NANOSECONDS_PER_MILLISECOND: u64 = 1_000_000;
+/// File transfers between the timed loop's clock reads, which keep the clock read out of most
+/// iterations, as the C program's `(operations & 63) == 0` did.
+const TRANSFERS_PER_CLOCK_READ: u64 = 64;
 /// Initial state of the C program's block-offset generator.
 const LCG_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 /// Multiplier of its 64-bit linear congruential generator.
@@ -343,7 +349,9 @@ fn measure_file(
     fill_pattern(&mut block.0);
     let mut offsets = Offsets::new(benchmark.size_bytes / BLOCK_SIZE as u64);
     let started = start()?;
-    let duration_ns = benchmark.duration_ms.wrapping_mul(1_000_000);
+    let duration_ns = benchmark
+        .duration_ms
+        .wrapping_mul(NANOSECONDS_PER_MILLISECOND);
     let mut ended = started;
     let mut operations = 0_u64;
     while ended.wrapping_sub(started) < duration_ns {
@@ -357,7 +365,7 @@ fn measure_file(
             return Err(CommandError::Transfer);
         }
         operations = operations.wrapping_add(1);
-        if operations & 63 == 0 {
+        if operations.is_multiple_of(TRANSFERS_PER_CLOCK_READ) {
             ended = now();
         }
     }
@@ -388,7 +396,9 @@ fn measure_network(benchmark: &NetworkBenchmark) -> Result<Measurement, CommandE
     let mut payload = [0; PAYLOAD_SIZE];
     fill_payload(&mut payload);
     let started = start()?;
-    let duration_ns = benchmark.duration_ms.wrapping_mul(1_000_000);
+    let duration_ns = benchmark
+        .duration_ms
+        .wrapping_mul(NANOSECONDS_PER_MILLISECOND);
     let mut ended = started;
     let mut operations = 0_u64;
     while ended.wrapping_sub(started) < duration_ns {
