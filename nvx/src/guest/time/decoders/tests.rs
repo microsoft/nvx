@@ -1049,7 +1049,7 @@ fn the_command_line_is_checked_as_the_kernel_reads_it() {
     // The kernel applies these parameters however the command line separates, quotes, or
     // spells them: `à` is C3 A0 in UTF-8, and the kernel takes the byte 0xa0, as it does the
     // vertical tab, for whitespace (microsoft/nvx#723).
-    let cases: [(&[u8], &[u8]); 25] = [
+    let cases: [(&[u8], &[u8]); 27] = [
         (b"quiet \xc3\xa0tsc=unstable", b"tsc=unstable"),
         (b"quiet\xc3\xa0tsc=unstable", b"tsc=unstable"),
         (b"quiet\x0btsc_early_khz=2100000", b"tsc_early_khz=2100000"),
@@ -1076,6 +1076,10 @@ fn the_command_line_is_checked_as_the_kernel_reads_it() {
         (b"clock=pmtmr", b"clock=pmtmr"),
         (b"clocksource=tsc clock=\"hpet\"", b"clock=hpet"),
         (b"clock=", b"clock="),
+        // `noapictimer`, whose handler disables the LAPIC timer as that of `nolapic_timer` does,
+        // with or without a value.
+        (b"quiet noapictimer", b"noapictimer"),
+        (b"noapictimer=1\n", b"noapictimer=1"),
         (b"nolapic_timer\n", b"nolapic_timer"),
         (b"hpet=force\0", b"hpet=force"),
         // The newline that procfs writes after the command line is not in a quote that the
@@ -1099,6 +1103,7 @@ fn the_command_line_is_checked_as_the_kernel_reads_it() {
         b"a=\"tsc=unstable notsc\" b",
         b"xnotsc tscx=unstable tsc=unstable2 hpet=disable,verbose clocksource nolapicx",
         b"clock=tsc clock clocks=hpet clock_x=jiffies",
+        b"noapictimerx xnoapictimer noapictimer_x",
         b"quiet\xe2\x80\x83tsc=unstable",
         b"quiet\0 tsc=unstable",
         b"quiet clocksource=\"tsc\n",
@@ -1138,6 +1143,9 @@ fn applies_forbidden_clock(name: &[u8], value: Option<&[u8]>) -> bool {
         "lapic_timer_hz",
         "nolapic",
         "nolapic_timer",
+        // `parse_disable_apic_timer`, the handler of `noapictimer`, sets `disable_apic_timer`, as
+        // that of `nolapic_timer` does.
+        "noapictimer",
     ]
     .into_iter()
     .any(early)
@@ -1159,10 +1167,11 @@ fn applies_forbidden_clock(name: &[u8], value: Option<&[u8]>) -> bool {
 /// quotes, the `--` delimiter, and the kernel's whitespace.
 fn clock_command_line() -> impl Strategy<Value = Vec<u8>> {
     /// The pieces of the command lines.
-    const PIECES: [&[u8]; 30] = [
+    const PIECES: [&[u8]; 31] = [
         b"tsc",
         b"notsc",
         b"nolapic",
+        b"noapictimer",
         b"_timer",
         b"-timer",
         b"tsc_early_khz",

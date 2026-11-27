@@ -1865,6 +1865,7 @@ fn time_test_mode_covers_checks_events_records_and_workers() {
         "notsc",
         "nolapic",
         "nolapic_timer",
+        "noapictimer",
         "tsc=unstable",
         "hpet=force",
         "clocksource=kvm-clock",
