@@ -153,7 +153,7 @@ pub(crate) fn require_file(path: &Path, description: &str) -> Result<()> {
 
 /// The logical block size that OpenVMM presents for a sandbox block device, in bytes, of which the
 /// device's length is a nonzero multiple.
-const LOGICAL_BLOCK_SIZE: u32 = 512;
+pub(in crate::host) const LOGICAL_BLOCK_SIZE: u32 = 512;
 
 /// The physical block size that OpenVMM presents for a sandbox block device on Windows, in bytes.
 #[cfg(windows)]

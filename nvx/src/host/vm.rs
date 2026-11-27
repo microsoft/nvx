@@ -61,11 +61,11 @@ pub use connection::{Connection, ConnectionError, ConnectionErrorKind, Console};
 /// OpenVMM's snapshot files: a capture's destination and a restore's snapshot view.
 const OPENVMM: &str = "openvmm";
 /// The sparse placeholder image that a capture VM attaches.
-const CAPTURE_IMAGE: &str = "capture-image.raw";
+pub(super) const CAPTURE_IMAGE: &str = "capture-image.raw";
 /// The dormant scratch that a capture VM attaches.
-const CAPTURE_SCRATCH: &str = "capture-scratch.raw";
+pub(super) const CAPTURE_SCRATCH: &str = "capture-scratch.raw";
 /// The activation record that a restore hands its guest in its restore packet.
-const ACTIVATION_RECORD: &str = "activation-record.bin";
+pub(super) const ACTIVATION_RECORD: &str = "activation-record.bin";
 /// OpenVMM's option that reads a restore's activation record.
 const RESTORE_ACTIVATION_RECORD: &str = "--restore-activation-record";
 
