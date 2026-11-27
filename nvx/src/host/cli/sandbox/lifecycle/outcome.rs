@@ -11,9 +11,8 @@ use super::directory::os_error;
 use crate::ErrorCode;
 use crate::hex::hex;
 use crate::host::cli::json::{Object, pretty, read_object};
-use crate::host::cli::sandbox::state::{random_bytes, temporary_path};
 use crate::host::cli::session::{EXIT_CATEGORIES, ExecResult};
-use crate::host::cli::{Exit, Result};
+use crate::host::cli::{Exit, Result, random_bytes, temporary_path};
 use crate::host::paths;
 #[cfg(unix)]
 use crate::host::platform;
