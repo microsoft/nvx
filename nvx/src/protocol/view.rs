@@ -8,7 +8,7 @@
 //! Consumers of this codec use the decoded bytes, not the legacy raw-hostname reader.
 //! Restores receive their view through a guest-restore record instead.
 
-use super::cmdline::{self, Token};
+use super::cmdline;
 use super::{ProtocolError, violation};
 use crate::hex::hex;
 
@@ -45,6 +45,13 @@ pub const HOSTNAME_TOKEN: &str = "nvx_hostname=";
 /// Prefix of the token that names the machine-ID mode, `image` or `generated`.
 pub const MACHINE_ID_TOKEN: &str = "nvx_machine_id=";
 
+/// The name of the kernel parameter of [`HOSTNAME_TOKEN`].
+const HOSTNAME: &str = "nvx_hostname";
+/// The name of the kernel parameter of [`MACHINE_ID_TOKEN`].
+const MACHINE_ID: &str = "nvx_machine_id";
+/// The names of the view's kernel parameters.
+const PARAMETERS: [&str; 2] = [HOSTNAME, MACHINE_ID];
+
 /// Renders the hostname token, then the machine-ID token.
 ///
 /// Fails with a [`ProtocolError`] if the hostname is not 1 to [`MAX_HOSTNAME_BYTES`] non-NUL
@@ -75,25 +82,18 @@ pub fn tokens(view: &View) -> Result<[String; 2], ProtocolError> {
 pub fn parse(command_line: &[u8]) -> Result<Option<View>, ProtocolError> {
     let mut hostname = None;
     let mut machine_id = None;
-    for Token { name, value } in cmdline::init_tokens(command_line) {
-        let parameter = match name {
-            b"nvx_hostname" => "nvx_hostname",
-            b"nvx_machine_id" => "nvx_machine_id",
-            _ => continue,
+    for token in cmdline::init_tokens(command_line) {
+        let Some((parameter, value)) = cmdline::boot_parameter(&PARAMETERS, token)? else {
+            continue;
         };
-        let value = value
-            .ok_or_else(|| violation(format!("the {parameter} kernel parameter has no value")))?;
-        let repeated = if parameter == "nvx_hostname" {
-            hostname.is_some()
-        } else {
-            machine_id.is_some()
+        let seen = match parameter {
+            HOSTNAME => hostname.is_some(),
+            _ => machine_id.is_some(),
         };
-        if repeated {
-            return Err(violation(format!(
-                "the {parameter} kernel parameter is repeated"
-            )));
+        if seen {
+            return Err(cmdline::repeated_parameter(parameter));
         }
-        if parameter == "nvx_hostname" {
+        if parameter == HOSTNAME {
             hostname = Some(parse_hostname(value)?);
         } else {
             machine_id = Some(match value {
