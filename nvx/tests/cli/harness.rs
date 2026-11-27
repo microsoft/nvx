@@ -39,6 +39,18 @@ pub(crate) const LAYER: &str = "distro,{root/distro.erofs},11111111-1111-1111-11
 pub(crate) const SCRATCH: &str = "{root/scratch.ext4}";
 /// The hypervisor that `--hypervisor auto`, the default, selects on this host.
 pub(crate) const HYPERVISOR: &str = if cfg!(windows) { "whp" } else { "kvm" };
+/// A hypervisor of this host's operating system that the cases of many options name explicitly:
+/// MSHV on Linux, which is not its default, and WHP, its only one, on Windows.
+pub(crate) const EXPLICIT_HYPERVISOR: &str = if cfg!(windows) { "whp" } else { "mshv" };
+/// A hypervisor that this host's operating system cannot run, KVM on Windows and WHP on Linux,
+/// which `nvx` refuses before it records, downloads, or launches anything.
+pub(crate) const FOREIGN_HYPERVISOR: &str = if cfg!(windows) { "kvm" } else { "whp" };
+/// The refusal of [`FOREIGN_HYPERVISOR`].
+pub(crate) const FOREIGN_HYPERVISOR_REFUSAL: &str = if cfg!(windows) {
+    "hypervisor kvm is not supported on windows"
+} else {
+    "hypervisor whp is not supported on linux"
+};
 /// The OpenVMM executable of a root, below it.
 pub(crate) const OPENVMM: &str = "openvmm/target/release/openvmm{exe}";
 /// How the lines that `nvx` prints end on this host, as Python's `print` ends them.

@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 #[cfg(unix)]
 use crate::harness::mode;
 use crate::harness::{
-    Content, HYPERVISOR, Hosts, LAYER, OPENVMM, Outcome, PROVENANCE, Root, SCRATCH, UUID,
-    canonical, entries, in_parallel, is_hex, json,
+    Content, FOREIGN_HYPERVISOR, FOREIGN_HYPERVISOR_REFUSAL, HYPERVISOR, Hosts, LAYER, OPENVMM,
+    Outcome, PROVENANCE, Root, SCRATCH, UUID, canonical, entries, in_parallel, is_hex, json,
 };
 use crate::openvmm::{
     NO_NETWORK, NetworkPolicy, Options, WORKLOAD, assert_endpoint, assert_opened_distro,
@@ -2091,6 +2091,25 @@ fn start_refuses_a_share_that_came_to_reach_its_own_files() {
         .assert_error("unsupported", &["overlaps the sandbox's state directory "]);
     assert_eq!(root.snapshot(), before);
     assert!(root.openvmm_records().is_empty());
+}
+
+/// A start refuses a configuration that records a hypervisor that this host's operating system
+/// cannot run, as a provision that did not check it recorded one, before it downloads or launches
+/// anything, and deprovision removes the sandbox.
+#[test]
+fn start_refuses_a_recorded_hypervisor_that_this_host_cannot_run() {
+    let root = Root::new();
+    root.nvx(&provision("{root/state}", &[]))
+        .assert_silent_success();
+    let mut config = json(&root.below("state/config.json"));
+    config["hypervisor"] = json!(FOREIGN_HYPERVISOR);
+    root.write("state/config.json", config.to_string());
+    let before = root.snapshot();
+    operate(&root, "start", "state", &[])
+        .assert_error("unsupported", &[FOREIGN_HYPERVISOR_REFUSAL]);
+    assert_eq!(root.snapshot(), before);
+    assert!(root.openvmm_records().is_empty());
+    operate(&root, "deprovision", "state", &[]).assert_silent_success();
 }
 
 /// Shares beside the sandbox's own files, whose names only start as theirs do, are no shares of

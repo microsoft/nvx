@@ -61,7 +61,7 @@ use std::time::{Duration, Instant};
 use nvx::host::process::{Opened, Process, ProcessRef};
 use serde_json::{Value, json};
 
-use self::harness::{FAKE_OPENVMM, NVX, Root, canonical};
+use self::harness::{EXPLICIT_HYPERVISOR, FAKE_OPENVMM, NVX, Root, canonical};
 
 /// Runs `nvx --root ROOT ARGUMENTS` in the root, without the variables that change its
 /// output.
@@ -3032,14 +3032,14 @@ fn run_guides_failed_cold_boots_on_cpus_that_no_built_in_profile_serves() {
                 "--cpu-profile",
                 "auto",
                 "--hypervisor",
-                "mshv",
+                EXPLICIT_HYPERVISOR,
                 "--cmdline",
                 "fake_exit_status=1",
             ][..],
             1,
             "",
             unserved,
-            "mshv",
+            EXPLICIT_HYPERVISOR,
         ),
         (
             &["--cpu-profile", "host", "--cmdline", "fake_exit_status=1"][..],

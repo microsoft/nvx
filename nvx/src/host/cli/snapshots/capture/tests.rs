@@ -369,6 +369,24 @@ fn the_capture_parser_takes_for_net_only_an_address_that_openvmm_accepts() {
     }
 }
 
+/// A capture refuses a hypervisor that this host's operating system cannot run, on which OpenVMM
+/// would exit at once, before it creates its store.
+#[test]
+fn a_capture_refuses_a_hypervisor_that_this_host_cannot_run_before_it_creates_its_store() {
+    let fixture = Fixture::new();
+    let mut options = fixture.options("refused");
+    let (hypervisor, refusal) = if cfg!(windows) {
+        ("kvm", "hypervisor kvm is not supported on windows")
+    } else {
+        ("whp", "hypervisor whp is not supported on linux")
+    };
+    options.hypervisor = hypervisor;
+    let error = run(None, options).unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
+    assert_eq!(error.message(), Some(refusal));
+    assert!(!fixture.root.path().join("store").exists());
+}
+
 #[test]
 fn a_capture_with_net_gives_its_vm_a_deny_all_nic_which_its_snapshot_keeps() {
     let fixture = Fixture::new();

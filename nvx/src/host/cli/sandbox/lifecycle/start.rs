@@ -32,7 +32,8 @@ use crate::host::cli::sandbox::state::{
     Config, RecordedDistro, RecordedScratch, Source, read_config, serialize_launch,
 };
 use crate::host::cli::sandbox::{
-    Artifacts, Options, error_with_cause, export_tokens, path_string, refuse_own_files,
+    Artifacts, Options, check_hypervisor, error_with_cause, export_tokens, path_string,
+    refuse_own_files,
 };
 use crate::host::cli::session::{ExecRequest, ExecResult, Session, closes};
 use crate::host::cli::shell::format_command;
@@ -89,9 +90,13 @@ fn start_locked(
     // recorded launch is read from their install metadata, and no download replaces them until
     // the start ends, once OpenVMM has read them, so that the runtime identity that the start
     // records is theirs. A configuration without a hypervisor is malformed, which reading it below
-    // reports.
+    // reports, and one of a hypervisor that this host's operating system cannot run, which a
+    // provision that did not check it recorded, fails before anything is downloaded or launched.
     let _hold = match config.get("hypervisor").and_then(Value::as_str) {
-        Some(hypervisor) => Some(artifacts.ensure(hypervisor)?),
+        Some(hypervisor) => {
+            check_hypervisor(hypervisor)?;
+            Some(artifacts.ensure(hypervisor)?)
+        }
         None => None,
     };
     match find_vm(lock, artifacts)? {

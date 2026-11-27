@@ -5,7 +5,10 @@
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 
-use crate::harness::{Content, Hosts, LAYER, OPENVMM, Outcome, Root, SCRATCH, in_parallel, native};
+use crate::harness::{
+    Content, EXPLICIT_HYPERVISOR, HYPERVISOR, Hosts, LAYER, OPENVMM, Outcome, Root, SCRATCH,
+    in_parallel, native,
+};
 use crate::lifecycle::exported;
 use crate::openvmm::{Options, child, cold_boot, managed_run, share_token};
 
@@ -184,7 +187,7 @@ fn sandbox_dry_runs() -> Vec<DryRun> {
                 "--memory-mib",
                 "512",
                 "--hypervisor",
-                "mshv",
+                EXPLICIT_HYPERVISOR,
                 "--cmdline",
                 "quiet loglevel=3",
                 "--outcome-report",
@@ -192,14 +195,14 @@ fn sandbox_dry_runs() -> Vec<DryRun> {
             ]),
             managed_run()
                 .with("--microvm-workload-identity", ["1000:1000"])
-                .with("--hypervisor", ["mshv"])
+                .with("--hypervisor", [EXPLICIT_HYPERVISOR])
                 .with("--memory", ["512M"])
                 .sandbox_kernel("quiet loglevel=3", &["nvx_hostname=worker"]),
         ),
         dry_run(
             "explicit hypervisor",
-            sandbox_run(&["--hypervisor", "kvm"]),
-            managed_run().with("--hypervisor", ["kvm"]),
+            sandbox_run(&["--hypervisor", HYPERVISOR]),
+            managed_run().with("--hypervisor", [HYPERVISOR]),
         ),
         // The CPU profile that OpenVMM presents, such as a development profile derived from the
         // host, on a host whose hypervisor does not support its CPU's built-in profile.
@@ -415,7 +418,7 @@ fn run_dry_runs() -> Vec<DryRun> {
             "run: every boot option",
             run(&[
                 "--hypervisor",
-                "mshv",
+                EXPLICIT_HYPERVISOR,
                 "--machine",
                 "microvm",
                 "--memory-mib",
@@ -431,7 +434,7 @@ fn run_dry_runs() -> Vec<DryRun> {
             ]),
             cold_boot()
                 .with("--processors", ["8"])
-                .with("--hypervisor", ["mshv"])
+                .with("--hypervisor", [EXPLICIT_HYPERVISOR])
                 .with("--memory", ["1024M"])
                 .with("--cpu-profile", ["intel.alderlake.v1"])
                 .with("--microvm-report", ["{root/reports/openvmm-run.json}"])
@@ -442,16 +445,20 @@ fn run_dry_runs() -> Vec<DryRun> {
             run(&["--hypervisor", "auto"]),
             cold_boot(),
         ),
+        // Each hypervisor reaches OpenVMM on the hosts whose operating system runs it; the others
+        // refuse it, as the refusals of `validation` show.
         dry_run(
             "run: KVM",
             run(&["--hypervisor", "kvm"]),
             cold_boot().with("--hypervisor", ["kvm"]),
-        ),
+        )
+        .on(Hosts::Posix),
         dry_run(
             "run: WHP",
             run(&["--hypervisor", "whp"]),
             cold_boot().with("--hypervisor", ["whp"]),
-        ),
+        )
+        .on(Hosts::Windows),
         // Integers are ASCII decimal digits, and print in their canonical form.
         dry_run(
             "run: leading zeros",
