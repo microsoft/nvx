@@ -1647,8 +1647,12 @@ KVM, under Linux 6.8 and 7.0, and the WHP, under Windows Server 2022 and 2025,
 of GitHub's runners with an EPYC 9V45. GitHub's runners with an EPYC 7763,
 9V74, or 9V45, or a Xeon 6973P-C, pass their profiles' full `test-microvm`
 suite on KVM, and those with an EPYC 7763, 9V74, or 9V45 pass it on the WHP of
-Windows Server 2025 too. Alder Lake hosts on KVM and MSHV, Granite Rapids
-hosts on MSHV and WHP, Milan, Genoa, and Turin hosts on MSHV, bare-metal AMD
+Windows Server 2025 too. On MSHV, the AMD runners of NVX's
+[CI pools](ci.md#job-graph-and-runner-capacity), Azure VMs with an EPYC 7763
+or 9V74 whose Azure Linux 3 root partition runs on the nested Microsoft
+hypervisor, pass `doctor`'s checks H1 to H4 and all of CI's microVM tests on
+`amd.milan.v1` and `amd.genoa.v2`. Alder Lake hosts on KVM and MSHV, Granite
+Rapids hosts on MSHV and WHP, Turin hosts on MSHV, bare-metal AMD
 hosts, and SKUs without the profiles'
 features are unverified. No profile presents AMX, whose tile states OpenVMM
 does not enable, or AVX10, whose leaf `0x24` no profile keeps; on Granite
