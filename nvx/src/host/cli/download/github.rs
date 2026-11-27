@@ -10,6 +10,7 @@
 
 use std::fs;
 use std::io::{self, IsTerminal, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -43,6 +44,22 @@ const STALL_SECONDS: u32 = 60;
 const RESPONSE_NAME: &str = "response";
 /// The file of the scratch directory that receives the headers of each response.
 const HEADERS_NAME: &str = "response.headers";
+/// The least HTTP status: RFC 9110 (section 15) defines three-digit statuses from 100, the first
+/// of the informational class.
+const MIN_STATUS: u16 = 100;
+/// The successful HTTP statuses, the 2xx class of RFC 9110 (section 15.3).
+const SUCCESSFUL: Range<u16> = 200..300;
+/// The redirection HTTP statuses, the 3xx class of RFC 9110 (section 15.4), whose `location`
+/// [`GitHub::get`] follows.
+const REDIRECTION: Range<u16> = 300..400;
+/// HTTP 401 Unauthorized (RFC 9110, section 15.5.2): GitHub rejected the token.
+const UNAUTHORIZED: u16 = 401;
+/// HTTP 403 Forbidden (RFC 9110, section 15.5.4): the token lacks access, or the rate limit is
+/// exhausted.
+const FORBIDDEN: u16 = 403;
+/// HTTP 404 Not Found (RFC 9110, section 15.5.5): GitHub answers it for a missing release, and
+/// for a repository that the request cannot read.
+const NOT_FOUND: u16 = 404;
 
 /// How a query of the REST API fails.
 #[derive(Debug)]
@@ -121,7 +138,7 @@ impl GitHub {
         let progress = io::stderr().is_terminal();
         let context = format!("the download of {}", asset.name);
         let response = self.get(&asset.url, BINARY, destination, progress, &context)?;
-        if !(200..300).contains(&response.status) {
+        if !SUCCESSFUL.contains(&response.status) {
             let body = fs::read(destination).unwrap_or_default();
             return Err(Exit::error(
                 ErrorCode::Unavailable,
@@ -161,14 +178,16 @@ impl GitHub {
             Err(error) => return Err(io_error(ErrorCode::Io, &error, &body).into()),
         };
         match response.status {
-            200..=299 => serde_json::from_slice(&bytes).map(Some).map_err(|_| {
-                Exit::error(
-                    ErrorCode::Unavailable,
-                    "GitHub release query returned an invalid response",
-                )
-                .into()
-            }),
-            404 if missing_ok => Ok(None),
+            status if SUCCESSFUL.contains(&status) => {
+                serde_json::from_slice(&bytes).map(Some).map_err(|_| {
+                    Exit::error(
+                        ErrorCode::Unavailable,
+                        "GitHub release query returned an invalid response",
+                    )
+                    .into()
+                })
+            }
+            NOT_FOUND if missing_ok => Ok(None),
             status => {
                 let advice = match hint(status, response.rate_limited(), self.token.is_some()) {
                     "" => String::new(),
@@ -225,7 +244,7 @@ impl GitHub {
             };
             let response = self.curl.request(&request, context)?;
             match response.location {
-                Some(location) if (300..400).contains(&response.status) => current = location,
+                Some(location) if REDIRECTION.contains(&response.status) => current = location,
                 _ => return Ok(response),
             }
         }
@@ -429,7 +448,7 @@ fn read_response(path: &Path, url: &str) -> Result<Option<Response>> {
         .iter()
         .find(|(name, _)| name == "location")
         .map(|(_, location)| location.as_str())
-        .filter(|location| (300..400).contains(&status) && !location.is_empty())
+        .filter(|location| REDIRECTION.contains(&status) && !location.is_empty())
         .map(|location| resolved(url, location));
     Ok(Some(Response {
         status,
@@ -445,7 +464,7 @@ fn status_code(line: &str) -> Option<u16> {
     if code.len() != 3 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    code.parse().ok().filter(|status| *status >= 100)
+    code.parse().ok().filter(|status| *status >= MIN_STATUS)
 }
 
 /// Returns `value`, the `what` of a request, quoted for the configuration of `curl`, or fails for
@@ -674,14 +693,18 @@ fn detail(message: &str) -> String {
 /// gave it, given whether the rate limit is exhausted and whether the query carried a token.
 fn hint(status: u16, rate_limited: bool, authenticated: bool) -> &'static str {
     match status {
-        401 | 403 | 404 if !authenticated => "set GH_TOKEN to a token that can read the repository",
-        401 => "the configured GitHub token was rejected; refresh or replace it",
-        403 if rate_limited => "the GitHub API rate limit is exhausted; retry later",
-        403 => {
+        UNAUTHORIZED | FORBIDDEN | NOT_FOUND if !authenticated => {
+            "set GH_TOKEN to a token that can read the repository"
+        }
+        UNAUTHORIZED => "the configured GitHub token was rejected; refresh or replace it",
+        FORBIDDEN if rate_limited => "the GitHub API rate limit is exhausted; retry later",
+        FORBIDDEN => {
             "the configured GitHub token lacks access; grant it read access to the repository \
              contents and authorize it for organization single sign-on"
         }
-        404 => "verify --repository and that the configured GitHub token can read that repository",
+        NOT_FOUND => {
+            "verify --repository and that the configured GitHub token can read that repository"
+        }
         _ => "",
     }
 }
