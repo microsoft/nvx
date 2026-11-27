@@ -1279,6 +1279,27 @@ fn inspection_failures_of_the_plan_name_the_path_and_keep_the_cause() {
     refused(limits::check_policy_paths(base, std::slice::from_ref(&missing), "read").unwrap_err());
 }
 
+/// A policy path whose file system cannot be identified, such as an exported directory that has
+/// gone, which names itself, fails with the path and the host's cause instead of passing.
+#[cfg(all(feature = "cli", unix))]
+#[test]
+fn policy_paths_that_cannot_be_identified_name_the_path_and_keep_the_cause() {
+    let directory = root();
+    let missing = directory.path().join("missing");
+    let error =
+        limits::check_policy_paths(&missing, std::slice::from_ref(&missing), "hide").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+    assert_eq!(
+        error.message(),
+        format!("cannot identify {}", missing.display())
+    );
+    let source = std::error::Error::source(&error).unwrap();
+    assert_eq!(
+        source.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::NotFound
+    );
+}
+
 /// A recorded plan with a read-only bind in a part of a child that the guest may write, which
 /// only the guest's bind mount would keep read-only, is refused before a guest runs.
 #[cfg(feature = "cli")]

@@ -6,6 +6,8 @@ use std::fs;
 use std::path::Component;
 use std::path::{Path, PathBuf};
 
+#[cfg(all(unix, feature = "cli"))]
+use super::host_path::identity;
 #[cfg(feature = "cli")]
 use super::host_path::is_reparse_point;
 use super::host_path::{display_path, relative_text};
@@ -14,8 +16,6 @@ use super::unsupported_inspection;
 use super::{MAX_AGGREGATE_ROOT_BYTES, MAX_POLICY_BYTES, MAX_POLICY_PATH_BYTES, MAX_POLICY_PATHS};
 #[cfg(feature = "cli")]
 use crate::error::{Error, Result};
-#[cfg(all(unix, feature = "cli"))]
-use crate::host::platform;
 
 /// Applies OpenVMM's rules for exported directories, which it reaches without links.
 #[cfg(feature = "cli")]
@@ -108,9 +108,7 @@ pub(super) fn check_policy_paths(root: &Path, paths: &[PathBuf], action: &str) -
             }
         }
         #[cfg(unix)]
-        if platform::file_identity(path).ok().map(|(device, _)| device)
-            != platform::file_identity(root).ok().map(|(device, _)| device)
-        {
+        if identity(path)?.device != identity(root)?.device {
             return unsupported(format!(
                 "OpenVMM cannot {action} {}, which lies on another file system than {}",
                 path.display(),
