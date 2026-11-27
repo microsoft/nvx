@@ -52,18 +52,28 @@ coordinator fills the `.sh.in` templates before use.
 | `linux-mshv-virtual-machine` | MSHV | Virtual machine |
 | `windows-whp-virtual-machine` | WHP | Virtual machine |
 
-The series names carry no CPU vendor: every CI microVM runner is an Azure virtual machine with an
-Intel Xeon CPU (Ice Lake-SP or Emerald Rapids), so each series has one vendor's samples. No CI
-microVM runner has an AMD CPU, so no AMD series exists yet. An AMD runner needs a built-in AMD
-[CPU profile](usage.md#cpu-profiles), because CI never uses host profiles and `benchmark` refuses a
-CPU that no built-in profile serves, and only Milan, Genoa,
-and Turin CPUs have one so far. Such a runner boots its guests on that profile through AMD-V, so its
-timings would skew an Intel series' baseline. [#410](https://github.com/microsoft/nvx/issues/410)
-tracks AMD runners. Before an AMD runner joins CI, give it series of its
-own, named with an `-amd` suffix such as `linux-kvm-virtual-machine-amd`, in `PLATFORM_NAMES` and
-`OPENVMM_BACKENDS` in `scripts/nvx_tools/performance.py` and in the CI matrix, so their history
-lives in separate `data/` files. Local measurements on AMD hosts can use the names above, because
-only CI records history.
+The series names carry no CPU vendor: each pool's benchmark runner alone measures its series, and
+the three benchmark runners are Azure virtual machines with Intel Xeon CPUs, whose models their
+`data/<platform>-host.json` files record, so each series has one vendor's samples. The pools also
+hold AMD virtual machines, with EPYC Genoa or Milan CPUs, but each of them carries `general`, so it
+runs the microVM tests and the other non-benchmark jobs, never a platform job, and no AMD series
+exists yet (see [Job graph and runner capacity](ci.md#job-graph-and-runner-capacity)). An AMD
+benchmark runner needs a built-in AMD [CPU profile](usage.md#cpu-profiles), because no benchmark
+measures a host profile: `benchmark` refuses a CPU that no built-in profile serves, and only Milan,
+Genoa, and Turin CPUs have one so far. Such a runner boots its guests on that profile through AMD-V,
+so its timings would skew an Intel series' baseline.
+[#410](https://github.com/microsoft/nvx/issues/410) tracks AMD benchmark runners. Before an AMD
+runner takes the `benchmark` role, give it series of its own, named with an `-amd` suffix such as
+`linux-kvm-virtual-machine-amd`, in `PLATFORM_NAMES` and `OPENVMM_BACKENDS` in
+`scripts/nvx_tools/performance.py` and in the CI matrix, so their history lives in separate `data/`
+files. A job's `runs-on` can require labels but not exclude them, so each series' platform job must
+also require a label of its vendor's benchmark runner: `amd`, which the AMD runners carry, for an
+AMD series, and for an Intel series a label that the AMD runners lack, such as `intel`, which the
+[runner setup scripts](../scripts/setup/README.md#github-actions-runners) add with
+`--extra-runner-labels` or `-ExtraRunnerLabels`; add it to the Intel benchmark runners before a
+workflow requires it. Otherwise a platform job could take the other vendor's benchmark runner, and
+the job's [expected host](#expected-benchmark-hosts) check would fail it before it measures. Local
+measurements on AMD hosts can use the names above, because only CI records history.
 
 CI runs the complete acceptance and performance suites and the five device metrics at one vCPU
 under the canonical microVM, and only the 512 MiB shell snapshot restore at `2`,
