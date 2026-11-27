@@ -296,6 +296,51 @@ fn each_refusal_names_what_it_refuses() {
     }
 }
 
+// OpenVMM's microVM takes 1, 2, 4, or 8 processors and refuses any other count at every launch,
+// so a VM of another count is refused before a launch renders it.
+#[test]
+fn a_vm_takes_only_the_processor_counts_of_openvmms_microvm() {
+    let render = |config: &VmConfig| {
+        config.openvmm_arguments(
+            &runtime(),
+            "/control",
+            Path::new("/report"),
+            Some("/console"),
+        )
+    };
+    for processors in [1, 2, 4, 8] {
+        let config = cold(VmConfig {
+            processors,
+            ..blockless()
+        });
+        config.check().unwrap();
+        config.check_command_line().unwrap();
+        assert_eq!(
+            values(&render(&config).unwrap(), "--processors"),
+            [OsStr::new(&processors.to_string())]
+        );
+    }
+    for processors in [3, 5, 6, 7, 9, 16, u32::MAX] {
+        let config = cold(VmConfig {
+            processors,
+            ..blockless()
+        });
+        for result in [
+            config.check(),
+            config.check_command_line(),
+            render(&config).map(|_| ()),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.kind(),
+                ErrorKind::Unsupported,
+                "{processors}: {error}"
+            );
+            assert!(error.to_string().contains("VmConfig.processors"), "{error}");
+        }
+    }
+}
+
 #[test]
 fn an_export_passes_the_check_of_the_targets_that_its_root_reserves() {
     // A blockless root runs the guest's own system from /usr, which a layered root's image holds.

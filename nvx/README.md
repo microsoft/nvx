@@ -639,13 +639,15 @@ percent of the VM's memory, 50 when the caller has no other
 
 `VmConfig::check` checks the whole value without reading the host, and fails
 with an `nvx::Error` of kind `Unsupported` that names the first refusal, such
-as a caller's boot token whose name NVX reserves: the root's and the view's
-tokens, `nvx_maps`, and every name beginning `virtfs_`, as both Linux and the
-guest's init read them. Outside a capture, it also refuses a caller's token
-that OpenVMM's machine profile owns and supplies itself, as OpenVMM reads it,
-split at ASCII whitespace, such as `console=`, `earlycon=`, `nr_cpus=`, a
-`virtnet_*` bootstrap token, or the control console's `nvx_control_tty=`,
-which OpenVMM would refuse at every launch; `Boot::command_line` lists them.
+as a processor count other than 1, 2, 4, or 8, which OpenVMM's microVM would
+refuse at every launch, or a caller's boot token whose name NVX reserves: the
+root's and the view's tokens, `nvx_maps`, and every name beginning `virtfs_`,
+as both Linux and the guest's init read them. Outside a capture, it also
+refuses a caller's token that OpenVMM's machine profile owns and supplies
+itself, as OpenVMM reads it, split at ASCII whitespace, such as `console=`,
+`earlycon=`, `nr_cpus=`, a `virtnet_*` bootstrap token, or the control
+console's `nvx_control_tty=`, which OpenVMM would refuse at every launch;
+`Boot::command_line` lists them.
 Outside a capture too, it refuses a caller's clock parameter that OpenVMM's
 time ABI refuses at every cold boot, `tsc_early_khz` or `lapic_timer_hz`, with
 or without a value, read as Linux and the time ABI read the command line, a

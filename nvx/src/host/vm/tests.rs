@@ -393,7 +393,7 @@ fn capture_resources_not_the_vms_cold_resources_determine_the_launch() {
     for (boot, capacity) in [(1, 4), (2, 2)] {
         let (_directory, vm) = vm_dir();
         let mut config = capture_config(&vm);
-        config.processors = 3;
+        config.processors = 8;
         config.memory_mib = 17;
         let capture = config.boot.as_mut().unwrap().capture.as_mut().unwrap();
         capture.processors = Capacity { boot, capacity };
