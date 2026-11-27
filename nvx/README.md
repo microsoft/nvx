@@ -658,7 +658,9 @@ an empty one without an export, which it sends not at all.
 command line against the Windows limit, on every host, with a reserve for the
 runtime's files and the VM's outputs, and `process_command_line_units` and
 `fit_process_command_line` count and check the Windows command line of any
-program against `PROCESS_COMMAND_LINE_LIMIT`. `COMMAND_LINE_BUDGET` is the
+program against `PROCESS_COMMAND_LINE_LIMIT`; the module's private
+`command_line` submodule holds them, with the Windows quoting rules that they
+count. `COMMAND_LINE_BUDGET` is the
 1,024-byte x86 kernel command-line budget, including the terminating NUL.
 
 A capture's `CaptureConfig` gives the processors and the memory that its VM
