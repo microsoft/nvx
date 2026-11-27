@@ -417,6 +417,21 @@ fn a_release_identifies_its_runtime_by_its_checksum_list() {
 }
 
 #[test]
+fn sha256_digests_are_64_lowercase_hexadecimal_digits() {
+    let digest = "0123456789abcdef".repeat(4);
+    assert!(is_sha256_digest(&digest));
+    for refused in [
+        digest[1..].to_owned(),
+        format!("{digest}0"),
+        digest.to_ascii_uppercase(),
+        format!("g{}", &digest[1..]),
+        String::new(),
+    ] {
+        assert!(!is_sha256_digest(&refused), "{refused:?}");
+    }
+}
+
+#[test]
 fn oversized_metadata_is_refused_for_its_size_whatever_its_content() {
     let installed = tempfile::tempdir().unwrap();
     checkout(installed.path());

@@ -81,7 +81,7 @@ pub fn probe_hypervisor(hypervisor: Hypervisor) -> Result<()> {
 pub const MAX_IDENTITY_LEN: usize = 128;
 
 /// Hexadecimal digits of a SHA-256 digest: two for each of its 32 bytes.
-const SHA256_HEX_LEN: usize = 64;
+pub(crate) const SHA256_HEX_LEN: usize = 64;
 
 /// Opaque text of 1 to [`MAX_IDENTITY_LEN`] printable ASCII characters and no space: the form of
 /// an [`ArtifactIdentity`] and of a [`CompatibilityIdentity`], which the library only compares.
