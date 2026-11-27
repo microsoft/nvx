@@ -158,15 +158,66 @@ struct ProbedTransport {
     probe: Arc<Probe>,
 }
 
+/// The Win32 error codes that [`closes`] and [`raised_at_once`] recognize, with the values and
+/// names of the Windows SDK. They are `i32`s, as [`io::Error::raw_os_error`] returns them, and
+/// local, since this module compiles on every target and `windows-sys` only on Windows.
+mod win32 {
+    /// The pipe has ended.
+    pub(super) const ERROR_BROKEN_PIPE: i32 = 109;
+    /// The pipe is being closed.
+    pub(super) const ERROR_NO_DATA: i32 = 232;
+    /// No process is on the other end of the pipe.
+    pub(super) const ERROR_PIPE_NOT_CONNECTED: i32 = 233;
+    /// The environment is incorrect.
+    pub(super) const ERROR_BAD_ENVIRONMENT: i32 = 10;
+    /// A program was loaded with an incorrect format.
+    pub(super) const ERROR_BAD_FORMAT: i32 = 11;
+    /// The first of the codes through [`ERROR_INFLOOP_IN_RELOC_CHAIN`] that report an executable
+    /// image that the loader refuses.
+    pub(super) const ERROR_INVALID_STARTING_CODESEG: i32 = 188;
+    /// The last of the codes from [`ERROR_INVALID_STARTING_CODESEG`] that report an executable
+    /// image that the loader refuses.
+    pub(super) const ERROR_INFLOOP_IN_RELOC_CHAIN: i32 = 202;
+    /// The handle is invalid.
+    pub(super) const ERROR_INVALID_HANDLE: i32 = 6;
+    /// The target internal file identifier is incorrect.
+    pub(super) const ERROR_INVALID_TARGET_HANDLE: i32 = 114;
+    /// A handle to an open disk partition is used for an operation other than raw disk I/O.
+    pub(super) const ERROR_DIRECT_ACCESS_HANDLE: i32 = 130;
+    /// There are no child processes to wait for.
+    pub(super) const ERROR_WAIT_NO_CHILDREN: i32 = 128;
+    /// The application cannot run in Win32 mode.
+    pub(super) const ERROR_CHILD_NOT_COMPLETE: i32 = 129;
+    /// The storage control blocks were destroyed.
+    pub(super) const ERROR_ARENA_TRASHED: i32 = 7;
+    /// Not enough memory is available to process the command.
+    pub(super) const ERROR_NOT_ENOUGH_MEMORY: i32 = 8;
+    /// The storage control block address is invalid.
+    pub(super) const ERROR_INVALID_BLOCK: i32 = 9;
+    /// Not enough quota is available to process the command.
+    pub(super) const ERROR_NOT_ENOUGH_QUOTA: i32 = 1816;
+    /// The file exists.
+    pub(super) const ERROR_FILE_EXISTS: i32 = 80;
+    /// A file that already exists cannot be created.
+    pub(super) const ERROR_ALREADY_EXISTS: i32 = 183;
+    /// A file cannot move to a different disk drive.
+    pub(super) const ERROR_NOT_SAME_DEVICE: i32 = 17;
+    /// The directory name is invalid.
+    pub(super) const ERROR_DIRECTORY: i32 = 267;
+    /// The system cannot open the file: too many files are open.
+    pub(super) const ERROR_TOO_MANY_OPEN_FILES: i32 = 4;
+    /// There is not enough space on the disk.
+    pub(super) const ERROR_DISK_FULL: i32 = 112;
+    /// The directory is not empty.
+    pub(super) const ERROR_DIR_NOT_EMPTY: i32 = 145;
+    /// No mapping for the Unicode character exists in the target code page.
+    pub(super) const ERROR_NO_UNICODE_TRANSLATION: i32 = 1113;
+}
+
 /// Returns whether `error` tells that the endpoint closed the stream, as Python's
 /// `_PEER_CLOSED` and `_PIPE_CLOSED_ERRORS` do.
 pub(super) fn closes(error: &io::Error) -> bool {
-    /// Win32 reports that the pipe has ended with this code.
-    const ERROR_BROKEN_PIPE: i32 = 109;
-    /// Win32 reports that the pipe is being closed with this code.
-    const ERROR_NO_DATA: i32 = 232;
-    /// Win32 reports that no process is on the other end of the pipe with this code.
-    const ERROR_PIPE_NOT_CONNECTED: i32 = 233;
+    use win32::{ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED};
 
     matches!(
         error.kind(),
@@ -382,10 +433,7 @@ impl Session {
                 Ok(transport) => break transport,
                 Err(error) => {
                     if (cfg!(target_os = "linux") && error.kind() == io::ErrorKind::Unsupported)
-                        || (cfg!(windows)
-                            && error
-                                .raw_os_error()
-                                .is_some_and(|code| raised_at_once(code as u32)))
+                        || (cfg!(windows) && error.raw_os_error().is_some_and(raised_at_once))
                     {
                         return Err(Exit::from_os_error(error));
                     }
@@ -806,14 +854,47 @@ fn protocol_message(message: String) -> String {
 /// Returns whether Python's `_NamedPipeStream.connect` raises the Windows error `code` at once
 /// instead of retrying: those that CPython maps to an `errno` other than `ENOENT`, `EACCES`,
 /// `EBUSY`, `EAGAIN`, and `EINVAL`, its default.
-fn raised_at_once(code: u32) -> bool {
+fn raised_at_once(code: i32) -> bool {
+    use win32::*;
+
     matches!(
         code,
-        // E2BIG, ENOEXEC, EBADF, ECHILD, and ENOMEM.
-        10 | 11 | 188
-            ..=202 | 6 | 114 | 130 | 128 | 129 | 7 | 8 | 9 | 1816
-        // EEXIST, EXDEV, ENOTDIR, EMFILE, ENOSPC, EPIPE, ENOTEMPTY, and EILSEQ.
-        | 80 | 183 | 17 | 267 | 4 | 112 | 109 | 232 | 145 | 1113
+        // E2BIG.
+        ERROR_BAD_ENVIRONMENT
+        // ENOEXEC.
+        | ERROR_BAD_FORMAT
+        | ERROR_INVALID_STARTING_CODESEG
+            ..=ERROR_INFLOOP_IN_RELOC_CHAIN
+        // EBADF.
+        | ERROR_INVALID_HANDLE
+        | ERROR_INVALID_TARGET_HANDLE
+        | ERROR_DIRECT_ACCESS_HANDLE
+        // ECHILD.
+        | ERROR_WAIT_NO_CHILDREN
+        | ERROR_CHILD_NOT_COMPLETE
+        // ENOMEM.
+        | ERROR_ARENA_TRASHED
+        | ERROR_NOT_ENOUGH_MEMORY
+        | ERROR_INVALID_BLOCK
+        | ERROR_NOT_ENOUGH_QUOTA
+        // EEXIST.
+        | ERROR_FILE_EXISTS
+        | ERROR_ALREADY_EXISTS
+        // EXDEV.
+        | ERROR_NOT_SAME_DEVICE
+        // ENOTDIR.
+        | ERROR_DIRECTORY
+        // EMFILE.
+        | ERROR_TOO_MANY_OPEN_FILES
+        // ENOSPC.
+        | ERROR_DISK_FULL
+        // EPIPE.
+        | ERROR_BROKEN_PIPE
+        | ERROR_NO_DATA
+        // ENOTEMPTY.
+        | ERROR_DIR_NOT_EMPTY
+        // EILSEQ.
+        | ERROR_NO_UNICODE_TRANSLATION
     )
 }
 
