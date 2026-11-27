@@ -226,3 +226,17 @@ fn an_unconfirmed_exit_reports_both_failures_when_the_termination_failed_too() {
         "cannot terminate the child: access denied; cannot wait for its exit: the wait failed"
     );
 }
+
+#[test]
+fn time_until_returns_the_time_left_before_a_deadline_and_none_after_it() {
+    let span = Duration::from_secs(3600);
+    let before = std::time::Instant::now();
+    let left = time_until(before + span).expect("an hour away has time left");
+    assert!(left > Duration::ZERO && left <= span);
+
+    let now = std::time::Instant::now();
+    assert_eq!(time_until(now), None);
+    if let Some(passed) = now.checked_sub(span) {
+        assert_eq!(time_until(passed), None);
+    }
+}

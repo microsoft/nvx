@@ -360,9 +360,7 @@ impl Watch<'_> {
     /// Returns how long the next wait until `deadline` may take, or why the step ends.
     fn slice(&self, deadline: Instant) -> Result<Duration, SessionError> {
         self.check()?;
-        deadline
-            .checked_duration_since(Instant::now())
-            .filter(|left| !left.is_zero())
+        super::platform::time_until(deadline)
             .map(|left| left.min(POLL))
             .ok_or(SessionError::TimedOut)
     }
