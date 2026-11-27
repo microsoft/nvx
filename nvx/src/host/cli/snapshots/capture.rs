@@ -26,7 +26,7 @@ use crate::host::network::{Access, NetworkPolicy};
 use crate::host::process::{Exited, KILL_TIMEOUT, Process};
 use crate::host::runtime::{LaunchOptions, Runtime};
 use crate::host::session::{ControlSession, SessionError};
-use crate::host::snapshot::{DESCRIPTION_FILE, KEY_FILE, OPENVMM_DIR, finish_capture};
+use crate::host::snapshot::{DESCRIPTION_FILE, KEY_FILE, MIB, OPENVMM_DIR, finish_capture};
 use crate::host::transport;
 use crate::host::vm::{self, Prepared, VmDir, VmOutputs};
 use crate::net::Ipv4Cidr;
@@ -232,7 +232,8 @@ fn capture(
     let mut locked = state.lock(deadline)?;
     let dir = VmDir::open(state.dir())?;
     let mut geometry = disk_geometry(&dir)?;
-    geometry.length = options.image_mib << 20;
+    // The parser bounds both lengths by MAX_MEMORY_MIB, whose bytes fit in a u64.
+    geometry.length = options.image_mib * MIB;
     let config = VmConfig {
         processors: options.processors,
         memory_mib: options.memory_mib,
@@ -255,7 +256,7 @@ fn capture(
                 disks: DiskCapture::Fresh {
                     image: geometry,
                     scratch: BlockGeometry {
-                        length: options.scratch_mib << 20,
+                        length: options.scratch_mib * MIB,
                         ..geometry
                     },
                 },

@@ -20,6 +20,7 @@ use crate::host::sandbox::options::{PolicyPathOption, SandboxOperation};
 use crate::host::sandbox::{
     DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, parse_workload_identity,
 };
+use crate::host::snapshot::MIB;
 use crate::host::snapshot::key::cpu_profile_problem;
 use crate::net::{Ipv4Cidr, guest_gateway};
 use crate::protocol::root::RootUpper;
@@ -144,7 +145,7 @@ pub(in crate::host::cli) const HYPERVISORS: [&str; 4] = ["auto", "whp", "kvm", "
 pub(in crate::host::cli) const MOUNT_OWNERS: [&str; 2] = ["vmm", "caller"];
 /// The most MiB of guest RAM that `--memory-mib` and the memory options of `run` take: the most
 /// whose count of bytes fits in 64 bits, as OpenVMM reads a size of RAM.
-pub(in crate::host::cli) const MAX_MEMORY_MIB: u64 = u64::MAX >> 20;
+pub(in crate::host::cli) const MAX_MEMORY_MIB: u64 = u64::MAX / MIB;
 
 /// Returns the seconds that `value` gives, a finite number greater than 0, as Rust's `f64`
 /// parses it: digits with an optional fraction and exponent, after an optional sign.
