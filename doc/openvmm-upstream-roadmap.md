@@ -6,12 +6,15 @@
   The v8.1 rebase moved the chain from `bf353460ff70e4a65627bb7003bed2cad1ce121f`, the fork base of v8.0.
 - Mapped fork tip: `06bfe58a65a9ed04690abeee8b8a8aa937cd7f3a`, position 126. The graph, PR summary, and exact mapping
   cover positions 001-126 and the later PR20, PR25, and PR18 fixups.
-- NVX's pinned OpenVMM revision: `10fc4d8ff17bce15af5eb69a3aa913707a61b896`, position 401, the v8.1 release candidate.
-  Positions 001-399 replay the v8.0 line through NVX's previous pin, `ee66d23117a9ebdd358686d8d9bacd1218d7dac0`;
-  positions 400 and 401 adapt upstream tests. The pin is 275 commits past the mapped tip.
+- NVX's pinned OpenVMM revision: `8a41259cf5222fa61a0b3cf36b925e702b683bf3`, position 403, the head
+  of microsoft/openvmm#5307, whose commits, positions 402 and 403, follow position 401, `10fc4d8ff`,
+  the v8.1 release candidate and the head of `feature/microvm/dev`.
+  Positions 001-399 replay the v8.0 line through its last NVX pin, `ee66d23117a9ebdd358686d8d9bacd1218d7dac0`;
+  positions 400 and 401 adapt upstream tests. The pin is 277 commits past the mapped tip.
   Positions 375 and 376 are PR20 fixups, 377 is a PR25 fixup, and 389, 393, and 396 are PR18
-  fixups. Positions 127-374, 378-388, 390-392, 394, 395, and 397-399 remain unassigned.
-  Positions 400 and 401 are rebase fixups with the fold targets listed below.
+  fixups. Positions 127-374, 378-388, 390-392, 394, 395, 397-399, and 402 remain unassigned.
+  Positions 400 and 401 are rebase fixups with the fold targets listed below, and position 403 is
+  a fixup of position 402.
 - Upstream main: `de11aa1b6efb34256630c8417fb03f81440099e7` (2026-11-26), one commit past the fork base;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -1817,7 +1820,9 @@ The physical branch is one first-parent chain:
   -> directory listings that close a descriptor that fdopendir refuses [399]
   -> v8.1 upstream state-test fixup [400]
   -> v8.1 upstream chipset-test fixup [401]
-  -> 10fc4d8ff (NVX pin)
+  -> IA32_FEATURE_CONTROL written only where KVM runs on VMX [402]
+  -> position 402 comment fixup [403]
+  -> 8a41259cf (NVX pin)
 ```
 
 For upstream review, PR01-PR03, PR05, PR06, and PR14 can be rebased independently onto current
@@ -1859,9 +1864,10 @@ position 393's fold shares `create_with_flags`, after position 083's test of `re
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 126 without merges. Of its 275 later commits, positions
+The NVX pin extends the chain past position 126 without merges. Of its 277 later commits, positions
 375 and 376 are PR20 fixups, position 377 is a PR25 fixup, positions 389, 393, and 396 are PR18
-fixups, and positions 400 and 401 are v8.1 rebase fixups. The others are not yet assigned to PRs.
+fixups, positions 400 and 401 are v8.1 rebase fixups, and position 403 is a fixup of position 402.
+The others are not yet assigned to PRs.
 Each of positions 127-181 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 182-186 followed the v3.0 reorganization, positions 187-200 are the ABI restart
@@ -1869,7 +1875,8 @@ of the v4.0 reorganization, positions 201-206 followed it, positions 207-213 fol
 reorganization, positions 214 and 215 followed the v5.1 rebase, positions 216-253 followed the
 v6.0 reorganization, positions 254-296 followed the v6.1 rebase, positions 297-314 followed the
 v7.0 reorganization, positions 315-331 followed the v7.1 rebase, positions 332-355 followed the
-v7.2 rebase, and positions 356-399 followed the v8.0 reorganization, so they combine none, apart
+v7.2 rebase, positions 356-399 followed the v8.0 reorganization, and positions 402 and 403
+followed the v8.1 rebase, so they combine none, apart
 from position 215, which combines v5.1 positions 222 and 223, and the commits that the v7.0 and
 v8.0 reorganizations folded into them. The v8.0 column counts the old chain through `ee66d2311`. The table also gives each commit's v7.2 position, which through
 position 301 is its own, since the v8.0 reorganization folded v7.2 positions 302, 316, 333,
@@ -2169,6 +2176,8 @@ whose first 269 commits are those of `feature/microvm/release/v6.1`, a v6.0 posi
 | 399 | `30f1851f0` | 399 | - | - | - | - | - | - | - | lxutil: close the descriptor when fdopendir fails in DirectoryEnumerator::new (microsoft/openvmm#5293) |
 | 400 | `bc669808f` | - | - | - | - | - | - | - | - | virt: adapt upstream saved-state tests (microsoft/openvmm#5274); fold into 258, 261, 272, 277, 278, 283, 287, 290, 291, 295, 303, and 304 |
 | 401 | `10fc4d8ff` | - | - | - | - | - | - | - | - | vmotherboard: adapt the standard RTC and lifecycle tests (microsoft/openvmm#5243); fold into 011, 052, and 236 |
+| 402 | `e2ab2259b` | - | - | - | - | - | - | - | - | virt_kvm: set IA32_FEATURE_CONTROL only where KVM runs on VMX (microsoft/openvmm#5307) |
+| 403 | `8a41259cf` | - | - | - | - | - | - | - | - | virt_kvm: qualify the IA32_FEATURE_CONTROL comments with kvm.ignore_msrs (microsoft/openvmm#5307); fold into 402 |
 
 The remarks below retain the historical SHAs and review evidence of their original mappings.
 The remarks that say whether commits apply to upstream main record what was found on upstream main
@@ -2182,8 +2191,9 @@ and `c0694c4da`, upstream main on 2026-11-16, for positions 297-305, `c4419be15`
 for positions 325 and 326, `bf353460f`, upstream main on 2026-11-21 and the fork base of v7.2 and
 v8.0, for positions 327-355, `b50d0c979`, upstream main later on 2026-11-23, for position 356,
 `5d6ab1cfa`, upstream main later that day, for positions 357-368, `efe0b08df`, upstream main later
-still, for positions 369-375, and `8d4e03132`, upstream main on 2026-11-24, for positions
-376-399. They name the positions that the commits have now, but neither
+still, for positions 369-375, `8d4e03132`, upstream main on 2026-11-24, for positions
+376-399, and `de11aa1b6`, upstream main on 2026-11-26, for positions 402 and 403. They name the
+positions that the commits have now, but neither
 the v8.0 reorganization and the v7.2 rebase, both on `bf353460f`, the v7.1 rebase on `9a875b563`,
 nor the v7.0 reorganization on `e6b458cc0` checked them again, nor did the v6.1 rebase check the
 earlier ones on `7d90c4104`.
@@ -6196,6 +6206,39 @@ descriptors open and passes with the fix. No chain commit changes `lxutil`'s `un
 Position 399 is a cherry-pick of microsoft/openvmm#5291's `7417a033b`, which proposes it on upstream
 main, `8d4e03132`, where `lxutil` type-checks and its 38 tests pass, so it can go upstream on its own,
 and a rebase onto an upstream main that has it drops it.
+
+Position 402 has the KVM backend's `bind` write `IA32_FEATURE_CONTROL` only where KVM runs on VMX
+(microsoft/nvx#1388). Upstream's `bind`, since microsoft/openvmm#3623, writes a locked
+`IA32_FEATURE_CONTROL` for every VP whose CPUID names Intel, but only KVM's VMX code has that MSR:
+on an AMD host, KVM runs on SVM and refuses the write unless `kvm.ignore_msrs` is set, so a VP of a
+partition whose CPUID names GenuineIntel, which a caller of the backend can set through
+`PartitionConfig::cpuid`, failed to bind with `IncompleteMsrs { failed_msr: 58 }`. OpenVMM's own VMs
+never reached it: without a time ABI a VM's CPUID names the host's vendor, and with one, which the
+microVM always has, an Intel CPU profile is refused on an AMD host with `E_CPU_GENERATION` before
+the partition is built. `KvmPartitionInner` gains `host_vmx`, which `build` sets from position 304's
+`KvmSupport::svm`, which the vendor of KVM's supported CPUID decides, and `bind` writes the MSR only
+where it is set and the CPUID names Intel, so nothing changes on an Intel host. In `x86_64/mod.rs`,
+which PR10's positions 021 and 024, PR17's position 072, and 23 positions that no PR has yet also
+change, it sets the field in `build` between upstream's `mce_cmci_supported` and position 248's
+`lapic_preemption_timer`, changes upstream's condition of the write and its comment in `bind`, and
+adds its `/dev/kvm` test, which builds a partition whose CPUID names Intel and binds its VP, as
+position 381's test builds one and binds its second VP, in a module of its own after position 284's
+`kvm_tests`; in `lib.rs`, which PR10's position 024 and positions 128, 142, 248, 259, 265, 283, 285,
+301, 373, 380, and 381 also change, it adds the field between the same two fields. It follows
+position 401; of positions 382-401, none changes its files. It is not a fixup: the write and its
+condition are upstream's, and it changes no line that a mapped PR adds. Upstream main, `de11aa1b6`,
+writes the MSR the same way, but replaying the commit there conflicts in `x86_64/mod.rs` and
+`lib.rs`, which lack position 248's `lapic_preemption_timer`, beside which it adds the field, and
+position 284's `kvm_tests`, after which it adds its test, it sets the field from position 304's
+`KvmSupport`, which upstream main lacks, and its test sets the fields of `ProtoPartitionConfig` that
+positions 036 and 127 add, so it cannot go upstream on its own.
+
+Position 403 is a fixup of position 402, to fold into it. It qualifies the comments of position
+402's write and of its test: KVM on SVM refuses the write only while `kvm.ignore_msrs` is off, as
+it is by default, and with it set ignores the write and reads the MSR as 0, so the bind succeeded on
+such a host before position 402 as well, and the test cannot tell the two apart there. It changes
+no code, and only lines of `x86_64/mod.rs` that position 402 adds or rewrites, so it goes upstream
+only with position 402.
 
 ## PR summary
 
