@@ -18,6 +18,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
+use windows_sys::Win32::System::Registry::RRF_RT_REG_DWORD;
 use windows_sys::Win32::System::Threading::{
     CreateEventW, GetCurrentProcess, INFINITE, OpenProcess, PROCESS_DUP_HANDLE,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, TerminateProcess,
@@ -32,7 +33,7 @@ use super::log_claim::log_job_processes;
 use super::log_claim::{local_directory, log_job_id, log_job_name, object_name};
 pub(crate) use super::private::tests::set_access;
 pub(crate) use super::private::tests::{access, user_sid};
-use super::process::{end_process, wait_step};
+use super::process::{BOOT_ID_KEY, end_process, read_machine_value, wait_step};
 use super::spawn::command_line;
 use super::*;
 use crate::host::platform::inherit::{Inherited, lock_spawns};
@@ -116,6 +117,25 @@ fn a_process_that_is_exiting_counts_as_killed_before_its_exit_shows() {
     let refused = end_process(false, 7, || panic!("terminated"), || Ok(false)).unwrap_err();
     assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
     end_process(false, 7, || panic!("terminated"), || Ok(true)).unwrap();
+}
+
+#[test]
+fn a_registry_value_is_read_as_the_boot_identity_reads_it_and_a_missing_one_is_named() {
+    let mut value = 0u32;
+    let size = read_machine_value(BOOT_ID_KEY, "BootId", RRF_RT_REG_DWORD, &mut value).unwrap();
+    assert_eq!(size, mem::size_of::<u32>());
+    assert_eq!(u128::from(value).to_le_bytes(), boot_id().unwrap());
+
+    let missing =
+        read_machine_value(BOOT_ID_KEY, "nvx-missing", RRF_RT_REG_DWORD, &mut value).unwrap_err();
+    assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+    let message = missing.to_string();
+    assert!(
+        message.starts_with(&format!(
+            "cannot read the registry value HKLM\\{BOOT_ID_KEY}\\nvx-missing: "
+        )),
+        "{message}"
+    );
 }
 
 #[test]
