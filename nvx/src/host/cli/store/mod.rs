@@ -47,6 +47,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use self::locked::{LockedState, open_lock, transition_in_progress};
 pub(crate) use self::names::StateFile;
+pub(in crate::host::cli) use self::names::{is_random_staging, split_staging};
 use crate::ErrorCode;
 use crate::host::cli::{Exit, Result};
 use crate::host::platform;

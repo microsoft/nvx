@@ -16,7 +16,7 @@ use crate::host::cli::run::processors;
 use crate::host::cli::sandbox::{
     Artifacts, HYPERVISORS, MAX_MEMORY_MIB, check_hypervisor, error_with_cause, hypervisor,
 };
-use crate::host::cli::store::{LockedState, StateDir, StateFile};
+use crate::host::cli::store::{LockedState, StateDir, StateFile, is_random_staging, split_staging};
 use crate::host::cli::{Exit, Result, check_interrupt, io_error, output};
 use crate::host::config::{
     BlockGeometry, Boot, Capacity, CaptureConfig, ConsoleAttachment, DiskCapture, Invariants,
@@ -467,14 +467,10 @@ fn remove_capture(store: &Store, deadline: Deadline) -> Result {
 }
 
 fn capture_temporary(name: &str) -> bool {
-    if let Some(random) = name.strip_prefix(".tmp") {
-        return random.len() == 6 && random.bytes().all(|byte| byte.is_ascii_alphanumeric());
+    if is_random_staging(name) {
+        return true;
     }
-    let Some((file, suffix)) = name
-        .strip_prefix('.')
-        .and_then(|name| name.strip_suffix(".tmp"))
-        .and_then(|name| name.rsplit_once('.'))
-    else {
+    let Some((file, suffix)) = split_staging(name) else {
         return false;
     };
     [
