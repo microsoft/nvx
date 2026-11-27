@@ -918,12 +918,20 @@ one's 8.9, on the benchmark runners, for which the platform jobs of
 overlapping runs queue.
 
 The KVM, MSHV, and WHP pools have eight runners each. The pools mix Intel and
-AMD virtual machines; the AMD runners also carry `amd`, which no job requires.
-In each pool, one runner carries `benchmark` and runs only the platform job,
-and the others carry `general` and run all non-benchmark backend jobs. Platform
-jobs from overlapping workflow runs still measure one after another on their
-backend's single benchmark runner, but they never wait behind an unrelated
-build or test.
+AMD virtual machines: four runners of each pool are AMD VMs, three with an
+EPYC 9V74 (Genoa) and one with an EPYC 7763 (Milan), and they also carry `amd`,
+which no job requires. In each pool, one runner, an Intel VM, carries
+`benchmark` and runs only the platform job, and the others carry `general` and
+run all non-benchmark backend jobs. A microVM job therefore boots the Genoa or
+Milan [CPU profile](usage.md#cpu-profiles) when it lands on an AMD runner and
+an Intel one otherwise, while only Intel VMs measure the performance series
+(see [Benchmarks](benchmarks.md)). Since no job requires a vendor, a run tests
+a vendor's CPUs only where its jobs land: of 40 CI runs started on November 27,
+2026, between 04:06 and 15:34 UTC, the microVM jobs of KVM, MSHV, and WHP ran
+on an AMD runner in 40, 39, and 39 of them, and on an Intel runner in 35, 39,
+and 37. Platform jobs from overlapping workflow runs still measure one after
+another on their backend's single benchmark runner, but they never wait behind
+an unrelated build or test.
 
 The role split follows an October 15-20, 2026 scheduling audit, when each pool
 had five runners. Before the split, the benchmark runners spent about one third
