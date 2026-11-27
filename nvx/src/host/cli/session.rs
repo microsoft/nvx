@@ -530,14 +530,16 @@ impl Session {
         let refused = |message: &str| Exit::error(ErrorCode::Unsupported, message);
         let arguments = &request.arguments;
         if !(1..=MAX_ARGUMENTS).contains(&arguments.len()) {
-            return Err(refused("managed exec requires 1 through 64 arguments"));
+            return Err(refused(&format!(
+                "managed exec requires 1 through {MAX_ARGUMENTS} arguments"
+            )));
         }
         for argument in arguments {
             if argument.is_empty() || argument.len() > MAX_ARGUMENT_BYTES || argument.contains('\0')
             {
-                return Err(refused(
-                    "managed exec argument is empty or exceeds 4096 bytes",
-                ));
+                return Err(refused(&format!(
+                    "managed exec argument is empty or exceeds {MAX_ARGUMENT_BYTES} bytes"
+                )));
             }
         }
         if !arguments[0].starts_with('/') {
@@ -549,9 +551,10 @@ impl Session {
                 || cwd.contains('\0')
                 || !cwd.starts_with('/'))
         {
-            return Err(refused(
-                "managed exec working directory must be an absolute path of at most 4096 bytes",
-            ));
+            return Err(refused(&format!(
+                "managed exec working directory must be an absolute path of at most \
+                 {MAX_ARGUMENT_BYTES} bytes"
+            )));
         }
         if let Some(entries) = &request.environment {
             validate_exec_environment(entries)?;
