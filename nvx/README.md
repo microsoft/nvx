@@ -641,7 +641,12 @@ percent of the VM's memory, 50 when the caller has no other
 with an `nvx::Error` of kind `Unsupported` that names the first refusal, such
 as a caller's boot token whose name NVX reserves: the root's and the view's
 tokens, `nvx_maps`, and every name beginning `virtfs_`, as both Linux and the
-guest's init read them. `VmConfig::kernel_command_line` renders a cold boot's
+guest's init read them. Outside a capture, it also refuses a caller's token
+that OpenVMM's machine profile owns and supplies itself, as OpenVMM reads it,
+split at ASCII whitespace, such as `console=`, `earlycon=`, `nr_cpus=`, a
+`virtnet_*` bootstrap token, or the control console's `nvx_control_tty=`,
+which OpenVMM would refuse at every launch; `Boot::command_line` lists them.
+`VmConfig::kernel_command_line` renders a cold boot's
 command line: the root's and the view's tokens, `nvx_maps` when an export
 exists, then the caller's text unchanged; a capture's holds only the caller's
 text, whose tokens must be among OpenVMM's platform tokens, and `maxcpus` when
@@ -1266,7 +1271,8 @@ is checked as the launched line holds it, untrimmed, and through the guest
 bootstrap's whitespace-only token view too. Reserved `nvx_*` and `virtfs_*`
 names cannot be hidden inside quoted values or behind leading Unicode
 whitespace; a `--` or unclosed quote that hides the tokens that OpenVMM appends
-is refused.
+is refused, and so is a token that OpenVMM's machine profile owns, such as
+`console=` or `nr_cpus=`, which `VmConfig::check` refuses.
 
 Host paths are the host's own, which `std::path` holds: spelled with their
 components alone, as `Path::components` reads them, with backslashes on

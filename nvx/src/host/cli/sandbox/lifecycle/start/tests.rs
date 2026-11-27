@@ -179,10 +179,16 @@ fn starts_check_the_kernel_command_line_that_they_launch() {
             "{user:?}"
         );
     }
-    // The user's part may add a virtio-mmio device, which the guest reads as the kernel does: one
-    // at the scratch disk's base conflicts with a RAM upper.
+    // The user's part may add a virtio-mmio device that OpenVMM does not read as its own, such as
+    // one after a vertical tab, at which Linux splits the command line but OpenVMM does not, and
+    // the guest reads it as the kernel does: one at the scratch disk's base conflicts with a RAM
+    // upper.
     assert_eq!(
-        refusal("virtio_mmio.device=0x1000@0xd0006000:22", None, None),
+        refusal(
+            "quiet\u{b}virtio_mmio.device=0x1000@0xd0006000:22",
+            None,
+            None
+        ),
         "sandbox kernel command line conflicts with the boot tokens of its root: a RAM upper \
          takes no scratch block device, but the command line adds a virtio-mmio device at \
          0xd0006000"

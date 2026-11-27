@@ -47,6 +47,39 @@ pub const DEFAULT_GUEST_NETWORK: &str = "10.0.0.2/24";
 /// The caps of a RAM upper that [`VmConfig::check`] accepts, in percent of the VM's memory.
 const RAM_UPPER_CAPS: RangeInclusive<u8> = 1..=90;
 
+/// The names of the cold boot tokens that OpenVMM's machine profile owns and supplies itself,
+/// beside the `virtfs_*` ones that NVX reserves: the consoles, device discovery, the NIC's
+/// bootstrap, the processor capacity, the capture tier, and the workload's identity and lifecycle.
+/// OpenVMM refuses a caller's token that starts with one of them and `=`, byte for byte
+/// (`doc/design/5.1-boot-protocol.md`, "Effective Command Line").
+const PROFILE_PARAMETERS: [&str; 15] = [
+    "earlycon",
+    "console",
+    "virtio_mmio.device",
+    "virtnet_ip",
+    "virtnet_mask",
+    "virtnet_gw",
+    "virtnet_dns",
+    "virtnet_ip6",
+    "virtnet_gw6",
+    "virtnet_ingress",
+    "nvx_snapshot_tier",
+    "nr_cpus",
+    "nvx_workload_uid",
+    "nvx_workload_gid",
+    "nvx_lifecycle",
+];
+
+/// The names of the cold boot tokens that the control console, which every cold boot attaches,
+/// owns: its terminal, the order of driver probes, and device discovery. OpenVMM refuses a caller's
+/// token with a value whose name is one of them as Linux compares names, a dash matching an
+/// underscore (`doc/design/3.3-consoles.md`, "Control Console").
+const CONTROL_CONSOLE_PARAMETERS: [&str; 3] = [
+    "nvx_control_tty",
+    "driver_async_probe",
+    "virtio_mmio.device",
+];
+
 /// The processor counts of a microVM.
 pub(crate) const PROCESSOR_COUNTS: [u32; 4] = [1, 2, 4, 8];
 
@@ -171,8 +204,13 @@ impl NetworkConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Boot {
     /// The caller's own kernel command-line tokens, to which NVX adds those of what it lowers.
-    /// The root's tokens, `nvx_hostname`, `nvx_machine_id`, `nvx_maps` and `virtfs_*` are reserved;
-    /// every other token, including `nvx_entrypoint`, `nvx_arg` and `nvx_share`, is caller-owned.
+    /// The root's tokens, `nvx_hostname`, `nvx_machine_id`, `nvx_maps` and `virtfs_*` are reserved,
+    /// and so, outside a capture, are those that OpenVMM's machine profile owns and supplies
+    /// itself: `earlycon`, `console`, `virtio_mmio.device`, `nr_cpus`, the NIC's `virtnet_ip`,
+    /// `virtnet_mask`, `virtnet_gw`, `virtnet_dns`, `virtnet_ip6`, `virtnet_gw6` and
+    /// `virtnet_ingress`, `nvx_snapshot_tier`, `nvx_workload_uid`, `nvx_workload_gid`,
+    /// `nvx_lifecycle`, and the control console's `nvx_control_tty` and `driver_async_probe`.
+    /// Every other token, including `nvx_entrypoint`, `nvx_arg` and `nvx_share`, is caller-owned.
     /// A capture permits only OpenVMM's platform allowlist, which admits the kernel tuning
     /// parameters `mitigations=off`, `mitigations=auto`, `mitigations=auto,nosmt`,
     /// `no_timer_check`, `quiet`, and `loglevel=0` to `loglevel=7`, each parameter at most once,
@@ -864,12 +902,15 @@ impl VmConfig {
     /// empty, longer than [`MAX_HOSTNAME_BYTES`], or holds a NUL; an export that
     /// [`ExportPlan::check`] refuses for the root, whose error is the source; a boot's capture
     /// that [`CaptureConfig::check`] refuses; a boot memory capacity, which only a capture
-    /// reserves; and caller boot tokens that collide with the root's,
-    /// the view's, `nvx_maps`, or any `virtfs_*` name.
+    /// reserves; caller boot tokens that collide with the root's,
+    /// the view's, `nvx_maps`, or any `virtfs_*` name; and, outside a capture, a caller boot token
+    /// that OpenVMM's machine profile owns, which [`Boot::command_line`] lists, and which OpenVMM
+    /// would refuse at every launch.
     ///
     /// The NIC's address is checked when it is built, and the network's policy where it is
     /// lowered, with the guest's address. Boot tokens are read as both Linux and the guest's init
-    /// read them, with dashes and underscores matching as Linux matches parameter names.
+    /// read them, with dashes and underscores matching as Linux matches parameter names, and those
+    /// that OpenVMM's machine profile owns as OpenVMM reads them, split at ASCII whitespace.
     /// [`kernel_command_line`](Self::kernel_command_line) appends accepted caller text unchanged.
     pub fn check(&self) -> Result<()> {
         if self.processors == 0 {
@@ -934,9 +975,38 @@ impl VmConfig {
                     )));
                 }
             }
+            // A capture's tokens must be among OpenVMM's platform tokens, which its renderer
+            // checks.
+            if boot.capture.is_none()
+                && let Some(name) = profile_owned_token(&boot.command_line)
+            {
+                return Err(Error::unsupported(format!(
+                    "Boot.command_line uses the token {name:?}, which OpenVMM's machine profile \
+                     owns"
+                )));
+            }
         }
         Ok(())
     }
+}
+
+/// Returns the name of the first token of `command_line`, a cold boot's caller tokens, that
+/// OpenVMM's machine profile owns, read as OpenVMM reads it: split at ASCII whitespace, a token
+/// whose name, up to its first `=`, is one of [`PROFILE_PARAMETERS`], or, as Linux compares names,
+/// one of [`CONTROL_CONSOLE_PARAMETERS`].
+fn profile_owned_token(command_line: &str) -> Option<&str> {
+    command_line.split_ascii_whitespace().find_map(|token| {
+        let (name, _) = token.split_once('=')?;
+        let parameter = Parameter {
+            name: name.as_bytes(),
+            value: None,
+        };
+        (PROFILE_PARAMETERS.contains(&name)
+            || CONTROL_CONSOLE_PARAMETERS
+                .iter()
+                .any(|owned| parameter.is_named(owned)))
+        .then_some(name)
+    })
 }
 
 /// The kernel tuning parameters that OpenVMM admits on the command line of a capture of its
