@@ -76,6 +76,7 @@ use crate::host::filesystem::{
     self, ExportPlan, ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target,
 };
 use crate::host::platform::{self, Transport};
+use crate::host::process::KILL_TIMEOUT;
 use crate::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
 use crate::host::sandbox::mount::{
     MountAccess, MountKind, MountOwner, POLICY_KINDS, PolicyKind, mount_kind, parse_mount_value,
@@ -182,6 +183,35 @@ const PROCESSORS: [&str; 4] = ["1", "2", "4", "8"];
 
 /// The name of a cold run's temporary VM directory, before 32 random lowercase hexadecimal digits.
 const RUN_DIRECTORY: &str = "nvx-run-";
+
+/// The longest that the foreground waits for console output, and its pause after a check of the
+/// console endpoint, the attachment, or the VM's output that found no progress: about 100 checks
+/// a second.
+const FOREGROUND_POLL: Duration = Duration::from_millis(10);
+/// The longest that one attempt to connect to the VM console's named pipe blocks before the
+/// foreground checks again whether OpenVMM has exited.
+#[cfg(not(target_os = "linux"))]
+const CONSOLE_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(250);
+/// The longest that a cold run waits for OpenVMM to serve its console endpoint.
+const CONSOLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// The longest wait for OpenVMM's exit status after a console connection fails for good: peer
+/// authentication may observe OpenVMM's exit just before its status becomes available.
+const PEER_EXIT_WAIT: Duration = Duration::from_millis(250);
+/// The longest that a managed cold run waits for each phase of its attachment to the VM's control
+/// session: first for the control endpoint, then for the attachment handshake over it.
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(60);
+/// The longest that OpenVMM has to exit after its control endpoint closed during the
+/// attachment, before the run reports the closed endpoint.
+const ATTACH_CLOSED_GRACE: Duration = Duration::from_secs(60);
+/// The longest that the foreground keeps forwarding boot output that still arrives after a
+/// failed attachment, before it reports the failure.
+const ATTACH_FAILURE_DRAIN: Duration = Duration::from_millis(250);
+/// The longest that a stop waits for the guest to stop through the control session before it
+/// terminates OpenVMM.
+const STOP_GRACE: Duration = Duration::from_millis(250);
+/// The bytes that one read takes from the standard input, the VM log, or the console: 8 KiB, the
+/// size of the buffer of `std::io::copy`.
+const TRANSFER_BUFFER_LEN: usize = 8192;
 
 /// The options of `snapshot restore` that a restore of `run` takes, which `sandbox` defines and
 /// parses for both: the sandbox's state directory, the image, its upper, the workload, and the
@@ -761,7 +791,7 @@ fn connect_running(
     #[cfg(target_os = "linux")]
     let connect = || platform::connect_child_endpoint(endpoint, pid);
     #[cfg(not(target_os = "linux"))]
-    let connect = || platform::connect_endpoint(endpoint, pid, Duration::from_millis(250));
+    let connect = || platform::connect_endpoint(endpoint, pid, CONSOLE_ATTEMPT_TIMEOUT);
     connect_before_exit(endpoint, connect, |timeout| launched.wait_status(timeout))
 }
 
@@ -771,7 +801,7 @@ fn connect_before_exit<T>(
     mut connect: impl FnMut() -> io::Result<T>,
     mut wait_status: impl FnMut(Duration) -> io::Result<Option<i32>>,
 ) -> Result<Option<T>> {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + CONSOLE_TIMEOUT;
     loop {
         check_interrupt()?;
         if wait_status(Duration::ZERO)
@@ -795,7 +825,7 @@ fn connect_before_exit<T>(
         let exit_wait = if retry {
             Duration::ZERO
         } else {
-            Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now()))
+            PEER_EXIT_WAIT.min(deadline.saturating_duration_since(Instant::now()))
         };
         if wait_status(exit_wait)
             .map_err(Exit::from_os_error)?
@@ -812,7 +842,7 @@ fn connect_before_exit<T>(
                 format!("VM console endpoint did not become available: {endpoint}"),
             ));
         }
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(FOREGROUND_POLL);
     }
 }
 
@@ -843,7 +873,7 @@ fn console_input(console: Box<dyn Transport>) -> Result<(Box<dyn Transport>, Inp
             .spawn(move || {
                 let result = (|| {
                     let mut stdin = io::stdin().lock();
-                    let mut buffer = [0; 8192];
+                    let mut buffer = [0; TRANSFER_BUFFER_LEN];
                     loop {
                         let count = stdin.read(&mut buffer)?;
                         if count == 0 {
@@ -898,7 +928,7 @@ impl<'a> ForegroundOutput<'a> {
     }
 
     fn forward(&mut self) -> Result<bool> {
-        let mut buffer = [0; 8192];
+        let mut buffer = [0; TRANSFER_BUFFER_LEN];
         let count = self.log.read(&mut buffer).map_err(Exit::from_os_error)?;
         let mut progressed = count != 0;
         self.stderr
@@ -908,7 +938,7 @@ impl<'a> ForegroundOutput<'a> {
             let timeout = if progressed {
                 Duration::ZERO
             } else {
-                Duration::from_millis(10)
+                FOREGROUND_POLL
             };
             match transport.read(&mut buffer, Some(timeout)) {
                 Ok(0) => {
@@ -965,7 +995,7 @@ pub(super) fn attach_with_output<T: Send>(
             while !attaching.is_finished() {
                 check_interrupt()?;
                 if !forward()? {
-                    thread::sleep(Duration::from_millis(10));
+                    thread::sleep(FOREGROUND_POLL);
                 }
             }
             Ok(())
@@ -976,7 +1006,7 @@ pub(super) fn attach_with_output<T: Send>(
                 if let Err(failure) = cancellation.cancel() {
                     cancel_failure.get_or_insert(failure);
                 }
-                thread::sleep(Duration::from_millis(10));
+                thread::sleep(FOREGROUND_POLL);
             }
             let _ = attaching
                 .join()
@@ -992,7 +1022,7 @@ pub(super) fn attach_with_output<T: Send>(
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         if attached.is_err() {
-            let deadline = Instant::now() + Duration::from_millis(250);
+            let deadline = Instant::now() + ATTACH_FAILURE_DRAIN;
             loop {
                 match forward() {
                     Ok(true) if Instant::now() < deadline => {}
@@ -1042,7 +1072,7 @@ fn foreground(
                     &endpoint,
                     process,
                     &capability,
-                    60.0,
+                    ATTACH_TIMEOUT.as_secs_f64(),
                     cancellation,
                 )
             },
@@ -1050,7 +1080,7 @@ fn foreground(
         ) {
             Ok(session) => *control = Some(session),
             Err(Exit::EndpointClosed) => {
-                attach_closed = Some(Instant::now() + Duration::from_secs(60));
+                attach_closed = Some(Instant::now() + ATTACH_CLOSED_GRACE);
             }
             Err(error) => return Err(error),
         }
@@ -1075,7 +1105,7 @@ fn foreground(
             return Err(Exit::EndpointClosed);
         }
         if !progressed {
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(FOREGROUND_POLL);
         }
     }
 }
@@ -1217,8 +1247,8 @@ fn run_cold(
                         }
                     })
             },
-            now + Duration::from_millis(250),
-            now + Duration::from_secs(10),
+            now + STOP_GRACE,
+            now + KILL_TIMEOUT,
         )
         .map_err(error_with_cause)?;
         cleanup = true;
