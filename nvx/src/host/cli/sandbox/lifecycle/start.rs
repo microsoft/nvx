@@ -1071,10 +1071,10 @@ fn check_command_line(config: &Config, vm: &VmConfig) -> Result {
         .as_ref()
         .map_or(0, |plan| export_tokens(plan).len());
     if line.len() + shares + 1 > COMMAND_LINE_BUDGET {
-        return Err(refused(
-            "sandbox kernel command line exceeds its 1024-byte x86 budget; use shorter arguments \
-             and kernel parameters",
-        ));
+        return Err(refused(&format!(
+            "sandbox kernel command line exceeds its {COMMAND_LINE_BUDGET}-byte x86 budget; use \
+             shorter arguments and kernel parameters"
+        )));
     }
     RootLayout::parse(line.as_bytes()).map_err(|error| {
         refused(&format!(
