@@ -9,15 +9,22 @@ use serde_json::Value;
 
 use super::{MAX_METADATA_LEN, PROVENANCE_FORMAT};
 use crate::error::{Error, Result};
-use crate::host::runtime::ArtifactIdentity;
+use crate::host::runtime::{ArtifactIdentity, SHA256_HEX_LEN};
 
-/// Returns the identity of an artifact whose SHA-256 digest is `digest`, if it holds 64 lowercase
-/// hexadecimal digits, as `nvx.py` writes digests and requires them.
+/// Returns whether `text` is a SHA-256 digest as `nvx.py` writes digests and requires them, in
+/// build provenance and in a release's `SHA256SUMS`: [`SHA256_HEX_LEN`] lowercase hexadecimal
+/// digits.
+pub(crate) fn is_sha256_digest(text: &str) -> bool {
+    text.len() == SHA256_HEX_LEN
+        && text
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Returns the identity of an artifact whose SHA-256 digest is `digest`, if
+/// [`is_sha256_digest`] accepts it.
 pub(super) fn sha256_identity(digest: &str) -> Option<ArtifactIdentity> {
-    if digest
-        .bytes()
-        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    {
+    if is_sha256_digest(digest) {
         ArtifactIdentity::sha256(digest).ok()
     } else {
         None

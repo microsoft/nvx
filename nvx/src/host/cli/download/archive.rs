@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use super::system_program;
 use crate::ErrorCode;
 use crate::hex::hex;
-use crate::host::artifacts::CHECKSUMS_NAME;
+use crate::host::artifacts::{CHECKSUMS_NAME, is_sha256_digest};
 use crate::host::cli::{Exit, Result, check_interrupt, failure_detail, io_error};
 
 /// The directory beside the package into which `tar` extracts it.
@@ -244,7 +244,7 @@ fn verify_checksums(package: &Path, files: &BTreeSet<&str>) -> Result {
             ))
         };
         let (expected, relative) = line.split_once("  ").ok_or_else(malformed)?;
-        if !is_digest(expected) || !is_canonical(relative) || relative == CHECKSUMS_NAME {
+        if !is_sha256_digest(expected) || !is_canonical(relative) || relative == CHECKSUMS_NAME {
             return Err(malformed());
         }
         if !listed.insert(relative) {
@@ -278,15 +278,6 @@ fn verify_checksums(package: &Path, files: &BTreeSet<&str>) -> Result {
         )));
     }
     Ok(())
-}
-
-/// Returns whether `text` is a SHA-256 digest as `SHA256SUMS` lists it: 64 lowercase hexadecimal
-/// digits.
-fn is_digest(text: &str) -> bool {
-    text.len() == 64
-        && text
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Returns the SHA-256 digest of the file at `path` in lowercase hexadecimal.

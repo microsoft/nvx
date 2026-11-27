@@ -45,6 +45,8 @@ pub(crate) use self::dir::{ArtifactDir, ArtifactPaths, Layout};
 #[cfg(feature = "cli")]
 pub(crate) use self::guest::Guest;
 #[cfg(feature = "cli")]
+pub(crate) use self::identity::is_sha256_digest;
+#[cfg(feature = "cli")]
 pub(crate) use self::require::{require_artifact, require_existing};
 
 /// Name of the release manifest at the root of a release archive or repository checkout.
