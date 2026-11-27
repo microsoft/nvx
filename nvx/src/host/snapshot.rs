@@ -48,8 +48,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::host::config::{
-    CaptureConfig, ConsoleAttachment, NicConfig, PROCESSOR_COUNTS, RootConfig, UpperConfig,
-    VmConfig,
+    CaptureConfig, ConsoleAttachment, MEMORY_BLOCK_MIB, NicConfig, PROCESSOR_COUNTS, RootConfig,
+    UpperConfig, VmConfig,
 };
 use crate::host::paths::{absolute, normalized};
 use crate::host::runtime::{Hypervisor, Runtime, RuntimeIdentity};
@@ -266,10 +266,10 @@ impl Snapshot {
                 self.key.memory_capacity()
             )));
         }
-        if !config.memory_mib.is_multiple_of(128) {
-            return Err(Error::unsupported(
-                "snapshot memory must be aligned to 128 MiB",
-            ));
+        if !config.memory_mib.is_multiple_of(MEMORY_BLOCK_MIB) {
+            return Err(Error::unsupported(format!(
+                "snapshot memory must be aligned to {MEMORY_BLOCK_MIB} MiB"
+            )));
         }
         let image = restore_geometry(&root.image, "image")?;
         let placeholder = self.key.distro();
@@ -362,11 +362,12 @@ impl Snapshot {
     }
 }
 
-/// The bytes in a mebibyte, the unit in which a VM's configuration and a capture give memory.
-const MIB: u64 = 1024 * 1024;
+/// The bytes in a mebibyte, the unit in which a VM's configuration and a capture give memory and
+/// disk lengths.
+pub(in crate::host) const MIB: u64 = 1024 * 1024;
 
 /// Returns `mib` mebibytes in bytes, or `None` when that overflows a `u64`.
-fn mib_bytes(mib: u64) -> Option<u64> {
+pub(in crate::host) fn mib_bytes(mib: u64) -> Option<u64> {
     mib.checked_mul(MIB)
 }
 

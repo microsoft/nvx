@@ -39,7 +39,7 @@ use crate::host::platform;
 use crate::host::report::{self, Report};
 use crate::host::restore::ReadyListener;
 use crate::host::runtime::{Hypervisor, Runtime, RuntimeIdentity};
-use crate::host::snapshot::{CaptureContext, HostTime, Snapshot};
+use crate::host::snapshot::{CaptureContext, HostTime, Snapshot, mib_bytes};
 use crate::host::spawn;
 #[cfg(feature = "cli")]
 use crate::host::transport::{self, HostConnection};
@@ -422,10 +422,7 @@ impl Prepared {
                     plan.binds.len(),
                 )
             });
-        let memory = self
-            .configuration
-            .memory_mib
-            .checked_mul(1 << 20)
+        let memory = mib_bytes(self.configuration.memory_mib)
             .ok_or_else(|| Error::unsupported("VM memory does not fit the record's byte count"))?;
         GuestRestoreRecord::new(
             Some(RestoreSection { transaction: tx }),

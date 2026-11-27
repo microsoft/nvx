@@ -52,7 +52,7 @@ pub(crate) const PROCESSOR_COUNTS: [u32; 4] = [1, 2, 4, 8];
 
 /// The size of the blocks in which a restore grows a VM's memory, in MiB, of which a capture's
 /// memory capacity is a multiple.
-const MEMORY_BLOCK_MIB: u64 = 128;
+pub(in crate::host) const MEMORY_BLOCK_MIB: u64 = 128;
 
 /// The domain of a capture's identity: the bytes that precede what identifies the capture in its
 /// digest.
