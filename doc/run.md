@@ -1166,8 +1166,9 @@ names even when quoted or written with hyphens instead of underscores. Validatio
 reads the text that the kernel command line holds, after the generated settings,
 and also checks the guest bootstrap's whitespace-only view, so reserved settings
 inside quoted values cannot override the generated settings. It also refuses a
-`--` or unclosed quote that hides the tokens that OpenVMM appends, and double
-quotes, which the VM control console cannot represent.
+`--` or unclosed quote that hides the tokens that OpenVMM appends, double
+quotes, which the VM control console cannot represent, and the tokens that
+OpenVMM's machine profile owns, such as `console=` or `nr_cpus=`.
 nvx-init runs the workload as a plain process in the VM's root, with no
 capabilities and `no_new_privs`, as it runs every
 [managed](#managed-lifecycle) execution. The workload always runs as the fixed
@@ -1785,7 +1786,8 @@ or is longer than 94 bytes, or than 88 for a sandbox of `snapshot restore`.
 `provision` refuses, with `error[unsupported]` and before it creates the state
 directory, a configuration that every `start` of the sandbox would refuse, as
 `run` refuses it before it launches OpenVMM: a `--cmdline` that holds a
-reserved token or double quotes, that hides the tokens that OpenVMM appends,
+reserved token, a token that OpenVMM's machine profile owns, such as
+`console=`, or double quotes, that hides the tokens that OpenVMM appends,
 or that overflows the kernel command line's 1024-byte budget; an image path
 whose lowercase extension would make OpenVMM attach the image in a container
 format, such as `.vhd` or `.vmdk`, rather than raw; and, for a sandbox that

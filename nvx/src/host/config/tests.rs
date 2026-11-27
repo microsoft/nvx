@@ -1038,7 +1038,7 @@ fn caller_owned_guest_tokens_and_noncolliding_names_stay_unchanged() {
     for command_line in [
         "nvx_entrypoint=/bin/work nvx_arg=\"x y\" nvx_share=0,/work",
         "nvx-entrypoint=/bin/work nvx-arg=x nvx-share=0,/work",
-        "nvx_sandbox=1 nvx_lifecycle=one-shot nvx_workload_account=1",
+        "nvx_sandbox=1 nvx_mode=one-shot nvx_workload_account=1",
         "quiet tsc=reliable hostname=caller root=/dev/custom",
         "nvx_maps_extra=1 NVX_MAPS=1 virtfs=1 virtfsx_name=1 other_virtfs_dir=1",
         "other=nvx_maps=1 -- nvx_arg=nvx_hostname",
@@ -1058,6 +1058,83 @@ fn caller_owned_guest_tokens_and_noncolliding_names_stay_unchanged() {
             config.kernel_command_line().unwrap(),
             format!("{rendered} {command_line}")
         );
+    }
+}
+
+#[test]
+fn cold_boots_refuse_the_tokens_that_openvmms_machine_profile_owns() {
+    // The tokens that callers may not supply, and those of the control console, which every cold
+    // boot attaches, in any dash spelling (doc/design/5.1-boot-protocol.md, "Effective Command
+    // Line", and doc/design/3.3-consoles.md, "Control Console").
+    let mut refused: Vec<(String, &str)> = [
+        "earlycon",
+        "console",
+        "virtio_mmio.device",
+        "nr_cpus",
+        "virtnet_ip",
+        "virtnet_mask",
+        "virtnet_gw",
+        "virtnet_dns",
+        "virtnet_ip6",
+        "virtnet_gw6",
+        "virtnet_ingress",
+        "nvx_snapshot_tier",
+        "nvx_workload_uid",
+        "nvx_workload_gid",
+        "nvx_lifecycle",
+        "nvx_control_tty",
+        "driver_async_probe",
+    ]
+    .into_iter()
+    .map(|name| (format!("{name}=1"), name))
+    .collect();
+    for (command_line, name) in [
+        ("quiet\tconsole=ttyS0 loglevel=7", "console"),
+        ("nvx-control-tty=hvc0", "nvx-control-tty"),
+        ("driver-async-probe=*", "driver-async-probe"),
+        ("virtio-mmio.device=4K@0xd0100000:20", "virtio-mmio.device"),
+    ] {
+        refused.push((command_line.to_owned(), name));
+    }
+    let boot = |command_line: &str| {
+        Some(Boot {
+            memory_capacity_mib: None,
+            command_line: command_line.to_owned(),
+            capture: None,
+        })
+    };
+    for (command_line, name) in &refused {
+        for config in [blockless(), layered(erofs())] {
+            let config = VmConfig {
+                boot: boot(command_line),
+                ..config
+            };
+            for error in [
+                config.check().unwrap_err(),
+                config.check_command_line().unwrap_err(),
+            ] {
+                assert_eq!(error.kind(), ErrorKind::Unsupported, "{command_line:?}");
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("Boot.command_line uses the token {name:?}")),
+                    "{command_line:?}: {error}"
+                );
+            }
+        }
+    }
+    // OpenVMM reads a token by its name up to its first `=`, so these are the caller's.
+    for command_line in [
+        "console nvx_control_tty",
+        "xconsole=1 consoles=1 nr_cpus_hint=1 virtnet=1 virtnet_ipx=1",
+        "nvx_lifecycle_note=1 driver_async_probes=1 other=console=ttyS0",
+    ] {
+        let config = VmConfig {
+            boot: boot(command_line),
+            ..blockless()
+        };
+        config.check().unwrap();
+        config.check_command_line().unwrap();
     }
 }
 
