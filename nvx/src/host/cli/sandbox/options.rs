@@ -23,7 +23,7 @@ use crate::host::sandbox::{
 };
 use crate::host::snapshot::MIB;
 use crate::host::snapshot::key::cpu_profile_problem;
-use crate::net::{Ipv4Cidr, guest_gateway};
+use crate::net::Ipv4Cidr;
 use crate::protocol::root::RootUpper;
 
 /// The usage and help of the parser.
@@ -476,7 +476,7 @@ pub(in crate::host::cli) fn sandbox_network(
     // network's first address.
     let guest_network =
         Ipv4Cidr::parse(net).map_err(|message| Exit::error(ErrorCode::Unsupported, message))?;
-    let gateway = guest_gateway(net).expect("a guest network that parses has a gateway");
+    let gateway = guest_network.gateway();
     if network.network_egress.is_none() && (!rules.allow.is_empty() || !rules.deny.is_empty()) {
         return Err(Exit::error(
             ErrorCode::Unsupported,
