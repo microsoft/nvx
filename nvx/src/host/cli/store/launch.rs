@@ -1,7 +1,7 @@
 //! Locked launch transitions and bounded recovery of an interrupted launch.
 
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use super::StateFile;
 use super::files;
@@ -10,6 +10,7 @@ use super::record::{LaunchJournal, RuntimeRecord};
 use crate::host::cli::deadline::RETRY_INTERVAL;
 use crate::host::process::{BootId, KILL_TIMEOUT, Opened, Process, ProcessRef};
 use crate::host::runtime::RuntimeIdentity;
+use crate::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
 use crate::host::vm::{Prepared, SavedVm};
 use crate::{Error, ErrorKind, Result};
 
@@ -73,9 +74,9 @@ impl LockedState {
         }
     }
 
-    /// Rechecks transient fork-inherited descriptors for at most one second.
+    /// Rechecks transient fork-inherited descriptors for at most [`CLAIM_RELEASE_WAIT`].
     fn released_claim(&self, journal: &LaunchJournal, deadline: Instant) -> Result<bool> {
-        let until = deadline.min(Instant::now() + Duration::from_secs(1));
+        let until = deadline.min(Instant::now() + CLAIM_RELEASE_WAIT);
         loop {
             if !self.claim_held(journal)? {
                 return Ok(true);
