@@ -65,7 +65,9 @@ const SCRATCH_BINDING_VERSION: u32 = 1;
 
 /// How long a check of a scratch image that should be free waits for its claim to be released:
 /// long enough for a process that another thread of the caller spawned to execute its program,
-/// and so to close its copy of a claim, as [Claims](self#claims) explains.
+/// and so to close its copy of a claim, as [Claims](self#claims) explains. The sandbox store
+/// waits as long for the claim on an interrupted launch's log, which such a process holds the
+/// same way on Linux, and on Windows while the claim is the log's open handles.
 pub(crate) const CLAIM_RELEASE_WAIT: Duration = Duration::from_secs(1);
 
 /// How often a check tries a claim that is held again.
