@@ -191,6 +191,49 @@ fn verification_takes_the_manifest_of_a_layer_whose_path_spells_its_name_in_anot
     binding.check(&layer, DISTRO_POLICY_REVISION).unwrap();
 }
 
+#[cfg(windows)]
+#[test]
+fn verification_takes_the_manifest_of_a_layer_whose_path_spells_a_non_ascii_letter_in_another_case()
+{
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("distro-\u{e9}.erofs");
+    let manifest = directory.path().join("distro-\u{e9}.erofs.manifest.json");
+    fs::write(&image, b"distro layer\n").unwrap();
+    let digest: String = Sha256::digest(fs::read(&image).unwrap())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let write_manifest = |artifact: &str| {
+        fs::write(
+            &manifest,
+            format!(
+                "{{\"format\": 1, \"artifact\": \"{artifact}\", \"artifact_sha256\": \
+                 \"{digest}\", \"packages\": []}}"
+            ),
+        )
+        .unwrap();
+    };
+    // Windows ignores the case of non-ASCII letters too, so `distro-É.erofs` names the layer
+    // `distro-é.erofs` and the manifest beside it, whose artifact is `distro-é.erofs`.
+    write_manifest("distro-\u{e9}.erofs");
+    let spelled = directory.path().join("distro-\u{c9}.erofs");
+    let layer = SandboxLayer::new(LayerRole::Distro, spelled.to_str().unwrap(), UUID);
+    let binding = DistroBinding::verify(&layer).unwrap();
+    assert_eq!(binding.image, seal_of(&image));
+    assert_eq!(binding.manifest, Some(seal_of(&manifest)));
+    binding.check(&layer, DISTRO_POLICY_REVISION).unwrap();
+    // A manifest that names another letter, `è`, rather than the same one in another case, names
+    // another artifact.
+    write_manifest("distro-\u{e8}.erofs");
+    assert_eq!(
+        failure(DistroBinding::verify(&layer)),
+        (
+            ErrorKind::Unsupported,
+            "sandbox distro manifest does not match its artifact".to_owned()
+        )
+    );
+}
+
 #[test]
 fn bindings_round_trip_through_their_serde_form() {
     let staged = Staged::new(false);
