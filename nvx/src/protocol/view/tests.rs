@@ -122,3 +122,35 @@ fn partial_missing_and_duplicate_owned_tokens_are_refused() {
         assert!(parse(line.as_bytes()).is_err(), "{line}");
     }
 }
+
+#[test]
+fn a_missing_value_is_refused_before_a_repeat_and_a_repeat_before_its_value() {
+    for (line, message) in [
+        (
+            "nvx_hostname nvx_machine_id=image",
+            "the nvx_hostname kernel parameter has no value",
+        ),
+        (
+            "nvx_hostname=626f78 nvx_machine_id",
+            "the nvx_machine_id kernel parameter has no value",
+        ),
+        (
+            "nvx_hostname=626f78 nvx_hostname nvx_machine_id=image",
+            "the nvx_hostname kernel parameter has no value",
+        ),
+        (
+            "nvx_hostname=626f78 nvx_hostname=XY nvx_machine_id=image",
+            "the nvx_hostname kernel parameter is repeated",
+        ),
+        (
+            "nvx_machine_id=image nvx_machine_id=other nvx_hostname=626f78",
+            "the nvx_machine_id kernel parameter is repeated",
+        ),
+    ] {
+        assert_eq!(
+            parse(line.as_bytes()).unwrap_err().message(),
+            message,
+            "{line}"
+        );
+    }
+}
