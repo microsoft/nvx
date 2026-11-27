@@ -13,6 +13,14 @@ use super::seam::{System, path_c_string};
 /// of the host's `/tmp` itself covers.
 const OWN_MOUNTS: [&str; 1] = ["/tmp"];
 
+/// The most bytes of the kernel command line that [`prepare`]'s one read takes: a 4 KiB page
+/// less one byte, more than the 2,048 bytes of Linux's `COMMAND_LINE_SIZE` on x86-64 and arm64,
+/// so that one read takes the whole command line.
+const COMMAND_LINE_READ_LIMIT: usize = 4095;
+
+/// The host export's mount point below `hostfs_dir`.
+const EXPORT_ROOT: &str = "root";
+
 /// The boot-announced host mapping table of the agent, the root beneath which it maps, and its
 /// mapper.
 #[derive(Default)]
@@ -80,13 +88,13 @@ pub(crate) enum MappingError {
 /// Reads the announced mapping count and validates the host export mount, which the guest's init
 /// mounts for the direct agent.
 pub(crate) fn prepare(system: &mut impl System, mappings: &mut HostMappings) -> Result<(), Errno> {
-    let mut command_line = [0u8; 4096];
+    let mut command_line = [0u8; COMMAND_LINE_READ_LIMIT];
     let count = std::fs::File::open(&system.paths().proc_cmdline)
-        .and_then(|mut file| file.read(&mut command_line[..4095]))
+        .and_then(|mut file| file.read(&mut command_line))
         .map_err(|error| sys::errno_of(&error))?;
     mappings.table = MappingTable::announced(&command_line[..count]).map_err(|_| Errno::EINVAL)?;
     let hostfs = system.paths().hostfs_dir.clone();
-    let root = hostfs.join("root");
+    let root = hostfs.join(EXPORT_ROOT);
     let mounted = match (std::fs::metadata(&hostfs), std::fs::metadata(&root)) {
         (Ok(parent), Ok(export)) => parent.dev() != export.dev(),
         _ => false,
@@ -164,7 +172,7 @@ fn open_table(system: &mut impl System, root: &TableRoot) -> Result<TableMapper,
         }
         TableRoot::Layered => return Err(Errno::EINVAL),
     };
-    let export = SourceRoot::open(&system.paths().hostfs_dir.join("root")).map_err(errno)?;
+    let export = SourceRoot::open(&system.paths().hostfs_dir.join(EXPORT_ROOT)).map_err(errno)?;
     Ok(TableMapper {
         mapper: Mapper::new(root, reserved),
         export: Some(export),
