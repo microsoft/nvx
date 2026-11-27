@@ -10,7 +10,7 @@
 //!   and every launch applies it, whether or not the layer has a manifest.
 //! - Explicit verification, [`DistroBinding::verify`], reads the layer's manifest,
 //!   `LAYER.manifest.json` beside the layer, if there is one. The manifest must name the layer,
-//!   as the host compares file names, in any ASCII case on Windows, and its SHA-256 digest, which
+//!   as the host compares file names, in any case on Windows, and its SHA-256 digest, which
 //!   verification compares with a hash of the whole layer, and list the layer's packages, of which
 //!   the distro policy refuses `systemd`. Verification runs where hashing belongs: where a layer
 //!   is built, installed, or staged, in diagnostics, and in the preflight of `nvx sandbox run` and
@@ -193,7 +193,7 @@ impl DistroBinding {
     /// for `nvx.py`'s outcomes, so a path whose lookup fails counts as none; the check of the
     /// binding then refuses that path, as [`check`](Self::check) says. With a manifest, it must
     /// be a JSON object of format 1 that names the layer, as the host compares file names, in any
-    /// ASCII case on Windows, and its SHA-256 digest, with a list of packages that each have a
+    /// case on Windows, and its SHA-256 digest, with a list of packages that each have a
     /// name, of which none is `systemd`. Verification reads the manifest and hashes the whole
     /// layer through the files that it opened, and fails if the metadata of either changed while
     /// it read them. The binding holds the seals that the files had, and

@@ -20,8 +20,8 @@
 //!   verbatim prefix `\\?\` that `canonicalize` gives, and turns `\\?\UNC\` into `\\`, unless only
 //!   the verbatim path names the object, as for a name that ends in a period or a space.
 //! - [`is_named`] compares a file name with the name that the CLI expects, as the host's file
-//!   systems compare names: in any ASCII case on Windows, whose file names ignore case, and
-//!   exactly elsewhere.
+//!   systems compare names: on Windows, whose file names ignore case, in any case, of letters
+//!   beyond ASCII too, and exactly elsewhere.
 //!
 //! Host paths that are not valid Unicode are refused, as [`text`] refuses them, since the CLI
 //! records them as JSON strings and messages name them.
@@ -31,6 +31,9 @@ use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Component, MAIN_SEPARATOR_STR, Path, PathBuf, Prefix};
+
+#[cfg(all(feature = "cli", windows))]
+use crate::host::platform;
 
 /// Returns the error for an operating-system string, which messages call `what`, that is not
 /// valid Unicode.
@@ -217,12 +220,16 @@ fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
 }
 
 /// Returns whether the file name `name` is `expected`, as the host's file systems compare names:
-/// in any ASCII case on Windows, whose file names ignore case, and exactly elsewhere.
+/// on Windows, whose file names ignore case, in any case, of letters beyond ASCII too, through
+/// the operating system's uppercase table, and exactly elsewhere.
 #[cfg(feature = "cli")]
 pub(crate) fn is_named(name: &OsStr, expected: &str) -> bool {
-    if cfg!(windows) {
-        name.eq_ignore_ascii_case(expected)
-    } else {
+    #[cfg(windows)]
+    {
+        platform::is_same_file_name(name, expected)
+    }
+    #[cfg(not(windows))]
+    {
         name == expected
     }
 }

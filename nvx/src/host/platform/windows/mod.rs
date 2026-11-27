@@ -71,6 +71,36 @@ fn refuse_nul(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Returns whether `name` and `expected` are one file name as Windows compares file names: unit
+/// for unit, except for case, which `CompareStringOrdinal` ignores through the operating system's
+/// uppercase table, for letters beyond ASCII too, so that `É` matches `é` as `E` matches `e`.
+#[cfg(feature = "cli")]
+pub(crate) fn is_same_file_name(name: &OsStr, expected: &str) -> bool {
+    use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+
+    /// The `bIgnoreCase` that asks for a comparison that ignores case: 1, the only true value
+    /// that the function takes.
+    const IGNORE_CASE: windows_sys::core::BOOL = 1;
+    let name: Vec<u16> = name.encode_wide().collect();
+    let expected: Vec<u16> = expected.encode_utf16().collect();
+    let (Ok(name_len), Ok(expected_len)) =
+        (i32::try_from(name.len()), i32::try_from(expected.len()))
+    else {
+        return false;
+    };
+    // SAFETY: each buffer holds the number of UTF-16 units that the call takes, and the call only
+    // reads them. A failure returns 0, which is not `CSTR_EQUAL`.
+    unsafe {
+        CompareStringOrdinal(
+            name.as_ptr(),
+            name_len,
+            expected.as_ptr(),
+            expected_len,
+            IGNORE_CASE,
+        ) == CSTR_EQUAL
+    }
+}
+
 /// Encodes a filesystem path for Win32, resolving it before adding an extended-length prefix
 /// when it reaches the legacy directory limit. Existing verbatim and device prefixes are preserved.
 fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
