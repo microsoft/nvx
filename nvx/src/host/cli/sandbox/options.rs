@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::ErrorCode;
 use crate::host::cli::args::{Parser, Receiver, Spec, Syntax, choice, integer};
+use crate::host::cli::cpu_profile;
 use crate::host::cli::network::{NativeRules, NetworkOptions};
 use crate::host::cli::{Exit, Result};
 use crate::host::config::NetworkConfig;
@@ -22,7 +23,6 @@ use crate::host::sandbox::{
     DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, parse_workload_identity,
 };
 use crate::host::snapshot::MIB;
-use crate::host::snapshot::key::cpu_profile_problem;
 use crate::net::Ipv4Cidr;
 use crate::protocol::root::RootUpper;
 
@@ -244,8 +244,8 @@ pub(crate) struct Options {
     pub(crate) inherit_default_environment: bool,
     /// `--hypervisor`, `auto` by default.
     pub(crate) hypervisor: &'static str,
-    /// `--cpu-profile`, if given, which [`cpu_profile_problem`] accepts; OpenVMM's default,
-    /// `auto`, without it.
+    /// `--cpu-profile`, if given, which [`cpu_profile::request_problem`] accepts; OpenVMM's
+    /// default, `auto`, without it.
     pub(crate) cpu_profile: Option<String>,
     /// The `--mount` options.
     pub(crate) mounts: Vec<String>,
@@ -353,7 +353,7 @@ impl Receiver for Options {
             "--hypervisor" => self.hypervisor = choice(&text(), &HYPERVISORS)?,
             "--cpu-profile" => {
                 let profile = text();
-                if let Some(problem) = cpu_profile_problem(&profile) {
+                if let Some(problem) = cpu_profile::request_problem(&profile) {
                     return Err(problem);
                 }
                 self.cpu_profile = Some(profile);

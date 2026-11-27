@@ -39,6 +39,7 @@ use serde_json::Value;
 use super::lifecycle::ProvisionConfig;
 use super::{MAX_MEMORY_MIB, path_string, sandbox_network};
 use crate::ErrorCode;
+use crate::host::cli::cpu_profile;
 use crate::host::cli::json::{Object, pretty_serde, read_object};
 use crate::host::cli::network::{NativeRules, NetworkOptions};
 use crate::host::cli::output;
@@ -56,7 +57,6 @@ use crate::host::sandbox::layer::{LayerRole, SandboxLayer};
 use crate::host::sandbox::mount::{HostQueries, check_distinct_export_roots, os_error};
 use crate::host::sandbox::scratch::ScratchBinding;
 use crate::host::sandbox::{DEFAULT_ENTRYPOINT, has_kernel_separator, require_file};
-use crate::host::snapshot::key::cpu_profile_problem;
 use crate::net::is_valid_hostname;
 use crate::protocol::root::{Journal, OverlayMode, RAM_UPPER_CAPS, RootImage};
 use crate::protocol::view::{MachineIdMode, View};
@@ -639,7 +639,7 @@ impl Config {
         if self
             .cpu_profile
             .as_deref()
-            .is_some_and(|profile| cpu_profile_problem(profile).is_some())
+            .is_some_and(|profile| cpu_profile::request_problem(profile).is_some())
         {
             return Err(malformed());
         }

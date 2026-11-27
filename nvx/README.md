@@ -1920,13 +1920,16 @@ intended changes of behavior.
   so every cold boot with it failed. `snapshot capture --memory-capacity-mib`
   reserves a snapshot's capacity.
 - `sandbox run` and `provision` take `--cpu-profile`, which `nvx.py sandbox`
-  lacked, with a value that OpenVMM's `--cpu-profile` takes: `auto`, `host`, or
-  a profile ID, `VENDOR.GENERATION.vREVISION`; any other is a usage error.
-  `provision` records it, and each `start` requests it of OpenVMM, so that a
-  host whose hypervisor does not support its CPU's built-in profile can run a
-  managed sandbox on a host profile, where `nvx.py` always took OpenVMM's
-  default, `auto`. The other operations, and `snapshot restore`, whose
-  snapshot fixes the profile, refuse it.
+  lacked, with a value that every cold boot of OpenVMM's `--cpu-profile` takes:
+  `auto`, `host`, or the ID of a built-in profile, which
+  `src/host/cli/cpu_generations.json` lists; any other, such as an ID that
+  OpenVMM does not pin, which it would refuse at every start with
+  `E_PROFILE_UNKNOWN`, is a usage error, and a start refuses a record that holds
+  one as malformed. `provision` records it, and each `start` requests it of
+  OpenVMM, so that a host whose hypervisor does not support its CPU's built-in
+  profile can run a managed sandbox on a host profile, where `nvx.py` always
+  took OpenVMM's default, `auto`. The other operations, and `snapshot restore`,
+  whose snapshot fixes the profile, refuse it.
 
 ### Test hooks
 
@@ -2384,7 +2387,8 @@ pin promotion; see
 [OpenVMM's vectors](tests/vectors/README.md#openvmms-vectors).
 `tests/openvmm_cpu_profiles.rs` is an ignored test that compares
 `src/host/cli/cpu_generations.json`, the identities of the built-in CPU
-profiles from which [`run`](#run) guides a failed cold boot, with the profiles
+profiles from which [`run`](#run) guides a failed cold boot, and which
+[`sandbox`](#sandbox) checks its `--cpu-profile` against, with the profiles
 that the submodule pins, and runs where that one does.
 
 `src/host/session/tests/managed_lifecycle.rs` is an ignored unit test of the

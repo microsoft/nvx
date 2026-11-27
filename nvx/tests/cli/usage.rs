@@ -741,6 +741,55 @@ fn usage_errors_exit_2_and_name_the_option() {
     }
 }
 
+/// `sandbox run` and `provision` refuse a `--cpu-profile` of a profile ID's form that no built-in
+/// profile has, such as another revision of a built-in profile or a host profile's, as a usage
+/// error that names it and lists the built-in IDs, before they record or launch anything: every
+/// cold boot of OpenVMM refuses one with `E_PROFILE_UNKNOWN`, so a provision that recorded it
+/// would make a sandbox that never starts.
+#[test]
+fn cpu_profiles_that_no_built_in_profile_has_are_usage_errors() {
+    let root = Root::new();
+    let before = root.snapshot();
+    for profile in ["intel.bogus.v1", "amd.milan.v9", "intel.host.v1"] {
+        let quoted = format!("{profile:?}");
+        for arguments in [
+            vec![
+                "sandbox",
+                "run",
+                "--layer",
+                LAYER,
+                "--scratch",
+                SCRATCH,
+                "--cpu-profile",
+                profile,
+            ],
+            vec![
+                "sandbox",
+                "provision",
+                "--state-dir",
+                "{root/state}",
+                "--layer",
+                LAYER,
+                "--scratch",
+                SCRATCH,
+                "--cpu-profile",
+                profile,
+            ],
+        ] {
+            root.nvx(&arguments).assert_usage_error(
+                "argument-invalid",
+                &[
+                    "--cpu-profile",
+                    &quoted,
+                    "intel.skylake-sp.v1",
+                    "amd.turin.v2",
+                ],
+            );
+            assert_eq!(root.snapshot(), before, "{arguments:?}");
+        }
+    }
+}
+
 /// A command line that asks a parser for its help, and options that the help describes.
 struct Help {
     /// The name of the case.

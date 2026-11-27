@@ -150,6 +150,37 @@ fn the_cpu_profile_is_a_request_of_openvmm_for_run_and_provision() {
     }
 }
 
+/// `--cpu-profile` refuses an ID of a profile ID's form that no built-in profile has, such as
+/// another revision of a built-in profile or a host profile's, as `doc/usage.md` specifies: every
+/// cold boot of the CLI's OpenVMM refuses one with `E_PROFILE_UNKNOWN`, so a provision that
+/// recorded it would make a sandbox that never starts. The refusal lists the built-in IDs.
+#[test]
+fn the_cpu_profile_is_one_that_every_cold_boot_takes() {
+    for operation in ["run", "provision"] {
+        for value in [
+            "intel.bogus.v1",
+            "amd.milan.v9",
+            "intel.alderlake.v2",
+            "intel.host.v1",
+        ] {
+            let error = parse(&[
+                operation.to_owned(),
+                "--cpu-profile".to_owned(),
+                value.to_owned(),
+            ])
+            .unwrap_err();
+            assert_eq!(error.code(), Some(ErrorCode::ArgumentInvalid), "{value:?}");
+            let message = error.message().unwrap();
+            assert!(
+                message.contains("--cpu-profile")
+                    && message.contains(&format!("{value:?}"))
+                    && message.contains("intel.alderlake.v1"),
+                "{message}"
+            );
+        }
+    }
+}
+
 /// Provision records the bindings that explicit verification of the distro layer and the binding
 /// of the scratch image make, which each start checks, and records no binding of a scratch image
 /// for an upper in RAM.
