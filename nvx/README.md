@@ -646,6 +646,10 @@ that OpenVMM's machine profile owns and supplies itself, as OpenVMM reads it,
 split at ASCII whitespace, such as `console=`, `earlycon=`, `nr_cpus=`, a
 `virtnet_*` bootstrap token, or the control console's `nvx_control_tty=`,
 which OpenVMM would refuse at every launch; `Boot::command_line` lists them.
+Outside a capture too, it refuses a caller's clock parameter that OpenVMM's
+time ABI refuses at every cold boot, `tsc_early_khz` or `lapic_timer_hz`, with
+or without a value, read as Linux and the time ABI read the command line, a
+dash matching an underscore.
 `VmConfig::kernel_command_line` renders a cold boot's
 command line: the root's and the view's tokens, `nvx_maps` when an export
 exists, then the caller's text unchanged; a capture's holds only the caller's
@@ -1276,8 +1280,10 @@ is checked as the launched line holds it, untrimmed, and through the guest
 bootstrap's whitespace-only token view too. Reserved `nvx_*` and `virtfs_*`
 names cannot be hidden inside quoted values or behind leading Unicode
 whitespace; a `--` or unclosed quote that hides the tokens that OpenVMM appends
-is refused, and so is a token that OpenVMM's machine profile owns, such as
-`console=` or `nr_cpus=`, which `VmConfig::check` refuses.
+is refused, and so are a token that OpenVMM's machine profile owns, such as
+`console=` or `nr_cpus=`, and a clock parameter that OpenVMM's time ABI
+refuses at every cold boot, `tsc_early_khz` or `lapic_timer_hz`, which
+`VmConfig::check` refuses.
 
 Host paths are the host's own, which `std::path` holds: spelled with their
 components alone, as `Path::components` reads them, with backslashes on

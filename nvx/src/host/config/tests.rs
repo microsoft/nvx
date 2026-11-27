@@ -1139,6 +1139,61 @@ fn cold_boots_refuse_the_tokens_that_openvmms_machine_profile_owns() {
 }
 
 #[test]
+fn cold_boots_refuse_the_clock_parameters_that_openvmms_time_abi_refuses() {
+    // OpenVMM's time ABI refuses every cold boot whose command line sets one of its clock tokens,
+    // with or without a value, as Linux's `parse_args` splits the line, at the 0xa0 that ends `à`
+    // or a vertical tab too, and compares names, before the VM starts
+    // (doc/design/5.1-boot-protocol.md, "Cold Boot Sequence").
+    let boot = |command_line: &str| {
+        Some(Boot {
+            memory_capacity_mib: None,
+            command_line: command_line.to_owned(),
+            capture: None,
+        })
+    };
+    for (command_line, name) in [
+        ("tsc_early_khz=1000000", "tsc_early_khz"),
+        ("lapic_timer_hz=100", "lapic_timer_hz"),
+        ("quiet tsc-early-khz=1000000", "tsc-early-khz"),
+        ("lapic-timer_hz=250 loglevel=7", "lapic-timer_hz"),
+        ("tsc_early_khz", "tsc_early_khz"),
+        ("quiet\u{e0}tsc_early_khz=1", "tsc_early_khz"),
+        ("loglevel=7\u{b}lapic_timer_hz=100", "lapic_timer_hz"),
+    ] {
+        for config in [blockless(), layered(erofs())] {
+            let config = VmConfig {
+                boot: boot(command_line),
+                ..config
+            };
+            for error in [
+                config.check().unwrap_err(),
+                config.check_command_line().unwrap_err(),
+            ] {
+                assert_eq!(error.kind(), ErrorKind::Unsupported, "{command_line:?}");
+                assert!(
+                    error.to_string().contains(&format!(
+                        "Boot.command_line sets the clock parameter {name:?}"
+                    )),
+                    "{command_line:?}: {error}"
+                );
+            }
+        }
+    }
+    // Other names, and these names in a value, are the caller's, as OpenVMM reads them.
+    for command_line in [
+        "tsc=reliable lapic_timer=100 tsc_early_khz_hint=1 xlapic_timer_hz=1",
+        "other=tsc_early_khz=1 nvx_arg=lapic_timer_hz",
+    ] {
+        let config = VmConfig {
+            boot: boot(command_line),
+            ..blockless()
+        };
+        config.check().unwrap();
+        config.check_command_line().unwrap();
+    }
+}
+
+#[test]
 fn mapping_table_is_the_exact_export_projection_counted_by_the_boot_token() {
     let mut plan = export("/work");
     plan.children.push(ExportChild {

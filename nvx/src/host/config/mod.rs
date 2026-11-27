@@ -83,6 +83,14 @@ const CONTROL_CONSOLE_PARAMETERS: [&str; 3] = [
     "virtio_mmio.device",
 ];
 
+/// The names of the clock parameters that OpenVMM's time ABI refuses on the command line of every
+/// cold boot, its `CLOCK_TOKENS`: the rates of the TSC and of the LAPIC timer, which the time ABI
+/// declares to the guest itself. OpenVMM reads the command line as Linux's `parse_args` does, and
+/// refuses a parameter with or without a value whose name is one of them as Linux compares names,
+/// a dash matching an underscore, before the VM starts (`doc/design/5.1-boot-protocol.md`, "Cold
+/// Boot Sequence"). The time ABI's other forbidden parameters reach the guest, which refuses them.
+const CLOCK_PARAMETERS: [&str; 2] = ["tsc_early_khz", "lapic_timer_hz"];
+
 /// The processor counts of a microVM.
 pub(crate) const PROCESSOR_COUNTS: [u32; 4] = [1, 2, 4, 8];
 
@@ -212,8 +220,11 @@ pub struct Boot {
     /// itself: `earlycon`, `console`, `virtio_mmio.device`, `nr_cpus`, the NIC's `virtnet_ip`,
     /// `virtnet_mask`, `virtnet_gw`, `virtnet_dns`, `virtnet_ip6`, `virtnet_gw6` and
     /// `virtnet_ingress`, `nvx_snapshot_tier`, `nvx_workload_uid`, `nvx_workload_gid`,
-    /// `nvx_lifecycle`, and the control console's `nvx_control_tty` and `driver_async_probe`.
-    /// Every other token, including `nvx_entrypoint`, `nvx_arg` and `nvx_share`, is caller-owned.
+    /// `nvx_lifecycle`, and the control console's `nvx_control_tty` and `driver_async_probe`, and
+    /// the clock parameters that OpenVMM's time ABI refuses at every cold boot, `tsc_early_khz` and
+    /// `lapic_timer_hz`, with or without a value, whose names match with dashes and underscores
+    /// alike. Every other token, including `nvx_entrypoint`, `nvx_arg` and `nvx_share`, is
+    /// caller-owned.
     /// A capture permits only OpenVMM's platform allowlist, which admits the kernel tuning
     /// parameters `mitigations=off`, `mitigations=auto`, `mitigations=auto,nosmt`,
     /// `no_timer_check`, `quiet`, and `loglevel=0` to `loglevel=7`, each parameter at most once,
@@ -908,12 +919,14 @@ impl VmConfig {
     /// reserves; caller boot tokens that collide with the root's,
     /// the view's, `nvx_maps`, or any `virtfs_*` name; and, outside a capture, a caller boot token
     /// that OpenVMM's machine profile owns, which [`Boot::command_line`] lists, and which OpenVMM
-    /// would refuse at every launch.
+    /// would refuse at every launch, and then a caller's clock parameter that OpenVMM's time ABI
+    /// refuses at every cold boot, `tsc_early_khz` or `lapic_timer_hz`.
     ///
     /// The NIC's address is checked when it is built, and the network's policy where it is
     /// lowered, with the guest's address. Boot tokens are read as both Linux and the guest's init
-    /// read them, with dashes and underscores matching as Linux matches parameter names, and those
-    /// that OpenVMM's machine profile owns as OpenVMM reads them, split at ASCII whitespace.
+    /// read them, with dashes and underscores matching as Linux matches parameter names, those
+    /// that OpenVMM's machine profile owns as OpenVMM reads them, split at ASCII whitespace, and
+    /// the time ABI's clock parameters as Linux and OpenVMM's time ABI read them.
     /// [`kernel_command_line`](Self::kernel_command_line) appends accepted caller text unchanged.
     pub fn check(&self) -> Result<()> {
         if self.processors == 0 {
@@ -988,9 +1001,31 @@ impl VmConfig {
                      owns"
                 )));
             }
+            if boot.capture.is_none()
+                && let Some(name) = clock_parameter(&boot.command_line)
+            {
+                return Err(Error::unsupported(format!(
+                    "Boot.command_line sets the clock parameter {name:?}, which OpenVMM's time ABI \
+                     refuses at every cold boot"
+                )));
+            }
         }
         Ok(())
     }
+}
+
+/// Returns the name of the first parameter of `command_line`, a cold boot's caller tokens, that is
+/// one of [`CLOCK_PARAMETERS`], read as OpenVMM's time ABI reads it: as Linux's `parse_args` splits
+/// the command line, which [`cmdline::parameters`] does, with or without a value, and with names
+/// compared as Linux compares them.
+fn clock_parameter(command_line: &str) -> Option<String> {
+    cmdline::parameters(command_line.as_bytes())
+        .find(|parameter| {
+            CLOCK_PARAMETERS
+                .iter()
+                .any(|clock| parameter.is_named(clock))
+        })
+        .map(|parameter| String::from_utf8_lossy(parameter.name).into_owned())
 }
 
 /// Returns the name of the first token of `command_line`, a cold boot's caller tokens, that
