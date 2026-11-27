@@ -1205,9 +1205,10 @@ pub(crate) fn check_cpuinfo(
 /// command line, as [`cmdline::parameters`] reads them, in quotes, after any of its whitespace,
 /// and up to a `--`.
 ///
-/// The ABI forbids `tsc_early_khz`, `nolapic`, and `nolapic_timer`, whose `early_param` handlers
-/// the kernel matches by their names, and `lapic_timer_hz`, the clock token that OpenVMM refuses
-/// with `tsc_early_khz`, by its name too; `notsc`, whose `__setup` handler the kernel matches with
+/// The ABI forbids `tsc_early_khz`, `nolapic`, `nolapic_timer`, and `noapictimer`, whose
+/// `early_param` handlers the kernel matches by their names, and of which the last two disable the
+/// LAPIC timer alike, and `lapic_timer_hz`, the clock token that OpenVMM refuses with
+/// `tsc_early_khz`, by its name too; `notsc`, whose `__setup` handler the kernel matches with
 /// every parameter that starts with it; and `tsc=unstable`, an `hpet=` list with an option that
 /// starts with `force`, as `hpet_setup` reads it, and a clocksource override other than `tsc`, by
 /// `clocksource=` or by its deprecated alias `clock=`, which `boot_override_clock` hands to the
@@ -1220,11 +1221,12 @@ pub(crate) fn check_cpuinfo(
 /// leaves open holds the value that the kernel read.
 pub(crate) fn check_cmdline(text: &[u8]) -> Result<(), Vec<u8>> {
     /// The forbidden parameters that the kernel, or OpenVMM for `lapic_timer_hz`, matches by name.
-    const NAMES: [&str; 4] = [
+    const NAMES: [&str; 5] = [
         "tsc_early_khz",
         "lapic_timer_hz",
         "nolapic",
         "nolapic_timer",
+        "noapictimer",
     ];
     /// The parameters whose `__setup` handlers set the clocksource override.
     const CLOCKSOURCE_OVERRIDES: [&str; 2] = ["clocksource", "clock"];
