@@ -1049,7 +1049,7 @@ fn the_command_line_is_checked_as_the_kernel_reads_it() {
     // The kernel applies these parameters however the command line separates, quotes, or
     // spells them: `à` is C3 A0 in UTF-8, and the kernel takes the byte 0xa0, as it does the
     // vertical tab, for whitespace (microsoft/nvx#723).
-    let cases: [(&[u8], &[u8]); 25] = [
+    let cases: [(&[u8], &[u8]); 28] = [
         (b"quiet \xc3\xa0tsc=unstable", b"tsc=unstable"),
         (b"quiet\xc3\xa0tsc=unstable", b"tsc=unstable"),
         (b"quiet\x0btsc_early_khz=2100000", b"tsc_early_khz=2100000"),
@@ -1068,6 +1068,11 @@ fn the_command_line_is_checked_as_the_kernel_reads_it() {
         (b"notscx", b"notscx"),
         (b"hpet=verbose,force", b"hpet=verbose,force"),
         (b"hpet=forced", b"hpet=forced"),
+        // `__setup("apicpmtimer", ...)`, whose handler calls that of `notsc`, takes every
+        // parameter that starts with it too, with or without a value.
+        (b"quiet apicpmtimer", b"apicpmtimer"),
+        (b"apicpmtimer=1\n", b"apicpmtimer=1"),
+        (b"apicpmtimerx", b"apicpmtimerx"),
         (b"clocksource=tsc clocksource=hpet", b"clocksource=hpet"),
         (b"clocksource=", b"clocksource="),
         // `clock=`, the deprecated alias of `clocksource=`, sets the same override, `pmtmr` as
@@ -1099,6 +1104,7 @@ fn the_command_line_is_checked_as_the_kernel_reads_it() {
         b"a=\"tsc=unstable notsc\" b",
         b"xnotsc tscx=unstable tsc=unstable2 hpet=disable,verbose clocksource nolapicx",
         b"clock=tsc clock clocks=hpet clock_x=jiffies",
+        b"apicpmtime xapicpmtimer apic-pm-timer APICPMTIMER",
         b"quiet\xe2\x80\x83tsc=unstable",
         b"quiet\0 tsc=unstable",
         b"quiet clocksource=\"tsc\n",
@@ -1142,6 +1148,9 @@ fn applies_forbidden_clock(name: &[u8], value: Option<&[u8]>) -> bool {
     .into_iter()
     .any(early)
         || setup("notsc").is_some()
+        // `setup_apicpmtimer`, the handler of `apicpmtimer`, calls `notsc_setup`, that of
+        // `notsc`, which marks the TSC unstable.
+        || setup("apicpmtimer").is_some()
         || setup("tsc=") == Some(b"unstable".as_slice())
         || setup("hpet=").is_some_and(|argument| {
             argument
@@ -1159,9 +1168,10 @@ fn applies_forbidden_clock(name: &[u8], value: Option<&[u8]>) -> bool {
 /// quotes, the `--` delimiter, and the kernel's whitespace.
 fn clock_command_line() -> impl Strategy<Value = Vec<u8>> {
     /// The pieces of the command lines.
-    const PIECES: [&[u8]; 30] = [
+    const PIECES: [&[u8]; 31] = [
         b"tsc",
         b"notsc",
+        b"apicpmtimer",
         b"nolapic",
         b"_timer",
         b"-timer",

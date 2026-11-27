@@ -1207,8 +1207,9 @@ pub(crate) fn check_cpuinfo(
 ///
 /// The ABI forbids `tsc_early_khz`, `nolapic`, and `nolapic_timer`, whose `early_param` handlers
 /// the kernel matches by their names, and `lapic_timer_hz`, the clock token that OpenVMM refuses
-/// with `tsc_early_khz`, by its name too; `notsc`, whose `__setup` handler the kernel matches with
-/// every parameter that starts with it; and `tsc=unstable`, an `hpet=` list with an option that
+/// with `tsc_early_khz`, by its name too; `notsc` and `apicpmtimer`, whose `__setup` handlers
+/// mark the TSC unstable, the second by calling the first, and which the kernel matches with
+/// every parameter that starts with either; and `tsc=unstable`, an `hpet=` list with an option that
 /// starts with `force`, as `hpet_setup` reads it, and a clocksource override other than `tsc`, by
 /// `clocksource=` or by its deprecated alias `clock=`, which `boot_override_clock` hands to the
 /// same override, as `acpi_pm` for `pmtmr`, whose `__setup` handlers take the values. Names match
@@ -1228,10 +1229,17 @@ pub(crate) fn check_cmdline(text: &[u8]) -> Result<(), Vec<u8>> {
     ];
     /// The parameters whose `__setup` handlers set the clocksource override.
     const CLOCKSOURCE_OVERRIDES: [&str; 2] = ["clocksource", "clock"];
+    /// The `__setup` strings whose handlers mark the TSC unstable: `notsc`, and `apicpmtimer`,
+    /// whose handler calls that of `notsc`.
+    const TSC_UNSTABLE_SETUPS: [&str; 2] = ["notsc", "apicpmtimer"];
     let forbidden = |parameter: &Parameter<'_>| {
         let value = |name: &str| parameter.value.filter(|_| parameter.is_named(name));
         NAMES.iter().any(|name| parameter.is_named(name))
-            || parameter.name.starts_with(b"notsc")
+            // Neither string holds an `=`, a dash, or an underscore, so the kernel's `parameqn`
+            // matches one with a parameter's text exactly when the parameter's name starts with it.
+            || TSC_UNSTABLE_SETUPS
+                .iter()
+                .any(|setup| parameter.name.starts_with(setup.as_bytes()))
             || value("tsc") == Some(b"unstable".as_slice())
             || value("hpet").is_some_and(|options| {
                 options

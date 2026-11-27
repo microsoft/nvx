@@ -1863,6 +1863,7 @@ fn time_test_mode_covers_checks_events_records_and_workers() {
         "tsc_early_khz=2194843",
         "lapic_timer_hz=200000000",
         "notsc",
+        "apicpmtimer",
         "nolapic",
         "nolapic_timer",
         "tsc=unstable",
