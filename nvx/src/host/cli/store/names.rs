@@ -1,5 +1,7 @@
 //! The files that the sandbox commands keep in a state directory.
 
+use crate::host::{vm, vm_directory};
+
 /// A file that the sandbox commands keep in a state directory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StateFile {
@@ -63,10 +65,10 @@ impl StateFile {
             Self::Journal => "launch.json",
             Self::Runtime => "runtime.json",
             Self::Capability => "control.capability",
-            Self::Socket => "control.sock",
-            Self::Log => "openvmm.log",
-            Self::Outcome => "outcome.json",
-            Self::ActivationRecord => "activation-record.bin",
+            Self::Socket => vm_directory::CONTROL,
+            Self::Log => vm_directory::LOG,
+            Self::Outcome => vm_directory::OUTCOME,
+            Self::ActivationRecord => vm::ACTIVATION_RECORD,
         }
     }
 }

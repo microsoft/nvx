@@ -84,6 +84,7 @@ use crate::host::sandbox::mount::{
 };
 use crate::host::sandbox::options::{SandboxOperation, validate_run_share_targets};
 use crate::host::vm::{self, VmDir};
+use crate::host::vm_directory;
 use crate::protocol::view::{MachineIdMode, View};
 
 /// The usage and help of the parser.
@@ -755,10 +756,10 @@ fn remove_vm_directory(dir: &VmDir) -> Result {
         Err(error) => Err(Exit::from_os_error(error)),
     };
     for name in [
-        "openvmm.log",
-        "outcome.json",
-        "control.sock",
-        "console.sock",
+        vm_directory::LOG,
+        vm_directory::OUTCOME,
+        vm_directory::CONTROL,
+        vm_directory::CONSOLE,
     ] {
         remove(&dir.path().join(name))?;
     }

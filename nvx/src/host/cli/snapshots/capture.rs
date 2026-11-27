@@ -25,10 +25,12 @@ use crate::host::config::{
 use crate::host::network::{Access, NetworkPolicy};
 use crate::host::process::{Exited, KILL_TIMEOUT, Process};
 use crate::host::runtime::{LaunchOptions, Runtime};
+use crate::host::sandbox::LOGICAL_BLOCK_SIZE;
 use crate::host::session::{ControlSession, SessionError};
 use crate::host::snapshot::{DESCRIPTION_FILE, KEY_FILE, MIB, OPENVMM_DIR, finish_capture};
 use crate::host::transport;
 use crate::host::vm::{self, Prepared, VmDir, VmOutputs};
+use crate::host::vm_directory;
 use crate::net::Ipv4Cidr;
 use crate::protocol::view::{MachineIdMode, View};
 
@@ -351,12 +353,16 @@ fn capture(
     })
 }
 
+/// The probe file through which [`disk_geometry`] reads the block geometry of a VM's filesystem.
+const GEOMETRY_PROBE: &str = "geometry.raw";
+
 /// Reads the geometry through the existing block-device helper on this VM's filesystem.
 fn disk_geometry(dir: &VmDir) -> Result<BlockGeometry> {
-    let path = dir.path().join("geometry.raw");
+    let path = dir.path().join(GEOMETRY_PROBE);
     let file = crate::host::platform::create_new(&path)
         .map_err(|error| io_error(ErrorCode::Io, &error, &path))?;
-    file.set_len(512)
+    // One logical block is the shortest length that `block_geometry` accepts.
+    file.set_len(u64::from(LOGICAL_BLOCK_SIZE))
         .map_err(|error| io_error(ErrorCode::Io, &error, &path))?;
     let geometry = crate::host::sandbox::block_geometry(&file, &path, "capture probe")?;
     drop(file);
@@ -396,10 +402,10 @@ fn remove_capture(store: &Store, deadline: Deadline) -> Result {
         let name = entry.file_name();
         let known = StateFile::ALL.iter().any(|file| name == file.name())
             || [
-                "geometry.raw",
-                "capture-image.raw",
-                "capture-scratch.raw",
-                "console.sock",
+                GEOMETRY_PROBE,
+                vm::CAPTURE_IMAGE,
+                vm::CAPTURE_SCRATCH,
+                vm_directory::CONSOLE,
                 KEY_FILE,
                 DESCRIPTION_FILE,
                 OPENVMM_DIR,
