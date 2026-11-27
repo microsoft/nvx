@@ -321,18 +321,21 @@ pub(crate) type TransportHandle = std::os::fd::OwnedFd;
 #[cfg(windows)]
 pub(crate) type TransportHandle = std::os::windows::io::OwnedHandle;
 
+/// Returns the time left until `deadline`, or `None` once it has passed: a deadline that is due
+/// now has no time left.
+pub(super) fn time_until(deadline: std::time::Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|left| !left.is_zero())
+}
+
 /// Returns the time left until `deadline`, `None` without one, or an [`io::ErrorKind::TimedOut`]
 /// error once it has passed.
 #[cfg(any(target_os = "linux", windows))]
 fn time_left(deadline: Option<std::time::Instant>) -> io::Result<Option<Duration>> {
-    match deadline {
-        None => Ok(None),
-        Some(deadline) => deadline
-            .checked_duration_since(std::time::Instant::now())
-            .filter(|left| !left.is_zero())
-            .map(Some)
-            .ok_or_else(|| io::ErrorKind::TimedOut.into()),
-    }
+    deadline
+        .map(|deadline| time_until(deadline).ok_or_else(|| io::ErrorKind::TimedOut.into()))
+        .transpose()
 }
 
 /// Returns the error of an owned child whose exit could not be confirmed: `wait`, the failure of

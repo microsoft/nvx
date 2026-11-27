@@ -326,7 +326,8 @@ pub(crate) fn endpoint_server_pid_until(
                 /// Bounds each wait for the backlog to drain to 25 ms before rechecking the
                 /// endpoint and the caller's deadline.
                 const MAX_BACKLOG_WAIT: Duration = Duration::from_millis(25);
-                let left = time_left(Some(deadline))?.expect("the probe has a deadline");
+                let left =
+                    crate::host::platform::time_until(deadline).ok_or(io::ErrorKind::TimedOut)?;
                 thread::sleep(left.min(MAX_BACKLOG_WAIT));
             }
             Err(error) => return Err(error),

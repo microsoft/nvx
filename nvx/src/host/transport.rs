@@ -66,16 +66,13 @@ pub(crate) fn connect_verified(
     let mut unavailable = None;
     loop {
         check_running(&process)?;
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .filter(|remaining| !remaining.is_zero())
-            .ok_or_else(|| {
-                Error::timed_out("the control connection timed out").with_source(
-                    unavailable
-                        .take()
-                        .unwrap_or_else(|| io::Error::from(io::ErrorKind::TimedOut)),
-                )
-            })?;
+        let remaining = platform::time_until(deadline).ok_or_else(|| {
+            Error::timed_out("the control connection timed out").with_source(
+                unavailable
+                    .take()
+                    .unwrap_or_else(|| io::Error::from(io::ErrorKind::TimedOut)),
+            )
+        })?;
         let attempt =
             platform::connect_endpoint(endpoint, reference.pid, remaining.min(ATTEMPT_TIMEOUT));
         check_running(&process)?;
@@ -402,14 +399,9 @@ impl HostConnection {
 
 /// Converts a deadline into the time left, failing once it has passed.
 fn remaining(deadline: Option<Instant>) -> Result<Option<Duration>, HostConnectionError> {
-    match deadline {
-        None => Ok(None),
-        Some(deadline) => deadline
-            .checked_duration_since(Instant::now())
-            .filter(|remaining| !remaining.is_zero())
-            .map(Some)
-            .ok_or(HostConnectionError::TimedOut),
-    }
+    deadline
+        .map(|deadline| platform::time_until(deadline).ok_or(HostConnectionError::TimedOut))
+        .transpose()
 }
 
 /// Returns the failure for an event that the session reports in no state that the connection

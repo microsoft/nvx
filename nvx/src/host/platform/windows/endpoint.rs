@@ -285,7 +285,8 @@ pub(crate) fn endpoint_server_pid_until(
                 /// Bounds each busy-pipe wait to 100 ms before rechecking the endpoint and
                 /// the caller's deadline.
                 const MAX_PIPE_WAIT_MS: u128 = 100;
-                let left = time_left(Some(deadline))?.expect("the probe has a deadline");
+                let left =
+                    crate::host::platform::time_until(deadline).ok_or(io::ErrorKind::TimedOut)?;
                 let wait = left.as_millis().min(MAX_PIPE_WAIT_MS) as u32;
                 // Zero selects the server's default timeout, not a nonblocking wait.
                 if wait == 0 {
