@@ -2,7 +2,10 @@
 //! anything changes: each refusal exits with status 1, names what it refuses, leaves the root as it
 //! was, with no state directory, and launches no OpenVMM.
 
-use crate::harness::{Content, Hosts, LAYER, Outcome, Root, SCRATCH, UUID, in_parallel};
+use crate::harness::{
+    Content, FOREIGN_HYPERVISOR, FOREIGN_HYPERVISOR_REFUSAL, Hosts, LAYER, Outcome, Root, SCRATCH,
+    UUID, in_parallel,
+};
 use crate::lifecycle::{provision, sandbox};
 
 /// An environment file of one entry.
@@ -825,6 +828,33 @@ fn sandbox_refusals() -> Vec<Refusal> {
             sandbox_run(&["--host-loopback-forward", "8080"]),
             &["network policy options require --net"],
         ),
+        // OpenVMM exits at once on a hypervisor that this host's operating system cannot run, so
+        // every start of a sandbox of one would fail, and a run would launch OpenVMM for nothing.
+        refusal(
+            "hypervisor that this host cannot run, at provision",
+            "unsupported",
+            provision("{root/state}", &["--hypervisor", FOREIGN_HYPERVISOR]),
+            &[FOREIGN_HYPERVISOR_REFUSAL],
+        ),
+        refusal(
+            "MSHV at provision on Windows",
+            "unsupported",
+            provision("{root/state}", &["--hypervisor", "mshv"]),
+            &["hypervisor mshv is not supported on windows"],
+        )
+        .on(Hosts::Windows),
+        refusal(
+            "hypervisor that this host cannot run",
+            "unsupported",
+            sandbox_run(&["--hypervisor", FOREIGN_HYPERVISOR]),
+            &[FOREIGN_HYPERVISOR_REFUSAL],
+        ),
+        refusal(
+            "hypervisor that this host cannot run, at a dry run",
+            "unsupported",
+            sandbox_run(&["--hypervisor", FOREIGN_HYPERVISOR, "--dry-run"]),
+            &[FOREIGN_HYPERVISOR_REFUSAL],
+        ),
         refusal(
             "missing OpenVMM",
             "artifact-missing",
@@ -1597,6 +1627,18 @@ fn run_refusals() -> Vec<Refusal> {
             &["caller owner", "Linux"],
         )
         .on(Hosts::Windows),
+        refusal(
+            "run: hypervisor that this host cannot run",
+            "unsupported",
+            run_dry(&["--hypervisor", FOREIGN_HYPERVISOR]),
+            &[FOREIGN_HYPERVISOR_REFUSAL],
+        ),
+        refusal(
+            "run: hypervisor that this host cannot run, at launch",
+            "unsupported",
+            ["run", "--hypervisor", FOREIGN_HYPERVISOR],
+            &[FOREIGN_HYPERVISOR_REFUSAL],
+        ),
         refusal(
             "run: missing OpenVMM at launch",
             "artifact-missing",

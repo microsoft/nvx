@@ -168,7 +168,7 @@ nvx/target/release/nvx run
 | Option | Default | Description |
 | --- | --- | --- |
 | `--guest {alpine,ubuntu,azurelinux}` | `alpine` | Select Alpine, Ubuntu, or Azure Linux userland with the same NVX kernel. A restore refuses it. |
-| `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the OpenVMM hypervisor. `auto` chooses WHP on Windows and KVM elsewhere. |
+| `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the OpenVMM hypervisor. `auto` chooses WHP on Windows and KVM elsewhere. A hypervisor that this host's operating system cannot run, KVM or MSHV on Windows and WHP on Linux, fails with `unsupported` before anything is downloaded or launched, in a dry run too. |
 | `--machine {microvm}` | `microvm` | Select the fixed-topology microVM with shared-status edge interrupts. |
 | `--memory-mib MIB` | guest-specific | Set guest memory in MiB, an ASCII decimal integer from 1 to 17592186044415, without signs, whitespace, or underscores. Defaults to 128 for Alpine, 512 for Ubuntu, and 512 for Azure Linux, and for a restore to 256, as for [`snapshot restore`](#snapshot-restore), which must be a multiple of 128 between the snapshot's boot memory and its capacity. A cold boot reserves no memory capacity: OpenVMM reserves one only for a capture, as [`snapshot capture`](#snapshot-capture) describes. |
 | `--processors {1,2,4,8}` | `1` | Select the microVM processor count, written as one of the choices. A restore refuses it: its VM keeps the processors that the snapshot had online. |
@@ -376,7 +376,7 @@ their names cannot be abbreviated either.
 | `--environment KEY=VALUE` | omitted | Set the exact environment of the workload of `run` or `exec`. Repeat for multiple entries. Empty values, spaces, additional equals signs, and UTF-8 are preserved. Inline values are visible in the invoking host process arguments; use `--environment-file` for sensitive values. |
 | `--environment-file PATH` | omitted | Read the exact environment of the workload of `run` or `exec` from a strict UTF-8 JSON array of `KEY=VALUE` strings, limited to 1 MiB of input. `PATH` may also be a FIFO or a terminal, such as `/dev/stdin`; on Linux, Ctrl-C ends the wait for its input. Invalid JSON, non-finite numbers, and unpaired surrogate escapes are refused. An empty array requests an empty environment. This option is mutually exclusive with `--environment`; omitting both preserves guest defaults. |
 | `--inherit-default-environment` | off | Layer the environment of the workload of `run` or `exec` from `--environment` or `--environment-file` over the guest default environment instead of replacing it; an entry replaces the default variable of the same name. Without either option the workload already receives the defaults, so the flag has no effect. |
-| `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the host hypervisor. |
+| `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the host hypervisor. `auto` chooses WHP on Windows and KVM elsewhere. `run`, in a dry run too, and `provision` refuse a hypervisor that this host's operating system cannot run, KVM or MSHV on Windows and WHP on Linux, with `unsupported` before they record, download, or launch anything, and `start` refuses a sandbox that records one. |
 | `--cpu-profile ID` | `auto` | Select the guest's [CPU profile](#cpu-profiles) for `run` or `provision`, as for [`run`](#run): `auto` for the built-in profile of the host's CPU, which falls back with a warning to a development profile derived from this host on an Intel or AMD CPU that no built-in profile serves, a built-in profile ID, or `host` for that development profile, as on a host whose hypervisor does not support its CPU's built-in profile. Any other value, which is not of the form `VENDOR.GENERATION.vREVISION`, is a usage error. `provision` records the profile, and each `start` requests it of OpenVMM; other sandbox operations reject this option. |
 | `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Live-share a host directory, or a single regular host file without its directory, at the absolute target inside the container rootfs for `run` or `provision`; defaults to `ro`. The target cannot contain whitespace, control characters, double quotes, backslashes, `=`, or any UTF-8 byte that Linux treats as whitespace, such as the `0xa0` in `à`. The mode follows the last comma, so `HOST_PATH` may contain commas when the mode is given. Repeat to attach more shares, each with its own target and mode, for example a read-write workspace and a read-only tool cache, as the children of an aggregate that the guest binds at their targets. Targets and host paths must not overlap, and `run`, `provision`, and `start` refuse a host path that equals, contains, or lies inside the sandbox's image, scratch image, OpenVMM, whether the artifact root's or the one that `NVX_OPENVMM` names, kernel, or initramfs, the state directory of `provision` and `start`, or the temporary VM directory of `run`; see [Live host shares](run.md#live-host-shares). The kernel command line announces only the number of the shares, whose mapping table the sandbox sends once its guest agent is ready, for at most 256 shares. An `rw` share accepts guest-created symbolic links, which the host never follows. `/`, `/etc`, `/run`, and `/run/nvx`, and the `/etc/machine-id`, `/etc/resolv.conf`, `/proc`, `/sys`, `/dev`, `/.nvx-agent`, and `/run/nvx/time` trees, are reserved. |
 | `--mount-deny HOST_PATH` | none | Hide one existing file or directory inside a `--mount` host directory; relative paths are resolved inside it. It may name the directory itself when `--mount-allow` paths inside it remain. With several shares, it applies to the `--mount` before it, which must share a directory. Repeat to deny multiple paths. |
@@ -419,10 +419,12 @@ nvx/target/release/nvx snapshot capture baseline \
     --store-dir /private/snapshots --hypervisor kvm
 ```
 
-Use `mshv` on Linux/MSHV or `whp` on Windows. The store's parent must exist;
-the store and its capture VM are private to the current user. Capture uses the
-identified OpenVMM, kernel and Alpine initramfs already installed in the artifact
-root, without downloading substitutes or accepting `NVX_OPENVMM` overrides.
+Use `mshv` on Linux/MSHV or `whp` on Windows; a hypervisor that this host's
+operating system cannot run fails with `unsupported` before the store is
+created. The store's parent must exist; the store and its capture VM are
+private to the current user. Capture uses the identified OpenVMM, kernel and
+Alpine initramfs already installed in the artifact root, without downloading
+substitutes or accepting `NVX_OPENVMM` overrides.
 
 The VM boots with `nvx_sandbox=1` and no workload or layered root. Its sparse
 placeholder image is at most `--image-capacity-mib` (1024 by default), and its
@@ -491,8 +493,9 @@ such as a new empty ext4 image, so a later start of a restored sandbox with a
 scratch image refuses once an earlier start has created the sandbox's view of
 the snapshot, as each start does before its guest can use the image: deprovision
 the sandbox and restore the snapshot again with a fresh one. A missing snapshot
-provisions nothing; a sandbox whose start fails stays provisioned, as after
-`sandbox provision`.
+provisions nothing, and a `--hypervisor` that this host's operating system
+cannot run fails with `unsupported` before the command opens the store; a
+sandbox whose start fails stays provisioned, as after `sandbox provision`.
 
 A restore attaches the sandbox's image and upper in place of the snapshot's
 placeholder image and dormant scratch: the image must fit the placeholder,

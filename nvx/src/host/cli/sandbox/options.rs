@@ -13,6 +13,7 @@ use crate::host::network::{
     openvmm_arguments,
 };
 use crate::host::paths;
+use crate::host::runtime::Hypervisor;
 use crate::host::sandbox::distro::DistroFormat;
 use crate::host::sandbox::layer::SandboxLayer;
 use crate::host::sandbox::mount::{MountOwner, PolicyKind};
@@ -401,6 +402,26 @@ pub(in crate::host::cli) fn hypervisor(selected: &'static str) -> &'static str {
         "auto" if cfg!(windows) => "whp",
         "auto" => "kvm",
         other => other,
+    }
+}
+
+/// Refuses `selected`, a `--hypervisor` choice or the hypervisor that a sandbox records, if it
+/// names a hypervisor that this host's operating system cannot run, as `download` refuses it:
+/// KVM and MSHV run on Linux alone, and WHP on Windows alone, so OpenVMM would exit at once on
+/// any other. `auto`, which selects this host's, passes, and so does a value that names no
+/// hypervisor, which its reader refuses.
+///
+/// Fails with [`ErrorCode::Unsupported`], as in `hypervisor kvm is not supported on windows`.
+pub(in crate::host::cli) fn check_hypervisor(selected: &str) -> Result {
+    match selected.parse::<Hypervisor>() {
+        Ok(hypervisor) if !hypervisor.supported_on_host() => Err(Exit::error(
+            ErrorCode::Unsupported,
+            format!(
+                "hypervisor {selected} is not supported on {}",
+                std::env::consts::OS
+            ),
+        )),
+        _ => Ok(()),
     }
 }
 

@@ -56,8 +56,8 @@ use super::download::{self, Hold};
 use super::network::{NativeRules, NetworkOptions};
 use super::output::ConsoleOutput;
 use super::sandbox::{
-    self, HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, copy_openvmm_outcome, error_with_cause,
-    export_tokens, hypervisor, path_string, path_text, sandbox_network,
+    self, HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, check_hypervisor, copy_openvmm_outcome,
+    error_with_cause, export_tokens, hypervisor, path_string, path_text, sandbox_network,
     validate_outcome_destination,
 };
 use super::session::{AttachmentCancellation, Session};
@@ -421,7 +421,8 @@ pub(super) fn parse(arguments: &[String]) -> Result<(Options, Vec<String>)> {
 }
 
 /// Checks `options` before anything that it looks up: a cold boot refuses the options that only a
-/// restore takes, and a restore those of [`COLD_ONLY`], in the order given.
+/// restore takes, and a restore those of [`COLD_ONLY`], in the order given; and either refuses a
+/// `--hypervisor` that this host's operating system cannot run, as [`check_hypervisor`] does.
 fn check(options: &Options) -> Result {
     let refused = |message: String| Err(Exit::error(ErrorCode::Unsupported, message));
     let restore = options.restore_snapshot.is_some();
@@ -440,7 +441,7 @@ fn check(options: &Options) -> Result {
     if !restore && network.net.is_some() != network.network_profile.is_some() {
         return refused("--net and --network-profile must be specified together".to_owned());
     }
-    Ok(())
+    check_hypervisor(options.hypervisor)
 }
 
 /// Returns the guest RAM in MiB: `--memory-mib`, or else the guest's default.

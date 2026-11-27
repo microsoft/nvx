@@ -803,7 +803,7 @@ fn a_restored_start_refuses_a_share_of_its_snapshot_store() {
     validate_mounts(&mounts).unwrap();
     let export = plan_mounts(&mounts).unwrap();
     let options = ProvisionConfig {
-        hypervisor: "kvm",
+        hypervisor: if cfg!(windows) { "whp" } else { "kvm" },
         cpu_profile: None,
         memory_mib: 512,
         cmdline: "",
@@ -925,6 +925,54 @@ fn snapshot_restore_records_its_source_and_starts_a_restore_of_it() {
         root: Some(root.as_str()),
     };
     deprovision(state.to_str().unwrap(), &artifacts, 5.0).unwrap();
+    assert!(!state.exists());
+}
+
+/// `snapshot restore` refuses a hypervisor that this host's operating system cannot run, which
+/// every start of its sandbox would fail on, before it opens the store or locks the snapshot, so
+/// that it reports that refusal and leaves the store as it was, whatever the snapshot.
+#[test]
+fn snapshot_restore_refuses_a_hypervisor_that_this_host_cannot_run_before_it_locks_the_snapshot() {
+    let fixture = Fixture::new(false);
+    let root = artifact_root(&fixture.state("checkout"));
+    let layer = fixture.state("distro.erofs");
+    fs::write(&layer, "distro").unwrap();
+    let store = fixture.root.path().join("store");
+    let state = fixture.state("command");
+    let (hypervisor, refusal) = if cfg!(windows) {
+        ("kvm", "hypervisor kvm is not supported on windows")
+    } else {
+        ("whp", "hypervisor whp is not supported on linux")
+    };
+    let locks = || fs::read_dir(store.join("locks")).unwrap().count();
+    let before = locks();
+    // A snapshot that the store lacks, whose lock a restore that got as far as the store creates.
+    let arguments = [
+        "restore",
+        "absent",
+        "--store-dir",
+        store.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
+        "--layer",
+        &format!(
+            "distro,{},11111111-1111-1111-1111-111111111111",
+            layer.display()
+        ),
+        "--upper",
+        "ram",
+        "--hypervisor",
+        hypervisor,
+        "--timeout",
+        "10",
+    ]
+    .map(str::to_owned);
+    let (command, unrecognized) = snapshots::parse(&arguments).unwrap();
+    assert!(unrecognized.is_empty(), "{unrecognized:?}");
+    let error = snapshots::run(Some(&root), command).unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
+    assert_eq!(error.message(), Some(refusal));
+    assert_eq!(locks(), before);
     assert!(!state.exists());
 }
 

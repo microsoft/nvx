@@ -3,7 +3,7 @@
 //! output, or OpenVMM's, byte for byte, and exits with OpenVMM's status. The runs of
 //! `nvx sandbox run`, which execute their workload over NVXC, are [`crate::sandbox_run`]'s.
 
-use crate::harness::{Content, OPENVMM, Root, in_parallel, native};
+use crate::harness::{Content, EXPLICIT_HYPERVISOR, OPENVMM, Root, in_parallel, native};
 use crate::openvmm::{
     NO_NETWORK, NetworkPolicy, Options, assert_outcome_report, child, cold_boot, share_token,
 };
@@ -173,7 +173,7 @@ fn run_launches() -> Vec<Launch> {
             "run: every boot option",
             run(&[
                 "--hypervisor",
-                "mshv",
+                EXPLICIT_HYPERVISOR,
                 "--processors",
                 "8",
                 "--cpu-profile",
@@ -183,7 +183,7 @@ fn run_launches() -> Vec<Launch> {
             ]),
             cold_boot()
                 .with("--processors", ["8"])
-                .with("--hypervisor", ["mshv"])
+                .with("--hypervisor", [EXPLICIT_HYPERVISOR])
                 .with("--memory", ["256M"])
                 .with("--cpu-profile", ["host"]),
             0,

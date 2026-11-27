@@ -14,7 +14,7 @@ use crate::host::cli::args::{Parser, Receiver, Spec, Syntax, choice, integer};
 use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
 use crate::host::cli::run::processors;
 use crate::host::cli::sandbox::{
-    Artifacts, HYPERVISORS, MAX_MEMORY_MIB, error_with_cause, hypervisor,
+    Artifacts, HYPERVISORS, MAX_MEMORY_MIB, check_hypervisor, error_with_cause, hypervisor,
 };
 use crate::host::cli::store::{LockedState, StateDir, StateFile};
 use crate::host::cli::{Exit, Result, check_interrupt, io_error, output};
@@ -176,7 +176,10 @@ pub(in crate::host::cli) fn parse(arguments: &[String]) -> Result<(Options, Vec<
 }
 
 /// Uses the identified artifacts, never an unlabelled OpenVMM override or a downloaded substitute.
+/// Refuses a `--hypervisor` that this host's operating system cannot run, as
+/// [`check_hypervisor`] does, before it creates the store.
 pub(in crate::host::cli) fn run(root: Option<&str>, options: Options) -> Result {
+    check_hypervisor(options.hypervisor)?;
     {
         let store = Store::create(Path::new(&options.store_dir))?;
         let deadline = Deadline::after(f64::from(options.timeout));

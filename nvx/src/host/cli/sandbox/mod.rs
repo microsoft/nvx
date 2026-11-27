@@ -45,7 +45,8 @@ pub(super) use self::lifecycle::remove_abandoned_vm_directories;
 pub(super) use self::lifecycle::{copy_openvmm_outcome, validate_outcome_destination};
 pub(super) use self::options::sandbox_network;
 pub(super) use self::options::{
-    HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, OPTIONS, hypervisor, parse, path_text,
+    HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, OPTIONS, check_hypervisor, hypervisor, parse,
+    path_text,
 };
 pub(crate) use self::options::{Options, path_string};
 pub(crate) use self::state::Source;
@@ -229,6 +230,14 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
             ErrorCode::Unsupported,
             "--cpu-profile is only valid for sandbox run or provision",
         ));
+    }
+    // A sandbox runs on the hypervisor that its run or provision names, which every start of one
+    // that this host's operating system cannot run would fail on.
+    if matches!(
+        operation,
+        SandboxOperation::Run | SandboxOperation::Provision
+    ) {
+        check_hypervisor(options.hypervisor)?;
     }
     if options.ram_upper_percent.is_some() && options.upper != Some(RootUpper::Ram) {
         return Err(Exit::error(

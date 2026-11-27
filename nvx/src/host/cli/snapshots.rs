@@ -212,14 +212,17 @@ pub(super) fn run(root: Option<&str>, command: Command) -> Result {
 /// Restores a new managed sandbox from a named snapshot, as `snapshot restore` does: provisions
 /// the sandbox with the source that [`restore_source`] checks, and its network at the snapshot's
 /// NIC, as [`run::restored_network`](super::run::restored_network) gives it, and starts it. It
-/// refuses the network options of a snapshot without a NIC, and those of a snapshot with one
-/// without `--network-profile`, before it provisions anything.
+/// refuses a `--hypervisor` that this host's operating system cannot run, as
+/// [`sandbox::check_hypervisor`] does, before it opens the store or locks the snapshot, and the
+/// network options of a snapshot without a NIC, and those of a snapshot with one without
+/// `--network-profile`, before it provisions anything.
 fn restore(root: Option<&str>, options: RestoreOptions) -> Result {
     let RestoreOptions {
         name,
         store_dir,
         sandbox: mut options,
     } = options;
+    sandbox::check_hypervisor(options.hypervisor)?;
     let snapshot = name.expect("the parser requires a snapshot name");
     let (source, nic) = restore_source(snapshot, &store_dir, &options)?;
     options.network = super::run::restored_network(options.network, nic)?;
