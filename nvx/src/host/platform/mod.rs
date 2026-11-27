@@ -19,6 +19,9 @@
 //!
 //! Its crate-private writes create files that only the current user may read, replace a file
 //! atomically, and make the changes to a directory's entries durable.
+//!
+//! It tells a lookup that failed because the last name of its path is longer than the path's file
+//! system takes, so that nothing can be at the path, from one that may hide a file.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -123,6 +126,52 @@ pub(crate) fn is_reparse_point(metadata: &fs::Metadata) -> bool {
 /// Reports no reparse points on hosts whose metadata has no such Windows attribute.
 pub(crate) fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
+}
+
+/// Returns whether `error`, with which a lookup of `path` failed, shows that the file system of
+/// the path's directory takes no name as long as the path's last one, so that nothing is at
+/// `path`.
+///
+/// Linux fails such a lookup with `ENAMETOOLONG`, and Windows with an invalid name. They fail
+/// lookups so for other reasons too, at which a file may be: Linux one of a path of `PATH_MAX`
+/// bytes or more, and one through a link whose target holds a name that is too long, and Windows
+/// one of a name that it refuses otherwise. So the last name's length decides: on Linux, against
+/// the longest name of the directory's file system, which `statvfs` reports, and on Windows,
+/// against the 255 UTF-16 code units of the longest name of its file systems. On other hosts,
+/// nothing shows it.
+#[cfg(feature = "cli")]
+pub(crate) fn name_too_long(path: &Path, error: &io::Error) -> bool {
+    if error.kind() != io::ErrorKind::InvalidFilename {
+        return false;
+    }
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        let directory = path
+            .parent()
+            .filter(|directory| !directory.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        nix::sys::statvfs::statvfs(directory).is_ok_and(|status| {
+            usize::try_from(status.name_max()).is_ok_and(|longest| name.as_bytes().len() > longest)
+        })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        /// The most UTF-16 code units that a name of Windows' file systems holds.
+        const MAX_NAME_UNITS: usize = 255;
+        name.encode_wide().count() > MAX_NAME_UNITS
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = name;
+        false
+    }
 }
 
 /// Returns `file`, which an open that follows no link opened, if it is a regular file.

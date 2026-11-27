@@ -596,6 +596,19 @@ fn a_distro_manifest_path_whose_lookup_fails_refuses_provision_and_start() {
 }
 
 #[test]
+fn a_distro_layer_whose_manifest_name_no_file_can_have_provisions_and_starts() {
+    // A layer whose name holds 242 to 255 bytes has no manifest, whose name,
+    // `LAYER.manifest.json`, would be longer than the file systems of Linux and of Windows take:
+    // provision and start take it as a layer without one.
+    let root = Root::new();
+    let layer = root.path.join(format!("{}.erofs", "d".repeat(243)));
+    fs::copy(root.path.join("distro.erofs"), &layer).unwrap();
+    let output = run(&root, &provision_layer(&root, "long", &layer, ""));
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    cycle(&root, "long");
+}
+
+#[test]
 fn provision_binds_a_linked_distro_layer_where_start_checks_it() {
     // Provision records a layer at its resolved path, and start checks the binding there, with
     // the manifest beside that path: through a link to a layer of another name, the manifest
