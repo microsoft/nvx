@@ -844,6 +844,27 @@ fn a_manifest_path_whose_lookup_fails_is_no_absent_manifest_for_a_binding() {
 }
 
 #[test]
+fn a_layer_whose_manifest_name_is_longer_than_its_file_system_takes_has_no_manifest() {
+    // The file systems of Linux and of Windows take names of at most 255 bytes or UTF-16 code
+    // units, and `LAYER.manifest.json` is 14 bytes longer than the layer's name, so no file can be
+    // at the manifest path of a layer whose name holds 242 to 255: verification binds the
+    // manifest's absence, which the staged check finds too.
+    let directory = tempfile::tempdir().unwrap();
+    for length in [242, 255] {
+        let image = directory
+            .path()
+            .join(format!("{}.erofs", "d".repeat(length - ".erofs".len())));
+        fs::write(&image, b"distro layer\n").unwrap();
+        let layer = SandboxLayer::new(LayerRole::Distro, image.to_str().unwrap(), UUID);
+        let binding = verify_with(&layer, METADATA_ONLY).unwrap();
+        assert_eq!(binding.manifest, None, "{length}");
+        binding
+            .check_with(&layer, DISTRO_POLICY_REVISION, METADATA_ONLY)
+            .unwrap();
+    }
+}
+
+#[test]
 fn a_staged_image_that_was_replaced_fails_its_check() {
     // Callers stage images in a directory that only their own account can write.
     let directory = tempfile::tempdir().unwrap();

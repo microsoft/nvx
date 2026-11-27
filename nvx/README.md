@@ -1107,9 +1107,12 @@ kind, length, or times changed, and a manifest that appeared, disappeared, or
 changed. A binding of a layer without a manifest holds only while nothing is at
 the manifest's path: unlike verification, which finds a manifest as
 `Path.exists` does, `check` refuses a path whose lookup fails for another
-reason than a missing file. A missing or stale binding fails: no runtime
-operation registers, verifies, or hashes a layer on its own. Hashing belongs
-where layers are built, installed, or staged, and to diagnostics.
+reason than a missing file, unless the lookup shows that the manifest's name is
+longer than the path's file system takes, which no file can have, as on ext4,
+tmpfs, or NTFS for a layer whose name holds more than 241 bytes or UTF-16 code
+units. A missing or stale binding fails: no runtime operation registers,
+verifies, or hashes a layer on its own. Hashing belongs where layers are built,
+installed, or staged, and to diagnostics.
 
 On Linux, a seal holds `st_dev`, `st_ino`, the file type, `st_size`, and
 `st_mtime` and `st_ctime` with their nanoseconds; on Windows, the volume serial

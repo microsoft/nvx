@@ -49,6 +49,7 @@ use crate::host::artifacts::DISTRO_MANIFEST_SUFFIX;
 use crate::host::network::policy::MAX_JSON_DEPTH;
 use crate::host::network::policy::json::{self, ReadError};
 use crate::host::paths;
+use crate::host::platform;
 use crate::host::seal::{self, FileKind, FileSeal};
 
 /// The revision of NVX's distro policy, which refuses a distro layer whose manifest lists the
@@ -191,7 +192,8 @@ impl DistroBinding {
     /// Without a manifest beside the layer, the layer passes without being read: the binding
     /// records the manifest's absence. A manifest is beside the layer as `Path.exists` finds it,
     /// for `nvx.py`'s outcomes, so a path whose lookup fails counts as none; the check of the
-    /// binding then refuses that path, as [`check`](Self::check) says. With a manifest, it must
+    /// binding then refuses that path, as [`check`](Self::check) says, unless its name is longer
+    /// than its file system takes. With a manifest, it must
     /// be a JSON object of format 1 that names the layer, as the host compares file names, in any
     /// case on Windows, and its SHA-256 digest, with a list of packages that each have a
     /// name, of which none is `systemd`. Verification reads the manifest and hashes the whole
@@ -219,8 +221,9 @@ impl DistroBinding {
     /// replacement, a change of kind, length, or time, and a manifest that appeared, disappeared,
     /// or changed each fail. A binding of a layer without a manifest holds only while nothing is
     /// at the manifest's path: a path whose lookup fails for another reason than a missing file
-    /// fails the check too. It never reads, maps, or hashes the layer or the manifest, and never
-    /// verifies them again.
+    /// fails the check too, unless the lookup shows that the path's name is longer than its file
+    /// system takes, which no file can have. It never reads, maps, or hashes the layer or the
+    /// manifest, and never verifies them again.
     ///
     /// Fails with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) for a stale binding,
     /// one that names another layer, and a missing layer; with
@@ -329,7 +332,11 @@ impl DistroBinding {
                 }
             }
             None => match (access.open)(&manifest) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                // Nothing is at a missing path, nor at a path whose name is longer than its file
+                // system takes.
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound
+                        || platform::name_too_long(&manifest, &error) => {}
                 // A manifest whose lookup fails otherwise may be present: the check fails.
                 Err(error) => return Err(os_error(&error, Some(&manifest))),
                 Ok(_) => {

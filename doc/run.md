@@ -1763,8 +1763,11 @@ from metadata alone, without reading the layer again, and refuses a layer or
 manifest that was replaced, modified, added, or removed since `provision`.
 `provision` and `start` refuse a manifest path
 that they cannot look up, as through a link loop, rather than take it for no
-manifest. Keep provisioned layers and their manifests read-only, and never
-rewrite them in place.
+manifest, unless the manifest's name is longer than the layer's file system
+takes, as on ext4, tmpfs, or NTFS for a layer whose name holds more than 241
+bytes or UTF-16 code units: no manifest can be beside such a layer. Keep
+provisioned layers and their manifests read-only, and never rewrite them in
+place.
 
 Disk image paths and the paths they resolve to must contain no commas or
 semicolons, and square brackets must nest properly. Balanced brackets, as in

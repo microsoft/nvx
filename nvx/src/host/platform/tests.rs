@@ -36,6 +36,60 @@ fn a_bounded_read_refuses_a_regular_file_that_holds_more_than_its_bound() {
     assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
 }
 
+#[cfg(all(any(target_os = "linux", windows), feature = "cli"))]
+#[test]
+fn only_a_name_longer_than_its_file_system_takes_shows_that_nothing_is_at_a_path() {
+    // The file systems of the tests take names of at most 255 bytes or UTF-16 code units, so a
+    // lookup of a longer name fails, and nothing is at its path.
+    let directory = tempfile::tempdir().unwrap();
+    let too_long = directory.path().join("n".repeat(256));
+    let error = File::open(&too_long).unwrap_err();
+    assert!(name_too_long(&too_long, &error), "{error}");
+    // A lookup that fails otherwise may hide a file.
+    let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+    assert!(!name_too_long(&too_long, &denied));
+    // So may one that fails as that of a long name does, as on Windows that of an invalid name of
+    // at most 255 UTF-16 code units.
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::ERROR_INVALID_NAME;
+
+        let invalid = io::Error::from_raw_os_error(ERROR_INVALID_NAME as i32);
+        assert_eq!(invalid.kind(), io::ErrorKind::InvalidFilename);
+        assert!(!name_too_long(
+            &directory.path().join("n".repeat(255)),
+            &invalid
+        ));
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "cli"))]
+#[test]
+fn on_linux_a_path_whose_lookup_fails_as_that_of_a_long_name_shows_nothing_by_itself() {
+    // Linux fails a lookup with `ENAMETOOLONG` through a link whose target holds a name that is
+    // too long, though the link is at its path.
+    let directory = tempfile::tempdir().unwrap();
+    let link = directory.path().join("link");
+    std::os::unix::fs::symlink(directory.path().join("n".repeat(256)), &link).unwrap();
+    let error = File::open(&link).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidFilename, "{error}");
+    assert!(!name_too_long(&link, &error));
+    // It fails one of a path of `PATH_MAX`, 4,096, bytes or more so whatever its names, and then
+    // the last name alone shows whether anything can be at the path. The directories take paths
+    // of less than 4,096 bytes, below which a name of 255 bytes makes one of 4,096 or more.
+    let mut deep = directory.path().to_path_buf();
+    while deep.as_os_str().len() < 3840 {
+        deep.push("d".repeat(200));
+    }
+    fs::create_dir_all(&deep).unwrap();
+    for (length, too_long) in [(256, true), (255, false)] {
+        let path = deep.join("n".repeat(length));
+        let error = File::open(&path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidFilename, "{error}");
+        assert_eq!(name_too_long(&path, &error), too_long, "{length}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn an_open_of_a_regular_file_refuses_a_link_and_a_directory() {
