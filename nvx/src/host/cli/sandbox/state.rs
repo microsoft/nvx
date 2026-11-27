@@ -43,7 +43,7 @@ use crate::host::cli::json::{Object, pretty_serde, read_object};
 use crate::host::cli::network::{NativeRules, NetworkOptions};
 use crate::host::cli::output;
 use crate::host::cli::snapshots::Name as SnapshotName;
-use crate::host::cli::{Exit, Result, io_error, io_message};
+use crate::host::cli::{Exit, Result, io_error, io_message, temporary_path};
 use crate::host::config::{
     Boot, ConsoleAttachment, LayeredRoot, NetworkConfig, RootConfig, UpperConfig, VmConfig,
     reject_container_path, reject_disk_path,
@@ -61,8 +61,6 @@ use crate::net::is_valid_hostname;
 use crate::protocol::root::{Journal, OverlayMode, RAM_UPPER_CAPS, RootImage};
 use crate::protocol::view::{MachineIdMode, View};
 use crate::uuid::Uuid;
-
-pub(crate) use crate::host::cli::{random_bytes, temporary_path};
 
 #[cfg(test)]
 mod tests;
