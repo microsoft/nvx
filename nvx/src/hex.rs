@@ -19,7 +19,6 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 /// Parses exactly `2 * N` hexadecimal digits, in either case, into the `N` bytes that they spell.
 ///
 /// A sign, whitespace, and any other byte that is not a digit, ASCII or not, refuses the text.
-#[cfg(any(feature = "host", all(feature = "guest", target_os = "linux")))]
 pub(crate) fn parse_hex<const N: usize>(text: impl AsRef<[u8]>) -> Option<[u8; N]> {
     let digits = text.as_ref();
     if digits.len() != 2 * N {

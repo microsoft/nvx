@@ -10,7 +10,7 @@
 
 use super::cmdline;
 use super::{ProtocolError, violation};
-use crate::hex::hex;
+use crate::hex::{hex, parse_hex};
 
 /// The longest hostname, in bytes: Linux's `HOST_NAME_MAX`, which the guest's entry applies.
 pub const MAX_HOSTNAME_BYTES: usize = 64;
@@ -121,29 +121,24 @@ pub fn parse(command_line: &[u8]) -> Result<Option<View>, ProtocolError> {
 
 /// Decodes a bounded, canonical hostname value, refusing a decoded NUL.
 fn parse_hostname(value: &[u8]) -> Result<Vec<u8>, ProtocolError> {
-    if value.is_empty()
-        || value.len() > 2 * MAX_HOSTNAME_BYTES
-        || !value.len().is_multiple_of(2)
-        || !value
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        return Err(violation(format!(
+    let malformed = || {
+        violation(format!(
             "the nvx_hostname kernel parameter must encode 1 to {MAX_HOSTNAME_BYTES} bytes \
              as lowercase hexadecimal"
-        )));
-    }
-    let digit = |byte: u8| {
-        if byte.is_ascii_digit() {
-            byte - b'0'
-        } else {
-            byte - b'a' + 10
-        }
+        ))
     };
+    // `parse_hex` reads either case, and the token is lowercase.
+    if value.is_empty()
+        || value.len() > 2 * MAX_HOSTNAME_BYTES
+        || value.iter().any(u8::is_ascii_uppercase)
+    {
+        return Err(malformed());
+    }
     let hostname: Vec<u8> = value
-        .chunks_exact(2)
-        .map(|pair| digit(pair[0]) * 16 + digit(pair[1]))
-        .collect();
+        .chunks(2)
+        .map(|pair| parse_hex::<1>(pair).map(|[byte]| byte))
+        .collect::<Option<_>>()
+        .ok_or_else(malformed)?;
     if !is_hostname(&hostname) {
         return Err(violation("the nvx_hostname kernel parameter encodes a NUL"));
     }

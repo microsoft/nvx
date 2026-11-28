@@ -91,6 +91,35 @@ fn hostname_values_must_be_bounded_canonical_hexadecimal_without_a_nul() {
 }
 
 #[test]
+fn malformed_hostname_values_keep_their_messages() {
+    let encoding = format!(
+        "the nvx_hostname kernel parameter must encode 1 to {MAX_HOSTNAME_BYTES} bytes as \
+         lowercase hexadecimal"
+    );
+    let too_long = b"62".repeat(MAX_HOSTNAME_BYTES + 1);
+    for value in [
+        b"".as_slice(),
+        b"0",
+        b"62f",
+        b"6A",
+        b"6g",
+        b"+6",
+        b"6\xe9",
+        b"\xff\xff",
+        &too_long,
+    ] {
+        let line = [b"nvx_hostname=".as_slice(), value, b" nvx_machine_id=image"].concat();
+        assert_eq!(parse(&line).unwrap_err().message(), encoding, "{value:?}");
+    }
+    assert_eq!(
+        parse(b"nvx_hostname=62006f nvx_machine_id=image")
+            .unwrap_err()
+            .message(),
+        "the nvx_hostname kernel parameter encodes a NUL"
+    );
+}
+
+#[test]
 fn machine_id_values_are_exact_and_unquoted() {
     for value in [
         b"".as_slice(),
