@@ -105,7 +105,7 @@ const CAPTURE_DOMAIN: &[u8] = b"nvx capture\0";
 /// The configuration of a VM.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VmConfig {
-    /// The number of processors: at least 1.
+    /// The number of processors: 1, 2, 4, or 8, the counts that OpenVMM's microVM takes.
     pub processors: u32,
     /// The memory, in MiB: at least 1.
     pub memory_mib: u64,
@@ -910,7 +910,8 @@ impl VmConfig {
     /// support of the host.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), naming the first
-    /// refusal in the order of the fields: no processor; no memory; a layered root without an image
+    /// refusal in the order of the fields: a processor count other than 1, 2, 4, or 8, which
+    /// OpenVMM's microVM would refuse at every launch; no memory; a layered root without an image
     /// path, with a bound of an EROFS image's first partition or a bound of 0, with a scratch upper
     /// without a path, or with a RAM upper whose cap is not 1 to 90 percent; a hostname that is
     /// empty, longer than [`MAX_HOSTNAME_BYTES`], or holds a NUL; an export that
@@ -929,8 +930,12 @@ impl VmConfig {
     /// the time ABI's clock parameters as Linux and OpenVMM's time ABI read them.
     /// [`kernel_command_line`](Self::kernel_command_line) appends accepted caller text unchanged.
     pub fn check(&self) -> Result<()> {
-        if self.processors == 0 {
-            return Err(Error::unsupported("a VM needs at least one processor"));
+        if !PROCESSOR_COUNTS.contains(&self.processors) {
+            return Err(Error::unsupported(format!(
+                "VmConfig.processors must be 1, 2, 4, or 8, the counts that OpenVMM's microVM \
+                 takes, not {}",
+                self.processors
+            )));
         }
         if self.memory_mib == 0 {
             return Err(Error::unsupported("a VM needs memory"));
