@@ -730,15 +730,29 @@ fn cold_vm_config(
         }),
         filesystem,
     };
-    if let Some(export) = &config.filesystem {
-        let line = config.kernel_command_line().map_err(error_with_cause)?;
-        if line.len() + export_tokens(export).len() + 1 > COMMAND_LINE_BUDGET {
-            return Err(Exit::error(
-                ErrorCode::Unsupported,
-                "the --mount shares and --cmdline exceed the 1024-byte budget of the kernel command \
-                 line; attach fewer shares or use shorter targets",
-            ));
-        }
+    // OpenVMM leaves `COMMAND_LINE_BUDGET` to the line that the run renders, shares or not, as to
+    // a sandbox's: past it, the tokens that OpenVMM appends can overflow the kernel's line.
+    let line = config.kernel_command_line().map_err(error_with_cause)?;
+    let shares = config
+        .filesystem
+        .as_ref()
+        .map_or(0, |export| export_tokens(export).len());
+    if line.len() + shares + 1 > COMMAND_LINE_BUDGET {
+        let (subject, advice) = if config.filesystem.is_some() {
+            (
+                "the --mount shares and --cmdline exceed",
+                "attach fewer shares or use shorter targets",
+            )
+        } else {
+            ("--cmdline exceeds", "use shorter kernel parameters")
+        };
+        return Err(Exit::error(
+            ErrorCode::Unsupported,
+            format!(
+                "{subject} the {COMMAND_LINE_BUDGET}-byte budget of the kernel command line; \
+                 {advice}"
+            ),
+        ));
     }
     config.check_command_line().map_err(error_with_cause)?;
     Ok(config)

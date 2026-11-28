@@ -1605,6 +1605,11 @@ next cold boot removes the VM directory that one that was terminated left.
   lowers, with its DNS server, egress, forwards, and published listeners; a
   snapshot with a NIC needs `--network-profile` with them, and one without
   refuses them.
+- A cold boot refuses, before it launches anything and with `--dry-run` too, a
+  kernel command line beyond `COMMAND_LINE_BUDGET`, the 1024 bytes that
+  OpenVMM leaves to it, whether or not it has `--mount` shares, as `sandbox`
+  does: the tokens that `run` renders and the text of `--cmdline`, the
+  bootstrap tokens that OpenVMM appends for the shares, if any, and a NUL.
 - A cold boot binds each `--mount` from the export's aggregate at
   `/run/nvx/hostfs/root`. The shares' guest targets must be absolute, must not
   overlap each other or the guest's reserved paths, such as `/run`, and must
