@@ -377,6 +377,17 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
                 export.as_ref().map(|export| &export.description),
                 located.as_ref(),
             )?;
+            // The view of each restore links the snapshot's files, which a share of the store
+            // would give the guest to change, so every start of a restored sandbox refuses it.
+            if let Some(source) = source {
+                refuse_own_files(
+                    Some(("snapshot store", &source.store)),
+                    layer.path(),
+                    scratch.as_deref(),
+                    export.as_ref().map(|export| &export.description),
+                    None,
+                )?;
+            }
             lifecycle::provision(
                 state_dir,
                 &layer,
