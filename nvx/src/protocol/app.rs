@@ -26,7 +26,7 @@ use crate::guest_restore::GuestRestoreRecord;
     feature = "cli",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
-use self::workload::WorkloadIdentity;
+use self::workload::{WORKLOAD_IDS, WorkloadIdentity};
 
 /// Shared identity data.
 #[cfg(any(
@@ -34,7 +34,14 @@ use self::workload::WorkloadIdentity;
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) mod workload {
-    /// The identity that workloads run as: a non-root user and group ID.
+    use std::ops::RangeInclusive;
+
+    /// The user and group IDs that a workload may run as: not root, and not `-1` as `(uid_t)-1`
+    /// and `(gid_t)-1`, which `setresuid` and `setresgid` read as "leave unchanged", so that
+    /// accepting it would leave the workload's user or group root's.
+    pub(crate) const WORKLOAD_IDS: RangeInclusive<u32> = 1..=u32::MAX - 1;
+
+    /// The identity that workloads run as: a user and group ID in [`WORKLOAD_IDS`].
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) struct WorkloadIdentity {
         /// User ID.
@@ -269,13 +276,13 @@ pub(crate) fn decode_activation_record(
     Ok((record, workload))
 }
 
-/// Matches the guest's non-root credential range, excluding the unchanged-ID sentinel.
+/// Checks that the workload's UID and GID both lie in [`WORKLOAD_IDS`].
 #[cfg(any(
     feature = "cli",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 fn check_workload_identity(workload: &WorkloadIdentity) -> Result<(), ProtocolError> {
-    if matches!(workload.uid, 0 | u32::MAX) || matches!(workload.gid, 0 | u32::MAX) {
+    if !WORKLOAD_IDS.contains(&workload.uid) || !WORKLOAD_IDS.contains(&workload.gid) {
         return Err(violation(
             "activation workload requires a non-root UID and GID below u32::MAX",
         ));
