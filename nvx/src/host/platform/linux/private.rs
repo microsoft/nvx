@@ -76,7 +76,7 @@ pub(crate) fn check_store_dir(path: &Path) -> io::Result<Option<String>> {
 
 /// Returns why the directory `path` is not private to the current user, if it is not: unless it
 /// is a directory, not a link to one, that belongs to the user and grants no one else any access.
-pub(crate) fn check_owner_only_dir(path: &Path) -> io::Result<Option<String>> {
+fn check_owner_only_dir(path: &Path) -> io::Result<Option<String>> {
     let Some(directory) = open_plain_dir(path)? else {
         return Ok(Some("is not a plain directory".to_owned()));
     };

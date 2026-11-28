@@ -307,7 +307,7 @@ pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
 /// Refuses a VMM working directory that exceeds Windows' process-creation limit, without
 /// accessing the filesystem.
 #[cfg(windows)]
-pub(crate) fn check_working_dir(path: &std::path::Path) -> Result<()> {
+fn check_working_dir(path: &std::path::Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::MAX_PATH;
 
