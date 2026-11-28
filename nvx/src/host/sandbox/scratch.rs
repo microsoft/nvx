@@ -55,7 +55,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::mount::os_error;
-use super::refused;
+use super::{not_found, open_error, refused};
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::paths;
 use crate::host::seal::{FileId, FileKind, FileSeal, SealScheme};
@@ -275,12 +275,14 @@ impl ScratchBinding {
 fn bind_with(path: &Path, access: Access<'_>) -> Result<ScratchBinding> {
     let file = match (access.open)(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::IsADirectory => return Err(missing(path)),
-        Err(error) => return Err(open_error(&error, path)),
+        Err(error) if error.kind() == io::ErrorKind::IsADirectory => {
+            return Err(not_found(path, DESCRIPTION));
+        }
+        Err(error) => return Err(open_error(&error, path, DESCRIPTION)),
     };
     let seal = FileSeal::of(&file).map_err(|error| os_error(&error, Some(path)))?;
     if seal.kind() != FileKind::Regular {
-        return Err(missing(path));
+        return Err(not_found(path, DESCRIPTION));
     }
     Ok(ScratchBinding::of(&seal))
 }
@@ -297,21 +299,6 @@ fn normalized(path: &Path) -> Result<PathBuf> {
         )));
     }
     Ok(paths::normalized(path))
-}
-
-/// Returns the error of a scratch image that is missing, or that is not a regular file, as
-/// `require_file` refuses its path.
-fn missing(path: &Path) -> Error {
-    Error::unavailable(format!("{DESCRIPTION} not found: {}", path.display()))
-}
-
-/// Returns the error of a scratch image that cannot be opened: unavailable if it is missing.
-fn open_error(error: &io::Error, path: &Path) -> Error {
-    if error.kind() == io::ErrorKind::NotFound {
-        missing(path)
-    } else {
-        os_error(error, Some(path))
-    }
 }
 
 /// Returns the error of a scratch image that another launch still claims, of the code
@@ -355,7 +342,7 @@ mod imp {
     use std::path::Path;
     use std::time::Instant;
 
-    use super::{Access, ScratchBinding, open_error, os_error, until_unclaimed};
+    use super::{Access, DESCRIPTION, ScratchBinding, open_error, os_error, until_unclaimed};
     use crate::error::Result;
     use crate::host::seal::{self, FileSeal};
 
@@ -386,11 +373,12 @@ mod imp {
             Ok(file) => file,
             // A directory took the image's place: its seal tells how it differs.
             Err(error) if error.kind() == io::ErrorKind::IsADirectory => {
-                let directory = seal::open_read(path).map_err(|error| open_error(&error, path))?;
+                let directory =
+                    seal::open_read(path).map_err(|error| open_error(&error, path, DESCRIPTION))?;
                 binding.compare(&sealed(&directory)?, path)?;
-                return Err(open_error(&error, path));
+                return Err(open_error(&error, path, DESCRIPTION));
             }
-            Err(error) => return Err(open_error(&error, path)),
+            Err(error) => return Err(open_error(&error, path, DESCRIPTION)),
         };
         binding.compare(&sealed(&file)?, path)?;
         until_unclaimed(path, deadline, || match file.try_lock() {
@@ -419,7 +407,7 @@ mod imp {
         FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA, SYNCHRONIZE,
     };
 
-    use super::{Access, ScratchBinding, open_error, os_error, until_unclaimed};
+    use super::{Access, DESCRIPTION, ScratchBinding, open_error, os_error, until_unclaimed};
     use crate::error::Result;
     use crate::host::seal::FileSeal;
 
@@ -475,7 +463,7 @@ mod imp {
         let guard = until_unclaimed(path, deadline, || match open_guard(path) {
             Ok(guard) => Ok(Some(guard)),
             Err(error) if sharing_violation(&error) => Ok(None),
-            Err(error) => Err(open_error(&error, path)),
+            Err(error) => Err(open_error(&error, path, DESCRIPTION)),
         })?;
         binding.compare(&sealed(&guard)?, path)?;
         until_unclaimed(path, deadline, || match open_sole_writer(path) {
@@ -487,13 +475,13 @@ mod imp {
                 Ok(Some(()))
             }
             Err(error) if sharing_violation(&error) => Ok(None),
-            Err(error) => Err(open_error(&error, path)),
+            Err(error) => Err(open_error(&error, path, DESCRIPTION)),
         })?;
         // The probe is closed, and no other check probes the image while this one holds the guard.
         // The claim's handle, open for writing, then keeps the probes of other checks out for as
         // long as this process, or a VMM that inherits it, holds it. A link on the way that now
         // leads elsewhere fails the comparison.
-        let claim = open_writable(path).map_err(|error| open_error(&error, path))?;
+        let claim = open_writable(path).map_err(|error| open_error(&error, path, DESCRIPTION))?;
         binding.compare(&sealed(&claim)?, path)?;
         Ok((guard, claim))
     }
