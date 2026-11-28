@@ -883,6 +883,7 @@ fn sandbox_refusals() -> Vec<Refusal> {
 fn run_refusals() -> Vec<Refusal> {
     let targets = "each target must be an absolute non-root path";
     let budget = &["--mount", "--cmdline", "1024"][..];
+    let no_share_budget = &["--cmdline exceeds the 1024-byte budget"][..];
     let overflow = crate::openvmm::two_share_command_line_room() + 1;
     let two_shares = |cmdline: &str| {
         run_dry(&[
@@ -1612,6 +1613,19 @@ fn run_refusals() -> Vec<Refusal> {
                 &"x".repeat(1100),
             ]),
             budget,
+        ),
+        // Without shares, the budget holds all the same, before a dry run and a launch alike.
+        refusal(
+            "run: long command line without shares",
+            "unsupported",
+            run_dry(&["--cmdline", &"x".repeat(1100)]),
+            no_share_budget,
+        ),
+        refusal(
+            "run: launch of a long command line without shares",
+            "unsupported",
+            ["run".to_owned(), "--cmdline".to_owned(), "x".repeat(1100)],
+            no_share_budget,
         ),
         refusal(
             "run: missing OpenVMM override",

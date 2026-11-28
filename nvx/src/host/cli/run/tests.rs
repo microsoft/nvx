@@ -90,6 +90,33 @@ fn cold_share_command_lines_fit_the_kernel_budget_to_the_byte() {
 }
 
 #[test]
+fn cold_command_lines_without_shares_fit_the_kernel_budget_to_the_byte() {
+    let mut options = Options::default();
+    let rules = options.network.egress_rules().unwrap();
+    let base = cold_config(&options, &rules).unwrap();
+    assert!(base.filesystem.is_none());
+    // The caller's text joins the run's own tokens after a space, and a NUL ends the line.
+    let room = COMMAND_LINE_BUDGET - base.kernel_command_line().unwrap().len() - 2;
+    options.cmdline = "x".repeat(room);
+    let fitting = cold_config(&options, &rules).unwrap();
+    assert_eq!(
+        fitting.kernel_command_line().unwrap().len() + 1,
+        COMMAND_LINE_BUDGET
+    );
+    options.cmdline.push('x');
+    let refused = cold_config(&options, &rules).err();
+    assert!(
+        matches!(
+            &refused,
+            Some(Exit::Error { code: ErrorCode::Unsupported, message })
+                if message == "--cmdline exceeds the 1024-byte budget of the kernel command line; \
+                               use shorter kernel parameters"
+        ),
+        "{refused:?}"
+    );
+}
+
+#[test]
 fn cold_command_lines_that_hide_the_appended_devices_are_refused() {
     // Linux ends its parameters at a `--` after a vertical tab or the byte 0xa0, which ends
     // U+00E0 in UTF-8, as after any whitespace, and would never read the virtio-mmio devices
