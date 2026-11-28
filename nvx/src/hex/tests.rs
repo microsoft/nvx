@@ -22,7 +22,6 @@ fn hexadecimal_text_is_written_in_lowercase() {
     assert_eq!(Hex(&identity).to_string(), hex(&identity));
 }
 
-#[cfg(any(feature = "host", all(feature = "guest", target_os = "linux")))]
 #[test]
 fn hexadecimal_text_is_read_in_either_case() {
     let bytes = [0x00, 0x0a, 0xb1, 0xff];
