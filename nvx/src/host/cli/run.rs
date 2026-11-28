@@ -735,8 +735,10 @@ fn cold_vm_config(
         if line.len() + export_tokens(export).len() + 1 > COMMAND_LINE_BUDGET {
             return Err(Exit::error(
                 ErrorCode::Unsupported,
-                "the --mount shares and --cmdline exceed the 1024-byte budget of the kernel command \
-                 line; attach fewer shares or use shorter targets",
+                format!(
+                    "the --mount shares and --cmdline exceed the {COMMAND_LINE_BUDGET}-byte budget \
+                     of the kernel command line; attach fewer shares or use shorter targets"
+                ),
             ));
         }
     }
