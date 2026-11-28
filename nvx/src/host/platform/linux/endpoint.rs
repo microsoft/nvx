@@ -83,22 +83,12 @@ impl ReadyListener {
         limit: usize,
         timeout: Duration,
     ) -> io::Result<bool> {
-        self.receive_checked(pid, received, limit, timeout, true)
-    }
-
-    /// Shares the byte/deadline receive path, verifying the original peer only when requested.
-    fn receive_checked(
-        &mut self,
-        pid: u32,
-        received: &mut Vec<u8>,
-        limit: usize,
-        timeout: Duration,
-        verify_original_peer: bool,
-    ) -> io::Result<bool> {
         // A timeout beyond the clock's range has no deadline.
         let deadline = Instant::now().checked_add(timeout);
         let left = || deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-        if self.connection.is_none() {
+        let connection = if let Some(connection) = &mut self.connection {
+            connection
+        } else {
             if !sys::wait_readable(&self.socket, left())? {
                 return Ok(true);
             }
@@ -124,16 +114,10 @@ impl ReadyListener {
                     ),
                 ));
             }
-            if verify_original_peer {
-                check_original_peer(&connection, false)?;
-            }
+            check_original_peer(&connection, false)?;
             connection.set_nonblocking(true)?;
-            self.connection = Some(connection);
-        }
-        let connection = self
-            .connection
-            .as_mut()
-            .expect("the host accepted the VMM's connection");
+            self.connection.insert(connection)
+        };
         let mut buffer = [0; 64];
         let room = limit.saturating_sub(received.len()).min(buffer.len());
         if room == 0 || !sys::wait_readable(connection, left())? {
