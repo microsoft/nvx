@@ -58,6 +58,13 @@ pub(crate) fn start_time_from_stat(
     }
 }
 
+/// The number of the `state` field of a `/proc/<pid>/stat` line, as proc_pid_stat(5) numbers the
+/// fields from 1: the first after the PID and the command name.
+const STAT_STATE_FIELD: usize = 3;
+
+/// The number of the `starttime` field of a `/proc/<pid>/stat` line in proc_pid_stat(5).
+const STAT_START_TIME_FIELD: usize = 22;
+
 /// Returns the state and the start time in the `/proc/<pid>/stat` line of `pid`.
 fn parse_stat(pid: u32, stat: &[u8]) -> io::Result<(&str, u64)> {
     let malformed = || io::Error::other(format!("/proc/{pid}/stat has an unexpected format"));
@@ -71,12 +78,13 @@ fn parse_stat(pid: u32, stat: &[u8]) -> io::Result<(&str, u64)> {
         .map_err(|_| malformed())?
         .split_whitespace()
         .collect();
-    // Field 22 of the stat line; the fields after the command name start at field 3.
+    // `fields` starts at the state field.
     let start_time = fields
-        .get(19)
+        .get(STAT_START_TIME_FIELD - STAT_STATE_FIELD)
         .and_then(|value| value.parse().ok())
         .ok_or_else(malformed)?;
-    Ok((fields[0], start_time))
+    let state = fields.first().copied().ok_or_else(malformed)?;
+    Ok((state, start_time))
 }
 
 /// Returns whether a process has threads besides its main thread.
