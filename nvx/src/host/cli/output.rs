@@ -12,9 +12,7 @@
 //! [`print_stderr`], which reports how the command ended, Ctrl-C included. On Windows, Python
 //! cannot end a write that waits either, so such a write runs to its end there.
 
-#[cfg(windows)]
-use std::io::IsTerminal;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 #[cfg(unix)]
 use std::os::fd::AsFd;
 
@@ -35,26 +33,27 @@ pub(super) fn print_stdout(text: &str) -> io::Result<()> {
     write_stdout(line(text).as_bytes())
 }
 
-/// Prints `text` and a line end to standard error, even after Ctrl-C. Like Python, which prints
-/// errors on a stream that it cannot write anyway, it ignores a failure.
+/// Prints `text` and a line end to standard error, even after Ctrl-C, as [`force_stderr`] writes.
 pub(super) fn print_stderr(text: &str) {
-    let mut stderr = io::stderr().lock();
-    let _ = stderr
-        .write_all(line(text).as_bytes())
-        .and_then(|()| stderr.flush());
+    force_stderr(line(text).as_bytes());
 }
 
 /// Ends the line that `written`, a workload's output that went to standard error last, left
 /// open, so that what [`print_stderr`] prints next starts a line of its own. It writes even after
-/// Ctrl-C, as [`print_stderr`] does, and ignores a failure.
+/// Ctrl-C, as [`force_stderr`] writes.
 pub(super) fn end_stderr_line(written: &[u8]) {
     let end = line_end_after(written);
     if !end.is_empty() {
-        let mut stderr = io::stderr().lock();
-        let _ = stderr
-            .write_all(end.as_bytes())
-            .and_then(|()| stderr.flush());
+        force_stderr(end.as_bytes());
     }
+}
+
+/// Writes `data` to standard error and flushes it, even after Ctrl-C, since it reports how the
+/// command ended. Like Python, which prints errors on a stream that it cannot write anyway, it
+/// ignores a failure: no stream is left to report it on.
+fn force_stderr(data: &[u8]) {
+    let mut stderr = io::stderr().lock();
+    let _ = stderr.write_all(data).and_then(|()| stderr.flush());
 }
 
 /// Returns what ends the line that `written` left open: nothing after no output or a line end,
@@ -101,23 +100,28 @@ pub(super) struct ConsoleOutput {
 impl ConsoleOutput {
     /// Returns the output to standard output.
     pub(super) fn new() -> Self {
-        Self {
-            write: write_stdout,
-            #[cfg(windows)]
-            console: io::stdout().is_terminal(),
-            #[cfg(windows)]
-            pending: [0; 3],
-            #[cfg(windows)]
-            pending_len: 0,
-        }
+        Self::to_stream(write_stdout, &io::stdout())
     }
 
     /// Returns the output to standard error.
     pub(super) fn stderr() -> Self {
+        Self::to_stream(write_stderr, &io::stderr())
+    }
+
+    /// Returns the output that `write` makes to `stream`, the stream that it writes, which is a
+    /// console if `stream` is a terminal. Only Windows treats a console apart.
+    fn to_stream(
+        write: fn(&[u8]) -> io::Result<()>,
+        #[cfg_attr(
+            not(windows),
+            expect(unused_variables, reason = "only Windows treats a console apart")
+        )]
+        stream: &impl IsTerminal,
+    ) -> Self {
         Self {
-            write: write_stderr,
+            write,
             #[cfg(windows)]
-            console: io::stderr().is_terminal(),
+            console: stream.is_terminal(),
             #[cfg(windows)]
             pending: [0; 3],
             #[cfg(windows)]
