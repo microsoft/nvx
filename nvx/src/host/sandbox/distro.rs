@@ -42,7 +42,7 @@ use sha2::{Digest, Sha256};
 
 use super::layer::SandboxLayer;
 use super::mount::os_error;
-use super::refused;
+use super::{not_found, open_error, refused};
 use crate::error::{Error, Result};
 use crate::hex::hex;
 use crate::host::artifacts::DISTRO_MANIFEST_SUFFIX;
@@ -455,21 +455,10 @@ fn manifest_path(path: &Path) -> Result<PathBuf> {
     Ok(path.with_file_name(format!("{name}{DISTRO_MANIFEST_SUFFIX}")))
 }
 
-/// Returns the error of a file, which messages call `description`, that cannot be opened:
-/// unavailable if it is missing, as `require_file` refuses a missing file.
-fn open_error(error: &io::Error, path: &Path, description: &str) -> Error {
-    if error.kind() == io::ErrorKind::NotFound {
-        Error::unavailable(format!("{description} not found: {}", path.display()))
-    } else {
-        os_error(error, Some(path))
-    }
-}
-
 /// Opens and seals the regular file at `path`, which messages call `description`, through
 /// `access`, without reading it.
 fn seal_regular(path: &Path, access: Access<'_>, description: &str) -> Result<FileSeal> {
-    seal_if_present(path, access, description)?
-        .ok_or_else(|| Error::unavailable(format!("{description} not found: {}", path.display())))
+    seal_if_present(path, access, description)?.ok_or_else(|| not_found(path, description))
 }
 
 /// Opens and seals the regular file at `path`, which messages call `description`, through
@@ -491,10 +480,7 @@ fn require_regular(seal: &FileSeal, path: &Path, description: &str) -> Result<()
     if seal.kind() == FileKind::Regular {
         Ok(())
     } else {
-        Err(Error::unavailable(format!(
-            "{description} not found: {}",
-            path.display()
-        )))
+        Err(not_found(path, description))
     }
 }
 

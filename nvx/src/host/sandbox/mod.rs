@@ -80,6 +80,24 @@ pub(crate) fn refused(message: impl Into<String>) -> Error {
     Error::unsupported(message)
 }
 
+/// Returns the error of an image, which messages call `description`, that is missing or not a
+/// regular file at `path`, as `require_file` refuses its path.
+#[cfg(feature = "cli")]
+fn not_found(path: &Path, description: &str) -> Error {
+    Error::unavailable(format!("{description} not found: {}", path.display()))
+}
+
+/// Returns the error of an image, which messages call `description`, that cannot be opened at
+/// `path`: [`not_found`] if it is missing, and the native I/O error otherwise.
+#[cfg(feature = "cli")]
+fn open_error(error: &std::io::Error, path: &Path, description: &str) -> Error {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        not_found(path, description)
+    } else {
+        os_error(error, Some(path))
+    }
+}
+
 /// Parses a `--workload-user` value, `UID:GID`, as [`parse_named_workload_identity`] does.
 #[cfg(feature = "cli")]
 pub(crate) fn parse_workload_identity(value: &str) -> Result<(u32, u32)> {

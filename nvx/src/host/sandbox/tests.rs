@@ -598,3 +598,22 @@ fn missing_files_are_named_with_their_components_alone() {
         )
     );
 }
+
+#[test]
+fn open_failures_of_a_missing_image_are_unavailable_and_others_are_io() {
+    let path = Path::new("image.ext4");
+    let missing = open_error(
+        &std::io::Error::from(std::io::ErrorKind::NotFound),
+        path,
+        "ext4 scratch image",
+    );
+    assert_eq!(missing.kind(), ErrorKind::Unavailable);
+    assert_eq!(
+        missing.to_string(),
+        format!("ext4 scratch image not found: {}", path.display())
+    );
+    let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+    let failed = open_error(&denied, path, "ext4 scratch image");
+    assert_eq!(failed.kind(), ErrorKind::Io);
+    assert_eq!(failed.to_string(), format!("{path:?}: {denied}"));
+}
