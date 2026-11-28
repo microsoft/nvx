@@ -70,7 +70,7 @@ use crate::uuid::Uuid;
 
 /// Returns the name of a temporary file next to `path`: `.NAME.UUID.tmp`, with a fresh UUID4 in
 /// hexadecimal.
-pub(crate) fn temporary_path(path: &Path) -> Result<PathBuf> {
+fn temporary_path(path: &Path) -> Result<PathBuf> {
     let Some(name) = path.file_name() else {
         return Err(Exit::error(
             ErrorCode::Other,
@@ -90,7 +90,7 @@ fn uuid4_hex() -> Result<String> {
 }
 
 /// Returns `N` random bytes from the operating system.
-pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N]> {
+fn random_bytes<const N: usize>() -> Result<[u8; N]> {
     let mut bytes = [0u8; N];
     getrandom::fill(&mut bytes).map_err(|error| {
         Exit::error(ErrorCode::Io, format!("cannot read random bytes: {error}"))
@@ -143,7 +143,7 @@ environment:
 
 /// How a command ends other than by succeeding.
 #[derive(Debug)]
-pub(crate) enum Exit {
+enum Exit {
     /// `error[CODE]: MESSAGE` on standard error, and status 1: what `nvx.py` does for a
     /// `ScriptError`, an `OSError`, a `RuntimeError`, or a `ValueError`.
     Error {
@@ -181,7 +181,7 @@ const ENDPOINT_CLOSED: &str = "managed control endpoint closed";
 
 impl Exit {
     /// Returns the error of `code` that prints `message`.
-    pub(crate) fn error(code: ErrorCode, message: impl Into<String>) -> Self {
+    fn error(code: ErrorCode, message: impl Into<String>) -> Self {
         Self::Error {
             code,
             message: message.into(),
@@ -189,7 +189,7 @@ impl Exit {
     }
 
     /// Returns the usage error `message` of `code` of the parser of `syntax`.
-    pub(crate) fn usage(syntax: &Syntax, code: ErrorCode, message: String) -> Self {
+    fn usage(syntax: &Syntax, code: ErrorCode, message: String) -> Self {
         Self::Usage {
             usage: syntax.usage(),
             prog: syntax.prog(),
@@ -199,7 +199,7 @@ impl Exit {
     }
 
     /// Returns the end of a parse that `stop` ended, for the parser of `syntax`.
-    pub(crate) fn from_stop(stop: Stop, syntax: &Syntax) -> Self {
+    fn from_stop(stop: Stop, syntax: &Syntax) -> Self {
         match stop {
             Stop::Usage(code, message) => Self::usage(syntax, code, message),
             Stop::Help => Self::Help(syntax.help()),
@@ -209,12 +209,12 @@ impl Exit {
     /// Returns the error of an I/O error that names no file, which prints the error as Rust
     /// writes it, such as `Broken pipe (os error 32)` for a write to a standard stream whose
     /// reader has gone, with the code [`ErrorCode::Io`].
-    pub(crate) fn from_os_error(error: std::io::Error) -> Self {
+    fn from_os_error(error: std::io::Error) -> Self {
         Self::error(ErrorCode::Io, error.to_string())
     }
 
     /// Returns the message that the end prints after its code, if it is an error.
-    pub(crate) fn message(&self) -> Option<&str> {
+    fn message(&self) -> Option<&str> {
         match self {
             Self::Error { message, .. } | Self::Usage { message, .. } => Some(message),
             Self::EndpointClosed => Some(ENDPOINT_CLOSED),
@@ -223,7 +223,7 @@ impl Exit {
     }
 
     /// Returns the code that the end prints, if it is an error or a usage error.
-    pub(crate) fn code(&self) -> Option<ErrorCode> {
+    fn code(&self) -> Option<ErrorCode> {
         match self {
             Self::Error { code, .. } | Self::Usage { code, .. } => Some(*code),
             Self::EndpointClosed => Some(ErrorCode::EndpointClosed),
@@ -288,24 +288,24 @@ fn one_line(message: &str) -> Cow<'_, str> {
 }
 
 /// The result of a command.
-pub(crate) type Result<T = ()> = std::result::Result<T, Exit>;
+type Result<T = ()> = std::result::Result<T, Exit>;
 
 /// Returns the message of the I/O error that an operation on `path` met, as the sandbox launch
 /// profile writes its own: the path, quoted with Rust's debug formatting, and the error as Rust
 /// writes it, such as `"/state/config.json": Permission denied (os error 13)`.
-pub(crate) fn io_message(error: &std::io::Error, path: &Path) -> String {
+fn io_message(error: &std::io::Error, path: &Path) -> String {
     format!("{path:?}: {error}")
 }
 
 /// Returns the error of `code` for the I/O error that an operation on `path` met, which prints
 /// [`io_message`].
-pub(crate) fn io_error(code: ErrorCode, error: &std::io::Error, path: &Path) -> Exit {
+fn io_error(code: ErrorCode, error: &std::io::Error, path: &Path) -> Exit {
     Exit::error(code, io_message(error, path))
 }
 
 /// Returns what a failed `program` reports in its `output`: the text that it wrote to its
 /// standard error, trimmed, or, when it wrote none, that it exited with its status.
-pub(crate) fn failure_detail(program: &str, output: &Output) -> String {
+fn failure_detail(program: &str, output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     match stderr.trim() {
         "" => format!("{program} exited with {}", output.status),
@@ -314,7 +314,7 @@ pub(crate) fn failure_detail(program: &str, output: &Output) -> String {
 }
 
 /// Fails with [`Exit::Interrupted`] if Ctrl-C arrived.
-pub(crate) fn check_interrupt() -> Result {
+fn check_interrupt() -> Result {
     if platform::interrupted() {
         Err(Exit::Interrupted)
     } else {
