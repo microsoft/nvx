@@ -4,6 +4,7 @@ use crate::guest::init::ExecRequest;
 use crate::guest::parse::parse_decimal;
 use crate::guest::sys::{Errno, c_string};
 use crate::protocol::GuestExecPayload;
+use crate::protocol::workload::WORKLOAD_IDS;
 
 use super::AgentConfig;
 use super::environment;
@@ -115,11 +116,11 @@ fn safe_path(path: &[u8]) -> bool {
             .all(|component| !matches!(component, b"" | b"." | b".."))
 }
 
-/// Parses one nonzero decimal UID or GID while excluding the unchanged-ID sentinel.
+/// Parses one decimal UID or GID in [`WORKLOAD_IDS`].
 pub(super) fn parse_id(text: &[u8]) -> Result<u32, Errno> {
     parse_decimal(text)
-        .filter(|&id| id != 0 && id < u64::from(u32::MAX))
         .and_then(|id| u32::try_from(id).ok())
+        .filter(|id| WORKLOAD_IDS.contains(id))
         .ok_or(Errno::EINVAL)
 }
 #[cfg(test)]

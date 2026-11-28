@@ -62,6 +62,8 @@ use crate::error::{Error, Result};
 use crate::host::artifacts::require_existing;
 #[cfg(feature = "cli")]
 use crate::protocol::cmdline;
+#[cfg(feature = "cli")]
+use crate::protocol::workload::WORKLOAD_IDS;
 
 /// The workload identity by default, `65534:65534`.
 #[cfg(feature = "cli")]
@@ -106,7 +108,8 @@ pub(crate) fn parse_named_workload_identity(name: &str, value: &str) -> Result<(
     ))
 }
 
-/// Parses a workload UID or GID, between 1 and 4294967294, and names it `name` in its refusal.
+/// Parses a workload UID or GID, between 1 and 4294967294 as [`WORKLOAD_IDS`] holds, and names it
+/// `name` in its refusal.
 ///
 /// 4294967295 is refused: as `(uid_t)-1` it reads as "leave unchanged" to `setresuid`/`setresgid`,
 /// so accepting it would leave a one-shot sandbox workload running as UID 0 and GID 0.
@@ -116,8 +119,14 @@ pub(crate) fn parse_named_workload_identity(name: &str, value: &str) -> Result<(
 #[cfg(feature = "cli")]
 pub(crate) fn parse_workload_id(name: impl std::fmt::Display, value: &str) -> Result<u32> {
     parse_decimal::<u32>(value)
-        .filter(|&id| id != 0 && id != u32::MAX)
-        .ok_or_else(|| refused(format!("{name} must be between 1 and 4294967294")))
+        .filter(|id| WORKLOAD_IDS.contains(id))
+        .ok_or_else(|| {
+            refused(format!(
+                "{name} must be between {} and {}",
+                WORKLOAD_IDS.start(),
+                WORKLOAD_IDS.end()
+            ))
+        })
 }
 
 /// Parses nonempty ASCII decimal digits into a native integer, refusing signs and whitespace.
