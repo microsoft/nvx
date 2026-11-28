@@ -24,6 +24,16 @@ const MAX_FIELD_NUMBER: u64 = (1 << 29) - 1;
 /// The longest varint, in bytes: ten, for 64 bits.
 const MAX_VARINT_LEN: usize = 10;
 
+/// The low bits of each varint byte that hold the integer: the wire format writes it in groups of
+/// seven bits, the least significant first.
+const VARINT_VALUE_BITS: usize = 7;
+
+/// The bits of a varint byte that hold the integer.
+const VARINT_VALUE_MASK: u8 = (1 << VARINT_VALUE_BITS) - 1;
+
+/// The high bit of a varint byte, which every byte of a varint but its last sets.
+const VARINT_CONTINUATION: u8 = 1 << VARINT_VALUE_BITS;
+
 /// The low bits of a key that hold the field's wire type: the wire format encodes a key as
 /// `(number << 3) | wire_type`.
 const WIRE_TYPE_BITS: u32 = 3;
@@ -203,13 +213,13 @@ impl<'a> Field<'a> {
 fn read_varint(data: &mut &[u8]) -> Result<u64, WireError> {
     let mut value = 0u64;
     for (index, &byte) in data.iter().enumerate().take(MAX_VARINT_LEN) {
-        let bits = u64::from(byte & 0x7f);
+        let bits = u64::from(byte & VARINT_VALUE_MASK);
         // The tenth byte holds the 64th bit alone.
         if index == MAX_VARINT_LEN - 1 && bits > 1 {
             return Err(WireError::Varint);
         }
-        value |= bits << (7 * index);
-        if byte & 0x80 == 0 {
+        value |= bits << (VARINT_VALUE_BITS * index);
+        if byte & VARINT_CONTINUATION == 0 {
             *data = &data[index + 1..];
             return Ok(value);
         }
