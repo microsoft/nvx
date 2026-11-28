@@ -33,7 +33,7 @@
 
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -539,20 +539,16 @@ fn hash_sealed(path: &Path, access: Access<'_>, description: &str) -> Result<(St
     const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 
     let io_error = |error: io::Error| os_error(&error, Some(path));
-    let mut file = (access.open)(path).map_err(io_error)?;
+    let file = (access.open)(path).map_err(io_error)?;
     let before = (access.seal)(&file).map_err(io_error)?;
     require_regular(&before, path, description)?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0; HASH_BUFFER_BYTES];
-    loop {
-        let read = match file.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => read,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(io_error(error)),
-        };
-        hasher.update(&buffer[..read]);
-    }
+    // `io::copy` reads a `BufReader` through its buffer, so each read takes up to its capacity.
+    io::copy(
+        &mut BufReader::with_capacity(HASH_BUFFER_BYTES, &file),
+        &mut hasher,
+    )
+    .map_err(io_error)?;
     let after = (access.seal)(&file).map_err(io_error)?;
     if let Some(field) = before.difference(&after) {
         return Err(changed_while_verified(path, field));
