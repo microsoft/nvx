@@ -928,6 +928,55 @@ fn snapshot_restore_records_its_source_and_starts_a_restore_of_it() {
     assert!(!state.exists());
 }
 
+/// `snapshot restore` refuses a share that reaches its snapshot store, whose files the view of
+/// each restore links, as every start of its sandbox would refuse it: before it records the
+/// sandbox, so that no provisioned sandbox stays behind, which a corrected restore into the same
+/// state directory would find provisioned.
+#[test]
+fn snapshot_restore_refuses_a_share_of_its_snapshot_store_before_it_provisions() {
+    let fixture = Fixture::new(false);
+    let root = artifact_root(&fixture.state("checkout"));
+    let layer = fixture.state("distro.erofs");
+    fs::write(&layer, "distro").unwrap();
+    let store = fixture.root.path().join("store");
+    let state = fixture.state("command");
+    // The store itself, and a directory inside it.
+    for shared in [store.clone(), store.join("snapshots")] {
+        let arguments = [
+            "restore",
+            "source",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--layer",
+            &format!(
+                "distro,{},11111111-1111-1111-1111-111111111111",
+                layer.display()
+            ),
+            "--upper",
+            "ram",
+            "--hypervisor",
+            if cfg!(windows) { "whp" } else { "kvm" },
+            "--mount",
+            &format!("/data,{},ro", shared.display()),
+        ]
+        .map(str::to_owned);
+        let (command, unrecognized) = snapshots::parse(&arguments).unwrap();
+        assert!(unrecognized.is_empty(), "{unrecognized:?}");
+        let error = snapshots::run(Some(&root), command).unwrap_err();
+        assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
+        let message = error.message().unwrap_or_default();
+        assert!(
+            message.contains("overlaps the sandbox's snapshot store"),
+            "{message}"
+        );
+        assert!(!state.exists(), "{}", shared.display());
+    }
+    assert!(fixture.snapshot_free());
+    assert!(fixture.spawned().is_empty());
+}
+
 /// `snapshot restore` refuses a hypervisor that this host's operating system cannot run, which
 /// every start of its sandbox would fail on, before it opens the store or locks the snapshot, so
 /// that it reports that refusal and leaves the store as it was, whatever the snapshot.
