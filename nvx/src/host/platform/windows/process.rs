@@ -13,7 +13,7 @@ use windows_sys::Win32::Foundation::{
     WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::Registry::{
-    HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
+    HKEY_LOCAL_MACHINE, REG_ROUTINE_FLAGS, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetProcessIoCounters, GetProcessTimes, INFINITE, IO_COUNTERS,
@@ -282,35 +282,13 @@ pub(crate) fn open_process(pid: u32, start_time: u64) -> io::Result<Option<Proce
 /// value `BootId` of [`BOOT_ID_KEY`] and changes at every boot, little-endian and zero-extended
 /// to 16 bytes.
 pub(crate) fn boot_id() -> io::Result<[u8; 16]> {
-    let key = wide(BOOT_ID_KEY);
-    let name = wide("BootId");
     let mut value = 0u32;
-    let mut size = mem::size_of_val(&value) as u32;
-    // SAFETY: the names are NUL-terminated, the type flag admits only a REG_DWORD, and the
-    // output buffer holds `size` bytes.
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            key.as_ptr(),
-            name.as_ptr(),
-            RRF_RT_REG_DWORD,
-            ptr::null_mut(),
-            (&raw mut value).cast(),
-            &mut size,
-        )
-    };
-    if status != ERROR_SUCCESS {
-        let error = io::Error::from_raw_os_error(status as i32);
-        return Err(io::Error::new(
-            error.kind(),
-            format!("cannot read the registry value HKLM\\{BOOT_ID_KEY}\\BootId: {error}"),
-        ));
-    }
+    read_machine_value(BOOT_ID_KEY, "BootId", RRF_RT_REG_DWORD, &mut value)?;
     Ok(u128::from(value).to_le_bytes())
 }
 
 /// The registry key of the boot counter, under `HKEY_LOCAL_MACHINE`.
-const BOOT_ID_KEY: &str =
+pub(super) const BOOT_ID_KEY: &str =
     r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters";
 
 /// The registry key of the machine GUID, under `HKEY_LOCAL_MACHINE`.
@@ -325,33 +303,9 @@ pub(crate) fn host_id() -> io::Result<[u8; 16]> {
     /// Bounds one registry read in UTF-16 units, including the terminator, with room beyond a
     /// canonical 36-unit MachineGuid; this is a read budget, not a GUID format limit.
     const MACHINE_GUID_BUFFER_UNITS: usize = 64;
-    let key = wide(MACHINE_GUID_KEY);
-    let name = wide("MachineGuid");
     let mut value = [0u16; MACHINE_GUID_BUFFER_UNITS];
-    let mut size = mem::size_of_val(&value) as u32;
-    // SAFETY: the names are NUL-terminated, the type flag admits only a REG_SZ, and the output
-    // buffer holds `size` bytes.
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            key.as_ptr(),
-            name.as_ptr(),
-            RRF_RT_REG_SZ,
-            ptr::null_mut(),
-            value.as_mut_ptr().cast(),
-            &mut size,
-        )
-    };
-    if status != ERROR_SUCCESS {
-        let error = io::Error::from_raw_os_error(status as i32);
-        return Err(io::Error::new(
-            error.kind(),
-            format!(
-                "cannot read the registry value HKLM\\{MACHINE_GUID_KEY}\\MachineGuid: {error}"
-            ),
-        ));
-    }
-    let units = &value[..(size as usize / UTF16_CODE_UNIT_BYTES).min(value.len())];
+    let size = read_machine_value(MACHINE_GUID_KEY, "MachineGuid", RRF_RT_REG_SZ, &mut value)?;
+    let units = &value[..(size / UTF16_CODE_UNIT_BYTES).min(value.len())];
     let end = units
         .iter()
         .position(|&unit| unit == 0)
@@ -364,6 +318,50 @@ pub(crate) fn host_id() -> io::Result<[u8; 16]> {
             ),
         )
     })
+}
+
+/// A buffer that `RegGetValueW` may fill with any bytes, since every bit pattern of it is a valid
+/// value: the `u32` of a `REG_DWORD`, or the UTF-16 units of a `REG_SZ`. Only these types
+/// implement it, which keeps [`read_machine_value`] safe to call.
+pub(super) trait RegistryBuffer {}
+
+impl RegistryBuffer for u32 {}
+
+impl<const N: usize> RegistryBuffer for [u16; N] {}
+
+/// Reads the registry value `name` of the key `key`, under `HKEY_LOCAL_MACHINE`, into `value`,
+/// admitting only the types of `flags`, and returns the size in bytes that `RegGetValueW` reports
+/// for it.
+pub(super) fn read_machine_value<T: RegistryBuffer>(
+    key: &str,
+    name: &str,
+    flags: REG_ROUTINE_FLAGS,
+    value: &mut T,
+) -> io::Result<usize> {
+    let wide_key = wide(key);
+    let wide_name = wide(name);
+    let mut size = mem::size_of_val(value) as u32;
+    // SAFETY: the names are NUL-terminated, the output buffer holds `size` bytes, and any bytes
+    // that the call writes there form a valid `T`, as `RegistryBuffer` requires.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            wide_key.as_ptr(),
+            wide_name.as_ptr(),
+            flags,
+            ptr::null_mut(),
+            ptr::from_mut(value).cast(),
+            &mut size,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        let error = io::Error::from_raw_os_error(status as i32);
+        return Err(io::Error::new(
+            error.kind(),
+            format!("cannot read the registry value HKLM\\{key}\\{name}: {error}"),
+        ));
+    }
+    Ok(size as usize)
 }
 
 /// Returns the host's monotonic time, as OpenVMM measures the downtime of a capture within one
