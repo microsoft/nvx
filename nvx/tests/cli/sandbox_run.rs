@@ -18,6 +18,10 @@ use crate::openvmm::{
     assert_stable_blocks, managed_run,
 };
 
+/// `--timeout` also bounds startup. Give the fake time to attach on a busy runner before
+/// testing what happens when it ignores the stop request.
+const IGNORED_STOP_TIMEOUT_SECS: &str = "5";
+
 /// Returns `nvx sandbox run` of the distro layer and scratch image of the root with `options`.
 fn sandbox_run(options: &[&str]) -> Vec<String> {
     ["sandbox", "run", "--layer", LAYER, "--scratch", SCRATCH]
@@ -592,7 +596,7 @@ fn a_run_forces_down_a_vm_that_does_not_stop() {
         "--arg",
         "once",
         "--timeout",
-        "1",
+        IGNORED_STOP_TIMEOUT_SECS,
         "--cmdline",
         "fake_ignore_stop=1",
     ]));
@@ -626,7 +630,7 @@ fn a_runs_warnings_start_lines_of_their_own_after_its_workloads_output() {
         "--arg",
         "printerr partial",
         "--timeout",
-        "1",
+        IGNORED_STOP_TIMEOUT_SECS,
         "--cmdline",
         "fake_ignore_stop=1",
     ]));
