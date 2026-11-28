@@ -221,6 +221,46 @@ fn records_keep_the_cpu_profile_that_their_starts_request() {
     );
 }
 
+/// Each start refuses as malformed a recorded CPU profile of a profile ID's form that no built-in
+/// profile has, as `--cpu-profile` refuses it, before it launches OpenVMM, whose every cold boot
+/// would refuse it with `E_PROFILE_UNKNOWN`, while the same record with `host` passes.
+#[test]
+fn starts_refuse_a_recorded_cpu_profile_that_no_built_in_profile_has() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("distro.erofs");
+    std::fs::write(&image, b"distro layer\n").unwrap();
+    let layer = SandboxLayer::new(
+        LayerRole::Distro,
+        image.to_str().unwrap(),
+        "11111111-1111-1111-1111-111111111111",
+    );
+    let distro = RecordedDistro::new(&layer, DistroBinding::verify(&layer).unwrap()).unwrap();
+    let options = ProvisionConfig {
+        hypervisor: "whp",
+        cpu_profile: Some("host"),
+        memory_mib: 128,
+        cmdline: "",
+        ram_upper_percent: None,
+        hostname: DEFAULT_HOSTNAME,
+        workload_identity: DEFAULT_WORKLOAD_IDENTITY,
+        export: None,
+        network: None,
+    };
+    let text = serialize_launch(&distro, None, &options, None).unwrap();
+    let object: Object = serde_json::from_str(&text).unwrap();
+    Config::new(object.clone()).unwrap().check().unwrap();
+    for value in ["intel.bogus.v1", "amd.milan.v9", "intel.host.v1"] {
+        let mut recorded = object.clone();
+        recorded.insert("cpu_profile".to_owned(), json!(value));
+        let error = Config::new(recorded).unwrap().check().unwrap_err();
+        assert_eq!(
+            error.message(),
+            Some("sandbox configuration is malformed"),
+            "{value}"
+        );
+    }
+}
+
 /// A sandbox's scratch image is a file of its own: the check of the images, which `run` and
 /// `provision` make of their options and each start of its record, refuses a scratch image that
 /// is the distro layer, by its path or through a hard or symbolic link, which OpenVMM would attach

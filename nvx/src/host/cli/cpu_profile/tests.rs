@@ -55,6 +55,41 @@ fn the_catalog_lists_the_built_in_profiles() {
     );
 }
 
+/// A sandbox's `--cpu-profile` is one that every cold boot takes, as `doc/usage.md` lists them:
+/// `auto`, `host`, or the ID of a built-in profile. OpenVMM's cold boot refuses every other ID
+/// with `E_PROFILE_UNKNOWN`: one of the ID's form that it does not pin, such as another revision
+/// of a built-in profile, and a host profile's, which only a restore takes. Their refusal names
+/// the value and lists the built-in IDs.
+#[test]
+fn requests_are_auto_host_or_the_id_of_a_built_in_profile() {
+    let catalog = catalog();
+    for profile in ["auto", "host"]
+        .into_iter()
+        .chain(catalog.iter().map(|profile| profile.id.as_str()))
+    {
+        assert_eq!(request_problem(profile), None, "{profile}");
+    }
+    for profile in [
+        "intel.bogus.v1",
+        "amd.milan.v9",
+        "intel.alderlake.v2",
+        "amd.turin.v3",
+        "intel.host.v1",
+        "amd.host.v1",
+        "arm.neoverse-v2.v1",
+        "Intel.AlderLake.v1",
+        "AUTO",
+        "intel.alderlake",
+        "",
+    ] {
+        let problem = request_problem(profile).expect(profile);
+        assert!(problem.contains(&format!("{profile:?}")), "{problem}");
+        for built_in in &catalog {
+            assert!(problem.contains(&built_in.id), "{problem}");
+        }
+    }
+}
+
 #[test]
 fn cpus_map_to_the_generations_of_the_built_in_profiles() {
     let intel = |model, stepping| generation("GenuineIntel", 6, model, stepping);

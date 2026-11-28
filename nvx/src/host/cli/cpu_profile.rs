@@ -1,5 +1,6 @@
-//! The CPU-profile guidance that `nvx run` prints after OpenVMM fails a cold boot on a host
-//! whose CPU no built-in CPU profile serves.
+//! The CLI's built-in CPU profiles: the check of the `--cpu-profile` that a sandbox records, and
+//! the CPU-profile guidance that `nvx run` prints after OpenVMM fails a cold boot on a host whose
+//! CPU no built-in CPU profile serves.
 //!
 //! OpenVMM presents each guest a CPU profile, by default the built-in profile of the host CPU's
 //! generation (`doc/usage.md`, "CPU profiles"). `cpu_generations.json` copies the identity of
@@ -9,6 +10,11 @@
 //! of a generation's profile share its generation, which the guidance lists once.
 //! `tests/openvmm_cpu_profiles.rs` compares the copy with the submodule's documents.
 //! [`HostCpu::current`] identifies the host CPU with CPUID, as OpenVMM does.
+//!
+//! A cold boot takes `--cpu-profile auto`, `host`, or the ID of a pinned profile: OpenVMM refuses
+//! any other ID with `E_PROFILE_UNKNOWN`, whatever the host, since a host profile has no ID by
+//! which a cold boot selects it. [`request_problem`] refuses those IDs, so that `sandbox
+//! provision` records no profile that every start of its sandbox would fail on.
 //!
 //! On an Intel or AMD CPU that no built-in profile serves, `--cpu-profile auto`, the default, falls
 //! back to a profile derived from the host, which OpenVMM warns about, and on another vendor's
@@ -25,6 +31,8 @@ use super::percent;
 /// The identities of the built-in CPU profiles, in the order in which [`guidance`] lists their
 /// generations.
 const CATALOG: &str = include_str!("cpu_generations.json");
+/// The `--cpu-profile` of OpenVMM's default: the built-in profile of the host CPU's generation.
+const AUTO_PROFILE: &str = "auto";
 /// The `--cpu-profile` of a profile that OpenVMM derives from the host that it runs on.
 const HOST_PROFILE: &str = "host";
 /// The code with which OpenVMM fails a cold boot where no CPU profile serves the host's CPU.
@@ -120,6 +128,28 @@ impl Profile {
 /// Returns the built-in CPU profiles of [`CATALOG`].
 fn catalog() -> Vec<Profile> {
     serde_json::from_str(CATALOG).expect("cpu_generations.json lists the built-in CPU profiles")
+}
+
+/// Returns why `profile` is no `--cpu-profile` that every cold boot of a sandbox can take, or
+/// `None` for one: [`AUTO_PROFILE`], [`HOST_PROFILE`], or the ID of a built-in profile of
+/// [`CATALOG`], as the [module](self) describes. The message lists the built-in IDs, as
+/// OpenVMM's `E_PROFILE_UNKNOWN` does.
+pub(super) fn request_problem(profile: &str) -> Option<String> {
+    let catalog = catalog();
+    if [AUTO_PROFILE, HOST_PROFILE].contains(&profile)
+        || catalog.iter().any(|built_in| built_in.id == profile)
+    {
+        return None;
+    }
+    let ids: Vec<&str> = catalog
+        .iter()
+        .map(|built_in| built_in.id.as_str())
+        .collect();
+    Some(format!(
+        "CPU profile {profile:?} must be \"{AUTO_PROFILE}\", \"{HOST_PROFILE}\", or the ID, \
+         VENDOR.GENERATION.vREVISION, of a built-in profile: {}",
+        ids.join(", ")
+    ))
 }
 
 /// Returns the generations of the built-in profiles in `catalog` as the guidance lists them, such
