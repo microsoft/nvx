@@ -17,11 +17,27 @@
 use std::fmt;
 use std::str::FromStr;
 
-/// The offsets of the hyphens in the canonical text of a UUID.
-const HYPHENS: [usize; 4] = [8, 13, 18, 23];
+/// The bytes at which the second through fifth groups of a UUID begin, whose groups of 4, 2, 2,
+/// 2, and 6 bytes spell the 8, 4, 4, 4, and 12 digits of its canonical text.
+const GROUP_STARTS: [usize; 4] = [4, 6, 8, 10];
 
-/// The length of the canonical text of a UUID.
-const TEXT_LEN: usize = 36;
+/// The offsets of the hyphens in the canonical text of a UUID, each of which precedes a group.
+const HYPHENS: [usize; GROUP_STARTS.len()] = hyphens();
+
+/// The length of the canonical text of a UUID: two digits a byte, and its hyphens.
+const TEXT_LEN: usize = 2 * 16 + HYPHENS.len();
+
+/// Returns the [`HYPHENS`]: each follows the two digits of every byte before its group, and the
+/// hyphens before it.
+const fn hyphens() -> [usize; GROUP_STARTS.len()] {
+    let mut hyphens = [0; GROUP_STARTS.len()];
+    let mut group = 0;
+    while group < GROUP_STARTS.len() {
+        hyphens[group] = 2 * GROUP_STARTS[group] + group;
+        group += 1;
+    }
+    hyphens
+}
 
 /// A UUID, whose 16 bytes are in the order of its canonical text, as the module describes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -117,7 +133,7 @@ impl fmt::Display for Uuid {
     /// Writes the UUID's canonical text.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (index, byte) in self.0.iter().enumerate() {
-            if matches!(index, 4 | 6 | 8 | 10) {
+            if GROUP_STARTS.contains(&index) {
                 formatter.write_str("-")?;
             }
             write!(formatter, "{byte:02x}")?;
