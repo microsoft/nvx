@@ -30,7 +30,7 @@ use crate::error::{Error, Result};
 ///
 /// Protocols order by name, as the compiler sorts them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum NativeProtocol {
+pub(super) enum NativeProtocol {
     /// ICMP, or ICMPv6 for IPv6 networks.
     Icmp,
     /// TCP.
@@ -41,7 +41,7 @@ pub(crate) enum NativeProtocol {
 
 impl NativeProtocol {
     /// Returns OpenVMM's name of the protocol.
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::Icmp => "icmp",
             Self::Tcp => "tcp",
@@ -52,7 +52,7 @@ impl NativeProtocol {
 
 /// The protocol of a rule as written: a native protocol, or `any`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RuleProtocol {
+pub(super) enum RuleProtocol {
     /// TCP.
     Tcp,
     /// UDP.
@@ -65,7 +65,7 @@ pub(crate) enum RuleProtocol {
 
 impl RuleProtocol {
     /// Returns the native protocol, or `None` for `any`.
-    pub(crate) fn native(self) -> Option<NativeProtocol> {
+    pub(super) fn native(self) -> Option<NativeProtocol> {
         match self {
             Self::Tcp => Some(NativeProtocol::Tcp),
             Self::Udp => Some(NativeProtocol::Udp),
@@ -87,33 +87,33 @@ impl RuleProtocol {
 }
 
 /// An inclusive range of ports.
-pub(crate) type PortRange = (u16, u16);
+pub(super) type PortRange = (u16, u16);
 
 /// Traffic that a rule selects at its destinations: a protocol, or every protocol, and a range of
 /// its ports, or every port.
-pub(crate) type Selector = (Option<NativeProtocol>, Option<PortRange>);
+pub(super) type Selector = (Option<NativeProtocol>, Option<PortRange>);
 
 /// A value that should be a port number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PortValue {
+pub(super) enum PortValue {
     /// An integer, saturated to the range of `i128`.
     Integer(i128),
 }
 
 /// A rule of one action, as the compiler lowers it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Rule {
+pub(super) struct Rule {
     /// Address family of the rule's addresses.
-    pub(crate) family: Family,
+    pub(super) family: Family,
     /// Addresses that the rule selects: sorted, disjoint intervals of `family`, possibly none.
     ///
     /// The rules of one rule's selectors share them, as Python's share one tuple, so that many
     /// destinations times many selectors cost no more memory than they take to write.
-    pub(crate) addresses: Rc<[Interval]>,
+    pub(super) addresses: Rc<[Interval]>,
     /// Protocol that the rule selects, or `None` for every protocol.
-    pub(crate) protocol: Option<NativeProtocol>,
+    pub(super) protocol: Option<NativeProtocol>,
     /// Ports that the rule selects, or `None` for every port. Only TCP and UDP rules have ports.
-    pub(crate) ports: Option<PortRange>,
+    pub(super) ports: Option<PortRange>,
 }
 
 /// Returns an [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) error with `message`.
@@ -123,7 +123,7 @@ fn invalid(message: impl Into<String>) -> Error {
 
 /// Parses the CIDR `value` of the field `description`, as `_network` does: the network of an
 /// IPv4 or IPv6 interface without an IPv6 scope.
-pub(crate) fn network(value: &str, description: &str) -> Result<Network> {
+pub(super) fn network(value: &str, description: &str) -> Result<Network> {
     address::parse_interface(value).map_err(|error| {
         invalid(match error {
             InterfaceError::Invalid => {
@@ -139,7 +139,7 @@ pub(crate) fn network(value: &str, description: &str) -> Result<Network> {
 /// Returns the family of the destination `description`, whose network is `parent`, and the
 /// addresses that it holds outside `exceptions`, as `_subtract_exclusions` does. Each exception,
 /// which is parsed when it is read, must lie within `parent`.
-pub(crate) fn destination(
+pub(super) fn destination(
     parent: Network,
     exceptions: impl IntoIterator<Item = Result<Network>>,
     description: &str,
@@ -162,7 +162,7 @@ pub(crate) fn destination(
 
 /// Returns the addresses of each family that `destinations`, each a family and its addresses,
 /// select, for the families that have destinations, as an MXC rule's `to` selects them.
-pub(crate) fn group_destinations(
+pub(super) fn group_destinations(
     destinations: &[(Family, Vec<Interval>)],
 ) -> Vec<(Family, Vec<Interval>)> {
     Family::ALL
@@ -209,7 +209,7 @@ fn port_range(start: PortValue, end: Option<PortValue>, description: &str) -> Re
 /// Returns the selectors of the port fields, `port` and the optional `endPort`, of
 /// `description`, an MXC port selector or a legacy flat rule whose protocol is valid, as the rest
 /// of `_parse_mxc_port` does. ICMP takes no port.
-pub(crate) fn port_selectors(
+pub(super) fn port_selectors(
     protocol: RuleProtocol,
     port: Option<PortValue>,
     end_port: Option<PortValue>,
@@ -238,7 +238,7 @@ pub(crate) fn port_selectors(
 /// `destinations`, which the rules share, as `_parse_mxc_rule` and `_parse_legacy_rule` build
 /// them. Without destinations, the rules select every address of both families, and without
 /// selectors every protocol and port.
-pub(crate) fn combine(
+pub(super) fn combine(
     destinations: Option<Vec<(Family, Vec<Interval>)>>,
     selectors: Option<Vec<Selector>>,
 ) -> Vec<Rule> {
@@ -278,14 +278,14 @@ fn too_many_rules(category: &str) -> Error {
 
 /// Lowers the rules of the action `category` into native rules, in the order in which the
 /// compiler sorts them, as `_compile_category` does once it has parsed them.
-pub(crate) fn lower(rules: &[Rule], category: &str) -> Result<Vec<String>> {
+pub(super) fn lower(rules: &[Rule], category: &str) -> Result<Vec<String>> {
     lower_within(rules, category, MAX_RULES)
 }
 
 /// Lowers the rules of the action `category` as [`lower`] does, but fails once they need more
 /// than `limit` native rules rather than [`MAX_RULES`]: tests lift the limit to learn how many
 /// native rules an action needs.
-pub(crate) fn lower_within(rules: &[Rule], category: &str, limit: usize) -> Result<Vec<String>> {
+pub(super) fn lower_within(rules: &[Rule], category: &str, limit: usize) -> Result<Vec<String>> {
     // A native rule matches only its own family, so each family is lowered on its own, within
     // the action's shared limit.
     let mut lowered: Vec<NativeRule> = Vec::new();

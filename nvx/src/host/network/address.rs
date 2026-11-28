@@ -15,7 +15,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 ///
 /// IPv4 orders before IPv6, as Python's IP versions 4 and 6 do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum Family {
+pub(super) enum Family {
     /// IPv4: 32-bit addresses.
     V4,
     /// IPv6: 128-bit addresses.
@@ -24,7 +24,7 @@ pub(crate) enum Family {
 
 impl Family {
     /// Both families, in the order in which the compiler lowers them.
-    pub(crate) const ALL: [Self; 2] = [Self::V4, Self::V6];
+    pub(super) const ALL: [Self; 2] = [Self::V4, Self::V6];
 
     /// Returns the number of bits of an address of this family.
     pub(super) const fn bits(self) -> u32 {
@@ -43,20 +43,20 @@ impl Family {
     }
 
     /// Returns every address of this family as one interval.
-    pub(crate) const fn everything(self) -> Interval {
+    pub(super) const fn everything(self) -> Interval {
         (0, self.last_address())
     }
 }
 
 /// An inclusive interval of addresses of one family: its first and its last address.
-pub(crate) type Interval = (u128, u128);
+pub(super) type Interval = (u128, u128);
 
 /// A network of one family, without host bits.
 ///
 /// Networks order as the compiler sorts its output: by family, then by address, then by prefix
 /// length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct Network {
+pub(super) struct Network {
     /// Address family.
     family: Family,
     /// First address of the network, with every host bit clear.
@@ -81,12 +81,12 @@ impl Network {
     }
 
     /// Returns the address family of the network.
-    pub(crate) fn family(self) -> Family {
+    pub(super) fn family(self) -> Family {
         self.family
     }
 
     /// Returns the interval of the network's addresses: its network and broadcast addresses.
-    pub(crate) fn interval(self) -> Interval {
+    pub(super) fn interval(self) -> Interval {
         (self.address, self.address | self.host_mask())
     }
 
@@ -101,7 +101,7 @@ impl Network {
     }
 
     /// Returns whether `other` lies within this network, as Python's `subnet_of` decides.
-    pub(crate) fn contains(self, other: Self) -> bool {
+    pub(super) fn contains(self, other: Self) -> bool {
         let (first, last) = self.interval();
         let (other_first, other_last) = other.interval();
         self.family == other.family && first <= other_first && last >= other_last
@@ -165,7 +165,7 @@ fn write_ipv6(formatter: &mut fmt::Formatter<'_>, address: u128) -> fmt::Result 
 
 /// Why [`parse_interface`] refused a string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InterfaceError {
+pub(super) enum InterfaceError {
     /// The string is neither an IPv4 nor an IPv6 interface.
     Invalid,
     /// The string is an IPv6 interface that names a scope, such as `fe80::1%eth0/64`.
@@ -174,7 +174,7 @@ pub(crate) enum InterfaceError {
 
 /// Parses `text` as Python's `ipaddress.ip_interface` does and returns its network, whose host
 /// bits are clear.
-pub(crate) fn parse_interface(text: &str) -> Result<Network, InterfaceError> {
+pub(super) fn parse_interface(text: &str) -> Result<Network, InterfaceError> {
     let text = text.as_bytes();
     // `ip_interface` tries IPv4 first, and no string is both.
     if let Some(network) = parse_ipv4_interface(text) {
@@ -405,7 +405,7 @@ fn parse_ipv6(text: &[u8]) -> Option<u128> {
 
 /// The networks that Python's `ipaddress.summarize_address_range` yields for an interval: the
 /// fewest networks that cover it exactly, from its first address.
-pub(crate) struct Summary {
+pub(super) struct Summary {
     /// Address family of the interval.
     family: Family,
     /// First address that the networks yielded so far do not cover, or `None` once they cover the
@@ -417,7 +417,7 @@ pub(crate) struct Summary {
 
 /// Returns the networks that cover the addresses of `family` from `first` through `last`, as
 /// `ipaddress.summarize_address_range` yields them.
-pub(crate) fn summarize(family: Family, (first, last): Interval) -> Summary {
+pub(super) fn summarize(family: Family, (first, last): Interval) -> Summary {
     #[cfg(test)]
     tests::probe::SUMMARIES.with(|count| count.set(count.get() + 1));
     Summary {
@@ -455,7 +455,7 @@ impl Iterator for Summary {
 
 /// Returns the union of `intervals`, sorted, with overlapping and adjacent intervals merged, as
 /// `_merge_intervals` does.
-pub(crate) fn merge(intervals: impl IntoIterator<Item = Interval>) -> Vec<Interval> {
+pub(super) fn merge(intervals: impl IntoIterator<Item = Interval>) -> Vec<Interval> {
     let mut sorted: Vec<Interval> = intervals.into_iter().collect();
     #[cfg(test)]
     tests::probe::MERGED_INTERVALS.with(|count| count.set(count.get() + sorted.len()));
@@ -474,7 +474,7 @@ pub(crate) fn merge(intervals: impl IntoIterator<Item = Interval>) -> Vec<Interv
 
 /// Returns the addresses of `sources` that `exclusions` do not hold, as `_subtract_intervals`
 /// does. Both lists are sorted and their intervals disjoint.
-pub(crate) fn subtract(sources: &[Interval], exclusions: &[Interval]) -> Vec<Interval> {
+pub(super) fn subtract(sources: &[Interval], exclusions: &[Interval]) -> Vec<Interval> {
     let mut remaining = Vec::new();
     let mut first_exclusion = 0;
     for &(source_start, source_end) in sources {
