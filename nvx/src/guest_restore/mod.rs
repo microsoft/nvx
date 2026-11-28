@@ -176,7 +176,7 @@ use std::net::IpAddr;
 
 use crate::hex::write_hex;
 use crate::protocol::MAX_HOST_MAPPINGS;
-use crate::protocol::root::{ImageFormat, Journal, OverlayMode};
+use crate::protocol::root::{ImageFormat, Journal, OverlayMode, RAM_UPPER_CAPS};
 use crate::protocol::view::{MAX_HOSTNAME_BYTES, View, is_hostname};
 use crate::uuid::Uuid;
 
@@ -390,7 +390,7 @@ impl Configuration {
             return Err(GuestRestoreError::FirstPartitionBound);
         }
         if let Upper::Tmpfs { max_memory_percent } = self.upper
-            && !(1..=90).contains(&max_memory_percent)
+            && !RAM_UPPER_CAPS.contains(&max_memory_percent)
         {
             return Err(GuestRestoreError::TmpfsMemoryPercent(max_memory_percent));
         }
@@ -533,7 +533,9 @@ impl fmt::Display for GuestRestoreError {
             }
             Self::TmpfsMemoryPercent(percent) => write!(
                 formatter,
-                "the tmpfs cap of {percent}% of the VM's memory is not 1 to 90%"
+                "the tmpfs cap of {percent}% of the VM's memory is not {} to {}%",
+                RAM_UPPER_CAPS.start(),
+                RAM_UPPER_CAPS.end()
             ),
             Self::ExportWithoutMappings => formatter.write_str("the export has no mappings"),
             Self::MappingsWithoutExport => formatter.write_str("the mappings have no export"),

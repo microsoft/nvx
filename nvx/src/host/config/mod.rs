@@ -12,7 +12,6 @@ mod command_line;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -27,7 +26,9 @@ use crate::hex::{parse_hex, write_hex};
 use crate::net::Ipv4Cidr;
 use crate::protocol::cmdline::{self, Parameter};
 use crate::protocol::maps::HostMap;
-use crate::protocol::root::{ImageFormat, Journal, OverlayMode, RootImage, RootLayout, RootUpper};
+use crate::protocol::root::{
+    ImageFormat, Journal, OverlayMode, RAM_UPPER_CAPS, RootImage, RootLayout, RootUpper,
+};
 use crate::protocol::view::{self, MAX_HOSTNAME_BYTES, View};
 
 pub(crate) use self::command_line::check_argument_nuls;
@@ -46,9 +47,6 @@ const OPENVMM_COMMAND_LINE_RESERVE: usize = 2048;
 /// The guest address of a VM's NIC at a cold boot whose configuration names none, in the form
 /// that [`Ipv4Cidr::parse`] reads.
 pub const DEFAULT_GUEST_NETWORK: &str = "10.0.0.2/24";
-
-/// The caps of a RAM upper that [`VmConfig::check`] accepts, in percent of the VM's memory.
-const RAM_UPPER_CAPS: RangeInclusive<u8> = 1..=90;
 
 /// The names of the cold boot tokens that OpenVMM's machine profile owns and supplies itself,
 /// beside the `virtfs_*` ones that NVX reserves: the consoles, device discovery, the NIC's
@@ -1129,8 +1127,10 @@ impl LayeredRoot {
                 if !RAM_UPPER_CAPS.contains(max_memory_percent) =>
             {
                 Err(Error::unsupported(format!(
-                    "the RAM upper's cap of {max_memory_percent}% of the VM's memory is not 1 to \
-                     90%"
+                    "the RAM upper's cap of {max_memory_percent}% of the VM's memory is not {} to \
+                     {}%",
+                    RAM_UPPER_CAPS.start(),
+                    RAM_UPPER_CAPS.end()
                 )))
             }
             _ => Ok(()),
