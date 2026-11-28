@@ -53,6 +53,8 @@
 //! execution that ended get no answer; and standard input beyond the window, or after its end,
 //! ends the session.
 
+use std::ops::Range;
+
 use crate::protocol::{APP_HEADER_LEN, OUTER_MAX_PAYLOAD, ProtocolError, array, violation};
 
 /// Version of the frame format and of the protocol, which each header and each `READY` carry.
@@ -97,6 +99,50 @@ const STDIN_ACK: u8 = 0x86;
 const BUSY: u8 = 0x87;
 /// Kind of [`Frame::Error`].
 const ERROR: u8 = 0xff;
+
+/// Positions of the fields of a frame header, which the module describes, in this order and with
+/// no padding, and which [`Frame::encode`] and [`Frame::decode`] share.
+mod field {
+    use super::{APP_HEADER_LEN, Range};
+
+    /// Bytes of the magic, [`MAGIC`](super::MAGIC).
+    pub(super) const MAGIC: Range<usize> = 0..4;
+    /// Byte of the version, [`VERSION`](super::VERSION).
+    pub(super) const VERSION: usize = 4;
+    /// Byte of the frame kind.
+    pub(super) const KIND: usize = 5;
+    /// Bytes of the flags, both zero in a valid frame.
+    pub(super) const FLAGS: Range<usize> = 6..8;
+    /// Bytes of the request ID, a little-endian `u64`.
+    pub(super) const REQUEST_ID: Range<usize> = 8..16;
+    /// Bytes of the status, a little-endian `i32`.
+    pub(super) const STATUS: Range<usize> = 16..20;
+    /// Bytes of the payload length, a little-endian `u32`, which end the header.
+    pub(super) const LENGTH: Range<usize> = 20..APP_HEADER_LEN;
+}
+
+/// Returns the number of bytes of `range`.
+const fn width(range: Range<usize>) -> usize {
+    range.end - range.start
+}
+
+// The fields tile the header in order, and each range holds exactly the bytes of its field's
+// type, so that the header's slices and `array`'s copies always fit.
+const _: () = {
+    assert!(field::MAGIC.start == 0);
+    assert!(field::MAGIC.end == field::VERSION);
+    assert!(field::VERSION + 1 == field::KIND);
+    assert!(field::KIND + 1 == field::FLAGS.start);
+    assert!(field::FLAGS.end == field::REQUEST_ID.start);
+    assert!(field::REQUEST_ID.end == field::STATUS.start);
+    assert!(field::STATUS.end == field::LENGTH.start);
+    assert!(field::LENGTH.end == APP_HEADER_LEN);
+    assert!(width(field::MAGIC) == size_of::<[u8; 4]>());
+    assert!(width(field::FLAGS) == size_of::<[u8; 2]>());
+    assert!(width(field::REQUEST_ID) == size_of::<u64>());
+    assert!(width(field::STATUS) == size_of::<i32>());
+    assert!(width(field::LENGTH) == size_of::<u32>());
+};
 
 /// A frame of version 2, without its request ID, which [`Frame::encode`] takes and
 /// [`Frame::decode`] returns.
@@ -237,11 +283,14 @@ impl<'a> Frame<'a> {
             return Err(violation("an NVXC frame must fit one outer data record"));
         }
         let mut frame = Vec::with_capacity(APP_HEADER_LEN + length);
-        frame.extend_from_slice(&MAGIC);
-        frame.extend_from_slice(&[VERSION, kind, 0, 0]);
-        frame.extend_from_slice(&request_id.to_le_bytes());
-        frame.extend_from_slice(&status.to_le_bytes());
-        frame.extend_from_slice(&(length as u32).to_le_bytes());
+        frame.resize(APP_HEADER_LEN, 0);
+        frame[field::MAGIC].copy_from_slice(&MAGIC);
+        frame[field::VERSION] = VERSION;
+        frame[field::KIND] = kind;
+        // The flags bytes, frame[field::FLAGS], stay zero.
+        frame[field::REQUEST_ID].copy_from_slice(&request_id.to_le_bytes());
+        frame[field::STATUS].copy_from_slice(&status.to_le_bytes());
+        frame[field::LENGTH].copy_from_slice(&(length as u32).to_le_bytes());
         frame.extend_from_slice(head);
         frame.extend_from_slice(data);
         Ok(frame)
@@ -259,19 +308,19 @@ impl<'a> Frame<'a> {
             .split_at_checked(APP_HEADER_LEN)
             .filter(|_| frame.len() <= OUTER_MAX_PAYLOAD)
             .ok_or_else(malformed)?;
-        if header[..4] != MAGIC || header[4] != VERSION {
+        if header[field::MAGIC] != MAGIC || header[field::VERSION] != VERSION {
             return Err(violation(
                 "the control peer sent a frame of another protocol than NVXC version 2",
             ));
         }
-        let request_id = u64::from_le_bytes(array(&header[8..16]));
-        let status = i32::from_le_bytes(array(&header[16..20]));
-        let length = u32::from_le_bytes(array(&header[20..24]));
-        if header[6..8] != [0, 0] || length as usize != payload.len() {
+        let request_id = u64::from_le_bytes(array(&header[field::REQUEST_ID]));
+        let status = i32::from_le_bytes(array(&header[field::STATUS]));
+        let length = u32::from_le_bytes(array(&header[field::LENGTH]));
+        if header[field::FLAGS] != [0, 0] || length as usize != payload.len() {
             return Err(malformed());
         }
         let empty = |variant| payload.is_empty().then_some(variant);
-        let decoded = match header[5] {
+        let decoded = match header[field::KIND] {
             PING => empty(Self::Ping),
             EXEC => Some(Self::Exec(payload)),
             STOP => empty(Self::Stop),
